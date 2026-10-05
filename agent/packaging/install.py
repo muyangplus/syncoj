@@ -65,6 +65,9 @@ EXIT_NEEDS_ROOT = 2
 #: 安装包内应当存在的顶层目录。用它来确认拿到的是真的 Agent 包，
 #: 而不是一个名字很像的压缩文件。
 EXPECTED_TOP_LEVEL = "syncoj_agent"
+#: 发布根目录下的启动器。systemd 的 ExecStart 指向它，而不是包内的 main.py
+#: —— 后者使用包内相对导入，当脚本直接跑会 ImportError。
+LAUNCHER_NAME = "run_agent.py"
 MAX_EXTRACTED_BYTES = 512 * 1024 * 1024
 MAX_MEMBERS = 20000
 
@@ -398,6 +401,12 @@ class Installer:
                     "安装包顶层缺少 %s/（实际顶层: %s）"
                     % (EXPECTED_TOP_LEVEL, ", ".join(tops) or "空")
                 )
+            if LAUNCHER_NAME not in tops:
+                raise InstallError(
+                    "安装包顶层缺少启动器 %s。没有它 Agent 在目标机上起不来 —— "
+                    "syncoj_agent/main.py 使用包内相对导入，无法当脚本直接执行。"
+                    % LAUNCHER_NAME
+                )
             version = read_bundle_version(staging)
             release_dir = self.prefix / RELEASES_DIR / version
 
@@ -695,14 +704,20 @@ def render_unit(
         "",
         "[Service]",
         "Type=simple",
+        # 必须走 run_agent.py 而不是 syncoj_agent/main.py：
+        # main.py 用包内相对导入，当脚本直接执行会
+        # ImportError: attempted relative import with no known parent package。
+        # 而 -E 会忽略 PYTHONPATH，没法靠环境变量把包目录告诉解释器，
+        # 所以只能靠启动器显式设置 sys.path。
+        #
         # -E 忽略所有 PYTHON* 环境变量，-s 忽略 user site-packages：
         # 选手怎么 pip install 都污染不到 Agent
-        "ExecStart=%s -E -s %s/%s/%s/main.py --config %s"
+        "ExecStart=%s -E -s %s/%s/%s --config %s"
         % (
             python,
             _posix(prefix),
             CURRENT_LINK,
-            EXPECTED_TOP_LEVEL,
+            LAUNCHER_NAME,
             _posix(config_path),
         ),
         "",

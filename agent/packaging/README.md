@@ -82,11 +82,20 @@ sudo userdel syncoj
 systemctl status syncoj-agent          # 进程是否在跑
 journalctl -u syncoj-agent -n 100      # systemd 侧的启动期输出
 tail -f /var/lib/syncoj/agent.log      # Agent 自己的日志（自动轮转）
-/usr/bin/python3 -E -s /opt/syncoj/current/syncoj_agent/main.py \
+/usr/bin/python3 -E -s /opt/syncoj/current/run_agent.py \
     --config /etc/syncoj/agent.ini --check      # 只校验配置
-/usr/bin/python3 -E -s /opt/syncoj/current/syncoj_agent/main.py \
+/usr/bin/python3 -E -s /opt/syncoj/current/run_agent.py \
     --config /etc/syncoj/agent.ini --once       # 只跑一轮，前台看输出
 ```
 
+> **必须走 `run_agent.py`，不能是 `syncoj_agent/main.py`。**
+> 后者使用包内相对导入，当脚本直接执行会报
+> `ImportError: attempted relative import with no known parent package`。
+> 而 `-E` 会连 `PYTHONPATH` 一起忽略，没法靠环境变量把包目录告诉解释器 ——
+> 所以只能靠启动器显式设置 `sys.path`。
+>
+> 这也是 `--check` / `--once` 手工调试与 systemd 启动**必须用同一条命令**的原因：
+> 换一种启动方式得到的行为就不是真实行为。
+
 > 注意 `-E -s`：忽略所有 `PYTHON*` 环境变量与 user site-packages。选手怎么
-> `pip install` 都污染不到 Agent。手工调试时也请带上，否则看到的不是真实行为。
+> `pip install` 都污染不到 Agent。手工调试时也请带上。

@@ -11,6 +11,7 @@ import importlib.util
 import io
 import os
 import shutil
+import subprocess
 import sys
 import tarfile
 import uuid
@@ -266,18 +267,110 @@ def test_render_unit_uses_configured_paths(installer) -> None:
 
 
 def test_render_unit_uses_current_symlink(installer) -> None:
-    """ExecStart 必须走 current 软链 —— 自更新的原子切换靠它生效。"""
+    """ExecStart 必须走 current 软链与 run_agent.py。
+
+    软链是自更新的原子切换点；run_agent.py 见下面的回归测试。
+    """
     text = installer.render_unit(
         prefix=Path("/opt/syncoj"), config_path=Path("/etc/syncoj/agent.ini"),
         state_dir=Path("/var/lib/syncoj"), deploy_root=Path("/d"),
         scan_roots="/c", run_user="u", python="/usr/bin/python3",
     )
-    assert "ExecStart=/usr/bin/python3 -E -s /opt/syncoj/current/syncoj_agent/main.py" in text
+    assert (
+        "ExecStart=/usr/bin/python3 -E -s /opt/syncoj/current/run_agent.py"
+        in text
+    ), text
+    # 绝不能指向包内的 main.py —— 它使用包内相对导入，当脚本执行会 ImportError
+    assert "syncoj_agent/main.py" not in text
     # -E 忽略 PYTHON* 环境变量，-s 忽略 user site-packages：
     # 选手怎么 pip install 都污染不到 Agent
     assert " -E -s " in text
     assert "StandardOutput=null" in text
     assert "NoNewPrivileges=yes" in text
+
+
+# --------------------------------------------------------------------------- #
+# 启动路径回归测试
+# --------------------------------------------------------------------------- #
+
+
+def test_main_py_cannot_be_run_as_a_script(workdir: Path) -> None:
+    """钉死这个事实：syncoj_agent/main.py **不能**当脚本直接执行。
+
+    它用包内相对导入（``from . import __version__``），直接跑会
+    ``ImportError: attempted relative import with no known parent package``。
+    这条测试是下面那条存在的前提 —— 一旦有人把 main.py 改成绝对导入，
+    这里会红，提醒他同步调整启动方式。
+    """
+    package_main = AGENT_ROOT / "syncoj_agent" / "main.py"
+    result = subprocess.run(
+        [sys.executable, "-E", "-s", str(package_main), "--version"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+    )
+    assert result.returncode != 0
+    assert "relative import" in (result.stderr or ""), result.stderr
+
+
+def test_launcher_works_exactly_like_systemd(workdir: Path) -> None:
+    """回归测试：systemd 用 ``-E -s /opt/syncoj/current/run_agent.py`` 启动。
+
+    **为什么需要这条测试**：在它出现之前，全项目 366 个测试全绿，而 Agent 在
+    真实 NOI Linux 上**一次都起不来** —— 因为所有测试都是"按包导入"来调用代码的，
+    没有任何一条走过 systemd 的真实启动路径。
+
+    单元测试覆盖得再全，也覆盖不到"入口点本身是坏的"这种情况。
+    """
+    launcher = AGENT_ROOT / "run_agent.py"
+    assert launcher.is_file(), "缺少启动器 agent/run_agent.py"
+
+    # --version 由 argparse 直接处理，不读配置、不联网，因此是最干净的入口验证
+    result = subprocess.run(
+        [sys.executable, "-E", "-s", str(launcher), "--version"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+    )
+    assert result.returncode == 0, (
+        "启动器执行失败（这等价于 systemd 里 Agent 起不来）:\n%s" % result.stderr
+    )
+    assert result.stdout.strip(), "启动器没有任何输出"
+
+
+def test_launcher_runs_from_a_copied_directory(workdir: Path) -> None:
+    """模拟真实发布布局：启动器与包在同一个目录里，且从别处调用。
+
+    启动器靠 ``__file__`` 推导发布根，因此换个目录也要能工作 ——
+    /opt/syncoj/current 是软链，解析出来是 releases/<版本>/，
+    不能假设 cwd 或调用路径。
+    """
+    release = workdir / "releases" / "1.0.0"
+    shutil.copytree(str(AGENT_ROOT / "syncoj_agent"), str(release / "syncoj_agent"))
+    shutil.copy2(str(AGENT_ROOT / "run_agent.py"), str(release / "run_agent.py"))
+
+    result = subprocess.run(
+        # 刻意用一个完全无关的 cwd，并带上 systemd 用的 -E -s
+        [sys.executable, "-E", "-s", str(release / "run_agent.py"), "--version"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=60, cwd=str(workdir),
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip()
+
+
+def test_bundle_contains_launcher(workdir: Path) -> None:
+    """打包器必须把启动器放进发布根目录，否则安装出来是一堆起不来的代码。"""
+    spec = importlib.util.spec_from_file_location(
+        "syncoj_build_bundle3", PACKAGING / "build_bundle.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    out = workdir / "bundle.tar.gz"
+    module.build(out, AGENT_ROOT)
+
+    with tarfile.open(str(out)) as archive:
+        names = [m.name for m in archive.getmembers()]
+
+    assert "run_agent.py" in names, "发布包里没有启动器"
+    assert "syncoj_agent/main.py" in names
 
 
 def test_render_unit_without_scan_roots(installer) -> None:
@@ -540,10 +633,12 @@ def test_build_bundle_produces_installable_archive(workdir: Path) -> None:
     with tarfile.open(str(out)) as archive:
         names = [m.name for m in archive.getmembers()]
     tops = {n.split("/")[0] for n in names}
-    assert tops == {"syncoj_agent"}
+    # 包目录 + 发布根上的启动器（main.py 用相对导入，必须靠启动器才能执行）
+    assert tops == {"syncoj_agent", "run_agent.py"}
     assert "syncoj_agent/main.py" in names
     assert not any("__pycache__" in n for n in names)
     assert not any(n.startswith("syncoj_agent/tests/") for n in names)
+    assert not any(".pytest-tmp" in n for n in names)
 
 
 def test_build_bundle_is_reproducible(workdir: Path) -> None:

@@ -26,10 +26,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 AGENT_ROOT = REPO_ROOT / "agent"
 PACKAGE_NAME = "syncoj_agent"
 
-#: 打进包里的内容。刻意用白名单而不是排除法 ——
-#: 排除法会在新增目录时悄悄漏掉或误带上不该带的东西（比如测试与开发工具）。
-INCLUDE_FILES = ("*.py",)
-INCLUDE_DIRS: Tuple[str, ...] = ()
+#: 放在发布根目录（包目录之外）的启动器。
+#:
+#: ``syncoj_agent/main.py`` 用包内相对导入，**不能当脚本直接跑**。而 systemd 必须
+#: 用 ``-E -s`` 启动以隔离选手的 Python 环境，可 ``-E`` 又会忽略 PYTHONPATH ——
+#: 所以只能靠一个显式设置 sys.path 的启动器。systemd 的 ExecStart 指向它。
+LAUNCHER_NAME = "run_agent.py"
 
 #: 明确不打进去的
 EXCLUDE_DIRS = frozenset({
@@ -56,6 +58,16 @@ def collect_files(agent_root: Path) -> List[Path]:
             continue
         files.append(path)
     return files
+
+
+def launcher_path(agent_root: Path) -> Path:
+    launcher = agent_root / LAUNCHER_NAME
+    if not launcher.is_file():
+        raise SystemExit(
+            "缺少启动器 %s。没有它 Agent 在目标机上根本起不来 —— "
+            "syncoj_agent/main.py 使用包内相对导入，无法当脚本直接执行。" % launcher
+        )
+    return launcher
 
 
 def read_version(agent_root: Path) -> str:
@@ -106,8 +118,13 @@ def _write_tar(stream, files: List[Path], agent_root: Path, reproducible: bool) 
 def _add_files(archive: tarfile.TarFile, files: List[Path], agent_root: Path,
                reproducible: bool) -> None:
     package = agent_root / PACKAGE_NAME
+    entries: List[Tuple[Path, str]] = [(launcher_path(agent_root), LAUNCHER_NAME)]
     for path in files:
-        arcname = "%s/%s" % (PACKAGE_NAME, path.relative_to(package).as_posix())
+        entries.append(
+            (path, "%s/%s" % (PACKAGE_NAME, path.relative_to(package).as_posix()))
+        )
+
+    for path, arcname in entries:
         info = archive.gettarinfo(str(path), arcname=arcname)
         info.uid = 0
         info.gid = 0

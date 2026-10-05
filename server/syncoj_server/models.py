@@ -66,6 +66,25 @@ class ContestStatus:
     ALL = (DRAFT, RUNNING, FROZEN, CLOSED)
 
 
+class EnrollmentMode:
+    """场次的注册方式。
+
+    ``PER_PLAYER_CODE`` 是原有行为：一个选手一个注册码，绑定
+    ``player_no + machine_id``，长期有效。
+
+    ``BOOTSTRAP`` 是镜像统一密钥：整间机房一份密钥（root 只读）换回每机凭据，
+    注册出来的机器**没有归属**，靠短码配对认领到人。适合"镜像预装 + 批量克隆"
+    的部署方式 —— 逐台发码在那种场景下根本不现实。
+
+    两种并存，按场次切换：外校选手、补位、重装的机器仍然可以走单人码。
+    """
+
+    PER_PLAYER_CODE = "per_player_code"
+    BOOTSTRAP = "bootstrap"
+
+    ALL = (PER_PLAYER_CODE, BOOTSTRAP)
+
+
 class DeployStatus:
     PENDING = "pending"
     READY = "ready"
@@ -126,9 +145,142 @@ class Contest(Base, TimestampMixin):
     ends_at = Column(DateTime, nullable=True)
     note = Column(Text, nullable=True)
 
+    #: 默认名单。建场次时从名单库挑一份，之后可以「一键应用」把名单落到选手表。
+    #: 只是**模板**，不参与鉴权也不参与成绩 —— 改了名单不会动已有选手，
+    #: 得显式应用一次。这样"名单调整"和"比赛数据"永远是两件分开的事。
+    default_roster_id = Column(Integer, ForeignKey("roster.id", ondelete="SET NULL"), nullable=True)
+    #: 见 ``EnrollmentMode``。老场次迁移后一律是 ``per_player_code``
+    enrollment_mode = Column(String(24), nullable=True, default=EnrollmentMode.PER_PLAYER_CODE)
+
     players = relationship("Player", back_populates="contest", cascade="all, delete-orphan")
+    default_roster = relationship("Roster")
 
     __table_args__ = (Index("ix_contest_status", "status"),)
+
+    @property
+    def effective_enrollment_mode(self) -> str:
+        """没设过（老数据、或迁移还没回填完）时按原有行为理解。"""
+        return self.enrollment_mode or EnrollmentMode.PER_PLAYER_CODE
+
+
+# --------------------------------------------------------------------------- #
+# 名单库
+# --------------------------------------------------------------------------- #
+
+
+class Roster(Base, TimestampMixin):
+    """可复用的学生名单。
+
+    和 ``Player`` 的区别是**用途**，不是字段：
+
+    * ``Roster`` 是"这个班/这个考点有哪些人"的事实，跨场次复用
+    * ``Player`` 是"这场比赛的参赛者"，成绩、代码、下发都挂在它身上
+
+    两者的关系是**复制**而不是引用：场次从名单库"应用"一次，之后各走各的。
+    引用看起来更优雅，但会让"改一下名单"顺带改掉历史场次的参赛者 ——
+    那时成绩矩阵的列、代码目录、下发目标全都会跟着动，这不是教师想要的效果。
+    """
+
+    __tablename__ = "roster"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(200), nullable=False, unique=True)
+    note = Column(Text, nullable=True)
+
+    entries = relationship(
+        "RosterEntry",
+        back_populates="roster",
+        cascade="all, delete-orphan",
+        order_by="RosterEntry.player_no",
+    )
+
+
+class RosterEntry(Base, TimestampMixin):
+    __tablename__ = "roster_entry"
+
+    id = Column(Integer, primary_key=True)
+    roster_id = Column(Integer, ForeignKey("roster.id", ondelete="CASCADE"), nullable=False)
+    player_no = Column(String(64), nullable=False)
+    name = Column(String(64), nullable=True)
+    seat = Column(String(32), nullable=True)
+    group_name = Column(String(64), nullable=True)
+
+    roster = relationship("Roster", back_populates="entries")
+
+    __table_args__ = (
+        UniqueConstraint("roster_id", "player_no", name="uq_roster_entry_no"),
+        Index("ix_roster_entry_roster", "roster_id"),
+    )
+
+
+class BootstrapKey(Base, TimestampMixin):
+    """镜像内置的统一注册密钥。
+
+    和 ``EnrollCode`` 的区别：
+
+    * ``EnrollCode`` 绑定到**某个选手**，泄漏一把只影响一个人
+    * ``BootstrapKey`` 是**服务端级**的，泄漏一把等于交出"注册任意多台机器"的
+      能力 —— 所以它不该出现在选手读得到的地方（``/etc/syncoj/agent.ini``
+      对选手账号可读，密钥必须放到 root 只读的单独文件里）
+
+    只存哈希，明文只在签发时打印一次；带 ``use_count`` 便于事后看"这把钥匙
+    到底被用过多少次"，异常用量能直接看出来。
+    """
+
+    __tablename__ = "bootstrap_key"
+
+    id = Column(Integer, primary_key=True)
+    key_hash = Column(String(64), nullable=False, unique=True)
+    label = Column(String(200), nullable=True, default="")
+    note = Column(String(500), nullable=True)
+    expires_at = Column(DateTime, nullable=True)
+    revoked_at = Column(DateTime, nullable=True)
+    last_used_at = Column(DateTime, nullable=True)
+    use_count = Column(Integer, nullable=False, default=0)
+
+
+class MachineClaim(Base):
+    """已注册但**还没认领到人**的机器。
+
+    刻意**不**塞进 ``agent`` 表：那需要把 ``agent.player_id`` 改成可空，
+    而 SQLite 改不了列的可空性，只能重建表 —— 重建要关外键强制，而
+    ``PRAGMA foreign_keys`` 在事务里是空操作，关不掉时 ``DROP TABLE`` 会顺着
+    ``ON DELETE CASCADE`` 把 ``agent_status`` 一起删掉。为了一个"还没归属"的
+    中间状态去冒删数据的风险，不值得。
+
+    另立一张表还有个附带好处：未认领的机器**根本没有 player_no**，
+    它也就算不出扫描目录、扫不了代码、传不了文件，它的全部工作就是"等认领"。
+    状态少，能出的错就少。
+
+    认领成功后这一行被**删除**，同一个 ``token_hash`` 原样转成 ``Agent`` 行 ——
+    客户端不用换 token，也没机会在换 token 的过程中掉线。
+    """
+
+    __tablename__ = "machine_claim"
+
+    id = Column(Integer, primary_key=True)
+    #: 临时凭据。认领后原样变成 agent.token_hash
+    token_hash = Column(String(64), nullable=False, unique=True)
+    #: Agent 首次运行时自己生成的 UUID，用来在服务端识别"同一台机器的重复注册"
+    machine_uuid = Column(String(64), nullable=True)
+    #: 硬件指纹。快照还原后 UUID 会没，指纹不会 —— 靠它认回原来的绑定
+    machine_fingerprint = Column(String(128), nullable=True)
+    machine_id = Column(String(128), nullable=True)
+    hostname = Column(String(128), nullable=True)
+    os_info = Column(String(200), nullable=True)
+    agent_version = Column(String(32), nullable=True)
+    #: 配对短码。只存哈希 —— 知道短码就等于能把这台机器认领走，
+    #: 而认领走一台机器就是在改"谁的成绩算谁的"
+    pair_code_hash = Column(String(64), nullable=True)
+    pair_code_expires_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    last_seen_at = Column(DateTime, nullable=True)
+    revoked_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("ix_claim_fingerprint", "machine_fingerprint"),
+        Index("ix_claim_uuid", "machine_uuid"),
+    )
 
 
 class Player(Base, TimestampMixin):
@@ -238,11 +390,22 @@ class Agent(Base, TimestampMixin):
     last_seen_at = Column(DateTime, nullable=True)
     revoked_at = Column(DateTime, nullable=True)
 
+    #: Agent 首次运行时自己生成的 UUID。比 ``/etc/machine-id`` 更适合当身份：
+    #: 克隆镜像没做通用化时 ``/etc/machine-id`` 是**整批相同**的，而它在首次
+    #: 开机后才生成。代价是快照还原会连它一起丢 —— 所以还需要下面的指纹。
+    machine_uuid = Column(String(64), nullable=True)
+    #: 硬件指纹（SMBIOS UUID / 主机名等）。**快照还原后仍然不变**，
+    #: 用来在 Agent 重新注册时认回原来那台机器与它已认领的选手。
+    machine_fingerprint = Column(String(128), nullable=True)
+    #: 认领（配对）到选手的时间。空表示这台机器是走单人码直接注册的
+    claimed_at = Column(DateTime, nullable=True)
+
     player = relationship("Player", back_populates="agents")
 
     __table_args__ = (
         UniqueConstraint("player_id", "machine_id", name="uq_agent_player_machine"),
         Index("ix_agent_machine", "machine_id"),
+        Index("ix_agent_fingerprint", "machine_fingerprint"),
     )
 
 

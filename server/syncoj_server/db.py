@@ -28,7 +28,7 @@ from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
 from .config import Settings
-from .models import Base
+from .migrations import migrate
 
 __all__ = ["Database"]
 
@@ -55,7 +55,15 @@ class Database:
         )
 
     def create_all(self) -> None:
-        Base.metadata.create_all(self.engine)
+        """把库升到最新结构。
+
+        **不要**直接叫 ``Base.metadata.create_all`` —— 它只建缺失的表，
+        看不见"已有表少了一列"。加字段必须走 ``migrations``，
+        否则老部署升级后会以一个很难定位的 500 收场。
+        """
+        applied = migrate(self.engine)
+        for line in applied:
+            log.info("数据库迁移已应用：%s", line)
 
     def dispose(self) -> None:
         self.engine.dispose()

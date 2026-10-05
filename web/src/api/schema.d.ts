@@ -227,6 +227,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/contests/{contest_id}/problems/match": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Match Problem Path
+         * @description 试算「这条相对路径会被算成哪道题」。
+         *
+         *     排错专用：教师配完模式想知道对不对，总得有个地方能问。放在服务端是因为
+         *     **匹配只有一份实现** —— 前端自己算一遍，迟早会出现"界面说归 p1、
+         *     实际归了 p2"这种谁也说不清的场面。
+         *
+         *     只做匹配，不碰文件系统；``path`` 按普通字符串处理，不需要是已存在的文件。
+         */
+        post: operations["match_problem_path_api_v1_admin_contests__contest_id__problems_match_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/contests/{contest_id}/scores": {
         parameters: {
             query?: never;
@@ -241,6 +267,10 @@ export interface paths {
          *     **区分"0 分"和"没有成绩"**：``parse_status`` 为 ``missing`` 表示从未收到
          *     结果，``unparsed`` 表示收到了但看不懂。界面上这两者都不该显示成 0 ——
          *     那会让教师以为选手考砸了。
+         *
+         *     再往下还分一层：``missing`` 里要看清是**交了但还没评测**（``submitted``
+         *     为真）还是**压根没交**。前者等着就行，后者得去问人 —— 教师看矩阵主要
+         *     就是想知道哪几个座位该去催。
          */
         get: operations["score_matrix_api_v1_admin_contests__contest_id__scores_get"];
         put?: never;
@@ -1216,10 +1246,35 @@ export interface components {
              */
             updated: number;
         };
+        /**
+         * ProblemMatchIn
+         * @description 拿一条相对路径来试算归题结果。
+         *
+         *     界面上的「这条路径会算成哪道题」走的是**服务端同一套匹配代码** ——
+         *     前端再实现一遍 glob 迟早会和服务端说不到一块去，而教师没法判断
+         *     是配置错了还是界面显示错了。
+         */
+        ProblemMatchIn: {
+            /** Path */
+            path: string;
+        };
+        /** ProblemMatchOut */
+        ProblemMatchOut: {
+            /** Expanded */
+            expanded?: string[];
+            /** Path */
+            path: string;
+            /** Patterns */
+            patterns?: string[];
+            /** Problem */
+            problem?: string | null;
+        };
         /** ProblemOut */
         ProblemOut: {
             /** Contest Id */
             contest_id: number;
+            /** File Patterns */
+            file_patterns?: string[];
             /** Id */
             id: number;
             /** Ident */
@@ -1240,8 +1295,13 @@ export interface components {
          *
          *     ``ident`` 会同时成为目录名、代码文件名与成绩矩阵的列名，
          *     所以要按路径段的规则校验（服务端会做）。
+         *
+         *     ``file_patterns`` 是用于把回收的代码归到这道题的 glob 模式。
+         *     留空表示用服务端的默认模式（出厂值 ``{ident}/**``）。
          */
         ProblemUpsert: {
+            /** File Patterns */
+            file_patterns?: string[];
             /** Ident */
             ident: string;
             /** Note */
@@ -1323,6 +1383,11 @@ export interface components {
             score?: number | null;
             /** Status */
             status?: string | null;
+            /**
+             * Submitted
+             * @default false
+             */
+            submitted: boolean;
             /** Updated At */
             updated_at?: string | null;
         };
@@ -1387,6 +1452,8 @@ export interface components {
             player_id: number;
             /** Player No */
             player_no: string;
+            /** Problem */
+            problem?: string | null;
             /** Rel Path */
             rel_path: string;
             /** Revision */
@@ -2054,6 +2121,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ProblemImportOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    match_problem_path_api_v1_admin_contests__contest_id__problems_match_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contest_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProblemMatchIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemMatchOut"];
                 };
             };
             /** @description Validation Error */

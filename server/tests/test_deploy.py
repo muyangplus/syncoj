@@ -204,6 +204,26 @@ def test_deploy_expands_player_no_per_target(client: TestClient, contest: dict,
     assert body["deploy_jobs"][0]["dest"] == "%s/p1/p1.pdf" % enrolled["player_no"]
 
 
+def test_empty_dest_dir_lands_on_desktop_root(client: TestClient, contest: dict,
+                                              admin_headers: dict, enrolled: dict) -> None:
+    """留空目标目录 = 直接落在桌面根目录。
+
+    这是**默认**行为：最常见的一次下发是题面 PDF + 样例，它们就该躺在桌面上，
+    选手双击就能看。要是逼教师每次都写目录名，早晚会有人把题面塞进
+    ``桌面/S001/p1/`` 里，然后一堆人找不到题。
+
+    落地路径里不能出现空路径段（``/p1.pdf`` 或 ``S001//p1.pdf`` 都是错的）。
+    """
+    asset = upload_asset(client, contest, admin_headers, "题面.pdf", b"statement").json()
+    response = make_deploy(client, contest, admin_headers, asset["id"], dest_dir="")
+    assert response.status_code == 200, response.text
+    assert response.json()["dest_dir"] == ""
+
+    body = tick(client, enrolled["token"], [], machine_id=enrolled["machine_id"])
+    assert len(body["deploy_jobs"]) == 1
+    assert body["deploy_jobs"][0]["dest"] == "题面.pdf"
+
+
 def test_dest_template_keeps_players_isolated(client: TestClient, contest: dict,
                                               admin_headers: dict, enrolled: dict, app) -> None:
     """两个选手拿到的目标路径必须不同。"""

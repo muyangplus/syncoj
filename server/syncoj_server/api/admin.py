@@ -25,6 +25,7 @@ from fastapi import (
 )
 from sqlalchemy import func, select
 
+from ..config import Settings
 from ..context import AppContext
 from ..models import (
     Admin,
@@ -66,6 +67,8 @@ from ..schemas import (
     PlayerUpsert,
     ProblemColumnOut,
     ProblemImportOut,
+    ProblemMatchIn,
+    ProblemMatchOut,
     ProblemOut,
     ProblemUpsert,
     ReleaseOut,
@@ -85,6 +88,7 @@ from ..security import (
     new_token,
     verify_password,
 )
+from ..services import matching
 from ..services.deploy import validate_dest_template
 from ..services.signing import parse_version
 from ..storage import BlobTooLarge, HashMismatch
@@ -450,6 +454,9 @@ def list_files(
 ) -> List[SourceFileOut]:
     limit = max(1, min(limit, 5000))
     with ctx.db.session() as session:
+        # 归属是**算出来的**，不是存下来的：教师改一个模式，界面上立刻跟着变，
+        # 不需要重收文件，也不用担心存量数据里的旧归属变成脏数据
+        rules = contest_problem_rules(session, contest_id, ctx.settings)
         stmt = (
             select(SourceFile, Player.player_no)
             .join(Player, SourceFile.player_id == Player.id)
@@ -474,6 +481,7 @@ def list_files(
                 first_seen_at=_iso(row.first_seen_at) or "",
                 last_seen_at=_iso(row.last_seen_at) or "",
                 deleted_at=_iso(row.deleted_at),
+                problem=matching.match_problem(row.rel_path, rules),
             )
             for row, player_no in session.execute(stmt)
         ]
@@ -946,7 +954,7 @@ def list_problems(
             .where(Problem.contest_id == contest_id)
             .order_by(Problem.order_index, Problem.ident)
         ).scalars()
-        return [_problem_out(row) for row in rows]
+        return [_problem_out(row, ctx.settings) for row in rows]
 
 
 @router.post("/contests/{contest_id}/problems", response_model=ProblemImportOut)
@@ -981,11 +989,19 @@ def import_problems(
         # 未指定顺序时按提交顺序自动编号，避免全部堆在 0
         auto_order = max([row.order_index for row in existing.values()] + [0])
 
-        for index, item in enumerate(payload):
+        for item in payload:
             try:
                 ident = _validate_problem_ident(item.ident)
             except HTTPException as exc:
                 result.errors.append("%s：%s" % (item.ident, exc.detail))
+                continue
+
+            # 先校验模式再落库。顺序反过来的话，"新建一行 → 模式不合法 → continue"
+            # 会留下一条只写了一半的题目（session 退出时照样提交）
+            try:
+                patterns = [matching.validate_pattern(p) for p in item.file_patterns]
+            except matching.PatternError as exc:
+                result.errors.append("%s：模式不合法（%s）" % (ident, exc))
                 continue
 
             row = existing.get(ident)
@@ -1006,8 +1022,12 @@ def import_problems(
 
             row.title = item.title or row.title
             row.note = item.note or row.note
+            # 传了非空模式列表就整体替换（不是追加）—— 编辑时"删掉一个模式"
+            # 必须能生效，追加语义做不到这一点
+            if patterns:
+                row.file_patterns = json.dumps(patterns, ensure_ascii=False)
             session.flush()
-            result.problems.append(_problem_out(row))
+            result.problems.append(_problem_out(row, ctx.settings))
 
         if result.created or result.updated:
             session.add(
@@ -1021,6 +1041,40 @@ def import_problems(
             )
 
     return result
+
+
+@router.post("/contests/{contest_id}/problems/match", response_model=ProblemMatchOut)
+def match_problem_path(
+    contest_id: int,
+    payload: ProblemMatchIn,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> ProblemMatchOut:
+    """试算「这条相对路径会被算成哪道题」。
+
+    排错专用：教师配完模式想知道对不对，总得有个地方能问。放在服务端是因为
+    **匹配只有一份实现** —— 前端自己算一遍，迟早会出现"界面说归 p1、
+    实际归了 p2"这种谁也说不清的场面。
+
+    只做匹配，不碰文件系统；``path`` 按普通字符串处理，不需要是已存在的文件。
+    """
+    with ctx.db.session() as session:
+        rules = contest_problem_rules(session, contest_id, ctx.settings)
+
+    ident = matching.match_problem(payload.path, rules)
+    hit = next((rule for rule in rules if rule.ident == ident), None)
+    if hit is None:
+        return ProblemMatchOut(path=payload.path, problem=None)
+
+    return ProblemMatchOut(
+        path=payload.path,
+        problem=hit.ident,
+        patterns=list(hit.patterns),
+        # 模板和展开结果都回 —— 教师写了 {title}/**，得能看见它变成了 签到题/**
+        expanded=[
+            matching.expand_pattern(p, hit.ident, hit.title) for p in hit.patterns
+        ],
+    )
 
 
 @router.patch("/problems/{problem_id}", response_model=ProblemOut)
@@ -1052,8 +1106,16 @@ def update_problem(
         row.note = payload.note
         if payload.order_index:
             row.order_index = payload.order_index
+
+        # 同 import：传了就整体替换。传空列表 = 回到默认模式
+        try:
+            patterns = [matching.validate_pattern(p) for p in payload.file_patterns]
+        except matching.PatternError as exc:
+            raise HTTPException(status_code=400, detail="模式不合法: %s" % exc)
+        row.file_patterns = json.dumps(patterns, ensure_ascii=False) if patterns else None
+
         session.flush()
-        return _problem_out(row)
+        return _problem_out(row, ctx.settings)
 
 
 @router.delete("/problems/{problem_id}", response_model=SimpleAck)
@@ -1076,7 +1138,7 @@ def delete_problem(
     return SimpleAck(ok=True, detail="已删除题目 %s（已有成绩记录保留）" % ident)
 
 
-def _problem_out(row: Problem) -> ProblemOut:
+def _problem_out(row: Problem, settings: Settings) -> ProblemOut:
     return ProblemOut(
         id=row.id,
         contest_id=row.contest_id,
@@ -1084,7 +1146,55 @@ def _problem_out(row: Problem) -> ProblemOut:
         title=row.title,
         order_index=int(row.order_index),
         note=row.note,
+        # 把实际生效的模式一并给前端 —— 否则界面得自己推默认值，
+        # 而默认值是可配置的（settings.default_file_pattern），前端推不出来
+        file_patterns=problem_patterns(row, settings),
     )
+
+
+def problem_patterns(row: Problem, settings: Settings) -> List[str]:
+    """题目实际生效的 glob 模式模板。
+
+    配了就用配的，没配就用服务端的默认模板。注意返回的是**模板本身**：
+    ``{ident}`` / ``{title}`` 占位符原样保留，由 ``matching`` 在每次匹配时展开。
+
+    这很关键：如果这里把占位符换成具体名字再返回，前端"打开编辑再保存"
+    就会把 ``{ident}/**`` 冻成一个写死的 ``p1/**`` —— 之后改个题目标识，
+    代码就再也认不出来了，而界面上看不出任何异常。
+    """
+    if not row.file_patterns:
+        return [settings.default_file_pattern]
+
+    try:
+        stored = json.loads(row.file_patterns)
+    except (TypeError, ValueError):
+        log.warning("题目 %s 的 file_patterns 不是合法 JSON，回退到默认模式", row.ident)
+        return [settings.default_file_pattern]
+
+    if not isinstance(stored, list):
+        return [settings.default_file_pattern]
+    return [str(p) for p in stored if isinstance(p, str) and p.strip()]
+
+
+def contest_problem_rules(
+    session, contest_id: int, settings: Settings
+) -> List[matching.ProblemRule]:
+    """把某场次的题目整理成匹配规则，供归题使用。
+
+    **顺序就是题目的顺序** —— 匹配时第一个命中的胜出。让顺序显式可预期，
+    比"最具体者优先"这类隐式规则好排查。
+    """
+    rows = session.execute(
+        select(Problem)
+        .where(Problem.contest_id == contest_id)
+        .order_by(Problem.order_index, Problem.ident)
+    ).scalars()
+    return [
+        matching.ProblemRule(
+            ident=row.ident, title=row.title, patterns=problem_patterns(row, settings)
+        )
+        for row in rows
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -1103,6 +1213,10 @@ def score_matrix(
     **区分"0 分"和"没有成绩"**：``parse_status`` 为 ``missing`` 表示从未收到
     结果，``unparsed`` 表示收到了但看不懂。界面上这两者都不该显示成 0 ——
     那会让教师以为选手考砸了。
+
+    再往下还分一层：``missing`` 里要看清是**交了但还没评测**（``submitted``
+    为真）还是**压根没交**。前者等着就行，后者得去问人 —— 教师看矩阵主要
+    就是想知道哪几个座位该去催。
     """
     with ctx.db.session() as session:
         contest = session.get(Contest, contest_id)
@@ -1117,63 +1231,88 @@ def score_matrix(
         runs = list(
             session.execute(select(JudgeRun).where(JudgeRun.contest_id == contest_id)).scalars()
         )
+        # 列顺序：**先按教师的题目清单**（有稳定的人工顺序），再把只在评测结果里
+        # 出现过的题目补在后面。补的那些要标出来 —— 它们可能是漏登记，
+        # 也可能是历史遗留；无论哪种都不该被静默隐藏。
+        declared = list(
+            session.execute(
+                select(Problem)
+                .where(Problem.contest_id == contest_id)
+                .order_by(Problem.order_index, Problem.ident)
+            ).scalars()
+        )
+        rules = [
+            matching.ProblemRule(
+                ident=row.ident,
+                title=row.title,
+                patterns=problem_patterns(row, ctx.settings),
+            )
+            for row in declared
+        ]
 
-    problems = sorted({run.problem for run in runs})
-    by_key = {(run.player_id, run.problem): run for run in runs}
+        # "交没交"只看当前活着的文件（deleted_at 为空）。已删除的不算交 ——
+        # 删除是 Agent 明确上报的事实，不该被当成"曾经交过"永久保留
+        submitted_pairs = set()
+        for player_id, rel_path in session.execute(
+            select(SourceFile.player_id, SourceFile.rel_path)
+            .join(Player, SourceFile.player_id == Player.id)
+            .where(Player.contest_id == contest_id, SourceFile.deleted_at.is_(None))
+        ):
+            ident = matching.match_problem(rel_path, rules)
+            if ident is not None:
+                submitted_pairs.add((player_id, ident))
 
-    # 列顺序：**先按教师的题目清单**（有稳定的人工顺序），再把只在评测结果里
-    # 出现过的题目补在后面。补的那些要标出来 —— 它们可能是漏登记，
-    # 也可能是历史遗留；无论哪种都不该被静默隐藏。
-    declared = list(
-        session.execute(
-            select(Problem)
-            .where(Problem.contest_id == contest_id)
-            .order_by(Problem.order_index, Problem.ident)
-        ).scalars()
-    )
-    declared_idents = [row.ident for row in declared]
-    declared_set = set(declared_idents)
-    undeclared = [name for name in problems if name not in declared_set]
+        problems = sorted({run.problem for run in runs})
+        declared_idents = [row.ident for row in declared]
+        declared_set = set(declared_idents)
+        undeclared = [name for name in problems if name not in declared_set]
 
-    columns = [
-        ProblemColumnOut(ident=row.ident, title=row.title, declared=True)
-        for row in declared
-    ] + [ProblemColumnOut(ident=name, title=None, declared=False) for name in undeclared]
+        # 在会话内就把列构造好 —— 不要把 ORM 对象带出 with 块，
+        # 那属于"现在能跑，改了 expire_on_commit 就炸"的写法
+        columns = [
+            ProblemColumnOut(ident=row.ident, title=row.title, declared=True) for row in declared
+        ] + [ProblemColumnOut(ident=name, title=None, declared=False) for name in undeclared]
 
-    rows: List[ScoreRowOut] = []
-    unparsed = 0
-    for player in players:
-        cells: List[ScoreCellOut] = []
-        total = 0
-        for column in columns:
-            run = by_key.get((player.id, column.ident))
-            if run is None:
-                cells.append(ScoreCellOut(problem=column.ident, parse_status="missing"))
-                continue
-            if run.parse_status == "unparsed":
-                unparsed += 1
-            if run.score:
-                total += run.score
-            cells.append(
-                ScoreCellOut(
-                    problem=column.ident,
-                    score=run.score,
-                    max_score=run.max_score,
-                    status=run.status,
-                    parse_status=run.parse_status,
-                    detail=run.detail,
-                    updated_at=_iso(run.updated_at),
+        by_key = {(run.player_id, run.problem): run for run in runs}
+
+        rows: List[ScoreRowOut] = []
+        unparsed = 0
+        for player in players:
+            cells: List[ScoreCellOut] = []
+            total = 0
+            for ident in declared_idents + undeclared:
+                submitted = (player.id, ident) in submitted_pairs
+                run = by_key.get((player.id, ident))
+                if run is None:
+                    cells.append(
+                        ScoreCellOut(problem=ident, parse_status="missing", submitted=submitted)
+                    )
+                    continue
+                if run.parse_status == "unparsed":
+                    unparsed += 1
+                if run.score:
+                    total += run.score
+                cells.append(
+                    ScoreCellOut(
+                        problem=ident,
+                        score=run.score,
+                        max_score=run.max_score,
+                        status=run.status,
+                        parse_status=run.parse_status,
+                        submitted=submitted,
+                        detail=run.detail,
+                        updated_at=_iso(run.updated_at),
+                    )
+                )
+            rows.append(
+                ScoreRowOut(
+                    player_id=player.id,
+                    player_no=player.player_no,
+                    player_name=player.name,
+                    total=total,
+                    cells=cells,
                 )
             )
-        rows.append(
-            ScoreRowOut(
-                player_id=player.id,
-                player_no=player.player_no,
-                player_name=player.name,
-                total=total,
-                cells=cells,
-            )
-        )
 
     return ScoreMatrixOut(
         contest_id=contest_id,

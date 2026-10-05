@@ -23,6 +23,8 @@ export type EnrollCodeOut = S['EnrollCodeOut']
 export type ProblemOut = S['ProblemOut']
 export type ProblemUpsert = S['ProblemUpsert']
 export type ProblemImportOut = S['ProblemImportOut']
+export type ProblemMatchIn = S['ProblemMatchIn']
+export type ProblemMatchOut = S['ProblemMatchOut']
 
 export type AgentRuntimeOut = S['AgentRuntimeOut']
 export type SourceFileOut = S['SourceFileOut']

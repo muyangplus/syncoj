@@ -23,6 +23,7 @@ import type {
   PlayerOut,
   PlayerUpsert,
   ProblemImportOut,
+  ProblemMatchOut,
   ProblemOut,
   ProblemUpsert,
   ReleaseOut,
@@ -94,6 +95,17 @@ export const problemApi = {
 
   remove: (problemId: number) =>
     request<SimpleAck>(`${ADMIN}/problems/${problemId}`, { method: 'DELETE' }),
+
+  /**
+   * 试算一条相对路径会归到哪道题。
+   *
+   * 走服务端的同一份匹配实现 —— 界面自己算一遍迟早会和服务端说不一致。
+   */
+  match: (contestId: number, path: string) =>
+    request<ProblemMatchOut>(`${ADMIN}/contests/${contestId}/problems/match`, {
+      method: 'POST',
+      body: { path },
+    }),
 }
 
 export const agentApi = {

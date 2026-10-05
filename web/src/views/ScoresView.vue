@@ -49,6 +49,9 @@ const form = reactive({
  *
  * 这里的核心是**区分"0 分"和"没有成绩"** —— 后端刻意把两者分成不同的
  * parse_status，前端也必须分开呈现。都显示成 0 会让教师以为选手考砸了。
+ *
+ * 再往下一层：没有成绩时还要分清**交了没评测**和**根本没交**。两件事看起来
+ * 都是"没有分"，但教师该做的事完全相反 —— 一个等着就行，一个得去座位上看。
  */
 function cellView(cell: ScoreCellOut | undefined): {
   text: string
@@ -56,7 +59,14 @@ function cellView(cell: ScoreCellOut | undefined): {
   tooltip: string
 } {
   if (!cell || cell.parse_status === 'missing') {
-    return { text: '—', type: 'info', tooltip: '未收到评测结果' }
+    if (cell?.submitted) {
+      return {
+        text: '待评测',
+        type: 'primary',
+        tooltip: '已收到这个题目的代码，还没等到评测结果。\n可以点开「原始记录」确认，或手工录分。',
+      }
+    }
+    return { text: '—', type: 'info', tooltip: '没有收到这个题目的代码' }
   }
 
   const detail = cell.detail ?? ''
@@ -80,6 +90,7 @@ function cellView(cell: ScoreCellOut | undefined): {
   const parts = [`${cell.score}${full ? ` / ${cell.max_score}` : ''} 分`]
   if (cell.status) parts.push(`状态：${cell.status}`)
   if (cell.parse_status === 'manual') parts.push('（教师手工录入）')
+  else if (cell.submitted) parts.push('（已收到该题代码）')
   if (detail) parts.push(detail)
 
   return {
@@ -89,14 +100,50 @@ function cellView(cell: ScoreCellOut | undefined): {
   }
 }
 
-const unparsedCells = computed(() => {
-  const result: Array<{ row: ScoreRowOut; cell: ScoreCellOut }> = []
+interface CellRef {
+  row: ScoreRowOut
+  cell: ScoreCellOut
+}
+
+/** 按题目筛出符合条件的所有格子。 */
+function pickCells(predicate: (cell: ScoreCellOut) => boolean): CellRef[] {
+  const result: CellRef[] = []
   for (const row of view.value?.rows ?? []) {
     for (const cell of row.cells) {
-      if (cell.parse_status === 'unparsed') result.push({ row, cell })
+      if (predicate(cell)) result.push({ row, cell })
     }
   }
   return result
+}
+
+const unparsedCells = computed(() => pickCells((cell) => cell.parse_status === 'unparsed'))
+
+/**
+ * 「交了，但评测还没出结果」。
+ *
+ * 这一栏是给教师吃定心丸用的：机器在跑、文件收到了，等着就行 ——
+ * 以前这种格子显示成「—」，和"根本没交"长得一模一样，只能逐个点开看。
+ */
+const pendingCells = computed(() =>
+  pickCells((cell) => cell.parse_status === 'missing' && cell.submitted === true),
+)
+
+/**
+ * 「一题都没交」。真正需要人去催的那一栏。
+ *
+ * 只统计**清单里登记过的题目** —— 未登记的题目可能只是历史遗留，
+ * 拿它去质问选手是错的。
+ */
+const missingCells = computed(() => {
+  const declared = new Set(
+    (view.value?.columns ?? []).filter((column) => column.declared).map((c) => c.ident),
+  )
+  return pickCells(
+    (cell) =>
+      cell.parse_status === 'missing' &&
+      cell.submitted !== true &&
+      declared.has(cell.problem),
+  )
 })
 
 function openManual(row: ScoreRowOut, problem: string, cell?: ScoreCellOut): void {
@@ -221,7 +268,10 @@ async function exportCsv(): Promise<void> {
   for (const row of data.rows) {
     const cells = data.columns.map((column) => {
       const cell = row.cells.find((c) => c.problem === column.ident)
-      if (!cell || cell.parse_status === 'missing') return ''
+      if (!cell || cell.parse_status === 'missing') {
+        // 导出里也要分清：空着是"没交"，"待评测"是交了的
+        return cell?.submitted ? '待评测' : ''
+      }
       if (cell.parse_status === 'unparsed') return '未解析'
       return cell.score ?? ''
     })
@@ -297,6 +347,65 @@ async function exportCsv(): Promise<void> {
           </el-tag>
           <span v-if="unparsedCells.length > 20" class="muted">
             等 {{ unparsedCells.length }} 项，点击标签可手工补录
+          </span>
+        </div>
+      </template>
+    </el-alert>
+
+    <!-- 交了但没出成绩：告诉教师"在跑，别急"，而不是让人以为漏收了 -->
+    <el-alert
+      v-if="pendingCells.length"
+      type="info"
+      :closable="false"
+      show-icon
+      style="margin-bottom: 12px"
+    >
+      <template #title>
+        有 {{ pendingCells.length }} 格已收到代码，正等评测结果
+      </template>
+      <template #default>
+        <div class="unparsed-list">
+          <el-tag
+            v-for="item in pendingCells.slice(0, 20)"
+            :key="`${item.row.player_id}-${item.cell.problem}`"
+            size="small"
+            type="primary"
+            effect="plain"
+          >
+            {{ item.row.player_no }} / {{ item.cell.problem }}
+          </el-tag>
+          <span v-if="pendingCells.length > 20" class="muted">
+            等 {{ pendingCells.length }} 项。文件已收到，只差评测器出结果 —— 也可以直接点格子手工录分。
+          </span>
+        </div>
+      </template>
+    </el-alert>
+
+    <!-- 一题都没交：这才是需要人去催的名单 -->
+    <el-alert
+      v-if="missingCells.length"
+      type="warning"
+      :closable="false"
+      show-icon
+      style="margin-bottom: 12px"
+    >
+      <template #title>
+        有 {{ missingCells.length }} 格还没收到代码（登记过的题目）
+      </template>
+      <template #default>
+        <div class="unparsed-list">
+          <el-tag
+            v-for="item in missingCells.slice(0, 20)"
+            :key="`${item.row.player_id}-${item.cell.problem}`"
+            size="small"
+            type="warning"
+            effect="plain"
+          >
+            {{ item.row.player_no }} / {{ item.cell.problem }}
+          </el-tag>
+          <span v-if="missingCells.length > 20" class="muted">
+            共 {{ missingCells.length }} 项。代码按「代码路径」模式认领 ——
+            模式配错了也会显示成没交，可在「题目清单 → 路径试算」里确认。
           </span>
         </div>
       </template>

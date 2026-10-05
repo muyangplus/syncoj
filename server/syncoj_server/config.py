@@ -46,6 +46,23 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _default_file_pattern() -> str:
+    """默认代码路径模式。
+
+    诚实的说法：``matching.DEFAULT_PATTERN`` 才是唯一的出厂常量，这里只是
+    把它读出来并允许环境变量覆盖。**故意用延迟 import** —— 顶层 import 会
+    把 ``syncoj_server.services`` 的 ``__init__`` 拉到 config 被完整定义之前
+    执行，哪天有人在 ``services/__init__`` 里 import 领域模块，就会变成一条
+    难查的循环导入。
+    """
+    override = os.environ.get("SYNCOJ_DEFAULT_FILE_PATTERN")
+    if override:
+        return override
+    from .services.matching import DEFAULT_PATTERN
+
+    return DEFAULT_PATTERN
+
+
 @dataclass
 class Settings:
     """服务端全部可调参数。"""
@@ -70,6 +87,18 @@ class Settings:
     max_file_size: int = 2 * 1024 * 1024
     max_relpath_length: int = 1024
     max_files_per_scan: int = 5000
+
+    # ---- 代码路径规范 ----
+    #: 题目没配 ``file_patterns`` 时用的默认 glob 模式。
+    #:
+    #: 出厂值对应约定 ``桌面/<准考证号>/<题目名>/<题目名>.cpp`` —— 但**那只是
+    #: 默认值**，换考点、换赛事可以直接改这里，或者按题目单独覆盖。
+    #:
+    #: 支持 ``{ident}`` / ``{title}`` 占位符，以及 glob 通配符：
+    #:   *  不跨 /；  **  跨 /；  ?  单字符；  [abc] 字符类
+    #:
+    #: 环境变量 ``SYNCOJ_DEFAULT_FILE_PATTERN`` 可覆盖。
+    default_file_pattern: str = field(default_factory=_default_file_pattern)
 
     # ---- 状态落库 ----
     # 内存持有实时状态，按此周期合并成一个事务刷入 SQLite

@@ -1,4 +1,4 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { computed, ref } from 'vue'
 
 import { fileApi, playerApi } from '@/api'
@@ -9,6 +9,8 @@ import { formatBytes, formatTime } from '@/utils/format'
 const playerFilter = ref<number | null>(null)
 const includeDeleted = ref(false)
 const keyword = ref('')
+/** 归题筛选：``'all'`` / ``'matched'`` / ``'loose'`` / 具体题目标识。 */
+const problemFilter = ref('all')
 
 // 场次确定/变化时立刻加载；切换选手筛选后调 reload() 重新拉
 const { data, loading, error, reload } = useContestData(
@@ -29,10 +31,36 @@ const { data, loading, error, reload } = useContestData(
 const files = computed<SourceFileOut[]>(() => data.value?.files ?? [])
 const players = computed<PlayerOut[]>(() => data.value?.players ?? [])
 
+/**
+ * 出现过的题目归属（含"未归类"）。
+ *
+ * 归属是服务端按当前模式算出来的 —— 改模式立刻变，不需要重收文件。
+ */
+const problems = computed(() => {
+  const seen = new Set<string>()
+  let loose = false
+  for (const file of files.value) {
+    if (file.problem) seen.add(file.problem)
+    else loose = true
+  }
+  return { matched: [...seen].sort(), loose }
+})
+
 /** 同名文件的多个版本只在台账里保留最新一条，所以这里直接按修订号看"改过几次"。 */
 const rows = computed(() => {
   const needle = keyword.value.trim().toLowerCase()
   return files.value.filter((file) => {
+    // 归题筛选：``未归类`` 单独一档，因为"模式没配上"是排错的第一步
+    if (problemFilter.value === 'matched' && !file.problem) return false
+    if (problemFilter.value === 'loose' && file.problem) return false
+    if (
+      problemFilter.value !== 'all' &&
+      problemFilter.value !== 'matched' &&
+      problemFilter.value !== 'loose' &&
+      file.problem !== problemFilter.value
+    ) {
+      return false
+    }
     if (!needle) return true
     return (
       file.rel_path.toLowerCase().includes(needle) ||
@@ -46,7 +74,18 @@ const stats = computed(() => {
   const totalBytes = active.reduce((sum, f) => sum + f.size, 0)
   const deleted = files.value.filter((f) => f.deleted_at).length
   const playersWithFiles = new Set(active.map((f) => f.player_id)).size
-  return { active: active.length, totalBytes, deleted, playersWithFiles }
+  const loose = active.filter((f) => !f.problem).length
+  return { active: active.length, totalBytes, deleted, playersWithFiles, loose }
+})
+
+/** 各题收到了几个文件 —— 一眼看出哪道题一个人都没交。 */
+const perProblem = computed(() => {
+  const counts = new Map<string, number>()
+  for (const file of files.value) {
+    if (file.deleted_at || !file.problem) continue
+    counts.set(file.problem, (counts.get(file.problem) ?? 0) + 1)
+  }
+  return [...counts.entries()].sort((a, b) => a[0].localeCompare(b[0]))
 })
 </script>
 
@@ -79,6 +118,21 @@ const stats = computed(() => {
         <el-checkbox v-model="includeDeleted" size="small" @change="reload">
           含已删除
         </el-checkbox>
+        <el-select v-model="problemFilter" size="small" style="width: 150px">
+          <el-option label="全部归属" value="all" />
+          <el-option label="已归题" value="matched" />
+          <el-option
+            label="未归类"
+            value="loose"
+            :disabled="!problems.loose"
+          />
+          <el-option
+            v-for="ident in problems.matched"
+            :key="ident"
+            :label="ident"
+            :value="ident"
+          />
+        </el-select>
         <el-input
           v-model="keyword"
           size="small"
@@ -126,6 +180,19 @@ const stats = computed(() => {
       </el-col>
     </el-row>
 
+    <!-- 归题情况单独说清楚：它只影响"算哪道题"，不影响文件本身收没收上来 -->
+    <div class="problem-summary">
+      <el-tag v-if="perProblem.length" size="small" type="info" effect="plain">
+        已归题：{{ perProblem.map(([ident, count]) => `${ident} ${count}`).join('　') }}
+      </el-tag>
+      <el-tag v-if="stats.loose" size="small" type="warning" effect="plain">
+        {{ stats.loose }} 个文件没归到任何题目
+      </el-tag>
+      <span class="muted">
+        「归属」由题目清单里的「代码路径」模式决定，改模式立刻生效，不用重收文件。
+      </span>
+    </div>
+
     <el-table
       :data="rows"
       v-loading="loading"
@@ -136,9 +203,21 @@ const stats = computed(() => {
     >
       <el-table-column label="选手" width="110" prop="player_no" />
 
-      <el-table-column label="路径" min-width="260">
+      <el-table-column label="路径" min-width="240">
         <template #default="{ row }">
           <span class="mono" :class="{ deleted: row.deleted_at }">{{ row.rel_path }}</span>
+        </template>
+      </el-table-column>
+
+      <el-table-column label="归属" width="110">
+        <template #default="{ row }">
+          <el-tag v-if="row.problem" size="small" effect="plain">{{ row.problem }}</el-tag>
+          <el-tooltip
+            v-else
+            content="按当前「代码路径」模式没有任何题目认领这条路径。文件照样收上来了，只是不会算到某道题头上。"
+          >
+            <el-tag size="small" type="warning" effect="plain">未归类</el-tag>
+          </el-tooltip>
         </template>
       </el-table-column>
 
@@ -218,5 +297,18 @@ const stats = computed(() => {
 .mono.deleted {
   color: #c0c4cc;
   text-decoration: line-through;
+}
+
+.problem-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 12px;
+}
+
+.muted {
+  color: #909399;
+  font-size: 12px;
 }
 </style>

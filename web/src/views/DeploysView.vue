@@ -23,8 +23,11 @@ const fileInput = ref<HTMLInputElement>()
  * 不同（``桌面/<各自的准考证号>/…``），这个替换客户端做不了（它不知道这次
  * 下发是给谁的）。
  *
- * 默认值对应约定：``桌面/<准考证号>/<题目名>/``。
- * 而 agent 侧的 ``deploy_root`` 默认就是桌面，所以这里的相对路径从准考证号写起。
+ * 默认值是**空串，也就是桌面根目录**：最常见的一次下发是题面 PDF + 样例，
+ * 它们就该直接躺在桌面上，选手双击就能看。只有"按题分发的附件"才需要
+ * ``{player_no}/<题目名>`` —— 那种情况选了题目会自动填上。
+ *
+ * agent 侧的 ``deploy_root`` 默认就是桌面，所以这里的相对路径从桌面往下写。
  */
 const form = reactive({
   assetId: undefined as number | undefined,
@@ -32,7 +35,7 @@ const form = reactive({
   playerIds: [] as number[],
   targetGroup: '',
   problemIdent: '',
-  destDir: '{player_no}',
+  destDir: '',
   mode: 'overwrite' as 'overwrite' | 'skip_exist',
 })
 
@@ -79,8 +82,9 @@ const destPreview = computed(() => {
 /** 选题时自动把题目名拼进目标目录 —— 教师不用手打。 */
 function applyProblem(ident: string): void {
   form.problemIdent = ident
-  const base = '{player_no}'
-  form.destDir = ident ? `${base}/${ident}` : base
+  // 选了题目 = 按题分发（附件放该选手的题目目录下）；
+  // 不选 = 通用资料（题面、样例、须知），直接放桌面根目录
+  form.destDir = ident ? `{player_no}/${ident}` : ''
 }
 
 async function loadTargets(task: DeployTaskOut): Promise<void> {
@@ -121,10 +125,10 @@ function openCreate(asset?: AssetOut): void {
   form.targetKind = 'all'
   form.playerIds = []
   form.targetGroup = groups.value[0] ?? ''
-  // 默认按约定落到 桌面/<准考证号>/。若已有登记的题目就顺手带上第一道，
-  // 省得教师每次都要手选一遍。
-  form.problemIdent = problems.value[0]?.ident ?? ''
-  form.destDir = form.problemIdent ? `{player_no}/${form.problemIdent}` : '{player_no}'
+  // 默认落到**桌面根目录** —— 题面 PDF、样例、须知这类东西就该直接摆在桌面上。
+  // 要按题分发附件时，选中题目会自动改成 `{player_no}/<题目名>`。
+  form.problemIdent = ''
+  form.destDir = ''
   form.mode = 'overwrite'
   createDialog.value = true
 }
@@ -433,7 +437,7 @@ function statusLabel(status: string): string {
         <el-form-item label="所属题目">
           <el-select
             v-model="form.problemIdent"
-            placeholder="选择题目（会自动填好目标目录）"
+            placeholder="可选：选了就按题分发到该选手的题目目录"
             clearable
             style="width: 100%"
             @change="applyProblem"
@@ -445,24 +449,30 @@ function statusLabel(status: string): string {
               :value="problem.ident"
             />
           </el-select>
-          <div v-if="!problems.length" class="page-hint">
-            本场次还没登记题目。可以先去「场次管理 → 题目」登记，或直接手填目标目录。
+          <div class="page-hint">
+            通用资料（题面、样例、须知）<strong>不用选</strong>，留空即落到桌面根目录。
+            <div v-if="!problems.length">
+              本场次还没登记题目。可以先去「场次管理 → 题目」登记，或直接手填目标目录。
+            </div>
           </div>
         </el-form-item>
 
         <el-form-item label="目标目录">
           <el-input
             v-model="form.destDir"
-            placeholder="{player_no}/题目名"
+            placeholder="留空 = 桌面根目录；{player_no}/题目名 = 该选手的题目目录"
           />
           <div class="page-hint">
-            相对于客户端配置里的 <code>deploy_root</code>（默认就是**桌面**）。
+            <strong>留空就是桌面根目录</strong> —— 题面 PDF、样例、须知这类东西
+            直接摆在桌面上最省事，选手双击就能看。
             <br />
-            <code>{player_no}</code> 会由服务端**逐选手展开**成准考证号 ——
+            要按题分发附件（额外样例、数据、模板）时才填
+            <code>{player_no}/&lt;题目名&gt;</code>，对应约定
+            <code>桌面/&lt;准考证号&gt;/&lt;题目名&gt;/</code>；上面选了题目会自动填好。
+            <br />
+            路径相对于客户端配置里的 <code>deploy_root</code>（默认就是<strong>桌面</strong>）。
+            <code>{player_no}</code> 会由服务端<strong>逐选手展开</strong>成准考证号 ——
             全员下发时每台机器的目标目录都不同。
-            <br />
-            默认 <code>{player_no}/题目名</code> 对应约定：
-            <code>桌面/&lt;准考证号&gt;/&lt;题目名&gt;/</code>。
             <br />
             <strong>实际落点预览：</strong>
             <code>{{ destPreview }}</code>

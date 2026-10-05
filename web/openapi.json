@@ -1336,12 +1336,75 @@
         "title": "ProblemImportOut",
         "type": "object"
       },
+      "ProblemMatchIn": {
+        "additionalProperties": false,
+        "description": "拿一条相对路径来试算归题结果。\n\n界面上的「这条路径会算成哪道题」走的是**服务端同一套匹配代码** ——\n前端再实现一遍 glob 迟早会和服务端说不到一块去，而教师没法判断\n是配置错了还是界面显示错了。",
+        "properties": {
+          "path": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "ProblemMatchIn",
+        "type": "object"
+      },
+      "ProblemMatchOut": {
+        "additionalProperties": false,
+        "properties": {
+          "expanded": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Expanded",
+            "type": "array"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "patterns": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Patterns",
+            "type": "array"
+          },
+          "problem": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Problem"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "ProblemMatchOut",
+        "type": "object"
+      },
       "ProblemOut": {
         "additionalProperties": false,
         "properties": {
           "contest_id": {
             "title": "Contest Id",
             "type": "integer"
+          },
+          "file_patterns": {
+            "items": {
+              "type": "string"
+            },
+            "title": "File Patterns",
+            "type": "array"
           },
           "id": {
             "title": "Id",
@@ -1389,8 +1452,15 @@
       },
       "ProblemUpsert": {
         "additionalProperties": false,
-        "description": "登记一道题。\n\n``ident`` 会同时成为目录名、代码文件名与成绩矩阵的列名，\n所以要按路径段的规则校验（服务端会做）。",
+        "description": "登记一道题。\n\n``ident`` 会同时成为目录名、代码文件名与成绩矩阵的列名，\n所以要按路径段的规则校验（服务端会做）。\n\n``file_patterns`` 是用于把回收的代码归到这道题的 glob 模式。\n留空表示用服务端的默认模式（出厂值 ``{ident}/**``）。",
         "properties": {
+          "file_patterns": {
+            "items": {
+              "type": "string"
+            },
+            "title": "File Patterns",
+            "type": "array"
+          },
           "ident": {
             "maxLength": 64,
             "minLength": 1,
@@ -1638,6 +1708,11 @@
             ],
             "title": "Status"
           },
+          "submitted": {
+            "default": false,
+            "title": "Submitted",
+            "type": "boolean"
+          },
           "updated_at": {
             "anyOf": [
               {
@@ -1796,6 +1871,17 @@
           "player_no": {
             "title": "Player No",
             "type": "string"
+          },
+          "problem": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Problem"
           },
           "rel_path": {
             "title": "Rel Path",
@@ -3064,9 +3150,62 @@
         ]
       }
     },
+    "/api/v1/admin/contests/{contest_id}/problems/match": {
+      "post": {
+        "description": "试算「这条相对路径会被算成哪道题」。\n\n排错专用：教师配完模式想知道对不对，总得有个地方能问。放在服务端是因为\n**匹配只有一份实现** —— 前端自己算一遍，迟早会出现\"界面说归 p1、\n实际归了 p2\"这种谁也说不清的场面。\n\n只做匹配，不碰文件系统；``path`` 按普通字符串处理，不需要是已存在的文件。",
+        "operationId": "match_problem_path_api_v1_admin_contests__contest_id__problems_match_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProblemMatchIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemMatchOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Match Problem Path",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/api/v1/admin/contests/{contest_id}/scores": {
       "get": {
-        "description": "「选手 × 题目」成绩矩阵。\n\n**区分\"0 分\"和\"没有成绩\"**：``parse_status`` 为 ``missing`` 表示从未收到\n结果，``unparsed`` 表示收到了但看不懂。界面上这两者都不该显示成 0 ——\n那会让教师以为选手考砸了。",
+        "description": "「选手 × 题目」成绩矩阵。\n\n**区分\"0 分\"和\"没有成绩\"**：``parse_status`` 为 ``missing`` 表示从未收到\n结果，``unparsed`` 表示收到了但看不懂。界面上这两者都不该显示成 0 ——\n那会让教师以为选手考砸了。\n\n再往下还分一层：``missing`` 里要看清是**交了但还没评测**（``submitted``\n为真）还是**压根没交**。前者等着就行，后者得去问人 —— 教师看矩阵主要\n就是想知道哪几个座位该去催。",
         "operationId": "score_matrix_api_v1_admin_contests__contest_id__scores_get",
         "parameters": [
           {

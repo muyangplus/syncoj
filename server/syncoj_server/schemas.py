@@ -228,12 +228,16 @@ class ProblemUpsert(_Base):
 
     ``ident`` 会同时成为目录名、代码文件名与成绩矩阵的列名，
     所以要按路径段的规则校验（服务端会做）。
+
+    ``file_patterns`` 是用于把回收的代码归到这道题的 glob 模式。
+    留空表示用服务端的默认模式（出厂值 ``{ident}/**``）。
     """
 
     ident: str = Field(min_length=1, max_length=64)
     title: Optional[str] = Field(default=None, max_length=200)
     order_index: int = Field(default=0, ge=0, le=9999)
     note: Optional[str] = Field(default=None, max_length=2000)
+    file_patterns: List[str] = Field(default_factory=list)
 
 
 class ProblemOut(_Base):
@@ -243,6 +247,8 @@ class ProblemOut(_Base):
     title: Optional[str] = None
     order_index: int = 0
     note: Optional[str] = None
+    #: 实际生效的模式（服务端把默认值补上，前端不用自己推）
+    file_patterns: List[str] = Field(default_factory=list)
 
 
 class ProblemImportOut(_Base):
@@ -250,6 +256,28 @@ class ProblemImportOut(_Base):
     updated: int = 0
     problems: List[ProblemOut] = Field(default_factory=list)
     errors: List[str] = Field(default_factory=list)
+
+
+class ProblemMatchIn(_Base):
+    """拿一条相对路径来试算归题结果。
+
+    界面上的「这条路径会算成哪道题」走的是**服务端同一套匹配代码** ——
+    前端再实现一遍 glob 迟早会和服务端说不到一块去，而教师没法判断
+    是配置错了还是界面显示错了。
+    """
+
+    path: str = Field(min_length=1, max_length=1024)
+
+
+class ProblemMatchOut(_Base):
+    path: str
+    #: 命中的题目标识；``None`` 表示按当前模式没有任何题目认领这条路径
+    problem: Optional[str] = None
+    #: 胜出题目的模式**模板**（``{ident}`` / ``{title}`` 原样保留）
+    patterns: List[str] = Field(default_factory=list)
+    #: 上面那些模式展开后的样子。排错时要看的正是这一步 ——
+    #: 教师写的是 ``{title}/**``，实际匹配的是 ``签到题/**``，两个都得看到。
+    expanded: List[str] = Field(default_factory=list)
 
 
 class AgentRuntimeOut(_Base):
@@ -295,6 +323,9 @@ class SourceFileOut(_Base):
     first_seen_at: str
     last_seen_at: str
     deleted_at: Optional[str] = None
+    #: 归属的题目 ``ident``；``None`` 表示按当前模式没能归类。
+    #: 只是**提示**，不影响文件的收发与存储 —— 教师改完模式不需要重收文件。
+    problem: Optional[str] = None
 
 
 # --------------------------------------------------------------------------- #
@@ -369,6 +400,11 @@ class ScoreCellOut(_Base):
     status: Optional[str] = None
     #: ok / unparsed / manual / missing（从未收到结果）
     parse_status: str = "missing"
+    #: 这一格对应的题目**有没有收到过代码**。
+    #:
+    #: ``parse_status="missing"`` 时才有区分意义：收了代码但没出成绩 = 评测还没跑完，
+    #: 界面该显示"已交未评测"；压根没收 = "未交"。这两件事对教师的含义完全不同。
+    submitted: bool = False
     detail: Optional[str] = None
     updated_at: Optional[str] = None
 

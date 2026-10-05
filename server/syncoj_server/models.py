@@ -157,14 +157,19 @@ class Problem(Base, TimestampMixin):
 
     1. 成绩矩阵的列需要稳定顺序 —— 应当是教师排的顺序，不是字典序，
        更不该随着"哪个选手先被评测"而变
-    2. 下发时要按题目落目录（``桌面/<准考证号>/<题目名>/``），得先知道有哪些题目
-    3. 代码命名规范（``<题目名>/<题目名>.cpp``）需要题目名才能给出提示
+    2. 成绩矩阵要能区分"交了没评测"与"根本没交"，得先知道有哪些题目
+    3. 代码回收的路径规范要能按题目自定义
 
     ``ident`` 同时充当三个角色：目录名、代码文件名、成绩矩阵的列标识。
     所以它必须能安全用作目录名 —— 服务端会对它跑一遍路径校验。
 
     评测结果里出现的、但没登记在这里的题目**仍会出现在矩阵里**（标注未登记），
     避免因为漏登记而丢掉真实成绩。
+
+    **代码路径规范是可配的**：``file_patterns`` 是一组 glob 模式，用于把回收
+    上来的文件归到这道题。留空表示用服务端配置的默认模式
+    （``default_file_pattern``，出厂值是 ``{ident}/**``）。改标识时模式里的
+    ``{ident}`` 会跟着走，不用手工同步。
     """
 
     __tablename__ = "problem"
@@ -177,6 +182,9 @@ class Problem(Base, TimestampMixin):
     title = Column(String(200), nullable=True)
     order_index = Column(Integer, nullable=False, default=0)
     note = Column(Text, nullable=True)
+    #: 归属这道题的 glob 模式，JSON 数组；NULL / 空数组表示用服务端默认模式。
+    #: 支持 {ident} 与 {title} 占位符（每次匹配时展开，所以改名会自动跟着走）。
+    file_patterns = Column(Text, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("contest_id", "ident", name="uq_problem_contest_ident"),

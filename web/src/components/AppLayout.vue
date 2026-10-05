@@ -190,15 +190,7 @@ onMounted(async () => {
           title="还没有任何场次"
           style="margin-bottom: 16px"
         >
-          <template #default>
-            <span>
-              场次是所有数据的容器。请先在
-              <el-button link type="primary" size="small" @click="goContests">
-                场次管理
-              </el-button>
-              里创建一个，再导入选手。
-            </span>
-          </template>
+          先创建一个场次，再导入选手。
         </el-alert>
         <RouterView />
       </el-main>

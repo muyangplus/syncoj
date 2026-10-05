@@ -1,20 +1,37 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { computed, nextTick, reactive, ref } from 'vue'
 
 import { scoreApi } from '@/api'
-import type { JudgeRunOut, ScoreCellOut, ScoreRowOut } from '@/api/types'
+import type { JudgeRunOut, JudgeScanOut, ScoreCellOut, ScoreRowOut } from '@/api/types'
+import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
+import DataTable from '@/components/DataTable.vue'
+import FormDialog from '@/components/FormDialog.vue'
+import HelpTip from '@/components/HelpTip.vue'
+import PageShell from '@/components/PageShell.vue'
+import { useList } from '@/composables/useList'
+import { useMutation } from '@/composables/useMutation'
 import { useContestData } from '@/composables/useContestData'
+import { useRouter } from 'vue-router'
+
 import { useContestStore } from '@/stores/contest'
+import { formatTime } from '@/utils/format'
 
 const contest = useContestStore()
+const router = useRouter()
 
-const rescanning = ref(false)
+// --------------------------------------------------------------------------- //
+// 成绩矩阵
+//
+// 矩阵是一个**整体对象**（选手 × 题目一次算全），不是一页数据，所以它走
+// `useContestData` 而不是 `useList`；它下面的「评测记录」才是分页集合。
+// --------------------------------------------------------------------------- //
 
-const { data: matrix, loading, error, reload } = useContestData(
-  (contestId) => scoreApi.matrix(contestId),
-  { interval: 10000 },
-)
+const {
+  data: matrix,
+  loading,
+  error,
+  reload: reloadMatrix,
+} = useContestData((contestId) => scoreApi.matrix(contestId), { interval: 10000 })
 
 /**
  * 归一化后的矩阵。
@@ -33,16 +50,110 @@ const view = computed(() => {
   }
 })
 
-const editing = ref(false)
-const submitting = ref(false)
-const form = reactive({
-  playerId: 0,
-  playerNo: '',
-  problem: '',
-  score: 0,
-  maxScore: 100,
-  status: '',
+// --------------------------------------------------------------------------- //
+// 评测记录
+//
+// 矩阵只告诉你"这一格是什么"，而"这一格是从哪个文件、用哪个解析器、为什么
+// 读不懂"在记录里。以前它藏在一个弹窗里、只看得到当前所有记录；现在它是页面上
+// 的一块，并且能按 `parse_status` 过滤 —— 教师排错时第一件事就是"把未解析的
+// 都列出来"。
+// --------------------------------------------------------------------------- //
+
+/** 空串 = 全部。服务端只认 `parse_status` 这个参数名。 */
+const parseFilter = ref('')
+
+const runs = useList<JudgeRunOut>({
+  rowKey: (row) => row.id,
+  loader: ({ limit, offset, signal }) => {
+    const contestId = contest.currentId
+    // 还没选场次时返回 null —— 列表空着但不报错
+    if (!contestId) return Promise.resolve(null)
+    return scoreApi.runs(
+      contestId,
+      { limit, offset, parse_status: parseFilter.value || undefined },
+      signal,
+    )
+  },
+  // 与矩阵同一个节奏：两边看到的是同一批数据
+  interval: 10000,
+  // 筛选变化要回到第一页 —— `watches` 负责这件事，页面不再自己 watch
+  watches: [() => contest.currentId, () => parseFilter.value],
 })
+
+const runsSection = ref<HTMLElement | null>(null)
+const scanReport = ref<JudgeScanOut | null>(null)
+const scanErrors = computed(() => scanReport.value?.errors ?? [])
+
+/** 重扫的回执。`errors` 必须露出来 —— 读不到的目录是"结果没进来"的唯一线索。 */
+function scanSummary(report: JudgeScanOut): string {
+  const parts = [
+    `解析 ${report.parsed}`,
+    `未解析 ${report.unparsed}`,
+    `未变化 ${report.unchanged}`,
+    `跳过 ${report.skipped}`,
+    `保留手工录入 ${report.manual}`,
+  ]
+  // 错误数从传进来的回执里数，而不是读 `scanErrors` —— 这句是在写入 ref **之前**
+  // 用来拼 toast 的，读 ref 会拿到上一次的报告
+  const errorCount = (report.errors ?? []).length
+  if (errorCount) parts.push(`读取错误 ${errorCount}`)
+  return parts.join(' · ')
+}
+
+const rescan = useMutation(
+  async () => {
+    const contestId = contest.currentId
+    if (!contestId) throw new Error('还没有选场次')
+    return scoreApi.rescan(contestId)
+  },
+  {
+    success: (report) => `重扫完成：${scanSummary(report)}`,
+    onDone: async (report) => {
+      scanReport.value = report
+      // 矩阵与记录都重拉：重扫刚刚改过它们，等下一轮轮询才更新会让人以为没生效
+      await Promise.all([reloadMatrix(), runs.reload()])
+    },
+  },
+)
+
+/** 把"未解析"作为筛选条件带到记录区，并滚过去 —— 不滚的话长页面上等于点了没反应。 */
+function showUnparsedRuns(): void {
+  parseFilter.value = 'unparsed'
+  void nextTick(() => runsSection.value?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+}
+
+// --------------------------------------------------------------------------- //
+// 清空成绩记录（范围删除）
+//
+// 它是"重扫之前的清场"：旧记录不抹掉的话，解析器换了、目录结构改了，
+// 矩阵里会留着上一批数据。`keepManual` 默认打开 —— 手工录入的分数是全场
+// 最贵的数据，不该被"重扫一遍"顺手清掉，服务端的默认值也是它。
+// --------------------------------------------------------------------------- //
+
+const clearRunsOpen = ref(false)
+const clearKeepManual = ref(true)
+
+const clearRuns = useMutation(
+  async () => {
+    const contestId = contest.currentId
+    if (!contestId) throw new Error('还没有选场次')
+    return scoreApi.clearRuns(contestId, contest.current?.slug ?? '', {
+      keepManual: clearKeepManual.value,
+    })
+  },
+  {
+    // 服务端的回执会写清"清除 N 条、保留 M 条手工录入"，直接用，不自己数
+    onDone: async () => {
+      clearRunsOpen.value = false
+      clearKeepManual.value = true
+      await Promise.all([reloadMatrix(), runs.reload()])
+    },
+  },
+)
+
+// --------------------------------------------------------------------------- //
+// 单元格呈现
+// --------------------------------------------------------------------------- //
 
 /**
  * 单元格外观。
@@ -63,7 +174,8 @@ function cellView(cell: ScoreCellOut | undefined): {
       return {
         text: '待评测',
         type: 'primary',
-        tooltip: '已收到这个题目的代码，还没等到评测结果。\n可以点开「原始记录」确认，或手工录分。',
+        tooltip:
+          '已收到这个题目的代码，还没等到评测结果。\n可以到下面「评测记录」里看，或直接点这一格手工录分。',
       }
     }
     return { text: '—', type: 'info', tooltip: '没有收到这个题目的代码' }
@@ -75,7 +187,9 @@ function cellView(cell: ScoreCellOut | undefined): {
     return {
       text: '未解析',
       type: 'danger',
-      tooltip: `收到了结果文件但无法解析，需要手工补录。\n原因：${detail}`,
+      tooltip:
+        `收到了结果文件但无法解析，需要手工补录 —— 点这一格就能录，` +
+        `也可以到下面「评测记录」里按「补录」。\n原因：${detail || '（服务端没有给出原因）'}`,
     }
   }
 
@@ -98,6 +212,10 @@ function cellView(cell: ScoreCellOut | undefined): {
     type: cell.parse_status === 'manual' ? 'primary' : isFull ? 'success' : isZero ? 'info' : 'warning',
     tooltip: parts.join('\n'),
   }
+}
+
+function cellOf(row: ScoreRowOut, ident: string): ScoreCellOut | undefined {
+  return row.cells?.find((cell) => cell.problem === ident)
 }
 
 interface CellRef {
@@ -146,113 +264,106 @@ const missingCells = computed(() => {
   )
 })
 
-function openManual(row: ScoreRowOut, problem: string, cell?: ScoreCellOut): void {
-  form.playerId = row.player_id
-  form.playerNo = row.player_no
+// --------------------------------------------------------------------------- //
+// 手工录分（矩阵与记录共用同一个弹窗）
+// --------------------------------------------------------------------------- //
+
+/**
+ * 录分入口的上下文。
+ *
+ * 矩阵格子与评测记录行都能开这个弹窗 —— 后者的意义是"看到一条未解析记录，
+ * 就地补录"，不用先回矩阵里找那一格。字段全给可选，两个来源的行对象就都能塞进来。
+ */
+interface ManualSeed {
+  score?: number | null
+  max_score?: number | null
+  status?: string | null
+  parse_status?: string
+  detail?: string | null
+}
+
+const editing = ref(false)
+const manualSeed = ref<ManualSeed | null>(null)
+const form = reactive({
+  playerId: 0,
+  playerNo: '',
+  problem: '',
+  score: 0,
+  maxScore: 100,
+  status: '',
+})
+
+/** 从"未解析"的格子/记录进来时，把解析器给出的原因摆在录入框上面。 */
+const manualUnparsed = computed(() => manualSeed.value?.parse_status === 'unparsed')
+
+function openManual(
+  target: { player_id: number; player_no: string },
+  problem: string,
+  seed?: ManualSeed,
+): void {
+  form.playerId = target.player_id
+  form.playerNo = target.player_no
   form.problem = problem
-  form.score = cell?.score ?? 0
-  form.maxScore = cell?.max_score ?? 100
-  form.status = cell?.status ?? ''
+  form.score = seed?.score ?? 0
+  form.maxScore = seed?.max_score ?? 100
+  form.status = seed?.status ?? ''
+  manualSeed.value = seed ?? null
   editing.value = true
 }
 
-async function submitManual(): Promise<void> {
-  if (!contest.currentId) return
-  submitting.value = true
-  try {
-    await scoreApi.setManual(contest.currentId, {
+const saveManual = useMutation(
+  async () => {
+    const contestId = contest.currentId
+    if (!contestId) throw new Error('还没有选场次')
+    return scoreApi.setManual(contestId, {
       player_id: form.playerId,
       problem: form.problem,
       score: form.score,
       max_score: form.maxScore,
-      status: form.status || null,
+      status: form.status.trim() || null,
     })
-    ElMessage.success('已保存。手工录入的成绩不会被自动扫描覆盖。')
-    editing.value = false
-    await reload()
-  } catch (err) {
-    ElMessage.error((err as Error).message)
-  } finally {
-    submitting.value = false
-  }
-}
-
-async function clearManual(playerId: number, problem: string): Promise<void> {
-  if (!contest.currentId) return
-  try {
-    await scoreApi.clear(contest.currentId, playerId, problem)
-    ElMessage.success('已清除，自动扫描将重新接管这一格')
-    editing.value = false
-    await reload()
-  } catch (err) {
-    ElMessage.error((err as Error).message)
-  }
-}
-
-async function rescan(): Promise<void> {
-  if (!contest.currentId) return
-  rescanning.value = true
-  try {
-    const report = await scoreApi.rescan(contest.currentId)
-    const parts = [`解析 ${report.parsed} 条`]
-    if (report.unparsed) parts.push(`未解析 ${report.unparsed} 条`)
-    if (report.unchanged) parts.push(`未变化 ${report.unchanged} 条`)
-    if (report.manual) parts.push(`保留手工录入 ${report.manual} 条`)
-    ElMessage.success(parts.join('，'))
-    await reload()
-  } catch (err) {
-    ElMessage.error((err as Error).message)
-  } finally {
-    rescanning.value = false
-  }
-}
+  },
+  {
+    // `JudgeRunOut` 上没有服务端的回执，自己拼一句，并把"不会被覆盖"这个关键约定写出来
+    success: '已保存。这一格是手工录入，自动扫描与「立即重扫」都不会覆盖它。',
+    onDone: async () => {
+      editing.value = false
+      await Promise.all([reloadMatrix(), runs.reload()])
+    },
+  },
+)
 
 /**
- * 原始记录：每一格成绩是从哪个文件、用哪个解析器、为什么失败。
- *
- * 矩阵只告诉你"这一格是未解析"，但排查需要知道**具体读了哪个文件、为什么读不懂**。
- * 没有这个视图的话，教师只能自己去翻 judge_result 目录猜。
+ * 清除某一格是**硬删除**一条评测记录，按约定要"把名字打一遍"而不是"是否确定" ——
+ * 连续清格子时，同一位置的确认按钮会被手指肌肉记忆点掉。
+ * 服务端要的 `confirm` 正好是考号，矩阵行首显示的也是考号，教师照着打就行。
  */
-const runsVisible = ref(false)
-const runsLoading = ref(false)
-const runs = ref<JudgeRunOut[]>([])
-const runsFilter = ref<string>('')
+const clearCellOpen = ref(false)
 
-async function openRuns(status = ''): Promise<void> {
-  if (!contest.currentId) return
-  runsVisible.value = true
-  runsFilter.value = status
-  await loadRuns()
+function askClear(): void {
+  clearCellOpen.value = true
 }
 
-async function loadRuns(): Promise<void> {
-  if (!contest.currentId) return
-  runsLoading.value = true
-  try {
-    runs.value = await scoreApi.runs(contest.currentId, runsFilter.value || undefined)
-  } catch (err) {
-    ElMessage.error((err as Error).message)
-  } finally {
-    runsLoading.value = false
-  }
-}
+const clearScore = useMutation(
+  async () => {
+    const contestId = contest.currentId
+    if (!contestId) throw new Error('还没有选场次')
+    // 第 4 个参数是考号：服务端拿它逐字比对 `confirm`
+    return scoreApi.clear(contestId, form.playerId, form.problem, form.playerNo)
+  },
+  {
+    success: '已清除。结果文件还在的话，下一轮扫描会重新解析出这一格。',
+    onDone: async () => {
+      clearCellOpen.value = false
+      editing.value = false
+      await Promise.all([reloadMatrix(), runs.reload()])
+    },
+  },
+)
 
-function runStatusType(status: string): 'success' | 'danger' | 'primary' | 'info' {
-  if (status === 'ok') return 'success'
-  if (status === 'unparsed') return 'danger'
-  if (status === 'manual') return 'primary'
-  return 'info'
-}
-
-function runStatusLabel(status: string): string {
-  const map: Record<string, string> = {
-    ok: '已解析',
-    unparsed: '未解析',
-    manual: '手工录入',
-    missing: '无记录',
-  }
-  return map[status] ?? status
-}
+// --------------------------------------------------------------------------- //
+// 导出 CSV
+// --------------------------------------------------------------------------- //
 
 async function exportCsv(): Promise<void> {
   const data = view.value
@@ -286,40 +397,74 @@ async function exportCsv(): Promise<void> {
   anchor.click()
   URL.revokeObjectURL(url)
 }
+
+function runStatusType(parseStatus: string): 'success' | 'danger' | 'primary' | 'info' {
+  if (parseStatus === 'ok') return 'success'
+  if (parseStatus === 'unparsed') return 'danger'
+  if (parseStatus === 'manual') return 'primary'
+  return 'info'
+}
+
+function runStatusLabel(parseStatus: string): string {
+  const map: Record<string, string> = {
+    ok: '已解析',
+    unparsed: '未解析',
+    manual: '手工录入',
+    missing: '无记录',
+  }
+  return map[parseStatus] ?? parseStatus
+}
 </script>
 
 <template>
-  <div>
-    <div class="page-header">
-      <div>
-        <h2 class="page-title">成绩</h2>
-        <p class="page-hint">
-          把评测器的输出目录指向
-          <code>&lt;数据目录&gt;/judge_result/&lt;场次&gt;/&lt;选手&gt;/&lt;题目&gt;/</code>，
-          服务端每 10 秒自动汇总一次。
-          <strong>点一下单元格可以手工录分或修正。</strong>
-        </p>
-      </div>
-      <div class="toolbar">
-        <el-button size="small" :loading="rescanning" @click="rescan">立即重扫</el-button>
-        <el-button size="small" :disabled="!view?.rows.length" @click="openRuns()">
-          原始记录
-        </el-button>
-        <el-button size="small" :disabled="!view?.rows.length" @click="exportCsv">
-          导出 CSV
-        </el-button>
-        <el-button size="small" :loading="loading" @click="reload">刷新</el-button>
-      </div>
-    </div>
+  <PageShell
+    title="成绩"
+    hint="评测器输出目录：judge_result/<场次>/<选手>/<题目>/。点格子可手工录分。"
+    :error="error"
+    error-action="矩阵取不到时不要手工录分 —— 会重复记。"
+    retryable
+    @retry="reloadMatrix"
+  >
+    <template #hint>
+      <HelpTip>
+        服务端每 10 秒扫一次结果目录并自动汇总。点一下矩阵里的格子可以手工录分或修正；
+        手工录的分会被标记并永久保留，自动扫描不会覆盖它。
+      </HelpTip>
+    </template>
+    <template #toolbar>
+      <el-button size="small" :loading="rescan.pending.value" @click="rescan.run(undefined)">
+        立即重扫
+      </el-button>
+      <el-button size="small" :disabled="!view?.rows.length" @click="exportCsv">导出 CSV</el-button>
+      <el-button size="small" :loading="loading" @click="reloadMatrix">刷新</el-button>
+    </template>
 
+    <!--
+      重扫的回执必须留在页面上，不能只弹一句 toast：`errors` 里是"哪个目录读不了、
+      哪个目录名对不上人"，它一闪而过的话教师根本来不及看 —— 而那正是
+      "明明交了却没分数"的排查起点。
+    -->
     <el-alert
-      v-if="error"
-      type="error"
-      :closable="false"
+      v-if="scanReport"
+      :type="scanErrors.length ? 'error' : scanReport.unparsed ? 'warning' : 'success'"
+      :closable="true"
       show-icon
-      :title="error"
       style="margin-bottom: 12px"
-    />
+      @close="scanReport = null"
+    >
+      <template #title>上次重扫：{{ scanSummary(scanReport) }}</template>
+      <template #default>
+        <ul v-if="scanErrors.length" class="scan-errors">
+          <li v-for="(item, index) in scanErrors" :key="index">{{ item }}</li>
+        </ul>
+        <div v-else class="page-hint">没有读取层面的错误。</div>
+        <div class="page-hint">
+          「未变化」是 mtime 没动、这次没重新解析的格子；「跳过」是结果目录里没有
+          可用的结果文件（或目录名对不上本场次的选手）；「保留手工录入」是你亲手录的、
+          重扫不会覆盖的那些。
+        </div>
+      </template>
+    </el-alert>
 
     <!-- 未解析项单独提示：这是"需要教师动手"的待办，不该混在矩阵里被忽略 -->
     <el-alert
@@ -348,6 +493,9 @@ async function exportCsv(): Promise<void> {
           <span v-if="unparsedCells.length > 20" class="muted">
             等 {{ unparsedCells.length }} 项，点击标签可手工补录
           </span>
+          <el-button link type="primary" size="small" @click="showUnparsedRuns">
+            在评测记录里逐条看
+          </el-button>
         </div>
       </template>
     </el-alert>
@@ -454,23 +602,15 @@ async function exportCsv(): Promise<void> {
           </el-tag>
         </template>
         <template #default="{ row }">
-          <el-tooltip
-            :content="cellView(row.cells.find((c: ScoreCellOut) => c.problem === column.ident)).tooltip"
-          >
+          <el-tooltip :content="cellView(cellOf(row, column.ident)).tooltip">
             <el-tag
-              :type="cellView(row.cells.find((c: ScoreCellOut) => c.problem === column.ident)).type"
+              :type="cellView(cellOf(row, column.ident)).type"
               size="small"
               effect="plain"
               class="clickable"
-              @click="
-                openManual(
-                  row,
-                  column.ident,
-                  row.cells.find((c: ScoreCellOut) => c.problem === column.ident),
-                )
-              "
+              @click="openManual(row, column.ident, cellOf(row, column.ident))"
             >
-              {{ cellView(row.cells.find((c: ScoreCellOut) => c.problem === column.ident)).text }}
+              {{ cellView(cellOf(row, column.ident)).text }}
             </el-tag>
           </el-tooltip>
         </template>
@@ -484,15 +624,113 @@ async function exportCsv(): Promise<void> {
     <el-card v-else shadow="never">
       <div class="empty-block">
         <p>还没有任何评测成绩，也没有登记题目。</p>
-        <p class="page-hint">
-          先在「场次管理」里登记题目清单，或把 LemonLime / Arbiter 的结果输出目录指到
-          <code>&lt;数据目录&gt;/judge_result/&lt;场次 slug&gt;/&lt;选手编号&gt;/&lt;题目标识&gt;/</code>
-          —— 结果里出现的题目会自动补进矩阵（标注"未登记"）。也可以点右上角「立即重扫」。
-        </p>
+        <p>先登记题目清单，或点右上角「立即重扫」。</p>
+        <el-button
+          type="primary"
+          size="small"
+          style="margin-top: 12px"
+          @click="router.push({ name: 'contests' })"
+        >
+          去场次管理登记题目
+        </el-button>
       </div>
     </el-card>
 
-    <el-dialog v-model="editing" title="录入成绩" width="480px">
+    <!--
+      评测记录：矩阵里每一格的来源。它必须能按 `parse_status` 过滤，
+      因为教师排错的第一步永远是"把未解析的都列出来"。
+    -->
+    <div ref="runsSection" style="margin-top: 24px">
+      <div class="list-head">
+        <h3 class="section-title">
+          评测记录
+          <span class="muted">（共 {{ runs.total.value }} 条）</span>
+        </h3>
+        <div class="toolbar">
+          <el-select v-model="parseFilter" size="small" style="width: 180px">
+            <el-option label="全部记录" value="" />
+            <el-option label="未解析（需要处理）" value="unparsed" />
+            <el-option label="已解析" value="ok" />
+            <el-option label="手工录入" value="manual" />
+          </el-select>
+          <el-button size="small" :loading="runs.loading.value" @click="runs.reload">刷新</el-button>
+          <!-- 不按 `runs.total` 置灰：那个数是**筛选后**的条数，而清空的范围是整个场次 -->
+          <el-button size="small" type="danger" plain @click="clearRunsOpen = true">
+            清空成绩记录
+          </el-button>
+        </div>
+      </div>
+
+      <p class="page-hint">每一格成绩来自哪个文件、为什么没读懂，都在这里。<strong>点「补录」可手工判分。</strong></p>
+
+      <DataTable
+        :rows="runs.rows.value"
+        :row-key="(row: JudgeRunOut) => row.id"
+        :loading="runs.loading.value"
+        :total="runs.total.value"
+        :page="runs.page.value"
+        :page-size="runs.pageSize.value"
+        empty-text="没有匹配的评测记录"
+        @update:page="runs.setPage"
+        @update:pageSize="runs.setPageSize"
+      >
+        <template #columns>
+          <el-table-column label="选手" prop="player_no" width="110" />
+          <el-table-column label="题目" prop="problem" width="100" />
+          <el-table-column label="状态" width="100">
+            <template #default="{ row }">
+              <el-tag :type="runStatusType(row.parse_status)" size="small" effect="plain">
+                {{ runStatusLabel(row.parse_status) }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="得分" width="100" align="right">
+            <template #default="{ row }">
+              <span v-if="row.score === null || row.score === undefined" class="muted">—</span>
+              <span v-else>{{ row.score }}/{{ row.max_score ?? '?' }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="来源文件" min-width="220">
+            <template #default="{ row }">
+              <span v-if="row.source_path" class="mono">{{ row.source_path }}</span>
+              <span v-else class="muted">—</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="说明" min-width="200">
+            <template #default="{ row }">
+              <span :class="{ 'error-text': row.parse_status === 'unparsed' }">
+                {{ row.detail || '—' }}
+              </span>
+            </template>
+          </el-table-column>
+          <el-table-column label="更新时间" width="160">
+            <template #default="{ row }">
+              <span class="cell-sub">{{ formatTime(row.updated_at) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="90" fixed="right">
+            <template #default="{ row }">
+              <el-button link type="primary" size="small" @click="openManual(row, row.problem, row)">
+                {{ row.parse_status === 'unparsed' ? '补录' : '修正' }}
+              </el-button>
+            </template>
+          </el-table-column>
+        </template>
+
+        <template #empty>
+          <p>没有匹配的评测记录。</p>
+          <p>记录来自 <code>judge_result/&lt;场次&gt;/&lt;选手&gt;/&lt;题目&gt;/</code>。一条都没有就先确认目录写对了，再点「立即重扫」。</p>
+        </template>
+      </DataTable>
+    </div>
+
+    <FormDialog
+      v-model="editing"
+      title="录入成绩"
+      width="480px"
+      :submitting="saveManual.pending.value"
+      @submit="saveManual.run(undefined)"
+    >
       <el-form label-width="90px">
         <el-form-item label="选手">
           <span class="mono">{{ form.playerNo }}</span>
@@ -511,81 +749,81 @@ async function exportCsv(): Promise<void> {
         </el-form-item>
       </el-form>
 
+      <!-- 从"未解析"进来时把解析器给的原因摆出来 —— 教师判分前需要知道它读的是什么文件 -->
+      <el-alert v-if="manualUnparsed" type="warning" :closable="false" show-icon style="margin-bottom: 10px">
+        <template #title>这一格是自动解析失败的，原因：{{ manualSeed?.detail || '（服务端没有给出原因）' }}</template>
+        <template #default>
+          系统没法覆盖所有评测器格式，所以这里给你留了补录的口子。
+          下面「评测记录」里能按「未解析」过滤出所有同类记录。
+        </template>
+      </el-alert>
+
       <el-alert
         type="info"
         :closable="false"
         show-icon
-        title="手工录入的成绩会被标记并永久保留，自动扫描不会覆盖它（连「立即重扫」也不会）。要恢复自动扫描请点「清除」。"
+        title="手工录的分永久保留，重扫不会覆盖它；要恢复自动扫描点「清除这一格」。"
       />
 
-      <template #footer>
+      <template #footer-prepend>
         <el-button
           v-if="form.playerId"
           link
           type="danger"
-          @click="clearManual(form.playerId, form.problem)"
+          :loading="clearScore.pending.value"
+          @click="askClear"
         >
           清除这一格
         </el-button>
-        <el-button @click="editing = false">取消</el-button>
-        <el-button type="primary" :loading="submitting" @click="submitManual">保存</el-button>
       </template>
-    </el-dialog>
+    </FormDialog>
 
-    <el-dialog v-model="runsVisible" title="成绩原始记录" width="900px">
-      <div class="toolbar" style="margin-bottom: 12px">
-        <el-select
-          v-model="runsFilter"
-          size="small"
-          placeholder="全部"
-          clearable
-          style="width: 150px"
-          @change="loadRuns"
-        >
-          <el-option label="未解析（需要处理）" value="unparsed" />
-          <el-option label="已解析" value="ok" />
-          <el-option label="手工录入" value="manual" />
-        </el-select>
-        <span class="page-hint" style="margin: 0">
-          每一格成绩来自哪个文件、用了哪个解析器、为什么失败
-        </span>
-      </div>
+    <!--
+      清除某一格 = 硬删除一条评测记录。服务端要 `confirm` 逐字等于考号，
+      所以这里不是"是否确定"，而是把考号打一遍。
+    -->
+    <ConfirmByNameDialog
+      v-model="clearCellOpen"
+      title="清除这一格成绩"
+      :expected="form.playerNo"
+      :submitting="clearScore.pending.value"
+      confirm-text="清除"
+      :detail="
+        `将删除 ${form.playerNo} 的「${form.problem}」这一格的成绩记录。` +
+        '手工录入的那份会被抹掉，随后自动扫描可以重新接管这一格。' +
+        '选手的代码与结果文件都不动 —— 删的只是这条成绩记录。'
+      "
+      @confirm="clearScore.run(undefined)"
+    />
 
-      <el-table :data="runs" v-loading="runsLoading" size="small" border max-height="420">
-        <el-table-column label="选手" prop="player_no" width="100" />
-        <el-table-column label="题目" prop="problem" width="90" />
-        <el-table-column label="状态" width="90">
-          <template #default="{ row }">
-            <el-tag :type="runStatusType(row.parse_status)" size="small" effect="plain">
-              {{ runStatusLabel(row.parse_status) }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="得分" width="90" align="right">
-          <template #default="{ row }">
-            <span v-if="row.score === null || row.score === undefined" class="muted">—</span>
-            <span v-else>{{ row.score }}/{{ row.max_score ?? '?' }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="来源文件" min-width="240">
-          <template #default="{ row }">
-            <span v-if="row.source_path" class="mono">{{ row.source_path }}</span>
-            <span v-else class="muted">—</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="说明" min-width="200">
-          <template #default="{ row }">
-            <span :class="{ 'error-text': row.parse_status === 'unparsed' }">
-              {{ row.detail || '—' }}
-            </span>
-          </template>
-        </el-table-column>
-        <template #empty>
-          <div class="empty-block">没有匹配的记录</div>
+    <!--
+      清空成绩记录 = 范围删除。`confirm` 是**场次标识**，不是某一格的名字 ——
+      这个动作的范围是整个场次，不跟着记录区上面的状态筛选走，文案要写清楚，
+      否则教师会以为"筛了未解析就是只清未解析的"。
+    -->
+    <ConfirmByNameDialog
+      v-model="clearRunsOpen"
+      title="清空本场次成绩记录"
+      :expected="contest.current?.slug ?? ''"
+      :submitting="clearRuns.pending.value"
+      confirm-text="清空"
+      :detail="
+        '将删除本场次的「全部」评测记录（不跟着记录区上面的状态筛选走），' +
+        '成绩矩阵随之一起空掉。默认保留手工录入的分数；要连手工分一起清，' +
+        '把下面那个勾去掉。'
+      "
+      @confirm="clearRuns.run(undefined)"
+    >
+      <el-checkbox v-model="clearKeepManual">保留手工录入的分数（推荐）</el-checkbox>
+      <el-alert v-if="!clearKeepManual" type="error" :closable="false" show-icon style="margin-top: 8px">
+        <template #title>手工录入的分数会被一起清掉</template>
+        <template #default>
+          那些分数是评测器给不出结果时教师亲自判的，重扫也恢复不出来 ——
+          清掉之后只能重新人工判一遍。
         </template>
-      </el-table>
-    </el-dialog>
-  </div>
+      </el-alert>
+    </ConfirmByNameDialog>
+  </PageShell>
 </template>
 
 <style scoped>
@@ -599,5 +837,36 @@ async function exportCsv(): Promise<void> {
   gap: 6px;
   align-items: center;
   margin-top: 4px;
+}
+
+.scan-errors {
+  margin: 4px 0;
+  padding-left: 18px;
+  max-height: 200px;
+  overflow: auto;
+}
+
+.list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.section-title {
+  font-size: 15px;
+  margin: 0 0 10px;
+}
+
+.muted {
+  font-size: 12px;
+  font-weight: 400;
+  color: #909399;
+}
+
+.error-text {
+  color: #f56c6c;
+  font-size: 12px;
 }
 </style>

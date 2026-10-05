@@ -44,6 +44,64 @@ export function percent(done: number, total: number): number {
   return Math.min(100, Math.round((done / total) * 100))
 }
 
+/**
+ * 审计事件的分类名转成中文。保留未知分类原文，别让它消失。
+ *
+ * 这份表覆盖**服务端实际会写的全部 category**（扫 `server/` 与 `agent/` 里
+ * 所有 `category=` 字面量得到）。漏一个的后果不是报错，而是界面上一列里
+ * 突然出现几个英文单词 —— 那种东西没人会去补，只会一直留在那里。
+ */
+const EVENT_CATEGORY_LABELS: Record<string, string> = {
+  // 注册与配对
+  enroll: '注册',
+  enroll_conflict: '注册冲突（指纹撞在线机器）',
+  enroll_ambiguous: '注册歧义（多台共用指纹）',
+  bind: '机器配对',
+  agent_rebind: '机器改派',
+  agent_unbind: '解除绑定',
+  agent_revoke: '作废机器',
+  bootstrap_key: '统一密钥',
+  machines_clear: '清空待配对机器',
+  // 场次与选手
+  contest_delete: '删除场次',
+  roster_apply: '应用名单',
+  player_delete: '删除选手',
+  players_clear: '清空选手',
+  // 代码台账
+  files_clear: '清理台账',
+  file_deleted: '文件消失',
+  file_restored: '文件恢复',
+  // 下发与题目
+  deploy_created: '下发创建',
+  deploy_cancelled: '下发取消',
+  deploy_delete: '删除下发任务',
+  deploy_failed: '下发失败',
+  problem_import: '题目登记',
+  problem_clear: '清空题目',
+  // 成绩
+  judge_manual: '手工录分',
+  scores_clear: '清空成绩',
+  // 审计
+  events_clear: '清空日志',
+  // Agent 侧上报
+  bulk_rewrite: '批量重写',
+  scan_rejected: '扫描拒绝',
+  scan_incomplete: '扫描不完整',
+  oversize_skipped: '超限跳过',
+  upload_rejected: '上传被拒',
+  offline: '离线',
+  disk_full: '磁盘满',
+  // 发布
+  release_uploaded: '发布上传',
+  release_rollout: '发布铺开',
+  release_yank: '发布撤回',
+}
+
+export function eventCategoryLabel(category: string): string {
+  return EVENT_CATEGORY_LABELS[category] ?? category
+}
+
+/** 审计日志的级别选择项。值跟着服务端 `EventLog.level` 走。 */
 const EVENT_LEVEL_LABELS: Record<string, string> = {
   info: '信息',
   warning: '警告',
@@ -52,31 +110,6 @@ const EVENT_LEVEL_LABELS: Record<string, string> = {
 
 export function eventLevelLabel(level: string): string {
   return EVENT_LEVEL_LABELS[level] ?? level
-}
-
-/** 审计事件的分类名转成中文。保留未知分类原文，别让它消失。 */
-const EVENT_CATEGORY_LABELS: Record<string, string> = {
-  enroll: '注册',
-  deploy_created: '下发创建',
-  deploy_cancelled: '下发取消',
-  deploy_failed: '下发失败',
-  release_uploaded: '发布上传',
-  release_rollout: '发布铺开',
-  release_yank: '发布撤回',
-  judge_manual: '手工录分',
-  file_deleted: '文件消失',
-  file_restored: '文件恢复',
-  bulk_rewrite: '批量重写',
-  scan_rejected: '扫描拒绝',
-  scan_incomplete: '扫描不完整',
-  oversize_skipped: '超限跳过',
-  upload_rejected: '上传被拒',
-  offline: '离线',
-  disk_full: '磁盘满',
-}
-
-export function eventCategoryLabel(category: string): string {
-  return EVENT_CATEGORY_LABELS[category] ?? category
 }
 
 const CONTEST_STATUS_LABELS: Record<string, string> = {

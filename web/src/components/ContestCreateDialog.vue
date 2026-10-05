@@ -1,15 +1,14 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 
 import { contestApi, rosterApi } from '@/api'
-import type { ContestOut, RosterOut } from '@/api/types'
+import type { ContestCreate, ContestOut, RosterOut } from '@/api/types'
+import FormDialog from '@/components/FormDialog.vue'
+import { useMutation } from '@/composables/useMutation'
 
 const props = defineProps<{
   modelValue: boolean
-  /** 用于生成默认 slug 的建议值（例如"校内模拟赛"→ mock） */
-  existing?: ContestOut[]
 }>()
 
 const emit = defineEmits<{
@@ -23,7 +22,6 @@ const visible = computed({
 })
 
 const formRef = ref<FormInstance>()
-const submitting = ref(false)
 /** slug 是否由用户手工编辑过。没有的话跟着名称自动走。 */
 const slugTouched = ref(false)
 
@@ -32,10 +30,14 @@ const rosters = ref<RosterOut[]>([])
 /**
  * 名单列表在打开对话框时才拉 —— 名单库是全局的，和场次无关，
  * 而这里只需要一个下拉选项，没必要进主视图的数据流。
+ *
+ * 走分页信封，`limit` 给宽一点：名单是天然很小的集合（几十份），
+ * 这里也确实需要全部选项。
  */
 async function loadRosters(): Promise<void> {
   try {
-    rosters.value = await rosterApi.list()
+    const page = await rosterApi.list({ limit: 500 })
+    rosters.value = page.items
   } catch {
     // 拉不到就当成"没有名单"，不拦住建场次 —— 名单本来就是可选项
     rosters.value = []
@@ -45,10 +47,9 @@ async function loadRosters(): Promise<void> {
 const form = reactive({
   name: '',
   slug: '',
-  status: 'draft',
+  status: 'running',
   note: '',
   defaultRosterId: null as number | null,
-  enrollmentMode: 'per_player_code',
 })
 
 const rules: FormRules = {
@@ -86,42 +87,48 @@ watch(visible, (open) => {
   form.status = 'running'
   form.note = ''
   form.defaultRosterId = null
-  form.enrollmentMode = 'per_player_code'
   slugTouched.value = false
   formRef.value?.clearValidate()
   void loadRosters()
 })
+
+const createContest = useMutation(
+  (payload: ContestCreate) => contestApi.create(payload),
+  {
+    // 服务端的回执只有实体本身，这里自己说一句更清楚是哪一个
+    success: (contest) => `场次「${contest.name}」已创建`,
+    onDone: (contest) => {
+      visible.value = false
+      emit('created', contest)
+    },
+  },
+)
 
 async function submit(): Promise<void> {
   if (!formRef.value) return
   const valid = await formRef.value.validate().catch(() => false)
   if (!valid) return
 
-  submitting.value = true
-  try {
-    const contest = await contestApi.create({
-      name: form.name.trim(),
-      // 空串要转成 null：服务端收到空串会当成"没给"，转而从名称生成
-      slug: form.slug.trim() || null,
-      status: form.status,
-      note: form.note.trim() || null,
-      default_roster_id: form.defaultRosterId,
-      enrollment_mode: form.enrollmentMode,
-    })
-    ElMessage.success(`场次「${contest.name}」已创建`)
-    visible.value = false
-    emit('created', contest)
-  } catch (error) {
-    // 最常见的是 409（slug 已存在）。原样展示服务端提示，不要自己加工。
-    ElMessage.error((error as Error).message)
-  } finally {
-    submitting.value = false
-  }
+  await createContest.run({
+    name: form.name.trim(),
+    // 空串要转成 null：服务端收到空串会当成"没给"，转而从名称生成
+    slug: form.slug.trim() || null,
+    status: form.status,
+    note: form.note.trim() || null,
+    default_roster_id: form.defaultRosterId,
+  })
 }
 </script>
 
 <template>
-  <el-dialog v-model="visible" title="新建场次" width="520px" :close-on-click-modal="false">
+  <FormDialog
+    v-model="visible"
+    title="新建场次"
+    :submitting="createContest.pending.value"
+    :disabled="!form.name.trim()"
+    confirm-text="创建"
+    @submit="submit"
+  >
     <el-form ref="formRef" :model="form" :rules="rules" label-width="90px">
       <el-form-item label="名称" prop="name">
         <el-input v-model="form.name" placeholder="例如 2025 校内模拟赛" maxlength="200" />
@@ -171,34 +178,17 @@ async function submit(): Promise<void> {
         </div>
       </el-form-item>
 
-      <el-form-item label="注册方式">
-        <el-radio-group v-model="form.enrollmentMode">
-          <el-radio value="per_player_code">每人一个注册码</el-radio>
-          <el-radio value="bootstrap">镜像统一密钥 + 短码配对</el-radio>
-        </el-radio-group>
-        <div class="page-hint">
-          一个选手一个注册码适合临时加人、小规模现场发码；
-          统一密钥适合整间机房用同一份镜像预装 —— 机器注册后没有归属，
-          由教师在「机器配对」里认领到人。
-        </div>
-      </el-form-item>
-
       <el-form-item label="备注">
         <el-input v-model="form.note" type="textarea" :rows="2" maxlength="500" />
       </el-form-item>
     </el-form>
 
     <el-alert type="info" :closable="false" show-icon>
-      <template #title>创建后还需要两步才能用</template>
+      <template #title>建好还有两步</template>
       <template #default>
-        ① 把选手落到场次（导入，或从「名单库」应用一份）
-        ② 让考试机注册上来（签发注册码，或装好带统一密钥的镜像）
+        ① 把选手落到这场（导入，或从「名单库」应用一份）
+        ② 让机器注册上来（签发统一密钥）
       </template>
     </el-alert>
-
-    <template #footer>
-      <el-button @click="visible = false">取消</el-button>
-      <el-button type="primary" :loading="submitting" @click="submit">创建</el-button>
-    </template>
-  </el-dialog>
+  </FormDialog>
 </template>

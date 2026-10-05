@@ -39,7 +39,10 @@ export const useContestStore = defineStore('contest', () => {
     loading.value = true
     error.value = null
     try {
-      contests.value = await contestApi.list()
+      // 列表接口统一走分页信封（见 docs/api-conventions.md §2），场次也不例外。
+      // 场次是天然很小的集合，取法是一页装下全部 —— 这里只关心 items。
+      const page = await contestApi.list()
+      contests.value = page.items
       restoreSelection()
     } catch (err) {
       error.value = (err as Error).message

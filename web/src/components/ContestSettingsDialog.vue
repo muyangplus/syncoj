@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
 
 import { contestApi, rosterApi } from '@/api'
-import type { ContestOut, RosterOut } from '@/api/types'
+import type { ContestOut, ContestUpdate, RosterOut } from '@/api/types'
+import FormDialog from '@/components/FormDialog.vue'
+import { useMutation } from '@/composables/useMutation'
 
 const props = defineProps<{
   modelValue: boolean
@@ -20,16 +21,7 @@ const visible = computed({
   set: (value: boolean) => emit('update:modelValue', value),
 })
 
-const submitting = ref(false)
 const rosters = ref<RosterOut[]>([])
-
-const form = reactive({
-  name: '',
-  status: 'draft',
-  note: '',
-  defaultRosterId: null as number | null,
-  enrollmentMode: 'per_player_code',
-})
 
 const STATUSES: Array<{ value: string; label: string }> = [
   { value: 'running', label: '进行中（正常收卷与下发）' },
@@ -38,51 +30,61 @@ const STATUSES: Array<{ value: string; label: string }> = [
   { value: 'closed', label: '已结束（不再自动扫成绩）' },
 ]
 
+const form = reactive({
+  name: '',
+  status: 'draft',
+  defaultRosterId: null as number | null,
+})
+
 watch(visible, async (open) => {
   if (!open || !props.contest) return
   form.name = props.contest.name
   form.status = props.contest.status
-  form.note = ''
   form.defaultRosterId = props.contest.default_roster_id ?? null
-  form.enrollmentMode = props.contest.enrollment_mode ?? 'per_player_code'
   try {
-    rosters.value = await rosterApi.list()
+    const page = await rosterApi.list({ limit: 500 })
+    rosters.value = page.items
   } catch {
+    // 拉不到名单不拦着改状态：名称、状态都不依赖它
     rosters.value = []
   }
 })
 
-async function submit(): Promise<void> {
-  if (!props.contest) return
-  if (!form.name.trim()) {
-    ElMessage.warning('场次名称不能为空')
-    return
-  }
+const saveContest = useMutation(
+  (payload: ContestUpdate) => {
+    const contest = props.contest
+    if (!contest) throw new Error('没有选中场次')
+    return contestApi.update(contest.id, payload)
+  },
+  {
+    success: '已保存',
+    onDone: (saved) => {
+      visible.value = false
+      emit('saved', saved)
+    },
+  },
+)
 
-  submitting.value = true
-  try {
-    const saved = await contestApi.update(props.contest.id, {
-      name: form.name.trim(),
-      status: form.status,
-      note: form.note.trim() || null,
-      // None 分不清"没传"和"要清空"，所以清空走显式开关
-      clear_default_roster: form.defaultRosterId === null,
-      default_roster_id: form.defaultRosterId,
-      enrollment_mode: form.enrollmentMode,
-    })
-    ElMessage.success('已保存')
-    visible.value = false
-    emit('saved', saved)
-  } catch (err) {
-    ElMessage.error((err as Error).message)
-  } finally {
-    submitting.value = false
-  }
+async function submit(): Promise<void> {
+  await saveContest.run({
+    name: form.name.trim(),
+    status: form.status,
+    // null 分不清"没传"和"要清空"，所以清空走显式开关
+    clear_default_roster: form.defaultRosterId === null,
+    default_roster_id: form.defaultRosterId,
+  })
 }
 </script>
 
 <template>
-  <el-dialog v-model="visible" title="场次设置" width="560px" :close-on-click-modal="false">
+  <FormDialog
+    v-model="visible"
+    title="场次设置"
+    width="560px"
+    :submitting="saveContest.pending.value"
+    :disabled="!form.name.trim()"
+    @submit="submit"
+  >
     <el-alert
       v-if="contest?.player_count"
       type="warning"
@@ -92,8 +94,8 @@ async function submit(): Promise<void> {
     >
       <template #title>这场已经有 {{ contest.player_count }} 名选手了</template>
       <template #default>
-        改「默认名单」只是换一个预设，<strong>不会动已有选手</strong>；
-        要真正落到场次得去「名单库」页点「应用」。
+        改「默认名单」只换预设，<strong>不动已有选手</strong>。
+        要落到场次请到「名单库」点「应用」。
       </template>
     </el-alert>
 
@@ -107,13 +109,22 @@ async function submit(): Promise<void> {
         <div class="page-hint">
           标识已经固定在磁盘路径（<code>source/&lt;标识&gt;/…</code>）与评测器配置里，
           改它会让已有成绩找不到位置，所以这里只读。
+          要删掉整场请回列表页用「删除」——那个入口要求把标识原样打一遍。
         </div>
       </el-form-item>
 
       <el-form-item label="状态">
         <el-select v-model="form.status" style="width: 100%">
-          <el-option v-for="item in STATUSES" :key="item.value" :label="item.label" :value="item.value" />
+          <el-option
+            v-for="item in STATUSES"
+            :key="item.value"
+            :label="item.label"
+            :value="item.value"
+          />
         </el-select>
+        <div class="page-hint">
+          「已封榜」停止下发新文件但仍然收卷 —— 封榜不影响已经在考的机器。
+        </div>
       </el-form-item>
 
       <el-form-item label="默认名单">
@@ -132,21 +143,11 @@ async function submit(): Promise<void> {
         </el-select>
       </el-form-item>
 
-      <el-form-item label="注册方式">
-        <el-radio-group v-model="form.enrollmentMode">
-          <el-radio value="per_player_code">每人一个注册码</el-radio>
-          <el-radio value="bootstrap">镜像统一密钥 + 短码配对</el-radio>
-        </el-radio-group>
-      </el-form-item>
-
-      <el-form-item label="备注">
-        <el-input v-model="form.note" type="textarea" :rows="2" maxlength="500" />
-      </el-form-item>
+      <!--
+        备注这里**没有**编辑框：服务端的 `ContestOut` 不回传 `note`，一个空白的
+        输入框在保存时没法区分"教师想清空"和"界面没读到"。等回执带上 note 再加，
+        不能靠"先清空再让教师重打一遍"糊过去。
+      -->
     </el-form>
-
-    <template #footer>
-      <el-button @click="visible = false">取消</el-button>
-      <el-button type="primary" :loading="submitting" @click="submit">保存</el-button>
-    </template>
-  </el-dialog>
+  </FormDialog>
 </template>

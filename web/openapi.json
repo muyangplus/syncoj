@@ -315,6 +315,11 @@
             "title": "Kind",
             "type": "string"
           },
+          "pending_targets": {
+            "default": 0,
+            "title": "Pending Targets",
+            "type": "integer"
+          },
           "sha256": {
             "title": "Sha256",
             "type": "string"
@@ -334,6 +339,107 @@
           "created_at"
         ],
         "title": "AssetOut",
+        "type": "object"
+      },
+      "AssetRenameIn": {
+        "additionalProperties": false,
+        "description": "只改显示名。内容是按 sha256 存的，改名不触碰到内容。",
+        "properties": {
+          "filename": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Filename",
+            "type": "string"
+          }
+        },
+        "required": [
+          "filename"
+        ],
+        "title": "AssetRenameIn",
+        "type": "object"
+      },
+      "BindByCodeIn": {
+        "additionalProperties": false,
+        "description": "用配对码配对：机器上显示什么，教师就输什么。",
+        "properties": {
+          "pair_code": {
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Pair Code",
+            "type": "string"
+          },
+          "roster_entry_id": {
+            "title": "Roster Entry Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pair_code",
+          "roster_entry_id"
+        ],
+        "title": "BindByCodeIn",
+        "type": "object"
+      },
+      "BindMachineIn": {
+        "additionalProperties": false,
+        "description": "把一台机器配对到名单里的某个人。\n\n这是\"永久配对\"：绑的是**人**（名单条目），不是某场比赛的选手。\n所以同一个学生换一场比赛不用重新配 —— 只要新场次应用了那份名单。\n\n``pair_code`` 可以省略（教师从列表里按主机名直接点选时），\n但只要给了就必须对得上：主机名可能是重复的，而配对码是唯一能证明\n\"我确实站在那台机器前面\"的东西。",
+        "properties": {
+          "pair_code": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pair Code"
+          },
+          "roster_entry_id": {
+            "title": "Roster Entry Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "roster_entry_id"
+        ],
+        "title": "BindMachineIn",
+        "type": "object"
+      },
+      "BindResultOut": {
+        "additionalProperties": false,
+        "description": "配对成功的结果。\n\n回显\"绑到了谁、在哪份名单里\"，是因为配对是**永久**动作：\n教师按下的这一刻决定了这台机器以后是谁的。给一句明确的回执，\n比让他在列表里自己找那台机器现在归属谁要可靠得多。",
+        "properties": {
+          "agent_id": {
+            "title": "Agent Id",
+            "type": "integer"
+          },
+          "detail": {
+            "default": "",
+            "title": "Detail",
+            "type": "string"
+          },
+          "player_no": {
+            "title": "Player No",
+            "type": "string"
+          },
+          "roster_entry_id": {
+            "title": "Roster Entry Id",
+            "type": "integer"
+          },
+          "roster_name": {
+            "default": "",
+            "title": "Roster Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_id",
+          "roster_entry_id",
+          "player_no"
+        ],
+        "title": "BindResultOut",
         "type": "object"
       },
       "Body_upload_asset_api_v1_admin_contests__contest_id__assets_post": {
@@ -616,55 +722,6 @@
         "title": "BootstrapKeyOut",
         "type": "object"
       },
-      "ClaimByCodeIn": {
-        "additionalProperties": false,
-        "description": "用配对码认领：机器上显示什么，教师就输什么。",
-        "properties": {
-          "pair_code": {
-            "maxLength": 32,
-            "minLength": 1,
-            "title": "Pair Code",
-            "type": "string"
-          },
-          "player_id": {
-            "title": "Player Id",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "pair_code",
-          "player_id"
-        ],
-        "title": "ClaimByCodeIn",
-        "type": "object"
-      },
-      "ClaimMachineIn": {
-        "additionalProperties": false,
-        "description": "认领一台机器。\n\n``pair_code`` 可以省略（教师从列表里按主机名直接认领时就省略），\n但只要给了就必须对得上 —— 那是\"我确认过这台机器就是那台\"的凭据。",
-        "properties": {
-          "pair_code": {
-            "anyOf": [
-              {
-                "maxLength": 32,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Pair Code"
-          },
-          "player_id": {
-            "title": "Player Id",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "player_id"
-        ],
-        "title": "ClaimMachineIn",
-        "type": "object"
-      },
       "CloneAlertOut": {
         "additionalProperties": false,
         "description": "克隆镜像告警：多台机器共用同一个硬件指纹。",
@@ -692,6 +749,23 @@
         "title": "CloneAlertOut",
         "type": "object"
       },
+      "ConfirmIn": {
+        "additionalProperties": false,
+        "description": "批量清空的确认体。\n\n\"清空\"删的是一**批**对象，没有单个名字可以打，所以确认内容是**范围的名字**：\n场次范围内的清空用场次 ``slug``、名单范围内用名单 ``name``；\n范围本身是\"全部\"的（审计日志、待配对机器）用固定字面量 ``all``。\n\n为什么要走请求体而不是 query：清空是破坏性动作，把确认值放在 JSON 体里，\n浏览器、curl、前端都更不容易在一个 copy-paste 里把它丢掉。",
+        "properties": {
+          "confirm": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Confirm",
+            "type": "string"
+          }
+        },
+        "required": [
+          "confirm"
+        ],
+        "title": "ConfirmIn",
+        "type": "object"
+      },
       "ContestCreate": {
         "additionalProperties": false,
         "properties": {
@@ -705,18 +779,6 @@
               }
             ],
             "title": "Default Roster Id"
-          },
-          "enrollment_mode": {
-            "anyOf": [
-              {
-                "maxLength": 24,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Enrollment Mode"
           },
           "name": {
             "maxLength": 200,
@@ -789,11 +851,6 @@
             ],
             "title": "Default Roster Name"
           },
-          "enrollment_mode": {
-            "default": "per_player_code",
-            "title": "Enrollment Mode",
-            "type": "string"
-          },
           "id": {
             "title": "Id",
             "type": "integer"
@@ -801,6 +858,17 @@
           "name": {
             "title": "Name",
             "type": "string"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
           },
           "online_count": {
             "default": 0,
@@ -850,18 +918,6 @@
               }
             ],
             "title": "Default Roster Id"
-          },
-          "enrollment_mode": {
-            "anyOf": [
-              {
-                "maxLength": 24,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Enrollment Mode"
           },
           "name": {
             "anyOf": [
@@ -1135,55 +1191,9 @@
         "title": "DeployTaskOut",
         "type": "object"
       },
-      "EnrollCodeOut": {
-        "additionalProperties": false,
-        "properties": {
-          "code": {
-            "title": "Code",
-            "type": "string"
-          },
-          "expires_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Expires At"
-          },
-          "note": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Note"
-          },
-          "player_id": {
-            "title": "Player Id",
-            "type": "integer"
-          },
-          "player_no": {
-            "title": "Player No",
-            "type": "string"
-          }
-        },
-        "required": [
-          "player_id",
-          "player_no",
-          "code"
-        ],
-        "title": "EnrollCodeOut",
-        "type": "object"
-      },
       "EnrollRequest": {
         "additionalProperties": false,
-        "description": "注册请求。\n\n两种凭据二选一：\n\n* ``enroll_code`` —— 每选手一个注册码（原有行为），一码一人\n* ``bootstrap_key`` —— 镜像内置的统一密钥，注册出来的机器**没有归属**，\n  要靠短码配对认领到人\n\n两个都传时以 ``enroll_code`` 为准：单人码是更明确的意图（\"这台机器就是\n某个具体选手\"），不该被镜像里那份宽泛的密钥盖过去。",
+        "description": "注册请求。\n\n只有一条路了：**镜像内置的统一密钥**。每选手注册码已经被\"机器永久绑定\n名单条目\"取代 —— 逐台发码在\"一份镜像装遍整间机房\"的现实里根本不可行，\n而两种模式并存意味着每种都要维护、测试、并且迟早有人选错。\n\n机器身份的三个要素，作用各不相同：\n\n* ``machine_uuid`` —— Agent 首次运行时生成。**配对之后认机器主要靠它**，\n  换凭据、重新注册都按它匹配，不再需要配对码\n* ``machine_fingerprint`` —— 硬件指纹（SMBIOS UUID）。UUID 会随整机快照还原\n  一起消失，指纹不会，所以它是第二道依据\n* ``machine_id`` —— 仅供人工辨认（列表里显示），不参与身份判定",
         "properties": {
           "agent_version": {
             "anyOf": [
@@ -1198,28 +1208,10 @@
             "title": "Agent Version"
           },
           "bootstrap_key": {
-            "anyOf": [
-              {
-                "maxLength": 256,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Bootstrap Key"
-          },
-          "enroll_code": {
-            "anyOf": [
-              {
-                "maxLength": 64,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Enroll Code"
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Bootstrap Key",
+            "type": "string"
           },
           "hostname": {
             "anyOf": [
@@ -1277,18 +1269,24 @@
           }
         },
         "required": [
-          "machine_id"
+          "machine_id",
+          "bootstrap_key"
         ],
         "title": "EnrollRequest",
         "type": "object"
       },
       "EnrollResponse": {
         "additionalProperties": false,
-        "description": "注册结果。\n\n``claimed=False`` 表示这是一台**还没有归属**的机器（走统一密钥注册的）。\n此时 Agent 该做的是把 ``pair_code`` 显示给人看、然后等着被认领，\n而不是去扫代码 —— 它连准考证号都不知道，扫出来的路径没有意义。\n\n``player_no`` 等在未认领时为空串，客户端必须按 ``claimed`` 分支处理。",
+        "description": "注册结果。\n\n三种状态，客户端必须分清 —— 它们看起来都像\"注册成功了\"，但该做的事完全不同：\n\n==================  =========  =============  ==============================\n``claimed``         ``bound``  ``contest``    客户端该做什么\n==================  =========  =============  ==============================\n``false``           false      —              把 ``pair_code`` 显示给人看，等配对\n``true``            false      ``null``       已配对，但还没有含你的场次：等\n``true``            true       有值           正常干活：扫代码、收下发\n==================  =========  =============  ==============================\n\n\"已配对但没场次\"这一档是新的：机器绑的是**人**，而某个场次有没有这个人，\n取决于那份名单有没有被应用到场次里。所以配对成功不等于马上能干活 ——\n这个中间状态必须说得出来，否则客户端只能猜（猜错的后果是它去扫一个\n展开不出准考证号的目录）。",
         "properties": {
           "agent_id": {
             "title": "Agent Id",
             "type": "integer"
+          },
+          "bound": {
+            "default": false,
+            "title": "Bound",
+            "type": "boolean"
           },
           "claimed": {
             "default": true,
@@ -1347,6 +1345,17 @@
             "default": "",
             "title": "Player No",
             "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
           },
           "token": {
             "title": "Token",
@@ -1417,6 +1426,28 @@
         "title": "EventOut",
         "type": "object"
       },
+      "FileClearIn": {
+        "additionalProperties": false,
+        "description": "清代码台账。\n\n``purge=False``（默认）只打墓碑 —— 行还在、``?include_deleted=true`` 仍能\n查到，导出里也仍然带着（见 ``docs/api-conventions.md`` §5.2）。\n``purge=True`` 才连行一起删，只在\"这些记录本来就是误传\"时才该用。",
+        "properties": {
+          "confirm": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Confirm",
+            "type": "string"
+          },
+          "purge": {
+            "default": false,
+            "title": "Purge",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "confirm"
+        ],
+        "title": "FileClearIn",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -1428,6 +1459,39 @@
           }
         },
         "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "JudgeRunClearIn": {
+        "additionalProperties": false,
+        "description": "清空成绩记录。\n\n``player_id`` 把范围缩小到一个人；``keep_manual`` 默认 True，\n因为手工录入的分数是全场最贵的数据，不该被\"重扫一遍\"顺手清掉。",
+        "properties": {
+          "confirm": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Confirm",
+            "type": "string"
+          },
+          "keep_manual": {
+            "default": true,
+            "title": "Keep Manual",
+            "type": "boolean"
+          },
+          "player_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Player Id"
+          }
+        },
+        "required": [
+          "confirm"
+        ],
+        "title": "JudgeRunClearIn",
         "type": "object"
       },
       "JudgeRunOut": {
@@ -1668,6 +1732,370 @@
         "title": "ManualScoreIn",
         "type": "object"
       },
+      "Page_AgentRuntimeOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AgentRuntimeOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "default": 50,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "title": "Page[AgentRuntimeOut]",
+        "type": "object"
+      },
+      "Page_AssetOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AssetOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "default": 50,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "title": "Page[AssetOut]",
+        "type": "object"
+      },
+      "Page_BootstrapKeyOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/BootstrapKeyOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "default": 50,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "title": "Page[BootstrapKeyOut]",
+        "type": "object"
+      },
+      "Page_CloneAlertOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/CloneAlertOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "default": 50,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "title": "Page[CloneAlertOut]",
+        "type": "object"
+      },
+      "Page_ContestOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ContestOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "default": 50,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "title": "Page[ContestOut]",
+        "type": "object"
+      },
+      "Page_DeployTaskOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/DeployTaskOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "default": 50,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "title": "Page[DeployTaskOut]",
+        "type": "object"
+      },
+      "Page_EventOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EventOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "default": 50,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "title": "Page[EventOut]",
+        "type": "object"
+      },
+      "Page_JudgeRunOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/JudgeRunOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "default": 50,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "title": "Page[JudgeRunOut]",
+        "type": "object"
+      },
+      "Page_PendingMachineOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PendingMachineOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "default": 50,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "title": "Page[PendingMachineOut]",
+        "type": "object"
+      },
+      "Page_PlayerOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PlayerOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "default": 50,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "title": "Page[PlayerOut]",
+        "type": "object"
+      },
+      "Page_ProblemOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ProblemOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "default": 50,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "title": "Page[ProblemOut]",
+        "type": "object"
+      },
+      "Page_RosterOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RosterOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "default": 50,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "title": "Page[RosterOut]",
+        "type": "object"
+      },
+      "Page_SourceFileOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SourceFileOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "default": 50,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "title": "Page[SourceFileOut]",
+        "type": "object"
+      },
       "PartialDownload": {
         "additionalProperties": false,
         "description": "客户端本地未完成的下载，服务端据此回填 offset。",
@@ -1691,7 +2119,7 @@
       },
       "PendingMachineOut": {
         "additionalProperties": false,
-        "description": "一台注册上来、还没认领到人的机器。",
+        "description": "一台注册上来、还没配对到人的机器。",
         "properties": {
           "agent_version": {
             "anyOf": [
@@ -1805,6 +2233,53 @@
           "created_at"
         ],
         "title": "PendingMachineOut",
+        "type": "object"
+      },
+      "PlayerClearIn": {
+        "additionalProperties": false,
+        "description": "清空一个场次的选手名单。\n\n``keep_with_submissions`` 默认 **True**：已经有代码或成绩的选手留着 ——\n误删代码是不可逆的，所以\"连提交一起清\"必须是显式选择，不能是默认。",
+        "properties": {
+          "confirm": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Confirm",
+            "type": "string"
+          },
+          "keep_with_submissions": {
+            "default": true,
+            "title": "Keep With Submissions",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "confirm"
+        ],
+        "title": "PlayerClearIn",
+        "type": "object"
+      },
+      "PlayerImportOut": {
+        "additionalProperties": false,
+        "description": "批量导入选手的结果。\n\n这是**动作结果**，不是集合读取 —— 所以它**不用列表信封**（见\n``docs/api-conventions.md`` §2：信封只属于 GET 集合）。\n返回 ``players`` 是因为调用方（导入界面）要拿到新建行的 id 才能\n接着做\"给这几个人应用名单\"\"批量配对\"之类的动作。",
+        "properties": {
+          "created": {
+            "default": 0,
+            "title": "Created",
+            "type": "integer"
+          },
+          "players": {
+            "items": {
+              "$ref": "#/components/schemas/PlayerOut"
+            },
+            "title": "Players",
+            "type": "array"
+          },
+          "updated": {
+            "default": 0,
+            "title": "Updated",
+            "type": "integer"
+          }
+        },
+        "title": "PlayerImportOut",
         "type": "object"
       },
       "PlayerOut": {
@@ -2171,6 +2646,21 @@
           "ident"
         ],
         "title": "ProblemUpsert",
+        "type": "object"
+      },
+      "RebindAgentIn": {
+        "additionalProperties": false,
+        "description": "把一台机器改派给名单里的另一个人。",
+        "properties": {
+          "roster_entry_id": {
+            "title": "Roster Entry Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "roster_entry_id"
+        ],
+        "title": "RebindAgentIn",
         "type": "object"
       },
       "ReleaseOut": {
@@ -2739,6 +3229,25 @@
         "title": "ScoreRowOut",
         "type": "object"
       },
+      "SetAgentContestIn": {
+        "additionalProperties": false,
+        "description": "给一台机器显式指定场次。\n\n默认是**动态解析**：找一个\"进行中、且名单含此人\"的场次。\n只有在一个考点同时跑多场比赛、同一个人两边都在时才需要指定 ——\n那种情况下服务端会明确说\"需要指定场次\"，而不是自己挑一个。",
+        "properties": {
+          "contest_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contest Id"
+          }
+        },
+        "title": "SetAgentContestIn",
+        "type": "object"
+      },
       "SimpleAck": {
         "additionalProperties": false,
         "properties": {
@@ -2933,6 +3442,11 @@
       "TickResponse": {
         "additionalProperties": false,
         "properties": {
+          "bound": {
+            "default": false,
+            "title": "Bound",
+            "type": "boolean"
+          },
           "cancel_assets": {
             "items": {
               "type": "integer"
@@ -3000,6 +3514,17 @@
               }
             ],
             "title": "Player No"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
           },
           "server_time": {
             "title": "Server Time",
@@ -3238,23 +3763,357 @@
   },
   "openapi": "3.1.0",
   "paths": {
-    "/api/v1/admin/bootstrap-keys": {
-      "get": {
-        "operationId": "list_bootstrap_keys_api_v1_admin_bootstrap_keys_get",
+    "/api/v1/admin/agents/{agent_id}": {
+      "delete": {
+        "description": "作废一台机器的凭据（硬删）。\n\n删行而不是打 ``revoked_at`` 标记，有两个具体原因：\n\n* ``agent`` 表上有机器 UUID 唯一约束。留着那一行，同一台机器重新注册时\n  会撞唯一约束 —— 而\"作废后重新配对\"正是最常见的后续动作。\n* 凭据是哈希存的行，删掉它就等于立刻失效；留着标记还要在每个鉴权点记得查。\n\n代价是这台机器的历史在线记录（``agent_status``）会一起级联删掉。\n要保留历史就别删，用「改派」。",
+        "operationId": "revoke_agent_api_v1_admin_agents__agent_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "原样输入机器名",
+            "in": "query",
+            "name": "confirm",
+            "required": true,
+            "schema": {
+              "description": "原样输入机器名",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Confirm",
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/BootstrapKeyOut"
-                  },
-                  "title": "Response List Bootstrap Keys Api V1 Admin Bootstrap Keys Get",
-                  "type": "array"
+                  "$ref": "#/components/schemas/SimpleAck"
                 }
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Revoke Agent",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/agents/{agent_id}/bind": {
+      "delete": {
+        "description": "解除机器与人的绑定（不是作废凭据）。\n\n解绑之后机器回到\"待配对\"，并在下一次心跳里重新拿到一个配对码 ——\n这样它能被绑给别人，而不用重新注册（重新注册要读 root 只读的密钥，\n在考场上等于要重启）。\n\n要彻底让一台机器下线请用「作废」。",
+        "operationId": "unbind_agent_api_v1_admin_agents__agent_id__bind_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Unbind Agent",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/agents/{agent_id}/contest": {
+      "post": {
+        "description": "给一台机器显式指定（或取消指定）场次。\n\n默认是**动态解析**：找一个\"进行中、且名单含此人\"的场次。只有在一个考点\n同时跑多场比赛、同一个人两边都在时才需要指定 —— 那种情况下机器的 tick\n响应里会明确说\"需要指定场次\"，而不是自己挑一个。\n\n传 ``contest_id=null`` 就是取消指定、回到自动。",
+        "operationId": "set_agent_contest_api_v1_admin_agents__agent_id__contest_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetAgentContestIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Agent Contest",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/agents/{agent_id}/rebind": {
+      "post": {
+        "description": "把一台机器改派给名单里的另一个人（换人）。\n\n这是\"换座位\"最自然的做法：机器上的凭据不用动、不用重启、不用重新配对 ——\n服务端改一下绑定，Agent 下一轮 tick 就拿到新的准考证号、自己更新扫描目录。\n\n**为什么不做成\"作废旧凭据 + 重新注册\"**：那条路要机器重新走一遍注册，\n而走统一密钥的机器读不到 root 只读的密钥，只能等到下次开机由注册单元处理。\n考场上\"换个人\"要等到重启，这是不能接受的。\n\n目标条目**必须还没有机器**：两台机器绑同一个人，代码会往同一个目录里写，\n而且完全静默（成绩矩阵只是看起来\"这个人交了两遍\"）。",
+        "operationId": "rebind_agent_api_v1_admin_agents__agent_id__rebind_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RebindAgentIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rebind Agent",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/assets/{asset_id}": {
+      "delete": {
+        "description": "删掉一个下发用的资产（题面、样例、测试点包…）。\n\n会连带删掉引用它的下发任务与逐选手进度（外键级联）。**已经落到选手机器上的\n文件不会被撤回** —— 客户端那边的文件不归服务端管，删了这个动作只影响\n\"以后还能不能发\"。界面上要把这句说清楚，否则教师会以为删了就能收回题面。\n\n内容本身（blob）是内容寻址的：如果还有别的资产或代码文件引用同一份内容，\n它不会被删。",
+        "operationId": "delete_asset_api_v1_admin_assets__asset_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "asset_id",
+            "required": true,
+            "schema": {
+              "title": "Asset Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Asset",
+        "tags": [
+          "admin"
+        ]
+      },
+      "patch": {
+        "description": "给资产改个显示名。\n\n上传时文件名打错了（`题面(1).pdf`、`样例 最终版.zip`）在考场上是常态，\n而这个名字会变成学生桌面上的文件名 —— 改它比重新上传省事。\n\n**内容不改**：资产是按 sha256 存的内容寻址对象，改名只是换标签，\n已经下发给选手的文件不受影响（它们早就落地了），但**未完成**的下发任务\n会按新名字落地 —— 这一点要说清楚，否则教师会以为改名能修正已经发出去的文件。",
+        "operationId": "rename_asset_api_v1_admin_assets__asset_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "asset_id",
+            "required": true,
+            "schema": {
+              "title": "Asset Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssetRenameIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rename Asset",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/bootstrap-keys": {
+      "get": {
+        "operationId": "list_bootstrap_keys_api_v1_admin_bootstrap_keys_get",
+        "parameters": [
+          {
+            "description": "每页条数",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "每页条数",
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "起始位置",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "起始位置",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_BootstrapKeyOut_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "List Bootstrap Keys",
@@ -3298,6 +4157,49 @@
           }
         },
         "summary": "Issue Bootstrap Key",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/bootstrap-keys/{key_id}": {
+      "delete": {
+        "description": "彻底删掉一把统一密钥（不是吊销）。\n\n「吊销」和「删除」的区别值得说清楚，否则教师只会看到两个长得很像的按钮：\n\n* **吊销**：留痕。``use_count`` / ``last_used_at`` 还在，能回答\"这把钥匙\n  到底被用过多少次\"。密钥泄漏时的第一反应应该是吊销。\n* **删除**：抹掉记录。只在\"签错了、一次都没用过\"时才合适。\n\n没被用过、也没被吊销的密钥才允许删除 —— 一把用过的钥匙不能因为记录被删\n就当它没存在过。",
+        "operationId": "delete_bootstrap_key_api_v1_admin_bootstrap_keys__key_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "key_id",
+            "required": true,
+            "schema": {
+              "title": "Key Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Bootstrap Key",
         "tags": [
           "admin"
         ]
@@ -3349,20 +4251,55 @@
     "/api/v1/admin/contests": {
       "get": {
         "operationId": "list_contests_api_v1_admin_contests_get",
+        "parameters": [
+          {
+            "description": "每页条数",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "每页条数",
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "起始位置",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "起始位置",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/ContestOut"
-                  },
-                  "title": "Response List Contests Api V1 Admin Contests Get",
-                  "type": "array"
+                  "$ref": "#/components/schemas/Page_ContestOut_"
                 }
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "List Contests",
@@ -3411,6 +4348,60 @@
       }
     },
     "/api/v1/admin/contests/{contest_id}": {
+      "delete": {
+        "description": "删除场次**连同它的一切**。\n\n外键全是 ``ON DELETE CASCADE``，所以删一个场次会连带删掉它的选手、\n代码台账、下发任务、成绩、资产。这是整个系统里破坏力最大的一个操作，\n所以要求把场次标识**原样再打一遍** ——\n界面上常见的\"你确定吗\"点一下就过去了，代价却不可逆。\n\n返回里带上删掉了什么，让教师事后能对上账（也便于日志审阅）。",
+        "operationId": "delete_contest_api_v1_admin_contests__contest_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "原样输入场次标识",
+            "in": "query",
+            "name": "confirm",
+            "required": true,
+            "schema": {
+              "description": "原样输入场次标识",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Confirm",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Contest",
+        "tags": [
+          "admin"
+        ]
+      },
       "patch": {
         "description": "改场次设置。只改传了的字段。\n\n``default_roster_id`` 有个特殊之处：``None`` 没法区分\"没传\"和\"要清空\"。\n所以清空要靠 ``clear_default_roster`` 这个显式开关 —— 否则教师一次选错\n名单就再也改不回来了。",
         "operationId": "update_contest_api_v1_admin_contests__contest_id__patch",
@@ -3465,6 +4456,7 @@
     },
     "/api/v1/admin/contests/{contest_id}/agents": {
       "get": {
+        "description": "这场比赛的机器台账 + 在线状态。\n\n**台账来自数据库，在线状态来自内存注册表。** 两者都要，缺一不可：\n\n* 只读注册表的话，机器在\"配对完成\"到\"第一次心跳\"之间是**看不见的** ——\n  而教师刚配对完，正是最想确认\"它到底认到没有\"的那一刻\n* 只读库的话，就永远不知道谁在线\n\n所以先按\"绑的人在这场比赛的名单里\"从库里捞出全部机器（这就是台账），\n再用注册表里的心跳信息盖上在线状态。还没心跳过的机器显示为离线。",
         "operationId": "list_agents_api_v1_admin_contests__contest_id__agents_get",
         "parameters": [
           {
@@ -3475,6 +4467,33 @@
               "title": "Contest Id",
               "type": "integer"
             }
+          },
+          {
+            "description": "每页条数",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "每页条数",
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "起始位置",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "起始位置",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -3482,11 +4501,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/AgentRuntimeOut"
-                  },
-                  "title": "Response List Agents Api V1 Admin Contests  Contest Id  Agents Get",
-                  "type": "array"
+                  "$ref": "#/components/schemas/Page_AgentRuntimeOut_"
                 }
               }
             },
@@ -3521,6 +4536,33 @@
               "title": "Contest Id",
               "type": "integer"
             }
+          },
+          {
+            "description": "每页条数",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "每页条数",
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "起始位置",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "起始位置",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -3528,11 +4570,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/AssetOut"
-                  },
-                  "title": "Response List Assets Api V1 Admin Contests  Contest Id  Assets Get",
-                  "type": "array"
+                  "$ref": "#/components/schemas/Page_AssetOut_"
                 }
               }
             },
@@ -3628,6 +4666,33 @@
               "title": "Include Targets",
               "type": "boolean"
             }
+          },
+          {
+            "description": "每页条数",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "每页条数",
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "起始位置",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "起始位置",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -3635,11 +4700,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/DeployTaskOut"
-                  },
-                  "title": "Response List Deploys Api V1 Admin Contests  Contest Id  Deploys Get",
-                  "type": "array"
+                  "$ref": "#/components/schemas/Page_DeployTaskOut_"
                 }
               }
             },
@@ -3728,16 +4789,6 @@
           },
           {
             "in": "query",
-            "name": "limit",
-            "required": false,
-            "schema": {
-              "default": 200,
-              "title": "Limit",
-              "type": "integer"
-            }
-          },
-          {
-            "in": "query",
             "name": "category",
             "required": false,
             "schema": {
@@ -3751,6 +4802,33 @@
               ],
               "title": "Category"
             }
+          },
+          {
+            "description": "每页条数",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "每页条数",
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "起始位置",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "起始位置",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -3758,11 +4836,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/EventOut"
-                  },
-                  "title": "Response List Events Api V1 Admin Contests  Contest Id  Events Get",
-                  "type": "array"
+                  "$ref": "#/components/schemas/Page_EventOut_"
                 }
               }
             },
@@ -3787,6 +4861,7 @@
     },
     "/api/v1/admin/contests/{contest_id}/files": {
       "get": {
+        "description": "这场比赛回收上来的代码台账。\n\n``total`` 是**过滤后**的总条数（含 ``player_id`` 筛选），因为前端要拿它\n显示\"共 N 份\"并且据此分页；拿本页条数充数会让第二页显示\"共 50 份\"。",
         "operationId": "list_files_api_v1_admin_contests__contest_id__files_get",
         "parameters": [
           {
@@ -3825,12 +4900,29 @@
             }
           },
           {
+            "description": "每页条数",
             "in": "query",
             "name": "limit",
             "required": false,
             "schema": {
-              "default": 500,
+              "default": 50,
+              "description": "每页条数",
+              "maximum": 500,
+              "minimum": 1,
               "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "起始位置",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "起始位置",
+              "minimum": 0,
+              "title": "Offset",
               "type": "integer"
             }
           }
@@ -3840,11 +4932,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/SourceFileOut"
-                  },
-                  "title": "Response List Files Api V1 Admin Contests  Contest Id  Files Get",
-                  "type": "array"
+                  "$ref": "#/components/schemas/Page_SourceFileOut_"
                 }
               }
             },
@@ -3862,6 +4950,158 @@
           }
         },
         "summary": "List Files",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/contests/{contest_id}/files/clear": {
+      "post": {
+        "description": "清理代码台账。\n\n这是**软删除**（打墓碑）的批量版本：行先删掉，``blobs/`` 里的内容只在\n没有任何记录再引用它时才释放 —— 见 ``docs/api-conventions.md`` §5.2。\n\n默认 ``purge=false``：只清掉**已经消失**的墓碑记录（选手删了文件之后留下的\n那些），这不会影响任何还在的东西 —— 也是这个操作最常见的用途。\n\n``purge=true`` 会连活的一起删，但**机器还在报的文件下一轮就会回来**，\n所以它只适合\"比赛结束后归档完毕、准备清场\"。界面上的按钮要写明这一点。\n\n确认内容是**场次 slug**。",
+        "operationId": "clear_source_files_api_v1_admin_contests__contest_id__files_clear_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "player_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Player Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FileClearIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Clear Source Files",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/contests/{contest_id}/files/export": {
+      "get": {
+        "description": "把回收的代码打包成一个 zip。\n\n包里有两个东西：\n\n* ``代码/`` —— 按 ``<准考证号>/<相对路径>`` 放，结构与 ``source/`` 一致，\n  解压出来就能直接丢给 LemonLime / Arbiter\n* ``清单.csv`` —— 每份文件的**精确字节数与 SHA256**\n\n清单是这个功能的一半价值：教师拿到归档之后要能核对\"是不是收全了、有没有传坏\"，\n而只看文件列表做不到这一点（同名文件、大小相近的代码太常见了）。",
+        "operationId": "export_source_files_api_v1_admin_contests__contest_id__files_export_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "player_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Player Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "problem",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Problem"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_deleted",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Deleted",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Export Source Files",
         "tags": [
           "admin"
         ]
@@ -3938,6 +5178,33 @@
               ],
               "title": "Parse Status"
             }
+          },
+          {
+            "description": "每页条数",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "每页条数",
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "起始位置",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "起始位置",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -3945,11 +5212,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/JudgeRunOut"
-                  },
-                  "title": "Response List Judge Runs Api V1 Admin Contests  Contest Id  Judge Runs Get",
-                  "type": "array"
+                  "$ref": "#/components/schemas/Page_JudgeRunOut_"
                 }
               }
             },
@@ -3972,8 +5235,62 @@
         ]
       }
     },
+    "/api/v1/admin/contests/{contest_id}/judge/runs/clear": {
+      "post": {
+        "description": "清空评测成绩。\n\n``keep_manual`` 默认 **True**：**教师手工录入的成绩不会被清掉**。\n\n这条默认值是有意的：手工录入意味着评测器给不出结果、教师看过代码之后\n亲自判的分。它是全场里最贵的那部分数据，而\"重扫一遍\"这种常见操作\n恰恰最容易顺手把它清掉。要连手工分一起清，得显式传 ``false``。\n\n确认内容是**场次 slug**（可选的 ``player_id`` 只是把范围缩小到一个人，\n范围本身仍然属于这场比赛）。",
+        "operationId": "clear_judge_runs_api_v1_admin_contests__contest_id__judge_runs_clear_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JudgeRunClearIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Clear Judge Runs",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/api/v1/admin/contests/{contest_id}/judge/score": {
       "delete": {
+        "description": "抹掉一条成绩记录（某个选手的某道题）。\n\n标识用**考号**：教师是在成绩矩阵上指着那一行操作的，矩阵行首显示的就是考号；\n题目标识已经在这个请求的 `problem` 参数里了，再要求拼一遍只会让人打错。",
         "operationId": "clear_judge_score_api_v1_admin_contests__contest_id__judge_score_delete",
         "parameters": [
           {
@@ -4000,6 +5317,19 @@
             "required": true,
             "schema": {
               "title": "Problem",
+              "type": "string"
+            }
+          },
+          {
+            "description": "原样输入考号",
+            "in": "query",
+            "name": "confirm",
+            "required": true,
+            "schema": {
+              "description": "原样输入考号",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Confirm",
               "type": "string"
             }
           }
@@ -4095,6 +5425,33 @@
               "title": "Contest Id",
               "type": "integer"
             }
+          },
+          {
+            "description": "每页条数",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "每页条数",
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "起始位置",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "起始位置",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -4102,11 +5459,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/PlayerOut"
-                  },
-                  "title": "Response List Players Api V1 Admin Contests  Contest Id  Players Get",
-                  "type": "array"
+                  "$ref": "#/components/schemas/Page_PlayerOut_"
                 }
               }
             },
@@ -4129,7 +5482,7 @@
         ]
       },
       "post": {
-        "description": "批量导入/更新选手。按 ``player_no`` 幂等 upsert。",
+        "description": "批量导入/更新选手。按 ``player_no`` 幂等 upsert。\n\n**这不是集合读取，所以不用列表信封**（``docs/api-conventions.md`` §2）：\n它返回的是\"这次导入干了什么\"，前端要显示的是 ``created``/``updated``。\n顺带回传受影响的行，是因为导入之后常常紧接着\"应用名单\"\"批量配对\"，\n调用方需要那些 id，不该再查一次。",
         "operationId": "import_players_api_v1_admin_contests__contest_id__players_post",
         "parameters": [
           {
@@ -4161,11 +5514,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/PlayerOut"
-                  },
-                  "title": "Response Import Players Api V1 Admin Contests  Contest Id  Players Post",
-                  "type": "array"
+                  "$ref": "#/components/schemas/PlayerImportOut"
                 }
               }
             },
@@ -4241,6 +5590,59 @@
         ]
       }
     },
+    "/api/v1/admin/contests/{contest_id}/players/clear": {
+      "post": {
+        "description": "清空场次的选手名单。\n\n``keep_with_submissions`` 默认 **True**：已经有代码或成绩的选手留着。\n理由和名单应用里的 ``prune`` 一样 —— 顺手把参赛者的提交一起删掉是不可逆的\n事故，而且它不报错。真要连提交一起清，得显式传 ``false``（界面上的按钮\n会写明这一点）。\n\n确认内容是**场次 slug**：这次删的不是某一个选手，而是\"这场比赛的整份名单\"。",
+        "operationId": "clear_players_api_v1_admin_contests__contest_id__players_clear_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlayerClearIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Clear Players",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/api/v1/admin/contests/{contest_id}/problems": {
       "get": {
         "operationId": "list_problems_api_v1_admin_contests__contest_id__problems_get",
@@ -4253,6 +5655,33 @@
               "title": "Contest Id",
               "type": "integer"
             }
+          },
+          {
+            "description": "每页条数",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "每页条数",
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "起始位置",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "起始位置",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -4260,11 +5689,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/ProblemOut"
-                  },
-                  "title": "Response List Problems Api V1 Admin Contests  Contest Id  Problems Get",
-                  "type": "array"
+                  "$ref": "#/components/schemas/Page_ProblemOut_"
                 }
               }
             },
@@ -4337,6 +5762,75 @@
           }
         },
         "summary": "Import Problems",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/contests/{contest_id}/problems/clear": {
+      "post": {
+        "description": "批量删除题目登记。\n\n``idents`` 是逗号分隔的题目标识；**留空表示清空整份清单**。\n\n和单条删除一样，**不动已有成绩记录** —— 它们会以「未登记」继续出现在矩阵里。\n这一点必须说清楚：教师看到\"清空清单\"很容易以为成绩也一起没了，\n于是不敢动，或者反过来以为清干净了结果成绩还在。\n\n确认内容是**场次 slug**：即便只删其中几道题，范围也还是\"这场比赛的题目清单\"。",
+        "operationId": "clear_problems_api_v1_admin_contests__contest_id__problems_clear_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "idents",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idents"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Clear Problems",
         "tags": [
           "admin"
         ]
@@ -4439,6 +5933,47 @@
       }
     },
     "/api/v1/admin/deploys/{task_id}": {
+      "delete": {
+        "description": "删掉一条下发记录。\n\n**不会撤回已经落地的文件** —— 客户端那边的文件不归服务端管。\n它做的是\"把这条任务从列表里去掉\"，包括还没完成的那些（等于放弃它）：\n删掉之后 Agent 下一轮 tick 不会再领到这个作业。\n\n还没完成的作业被删时要提醒一句：教师很可能以为\"删除 = 取消下发\"，\n而实际上那台机器上的半份文件会留在硬盘上（``.part`` 分片）。\n真要停止下发应该用「取消」，它会保留记录、只是不再派发。",
+        "operationId": "delete_deploy_api_v1_admin_deploys__task_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Deploy",
+        "tags": [
+          "admin"
+        ]
+      },
       "get": {
         "operationId": "get_deploy_api_v1_admin_deploys__task_id__get",
         "parameters": [
@@ -4573,16 +6108,6 @@
         "parameters": [
           {
             "in": "query",
-            "name": "limit",
-            "required": false,
-            "schema": {
-              "default": 200,
-              "title": "Limit",
-              "type": "integer"
-            }
-          },
-          {
-            "in": "query",
             "name": "level",
             "required": false,
             "schema": {
@@ -4612,6 +6137,33 @@
               ],
               "title": "Category"
             }
+          },
+          {
+            "description": "每页条数",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "每页条数",
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "起始位置",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "起始位置",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -4619,11 +6171,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/EventOut"
-                  },
-                  "title": "Response List All Events Api V1 Admin Events Get",
-                  "type": "array"
+                  "$ref": "#/components/schemas/Page_EventOut_"
                 }
               }
             },
@@ -4641,6 +6189,182 @@
           }
         },
         "summary": "List All Events",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/events/clear": {
+      "post": {
+        "description": "清空审计日志。\n\n``older_than_days`` 是**推荐用法**：日志的价值在于事后回看，\n一把全清掉很容易把\"三天前那台机器为什么掉线\"的唯一线索抹掉。\n界面上的默认值就填一个天数，而不是\"全部\"。\n\n``contest_id`` 留空表示所有场次（含不属于任何场次的那批全局事件，\n比如统一密钥注册与克隆告警）。\n\n确认内容跟着**范围**走：指定了场次就输场次 slug，全局清空则输 ``all`` ——\n因为这次删的不是某一个对象，而是\"这一片日志\"，输入名字才有意义。",
+        "operationId": "clear_events_api_v1_admin_events_clear_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "contest_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Contest Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "level",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Level"
+            }
+          },
+          {
+            "in": "query",
+            "name": "older_than_days",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Older Than Days"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Clear Events",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/files/{file_id}": {
+      "delete": {
+        "description": "删掉台账里的一条代码记录（连同不再被引用的内容）。\n\n三件事必须说清楚，否则这个按钮会让人误判：\n\n1. **不会删除选手机器上的文件。** 服务端管不到那边。\n2. **文件还在的话，下一轮 tick 会把它重新收上来。** 这个按钮的持久用途是\n   清掉\"选手已经删掉、服务端还留着墓碑记录\"的那些行，以及把误收的文件\n   从归档里去掉。\n3. 内容按哈希共享：只有**没有任何其他记录引用**这份内容时才会真删掉它。",
+        "operationId": "delete_source_file_api_v1_admin_files__file_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "file_id",
+            "required": true,
+            "schema": {
+              "title": "File Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Source File",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/files/{file_id}/content": {
+      "get": {
+        "description": "下载一份回收上来的代码。\n\n\"收代码\"的系统收完之后教师只能去磁盘上翻 ``source/``，这是最刺眼的一处缺口 ——\n而这个端点让\"看一眼某个学生交了什么\"变成一次点击。\n\n内容走内容寻址的 blob 存储，所以这里是**按哈希取文件**，\n不存在路径穿越的可能（``rel_path`` 只用来决定下载时显示的文件名）。",
+        "operationId": "download_source_file_api_v1_admin_files__file_id__content_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "file_id",
+            "required": true,
+            "schema": {
+              "title": "File Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download Source File",
         "tags": [
           "admin"
         ]
@@ -4731,15 +6455,179 @@
         ]
       }
     },
-    "/api/v1/admin/machines/claim-by-code": {
+    "/api/v1/admin/machines/bind-by-code": {
       "post": {
-        "description": "按配对码认领：机器上显示什么，教师就输什么。\n\n遍历全部待认领机器逐个比对哈希。待认领队列通常只有个位数，\n遍历完全可接受 —— 而按哈希直接查表需要一个\"码 → 机器\"的索引，\n那意味着要存明文或者可逆的东西，不值得为这点性能换。",
-        "operationId": "claim_machine_by_code_api_v1_admin_machines_claim_by_code_post",
+        "description": "按配对码配对：机器上显示什么，教师就输什么。\n\n这是主路径。配对码六位数字、限时、用一次即作废 —— 它**只在绑定时用**，\n配对之后认机器靠 machine_uuid。",
+        "operationId": "bind_machine_by_code_api_v1_admin_machines_bind_by_code_post",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ClaimByCodeIn"
+                "$ref": "#/components/schemas/BindByCodeIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BindResultOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Bind Machine By Code",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/machines/clone-alerts": {
+      "get": {
+        "description": "疑似克隆镜像：多台机器共用同一个硬件指纹。\n\n正常情况下每台物理机的 SMBIOS UUID 都不同。撞了指纹说明镜像是在某台机器\n**跑过之后**才克隆的 —— 那批机器里可能已经有人的凭据被一起拷了进去，\n配对与成绩归属都有串的风险，值得教师停下来看一眼。",
+        "operationId": "list_clone_alerts_api_v1_admin_machines_clone_alerts_get",
+        "parameters": [
+          {
+            "description": "每页条数",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "每页条数",
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "起始位置",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "起始位置",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_CloneAlertOut_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Clone Alerts",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/machines/pending": {
+      "get": {
+        "description": "待配对的机器。\n\n按**最后心跳时间倒序**：教师站在机器前读配对码时，那台机器刚刚才心跳过，\n它就应该在最上面。按注册时间排会让人从一堆久未上线的机器里翻找。",
+        "operationId": "list_pending_machines_api_v1_admin_machines_pending_get",
+        "parameters": [
+          {
+            "description": "每页条数",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "每页条数",
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "起始位置",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "起始位置",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_PendingMachineOut_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Pending Machines",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/machines/pending/clear": {
+      "post": {
+        "description": "清空待配对列表。\n\n典型场景：机房做镜像时忘了通用化，50 台克隆机全冒出来了 ——\n教师修好镜像之后要把这一堆清掉重来。\n\n这是**范围**删除（没有单个名字可打），所以确认内容是全局面量 ``all``。\n\n**先吊销统一密钥再清**，否则那批机器下次心跳拿到 401、等下次开机又回来。",
+        "operationId": "clear_pending_machines_api_v1_admin_machines_pending_clear_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmIn"
               }
             }
           },
@@ -4767,76 +6655,37 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Claim Machine By Code",
+        "summary": "Clear Pending Machines",
         "tags": [
           "admin"
         ]
       }
     },
-    "/api/v1/admin/machines/clone-alerts": {
-      "get": {
-        "description": "疑似克隆镜像：多台机器共用同一个硬件指纹。\n\n正常情况下每台物理机的 SMBIOS UUID 都不同。撞了指纹说明镜像是在某台机器\n**跑过之后**才克隆的 —— 那批机器里可能已经有人的凭据被一起拷了进去，\n配对与成绩归属都有串的风险，值得教师停下来看一眼。",
-        "operationId": "list_clone_alerts_api_v1_admin_machines_clone_alerts_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/CloneAlertOut"
-                  },
-                  "title": "Response List Clone Alerts Api V1 Admin Machines Clone Alerts Get",
-                  "type": "array"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "List Clone Alerts",
-        "tags": [
-          "admin"
-        ]
-      }
-    },
-    "/api/v1/admin/machines/pending": {
-      "get": {
-        "description": "待配对的机器。\n\n按**最后心跳时间倒序**：教师站在机器前读配对码时，那台机器刚刚才心跳过，\n它就应该在最上面。按注册时间排会让人从一堆久未上线的机器里翻找。",
-        "operationId": "list_pending_machines_api_v1_admin_machines_pending_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/PendingMachineOut"
-                  },
-                  "title": "Response List Pending Machines Api V1 Admin Machines Pending Get",
-                  "type": "array"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "List Pending Machines",
-        "tags": [
-          "admin"
-        ]
-      }
-    },
-    "/api/v1/admin/machines/pending/{claim_id}": {
+    "/api/v1/admin/machines/pending/{agent_id}": {
       "delete": {
-        "description": "把一台待配对的机器从列表里去掉（认错机器、测试机、刷注册的垃圾）。\n\n只是吊销它的临时凭据 —— 那台机器下次心跳会拿到 401，然后按配置重新注册。\n真正的垃圾机器应该先吊销统一密钥，否则它会一直回来。",
-        "operationId": "revoke_pending_machine_api_v1_admin_machines_pending__claim_id__delete",
+        "description": "把一台待配对的机器从列表里去掉（认错机器、测试机、刷注册的垃圾）。\n\n作废它的凭据 —— 那台机器下次心跳会拿到 401，然后等下一次开机由注册单元\n重新注册。真正的垃圾机器应该先吊销统一密钥，否则它会一直回来。",
+        "operationId": "revoke_pending_machine_api_v1_admin_machines_pending__agent_id__delete",
         "parameters": [
           {
             "in": "path",
-            "name": "claim_id",
+            "name": "agent_id",
             "required": true,
             "schema": {
-              "title": "Claim Id",
+              "title": "Agent Id",
               "type": "integer"
+            }
+          },
+          {
+            "description": "原样输入主机名",
+            "in": "query",
+            "name": "confirm",
+            "required": true,
+            "schema": {
+              "description": "原样输入主机名",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Confirm",
+              "type": "string"
             }
           }
         ],
@@ -4868,17 +6717,17 @@
         ]
       }
     },
-    "/api/v1/admin/machines/{claim_id}/claim": {
+    "/api/v1/admin/machines/{agent_id}/bind": {
       "post": {
-        "description": "按机器认领（教师从列表里按主机名点选）。\n\n给了 ``pair_code`` 就必须对得上 —— 机器名可能是重复的（克隆镜像、\n默认 hostname），而配对码是唯一能证明\"教师确实站在这台机器前面\"的东西。",
-        "operationId": "claim_machine_by_id_api_v1_admin_machines__claim_id__claim_post",
+        "description": "按机器配对（教师从列表里按主机名点选）。\n\n给了 ``pair_code`` 就必须对得上 —— 机器名可能是重复的（克隆镜像、\n默认 hostname），而配对码是唯一能证明\"教师确实站在这台机器前面\"的东西。",
+        "operationId": "bind_machine_by_id_api_v1_admin_machines__agent_id__bind_post",
         "parameters": [
           {
             "in": "path",
-            "name": "claim_id",
+            "name": "agent_id",
             "required": true,
             "schema": {
-              "title": "Claim Id",
+              "title": "Agent Id",
               "type": "integer"
             }
           }
@@ -4887,7 +6736,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ClaimMachineIn"
+                "$ref": "#/components/schemas/BindMachineIn"
               }
             }
           },
@@ -4898,7 +6747,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SimpleAck"
+                  "$ref": "#/components/schemas/BindResultOut"
                 }
               }
             },
@@ -4915,7 +6764,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Claim Machine By Id",
+        "summary": "Bind Machine By Id",
         "tags": [
           "admin"
         ]
@@ -4942,10 +6791,10 @@
         ]
       }
     },
-    "/api/v1/admin/players/{player_id}/enroll-code": {
-      "post": {
-        "description": "签发（或重新签发）该选手的注册码。\n\n注册码长期有效、可重复使用 —— 它是\"机器凭据种子\"，供快照还原后自愈。\n重新签发会吊销该选手此前所有未绑定的注册码。",
-        "operationId": "issue_enroll_code_api_v1_admin_players__player_id__enroll_code_post",
+    "/api/v1/admin/players/{player_id}": {
+      "delete": {
+        "description": "删一名选手，连同他的代码台账与成绩（外键级联）。\n\n**不动他的机器。** 机器绑的是名单里的那个人，不是这场比赛的这条选手记录 ——\n删掉他在本场的参赛记录，不等于要作废他那台机器：同一个学生明天还有比赛，\n机器明天照样要用。作废机器请用「作废机器」，那是另一件事、也该由人显式做。\n\n这条在一次误删里是救命的：教师清场时删掉整场选手，如果连机器一起作废，\n第二天的比赛就得重新配对 50 台。",
+        "operationId": "delete_player_api_v1_admin_players__player_id__delete",
         "parameters": [
           {
             "in": "path",
@@ -4955,6 +6804,19 @@
               "title": "Player Id",
               "type": "integer"
             }
+          },
+          {
+            "description": "原样输入考号",
+            "in": "query",
+            "name": "confirm",
+            "required": true,
+            "schema": {
+              "description": "原样输入考号",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Confirm",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -4962,7 +6824,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/EnrollCodeOut"
+                  "$ref": "#/components/schemas/SimpleAck"
                 }
               }
             },
@@ -4979,7 +6841,58 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Issue Enroll Code",
+        "summary": "Delete Player",
+        "tags": [
+          "admin"
+        ]
+      },
+      "patch": {
+        "description": "改一名选手。\n\n``player_no`` 也能改，但要连带想清楚：它出现在已回收代码的落盘路径\n（``source/<场次>/<准考证号>/…``）与下发目标模板里。改完之后**已有文件的\n目录名不会跟着变** —— 这是有意的：把磁盘上的目录改名会让评测器配置\n与历史成绩一起失效。真要改名，请连同 `source/` 目录和评测器配置一起改。",
+        "operationId": "update_player_api_v1_admin_players__player_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "player_id",
+            "required": true,
+            "schema": {
+              "title": "Player Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlayerUpsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlayerOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Player",
         "tags": [
           "admin"
         ]
@@ -4997,6 +6910,19 @@
             "schema": {
               "title": "Problem Id",
               "type": "integer"
+            }
+          },
+          {
+            "description": "原样输入题目标识",
+            "in": "query",
+            "name": "confirm",
+            "required": true,
+            "schema": {
+              "description": "原样输入题目标识",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Confirm",
+              "type": "string"
             }
           }
         ],
@@ -5140,6 +7066,47 @@
       }
     },
     "/api/v1/admin/releases/{release_id}": {
+      "delete": {
+        "description": "删掉一条发布记录。\n\n**正在铺开的版本要先下架**再删：已经升级上去的 Agent 拿不到旧包也没关系\n（它们在本地已经有一份），但服务端这边\"哪些机器该升到这个版本\"的账\n会随着记录一起消失，出问题时就没有对照物了。\n\n发布包本身存在 blob 存储里且是内容寻址的，所以这条删除只针对记录；\n没有别的记录引用同一份内容时才会顺手清掉内容。",
+        "operationId": "delete_release_api_v1_admin_releases__release_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "release_id",
+            "required": true,
+            "schema": {
+              "title": "Release Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Release",
+        "tags": [
+          "admin"
+        ]
+      },
       "patch": {
         "operationId": "update_release_api_v1_admin_releases__release_id__patch",
         "parameters": [
@@ -5289,6 +7256,19 @@
               "title": "Entry Id",
               "type": "integer"
             }
+          },
+          {
+            "description": "原样输入考号",
+            "in": "query",
+            "name": "confirm",
+            "required": true,
+            "schema": {
+              "description": "原样输入考号",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Confirm",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -5317,25 +7297,111 @@
         "tags": [
           "admin"
         ]
-      }
-    },
-    "/api/v1/admin/rosters": {
-      "get": {
-        "operationId": "list_rosters_api_v1_admin_rosters_get",
+      },
+      "patch": {
+        "description": "改名单里的一条。改错了编号要能修，不必删了重加。",
+        "operationId": "update_roster_entry_api_v1_admin_roster_entries__entry_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "entry_id",
+            "required": true,
+            "schema": {
+              "title": "Entry Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RosterEntryIn"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/RosterOut"
-                  },
-                  "title": "Response List Rosters Api V1 Admin Rosters Get",
-                  "type": "array"
+                  "$ref": "#/components/schemas/RosterEntryOut"
                 }
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Roster Entry",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/rosters": {
+      "get": {
+        "operationId": "list_rosters_api_v1_admin_rosters_get",
+        "parameters": [
+          {
+            "description": "每页条数",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "每页条数",
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "起始位置",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "起始位置",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_RosterOut_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "List Rosters",
@@ -5395,6 +7461,19 @@
             "schema": {
               "title": "Roster Id",
               "type": "integer"
+            }
+          },
+          {
+            "description": "原样输入名单名称",
+            "in": "query",
+            "name": "confirm",
+            "required": true,
+            "schema": {
+              "description": "原样输入名单名称",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Confirm",
+              "type": "string"
             }
           }
         ],
@@ -5573,6 +7652,59 @@
         ]
       }
     },
+    "/api/v1/admin/rosters/{roster_id}/entries/clear": {
+      "post": {
+        "description": "清空名单里的全部条目（保留名单本身）。",
+        "operationId": "clear_roster_entries_api_v1_admin_rosters__roster_id__entries_clear_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "roster_id",
+            "required": true,
+            "schema": {
+              "title": "Roster Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Clear Roster Entries",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/api/v1/agent/assets/{asset_id}": {
       "get": {
         "operationId": "download_asset_api_v1_agent_assets__asset_id__get",
@@ -5615,7 +7747,7 @@
     },
     "/api/v1/agent/enroll": {
       "post": {
-        "description": "换长期凭据。两条路，二选一。\n\n**每选手注册码**（``enroll_code``）：一码一人，绑定 ``player_no + machine_id``。\n刻意允许重复注册 —— NOI Linux 考试机常做整机快照还原，机器上的\n``credential.json`` 会消失，此时 Agent 用镜像内置的注册码重新 enroll，\n服务端按 ``machine_id`` 认出这是老机器，换发新凭据并作废旧凭据。\n所以注册码不是一次性的，而是\"机器凭据种子\"。\n\n**统一密钥**（``bootstrap_key``）：整间机房一份密钥，换回来的机器**没有归属**，\n要靠短码配对认领到人。适合\"镜像预装 + 批量克隆\"的部署方式。\n\n两个都传时以 ``enroll_code`` 为准 —— 单人码是更明确的意图。",
+        "description": "用镜像里的统一密钥换回长期凭据。\n\n这是**唯一**的注册路径 —— 每选手注册码已经被\"机器永久绑定名单条目\"取代。\n逐台发码在\"一份镜像装遍整间机房\"的现实里根本不可行，而两种模式并存\n意味着每种都要维护、测试，并且迟早有人选错。\n\n注册出来的是三种状态之一（未配对 / 配好但没场次 / 能干活），\nAgent 必须按 `claimed` 与 `bound` 分开处理。",
         "operationId": "enroll_api_v1_agent_enroll_post",
         "requestBody": {
           "content": {

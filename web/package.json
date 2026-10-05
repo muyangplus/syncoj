@@ -6,9 +6,10 @@
   "description": "SyncOJ 管理界面",
   "scripts": {
     "dev": "vite",
-    "build": "npm run typecheck && vite build",
+    "build": "npm run check:routes && npm run typecheck && vite build",
     "preview": "vite preview",
     "typecheck": "vue-tsc --noEmit -p tsconfig.json",
+    "check:routes": "node scripts/check-routes.mjs",
     "gen:types": "openapi-typescript ./openapi.json -o src/api/schema.d.ts"
   },
   "dependencies": {

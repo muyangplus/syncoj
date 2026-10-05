@@ -4,6 +4,155 @@
  */
 
 export interface paths {
+    "/api/v1/admin/agents/{agent_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Revoke Agent
+         * @description 作废一台机器的凭据（硬删）。
+         *
+         *     删行而不是打 ``revoked_at`` 标记，有两个具体原因：
+         *
+         *     * ``agent`` 表上有机器 UUID 唯一约束。留着那一行，同一台机器重新注册时
+         *       会撞唯一约束 —— 而"作废后重新配对"正是最常见的后续动作。
+         *     * 凭据是哈希存的行，删掉它就等于立刻失效；留着标记还要在每个鉴权点记得查。
+         *
+         *     代价是这台机器的历史在线记录（``agent_status``）会一起级联删掉。
+         *     要保留历史就别删，用「改派」。
+         */
+        delete: operations["revoke_agent_api_v1_admin_agents__agent_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/agents/{agent_id}/bind": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Unbind Agent
+         * @description 解除机器与人的绑定（不是作废凭据）。
+         *
+         *     解绑之后机器回到"待配对"，并在下一次心跳里重新拿到一个配对码 ——
+         *     这样它能被绑给别人，而不用重新注册（重新注册要读 root 只读的密钥，
+         *     在考场上等于要重启）。
+         *
+         *     要彻底让一台机器下线请用「作废」。
+         */
+        delete: operations["unbind_agent_api_v1_admin_agents__agent_id__bind_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/agents/{agent_id}/contest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Set Agent Contest
+         * @description 给一台机器显式指定（或取消指定）场次。
+         *
+         *     默认是**动态解析**：找一个"进行中、且名单含此人"的场次。只有在一个考点
+         *     同时跑多场比赛、同一个人两边都在时才需要指定 —— 那种情况下机器的 tick
+         *     响应里会明确说"需要指定场次"，而不是自己挑一个。
+         *
+         *     传 ``contest_id=null`` 就是取消指定、回到自动。
+         */
+        post: operations["set_agent_contest_api_v1_admin_agents__agent_id__contest_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/agents/{agent_id}/rebind": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rebind Agent
+         * @description 把一台机器改派给名单里的另一个人（换人）。
+         *
+         *     这是"换座位"最自然的做法：机器上的凭据不用动、不用重启、不用重新配对 ——
+         *     服务端改一下绑定，Agent 下一轮 tick 就拿到新的准考证号、自己更新扫描目录。
+         *
+         *     **为什么不做成"作废旧凭据 + 重新注册"**：那条路要机器重新走一遍注册，
+         *     而走统一密钥的机器读不到 root 只读的密钥，只能等到下次开机由注册单元处理。
+         *     考场上"换个人"要等到重启，这是不能接受的。
+         *
+         *     目标条目**必须还没有机器**：两台机器绑同一个人，代码会往同一个目录里写，
+         *     而且完全静默（成绩矩阵只是看起来"这个人交了两遍"）。
+         */
+        post: operations["rebind_agent_api_v1_admin_agents__agent_id__rebind_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/assets/{asset_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Asset
+         * @description 删掉一个下发用的资产（题面、样例、测试点包…）。
+         *
+         *     会连带删掉引用它的下发任务与逐选手进度（外键级联）。**已经落到选手机器上的
+         *     文件不会被撤回** —— 客户端那边的文件不归服务端管，删了这个动作只影响
+         *     "以后还能不能发"。界面上要把这句说清楚，否则教师会以为删了就能收回题面。
+         *
+         *     内容本身（blob）是内容寻址的：如果还有别的资产或代码文件引用同一份内容，
+         *     它不会被删。
+         */
+        delete: operations["delete_asset_api_v1_admin_assets__asset_id__delete"];
+        options?: never;
+        head?: never;
+        /**
+         * Rename Asset
+         * @description 给资产改个显示名。
+         *
+         *     上传时文件名打错了（`题面(1).pdf`、`样例 最终版.zip`）在考场上是常态，
+         *     而这个名字会变成学生桌面上的文件名 —— 改它比重新上传省事。
+         *
+         *     **内容不改**：资产是按 sha256 存的内容寻址对象，改名只是换标签，
+         *     已经下发给选手的文件不受影响（它们早就落地了），但**未完成**的下发任务
+         *     会按新名字落地 —— 这一点要说清楚，否则教师会以为改名能修正已经发出去的文件。
+         */
+        patch: operations["rename_asset_api_v1_admin_assets__asset_id__patch"];
+        trace?: never;
+    };
     "/api/v1/admin/bootstrap-keys": {
         parameters: {
             query?: never;
@@ -20,6 +169,35 @@ export interface paths {
          */
         post: operations["issue_bootstrap_key_api_v1_admin_bootstrap_keys_post"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/bootstrap-keys/{key_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Bootstrap Key
+         * @description 彻底删掉一把统一密钥（不是吊销）。
+         *
+         *     「吊销」和「删除」的区别值得说清楚，否则教师只会看到两个长得很像的按钮：
+         *
+         *     * **吊销**：留痕。``use_count`` / ``last_used_at`` 还在，能回答"这把钥匙
+         *       到底被用过多少次"。密钥泄漏时的第一反应应该是吊销。
+         *     * **删除**：抹掉记录。只在"签错了、一次都没用过"时才合适。
+         *
+         *     没被用过、也没被吊销的密钥才允许删除 —— 一把用过的钥匙不能因为记录被删
+         *     就当它没存在过。
+         */
+        delete: operations["delete_bootstrap_key_api_v1_admin_bootstrap_keys__key_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -76,7 +254,18 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Delete Contest
+         * @description 删除场次**连同它的一切**。
+         *
+         *     外键全是 ``ON DELETE CASCADE``，所以删一个场次会连带删掉它的选手、
+         *     代码台账、下发任务、成绩、资产。这是整个系统里破坏力最大的一个操作，
+         *     所以要求把场次标识**原样再打一遍** ——
+         *     界面上常见的"你确定吗"点一下就过去了，代价却不可逆。
+         *
+         *     返回里带上删掉了什么，让教师事后能对上账（也便于日志审阅）。
+         */
+        delete: operations["delete_contest_api_v1_admin_contests__contest_id__delete"];
         options?: never;
         head?: never;
         /**
@@ -97,7 +286,19 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Agents */
+        /**
+         * List Agents
+         * @description 这场比赛的机器台账 + 在线状态。
+         *
+         *     **台账来自数据库，在线状态来自内存注册表。** 两者都要，缺一不可：
+         *
+         *     * 只读注册表的话，机器在"配对完成"到"第一次心跳"之间是**看不见的** ——
+         *       而教师刚配对完，正是最想确认"它到底认到没有"的那一刻
+         *     * 只读库的话，就永远不知道谁在线
+         *
+         *     所以先按"绑的人在这场比赛的名单里"从库里捞出全部机器（这就是台账），
+         *     再用注册表里的心跳信息盖上在线状态。还没心跳过的机器显示为离线。
+         */
         get: operations["list_agents_api_v1_admin_contests__contest_id__agents_get"];
         put?: never;
         post?: never;
@@ -179,8 +380,74 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Files */
+        /**
+         * List Files
+         * @description 这场比赛回收上来的代码台账。
+         *
+         *     ``total`` 是**过滤后**的总条数（含 ``player_id`` 筛选），因为前端要拿它
+         *     显示"共 N 份"并且据此分页；拿本页条数充数会让第二页显示"共 50 份"。
+         */
         get: operations["list_files_api_v1_admin_contests__contest_id__files_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/contests/{contest_id}/files/clear": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Clear Source Files
+         * @description 清理代码台账。
+         *
+         *     这是**软删除**（打墓碑）的批量版本：行先删掉，``blobs/`` 里的内容只在
+         *     没有任何记录再引用它时才释放 —— 见 ``docs/api-conventions.md`` §5.2。
+         *
+         *     默认 ``purge=false``：只清掉**已经消失**的墓碑记录（选手删了文件之后留下的
+         *     那些），这不会影响任何还在的东西 —— 也是这个操作最常见的用途。
+         *
+         *     ``purge=true`` 会连活的一起删，但**机器还在报的文件下一轮就会回来**，
+         *     所以它只适合"比赛结束后归档完毕、准备清场"。界面上的按钮要写明这一点。
+         *
+         *     确认内容是**场次 slug**。
+         */
+        post: operations["clear_source_files_api_v1_admin_contests__contest_id__files_clear_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/contests/{contest_id}/files/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Export Source Files
+         * @description 把回收的代码打包成一个 zip。
+         *
+         *     包里有两个东西：
+         *
+         *     * ``代码/`` —— 按 ``<准考证号>/<相对路径>`` 放，结构与 ``source/`` 一致，
+         *       解压出来就能直接丢给 LemonLime / Arbiter
+         *     * ``清单.csv`` —— 每份文件的**精确字节数与 SHA256**
+         *
+         *     清单是这个功能的一半价值：教师拿到归档之后要能核对"是不是收全了、有没有传坏"，
+         *     而只看文件列表做不到这一点（同名文件、大小相近的代码太常见了）。
+         */
+        get: operations["export_source_files_api_v1_admin_contests__contest_id__files_export_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -226,6 +493,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/contests/{contest_id}/judge/runs/clear": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Clear Judge Runs
+         * @description 清空评测成绩。
+         *
+         *     ``keep_manual`` 默认 **True**：**教师手工录入的成绩不会被清掉**。
+         *
+         *     这条默认值是有意的：手工录入意味着评测器给不出结果、教师看过代码之后
+         *     亲自判的分。它是全场里最贵的那部分数据，而"重扫一遍"这种常见操作
+         *     恰恰最容易顺手把它清掉。要连手工分一起清，得显式传 ``false``。
+         *
+         *     确认内容是**场次 slug**（可选的 ``player_id`` 只是把范围缩小到一个人，
+         *     范围本身仍然属于这场比赛）。
+         */
+        post: operations["clear_judge_runs_api_v1_admin_contests__contest_id__judge_runs_clear_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/contests/{contest_id}/judge/score": {
         parameters: {
             query?: never;
@@ -243,7 +539,13 @@ export interface paths {
          */
         put: operations["set_judge_score_api_v1_admin_contests__contest_id__judge_score_put"];
         post?: never;
-        /** Clear Judge Score */
+        /**
+         * Clear Judge Score
+         * @description 抹掉一条成绩记录（某个选手的某道题）。
+         *
+         *     标识用**考号**：教师是在成绩矩阵上指着那一行操作的，矩阵行首显示的就是考号；
+         *     题目标识已经在这个请求的 `problem` 参数里了，再要求拼一遍只会让人打错。
+         */
         delete: operations["clear_judge_score_api_v1_admin_contests__contest_id__judge_score_delete"];
         options?: never;
         head?: never;
@@ -263,6 +565,11 @@ export interface paths {
         /**
          * Import Players
          * @description 批量导入/更新选手。按 ``player_no`` 幂等 upsert。
+         *
+         *     **这不是集合读取，所以不用列表信封**（``docs/api-conventions.md`` §2）：
+         *     它返回的是"这次导入干了什么"，前端要显示的是 ``created``/``updated``。
+         *     顺带回传受影响的行，是因为导入之后常常紧接着"应用名单""批量配对"，
+         *     调用方需要那些 id，不该再查一次。
          */
         post: operations["import_players_api_v1_admin_contests__contest_id__players_post"];
         delete?: never;
@@ -297,6 +604,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/contests/{contest_id}/players/clear": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Clear Players
+         * @description 清空场次的选手名单。
+         *
+         *     ``keep_with_submissions`` 默认 **True**：已经有代码或成绩的选手留着。
+         *     理由和名单应用里的 ``prune`` 一样 —— 顺手把参赛者的提交一起删掉是不可逆的
+         *     事故，而且它不报错。真要连提交一起清，得显式传 ``false``（界面上的按钮
+         *     会写明这一点）。
+         *
+         *     确认内容是**场次 slug**：这次删的不是某一个选手，而是"这场比赛的整份名单"。
+         */
+        post: operations["clear_players_api_v1_admin_contests__contest_id__players_clear_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/contests/{contest_id}/problems": {
         parameters: {
             query?: never;
@@ -315,6 +649,34 @@ export interface paths {
          *     教师一次粘贴十道题，不该因为其中一个名字打错就全部白填。
          */
         post: operations["import_problems_api_v1_admin_contests__contest_id__problems_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/contests/{contest_id}/problems/clear": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Clear Problems
+         * @description 批量删除题目登记。
+         *
+         *     ``idents`` 是逗号分隔的题目标识；**留空表示清空整份清单**。
+         *
+         *     和单条删除一样，**不动已有成绩记录** —— 它们会以「未登记」继续出现在矩阵里。
+         *     这一点必须说清楚：教师看到"清空清单"很容易以为成绩也一起没了，
+         *     于是不敢动，或者反过来以为清干净了结果成绩还在。
+         *
+         *     确认内容是**场次 slug**：即便只删其中几道题，范围也还是"这场比赛的题目清单"。
+         */
+        post: operations["clear_problems_api_v1_admin_contests__contest_id__problems_clear_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -386,7 +748,19 @@ export interface paths {
         get: operations["get_deploy_api_v1_admin_deploys__task_id__get"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Delete Deploy
+         * @description 删掉一条下发记录。
+         *
+         *     **不会撤回已经落地的文件** —— 客户端那边的文件不归服务端管。
+         *     它做的是"把这条任务从列表里去掉"，包括还没完成的那些（等于放弃它）：
+         *     删掉之后 Agent 下一轮 tick 不会再领到这个作业。
+         *
+         *     还没完成的作业被删时要提醒一句：教师很可能以为"删除 = 取消下发"，
+         *     而实际上那台机器上的半份文件会留在硬盘上（``.part`` 分片）。
+         *     真要停止下发应该用「取消」，它会保留记录、只是不再派发。
+         */
+        delete: operations["delete_deploy_api_v1_admin_deploys__task_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -460,6 +834,90 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/events/clear": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Clear Events
+         * @description 清空审计日志。
+         *
+         *     ``older_than_days`` 是**推荐用法**：日志的价值在于事后回看，
+         *     一把全清掉很容易把"三天前那台机器为什么掉线"的唯一线索抹掉。
+         *     界面上的默认值就填一个天数，而不是"全部"。
+         *
+         *     ``contest_id`` 留空表示所有场次（含不属于任何场次的那批全局事件，
+         *     比如统一密钥注册与克隆告警）。
+         *
+         *     确认内容跟着**范围**走：指定了场次就输场次 slug，全局清空则输 ``all`` ——
+         *     因为这次删的不是某一个对象，而是"这一片日志"，输入名字才有意义。
+         */
+        post: operations["clear_events_api_v1_admin_events_clear_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/files/{file_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Source File
+         * @description 删掉台账里的一条代码记录（连同不再被引用的内容）。
+         *
+         *     三件事必须说清楚，否则这个按钮会让人误判：
+         *
+         *     1. **不会删除选手机器上的文件。** 服务端管不到那边。
+         *     2. **文件还在的话，下一轮 tick 会把它重新收上来。** 这个按钮的持久用途是
+         *        清掉"选手已经删掉、服务端还留着墓碑记录"的那些行，以及把误收的文件
+         *        从归档里去掉。
+         *     3. 内容按哈希共享：只有**没有任何其他记录引用**这份内容时才会真删掉它。
+         */
+        delete: operations["delete_source_file_api_v1_admin_files__file_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/files/{file_id}/content": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download Source File
+         * @description 下载一份回收上来的代码。
+         *
+         *     "收代码"的系统收完之后教师只能去磁盘上翻 ``source/``，这是最刺眼的一处缺口 ——
+         *     而这个端点让"看一眼某个学生交了什么"变成一次点击。
+         *
+         *     内容走内容寻址的 blob 存储，所以这里是**按哈希取文件**，
+         *     不存在路径穿越的可能（``rel_path`` 只用来决定下载时显示的文件名）。
+         */
+        get: operations["download_source_file_api_v1_admin_files__file_id__content_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/health": {
         parameters: {
             query?: never;
@@ -511,7 +969,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/admin/machines/claim-by-code": {
+    "/api/v1/admin/machines/bind-by-code": {
         parameters: {
             query?: never;
             header?: never;
@@ -521,14 +979,13 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Claim Machine By Code
-         * @description 按配对码认领：机器上显示什么，教师就输什么。
+         * Bind Machine By Code
+         * @description 按配对码配对：机器上显示什么，教师就输什么。
          *
-         *     遍历全部待认领机器逐个比对哈希。待认领队列通常只有个位数，
-         *     遍历完全可接受 —— 而按哈希直接查表需要一个"码 → 机器"的索引，
-         *     那意味着要存明文或者可逆的东西，不值得为这点性能换。
+         *     这是主路径。配对码六位数字、限时、用一次即作废 —— 它**只在绑定时用**，
+         *     配对之后认机器靠 machine_uuid。
          */
-        post: operations["claim_machine_by_code_api_v1_admin_machines_claim_by_code_post"];
+        post: operations["bind_machine_by_code_api_v1_admin_machines_bind_by_code_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -582,7 +1039,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/admin/machines/pending/{claim_id}": {
+    "/api/v1/admin/machines/pending/clear": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Clear Pending Machines
+         * @description 清空待配对列表。
+         *
+         *     典型场景：机房做镜像时忘了通用化，50 台克隆机全冒出来了 ——
+         *     教师修好镜像之后要把这一堆清掉重来。
+         *
+         *     这是**范围**删除（没有单个名字可打），所以确认内容是全局面量 ``all``。
+         *
+         *     **先吊销统一密钥再清**，否则那批机器下次心跳拿到 401、等下次开机又回来。
+         */
+        post: operations["clear_pending_machines_api_v1_admin_machines_pending_clear_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/machines/pending/{agent_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -596,16 +1080,16 @@ export interface paths {
          * Revoke Pending Machine
          * @description 把一台待配对的机器从列表里去掉（认错机器、测试机、刷注册的垃圾）。
          *
-         *     只是吊销它的临时凭据 —— 那台机器下次心跳会拿到 401，然后按配置重新注册。
-         *     真正的垃圾机器应该先吊销统一密钥，否则它会一直回来。
+         *     作废它的凭据 —— 那台机器下次心跳会拿到 401，然后等下一次开机由注册单元
+         *     重新注册。真正的垃圾机器应该先吊销统一密钥，否则它会一直回来。
          */
-        delete: operations["revoke_pending_machine_api_v1_admin_machines_pending__claim_id__delete"];
+        delete: operations["revoke_pending_machine_api_v1_admin_machines_pending__agent_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v1/admin/machines/{claim_id}/claim": {
+    "/api/v1/admin/machines/{agent_id}/bind": {
         parameters: {
             query?: never;
             header?: never;
@@ -615,13 +1099,13 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Claim Machine By Id
-         * @description 按机器认领（教师从列表里按主机名点选）。
+         * Bind Machine By Id
+         * @description 按机器配对（教师从列表里按主机名点选）。
          *
          *     给了 ``pair_code`` 就必须对得上 —— 机器名可能是重复的（克隆镜像、
          *     默认 hostname），而配对码是唯一能证明"教师确实站在这台机器前面"的东西。
          */
-        post: operations["claim_machine_by_id_api_v1_admin_machines__claim_id__claim_post"];
+        post: operations["bind_machine_by_id_api_v1_admin_machines__agent_id__bind_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -645,7 +1129,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/admin/players/{player_id}/enroll-code": {
+    "/api/v1/admin/players/{player_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -654,18 +1138,31 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        post?: never;
         /**
-         * Issue Enroll Code
-         * @description 签发（或重新签发）该选手的注册码。
+         * Delete Player
+         * @description 删一名选手，连同他的代码台账与成绩（外键级联）。
          *
-         *     注册码长期有效、可重复使用 —— 它是"机器凭据种子"，供快照还原后自愈。
-         *     重新签发会吊销该选手此前所有未绑定的注册码。
+         *     **不动他的机器。** 机器绑的是名单里的那个人，不是这场比赛的这条选手记录 ——
+         *     删掉他在本场的参赛记录，不等于要作废他那台机器：同一个学生明天还有比赛，
+         *     机器明天照样要用。作废机器请用「作废机器」，那是另一件事、也该由人显式做。
+         *
+         *     这条在一次误删里是救命的：教师清场时删掉整场选手，如果连机器一起作废，
+         *     第二天的比赛就得重新配对 50 台。
          */
-        post: operations["issue_enroll_code_api_v1_admin_players__player_id__enroll_code_post"];
-        delete?: never;
+        delete: operations["delete_player_api_v1_admin_players__player_id__delete"];
         options?: never;
         head?: never;
-        patch?: never;
+        /**
+         * Update Player
+         * @description 改一名选手。
+         *
+         *     ``player_no`` 也能改，但要连带想清楚：它出现在已回收代码的落盘路径
+         *     （``source/<场次>/<准考证号>/…``）与下发目标模板里。改完之后**已有文件的
+         *     目录名不会跟着变** —— 这是有意的：把磁盘上的目录改名会让评测器配置
+         *     与历史成绩一起失效。真要改名，请连同 `source/` 目录和评测器配置一起改。
+         */
+        patch: operations["update_player_api_v1_admin_players__player_id__patch"];
         trace?: never;
     };
     "/api/v1/admin/problems/{problem_id}": {
@@ -727,7 +1224,18 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Delete Release
+         * @description 删掉一条发布记录。
+         *
+         *     **正在铺开的版本要先下架**再删：已经升级上去的 Agent 拿不到旧包也没关系
+         *     （它们在本地已经有一份），但服务端这边"哪些机器该升到这个版本"的账
+         *     会随着记录一起消失，出问题时就没有对照物了。
+         *
+         *     发布包本身存在 blob 存储里且是内容寻址的，所以这条删除只针对记录；
+         *     没有别的记录引用同一份内容时才会顺手清掉内容。
+         */
+        delete: operations["delete_release_api_v1_admin_releases__release_id__delete"];
         options?: never;
         head?: never;
         /** Update Release */
@@ -794,7 +1302,11 @@ export interface paths {
         delete: operations["delete_roster_entry_api_v1_admin_roster_entries__entry_id__delete"];
         options?: never;
         head?: never;
-        patch?: never;
+        /**
+         * Update Roster Entry
+         * @description 改名单里的一条。改错了编号要能修，不必删了重加。
+         */
+        patch: operations["update_roster_entry_api_v1_admin_roster_entries__entry_id__patch"];
         trace?: never;
     };
     "/api/v1/admin/rosters": {
@@ -864,6 +1376,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/rosters/{roster_id}/entries/clear": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Clear Roster Entries
+         * @description 清空名单里的全部条目（保留名单本身）。
+         */
+        post: operations["clear_roster_entries_api_v1_admin_rosters__roster_id__entries_clear_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/agent/assets/{asset_id}": {
         parameters: {
             query?: never;
@@ -892,18 +1424,14 @@ export interface paths {
         put?: never;
         /**
          * Enroll
-         * @description 换长期凭据。两条路，二选一。
+         * @description 用镜像里的统一密钥换回长期凭据。
          *
-         *     **每选手注册码**（``enroll_code``）：一码一人，绑定 ``player_no + machine_id``。
-         *     刻意允许重复注册 —— NOI Linux 考试机常做整机快照还原，机器上的
-         *     ``credential.json`` 会消失，此时 Agent 用镜像内置的注册码重新 enroll，
-         *     服务端按 ``machine_id`` 认出这是老机器，换发新凭据并作废旧凭据。
-         *     所以注册码不是一次性的，而是"机器凭据种子"。
+         *     这是**唯一**的注册路径 —— 每选手注册码已经被"机器永久绑定名单条目"取代。
+         *     逐台发码在"一份镜像装遍整间机房"的现实里根本不可行，而两种模式并存
+         *     意味着每种都要维护、测试，并且迟早有人选错。
          *
-         *     **统一密钥**（``bootstrap_key``）：整间机房一份密钥，换回来的机器**没有归属**，
-         *     要靠短码配对认领到人。适合"镜像预装 + 批量克隆"的部署方式。
-         *
-         *     两个都传时以 ``enroll_code`` 为准 —— 单人码是更明确的意图。
+         *     注册出来的是三种状态之一（未配对 / 配好但没场次 / 能干活），
+         *     Agent 必须按 `claimed` 与 `bound` 分开处理。
          */
         post: operations["enroll_api_v1_agent_enroll_post"];
         delete?: never;
@@ -1167,10 +1695,76 @@ export interface components {
             id: number;
             /** Kind */
             kind: string;
+            /**
+             * Pending Targets
+             * @default 0
+             */
+            pending_targets: number;
             /** Sha256 */
             sha256: string;
             /** Size */
             size: number;
+        };
+        /**
+         * AssetRenameIn
+         * @description 只改显示名。内容是按 sha256 存的，改名不触碰到内容。
+         */
+        AssetRenameIn: {
+            /** Filename */
+            filename: string;
+        };
+        /**
+         * BindByCodeIn
+         * @description 用配对码配对：机器上显示什么，教师就输什么。
+         */
+        BindByCodeIn: {
+            /** Pair Code */
+            pair_code: string;
+            /** Roster Entry Id */
+            roster_entry_id: number;
+        };
+        /**
+         * BindMachineIn
+         * @description 把一台机器配对到名单里的某个人。
+         *
+         *     这是"永久配对"：绑的是**人**（名单条目），不是某场比赛的选手。
+         *     所以同一个学生换一场比赛不用重新配 —— 只要新场次应用了那份名单。
+         *
+         *     ``pair_code`` 可以省略（教师从列表里按主机名直接点选时），
+         *     但只要给了就必须对得上：主机名可能是重复的，而配对码是唯一能证明
+         *     "我确实站在那台机器前面"的东西。
+         */
+        BindMachineIn: {
+            /** Pair Code */
+            pair_code?: string | null;
+            /** Roster Entry Id */
+            roster_entry_id: number;
+        };
+        /**
+         * BindResultOut
+         * @description 配对成功的结果。
+         *
+         *     回显"绑到了谁、在哪份名单里"，是因为配对是**永久**动作：
+         *     教师按下的这一刻决定了这台机器以后是谁的。给一句明确的回执，
+         *     比让他在列表里自己找那台机器现在归属谁要可靠得多。
+         */
+        BindResultOut: {
+            /** Agent Id */
+            agent_id: number;
+            /**
+             * Detail
+             * @default
+             */
+            detail: string;
+            /** Player No */
+            player_no: string;
+            /** Roster Entry Id */
+            roster_entry_id: number;
+            /**
+             * Roster Name
+             * @default
+             */
+            roster_name: string;
         };
         /** Body_upload_asset_api_v1_admin_contests__contest_id__assets_post */
         Body_upload_asset_api_v1_admin_contests__contest_id__assets_post: {
@@ -1270,29 +1864,6 @@ export interface components {
             use_count: number;
         };
         /**
-         * ClaimByCodeIn
-         * @description 用配对码认领：机器上显示什么，教师就输什么。
-         */
-        ClaimByCodeIn: {
-            /** Pair Code */
-            pair_code: string;
-            /** Player Id */
-            player_id: number;
-        };
-        /**
-         * ClaimMachineIn
-         * @description 认领一台机器。
-         *
-         *     ``pair_code`` 可以省略（教师从列表里按主机名直接认领时就省略），
-         *     但只要给了就必须对得上 —— 那是"我确认过这台机器就是那台"的凭据。
-         */
-        ClaimMachineIn: {
-            /** Pair Code */
-            pair_code?: string | null;
-            /** Player Id */
-            player_id: number;
-        };
-        /**
          * CloneAlertOut
          * @description 克隆镜像告警：多台机器共用同一个硬件指纹。
          */
@@ -1304,12 +1875,25 @@ export interface components {
             /** Machine Count */
             machine_count: number;
         };
+        /**
+         * ConfirmIn
+         * @description 批量清空的确认体。
+         *
+         *     "清空"删的是一**批**对象，没有单个名字可以打，所以确认内容是**范围的名字**：
+         *     场次范围内的清空用场次 ``slug``、名单范围内用名单 ``name``；
+         *     范围本身是"全部"的（审计日志、待配对机器）用固定字面量 ``all``。
+         *
+         *     为什么要走请求体而不是 query：清空是破坏性动作，把确认值放在 JSON 体里，
+         *     浏览器、curl、前端都更不容易在一个 copy-paste 里把它丢掉。
+         */
+        ConfirmIn: {
+            /** Confirm */
+            confirm: string;
+        };
         /** ContestCreate */
         ContestCreate: {
             /** Default Roster Id */
             default_roster_id?: number | null;
-            /** Enrollment Mode */
-            enrollment_mode?: string | null;
             /** Name */
             name: string;
             /** Note */
@@ -1330,15 +1914,12 @@ export interface components {
             default_roster_id?: number | null;
             /** Default Roster Name */
             default_roster_name?: string | null;
-            /**
-             * Enrollment Mode
-             * @default per_player_code
-             */
-            enrollment_mode: string;
             /** Id */
             id: number;
             /** Name */
             name: string;
+            /** Note */
+            note?: string | null;
             /**
              * Online Count
              * @default 0
@@ -1366,8 +1947,6 @@ export interface components {
             clear_default_roster: boolean;
             /** Default Roster Id */
             default_roster_id?: number | null;
-            /** Enrollment Mode */
-            enrollment_mode?: string | null;
             /** Name */
             name?: string | null;
             /** Note */
@@ -1498,39 +2077,27 @@ export interface components {
              */
             total: number;
         };
-        /** EnrollCodeOut */
-        EnrollCodeOut: {
-            /** Code */
-            code: string;
-            /** Expires At */
-            expires_at?: string | null;
-            /** Note */
-            note?: string | null;
-            /** Player Id */
-            player_id: number;
-            /** Player No */
-            player_no: string;
-        };
         /**
          * EnrollRequest
          * @description 注册请求。
          *
-         *     两种凭据二选一：
+         *     只有一条路了：**镜像内置的统一密钥**。每选手注册码已经被"机器永久绑定
+         *     名单条目"取代 —— 逐台发码在"一份镜像装遍整间机房"的现实里根本不可行，
+         *     而两种模式并存意味着每种都要维护、测试、并且迟早有人选错。
          *
-         *     * ``enroll_code`` —— 每选手一个注册码（原有行为），一码一人
-         *     * ``bootstrap_key`` —— 镜像内置的统一密钥，注册出来的机器**没有归属**，
-         *       要靠短码配对认领到人
+         *     机器身份的三个要素，作用各不相同：
          *
-         *     两个都传时以 ``enroll_code`` 为准：单人码是更明确的意图（"这台机器就是
-         *     某个具体选手"），不该被镜像里那份宽泛的密钥盖过去。
+         *     * ``machine_uuid`` —— Agent 首次运行时生成。**配对之后认机器主要靠它**，
+         *       换凭据、重新注册都按它匹配，不再需要配对码
+         *     * ``machine_fingerprint`` —— 硬件指纹（SMBIOS UUID）。UUID 会随整机快照还原
+         *       一起消失，指纹不会，所以它是第二道依据
+         *     * ``machine_id`` —— 仅供人工辨认（列表里显示），不参与身份判定
          */
         EnrollRequest: {
             /** Agent Version */
             agent_version?: string | null;
             /** Bootstrap Key */
-            bootstrap_key?: string | null;
-            /** Enroll Code */
-            enroll_code?: string | null;
+            bootstrap_key: string;
             /** Hostname */
             hostname?: string | null;
             /** Machine Fingerprint */
@@ -1546,15 +2113,29 @@ export interface components {
          * EnrollResponse
          * @description 注册结果。
          *
-         *     ``claimed=False`` 表示这是一台**还没有归属**的机器（走统一密钥注册的）。
-         *     此时 Agent 该做的是把 ``pair_code`` 显示给人看、然后等着被认领，
-         *     而不是去扫代码 —— 它连准考证号都不知道，扫出来的路径没有意义。
+         *     三种状态，客户端必须分清 —— 它们看起来都像"注册成功了"，但该做的事完全不同：
          *
-         *     ``player_no`` 等在未认领时为空串，客户端必须按 ``claimed`` 分支处理。
+         *     ==================  =========  =============  ==============================
+         *     ``claimed``         ``bound``  ``contest``    客户端该做什么
+         *     ==================  =========  =============  ==============================
+         *     ``false``           false      —              把 ``pair_code`` 显示给人看，等配对
+         *     ``true``            false      ``null``       已配对，但还没有含你的场次：等
+         *     ``true``            true       有值           正常干活：扫代码、收下发
+         *     ==================  =========  =============  ==============================
+         *
+         *     "已配对但没场次"这一档是新的：机器绑的是**人**，而某个场次有没有这个人，
+         *     取决于那份名单有没有被应用到场次里。所以配对成功不等于马上能干活 ——
+         *     这个中间状态必须说得出来，否则客户端只能猜（猜错的后果是它去扫一个
+         *     展开不出准考证号的目录）。
          */
         EnrollResponse: {
             /** Agent Id */
             agent_id: number;
+            /**
+             * Bound
+             * @default false
+             */
+            bound: boolean;
             /**
              * Claimed
              * @default true
@@ -1585,6 +2166,8 @@ export interface components {
              * @default
              */
             player_no: string;
+            /** Reason */
+            reason?: string | null;
             /** Token */
             token: string;
         };
@@ -1607,10 +2190,45 @@ export interface components {
             /** Ts */
             ts: string;
         };
+        /**
+         * FileClearIn
+         * @description 清代码台账。
+         *
+         *     ``purge=False``（默认）只打墓碑 —— 行还在、``?include_deleted=true`` 仍能
+         *     查到，导出里也仍然带着（见 ``docs/api-conventions.md`` §5.2）。
+         *     ``purge=True`` 才连行一起删，只在"这些记录本来就是误传"时才该用。
+         */
+        FileClearIn: {
+            /** Confirm */
+            confirm: string;
+            /**
+             * Purge
+             * @default false
+             */
+            purge: boolean;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /**
+         * JudgeRunClearIn
+         * @description 清空成绩记录。
+         *
+         *     ``player_id`` 把范围缩小到一个人；``keep_manual`` 默认 True，
+         *     因为手工录入的分数是全场最贵的数据，不该被"重扫一遍"顺手清掉。
+         */
+        JudgeRunClearIn: {
+            /** Confirm */
+            confirm: string;
+            /**
+             * Keep Manual
+             * @default true
+             */
+            keep_manual: boolean;
+            /** Player Id */
+            player_id?: number | null;
         };
         /** JudgeRunOut */
         JudgeRunOut: {
@@ -1702,6 +2320,266 @@ export interface components {
             /** Status */
             status?: string | null;
         };
+        /** Page[AgentRuntimeOut] */
+        Page_AgentRuntimeOut_: {
+            /** Items */
+            items?: components["schemas"]["AgentRuntimeOut"][];
+            /**
+             * Limit
+             * @default 50
+             */
+            limit: number;
+            /**
+             * Offset
+             * @default 0
+             */
+            offset: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        };
+        /** Page[AssetOut] */
+        Page_AssetOut_: {
+            /** Items */
+            items?: components["schemas"]["AssetOut"][];
+            /**
+             * Limit
+             * @default 50
+             */
+            limit: number;
+            /**
+             * Offset
+             * @default 0
+             */
+            offset: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        };
+        /** Page[BootstrapKeyOut] */
+        Page_BootstrapKeyOut_: {
+            /** Items */
+            items?: components["schemas"]["BootstrapKeyOut"][];
+            /**
+             * Limit
+             * @default 50
+             */
+            limit: number;
+            /**
+             * Offset
+             * @default 0
+             */
+            offset: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        };
+        /** Page[CloneAlertOut] */
+        Page_CloneAlertOut_: {
+            /** Items */
+            items?: components["schemas"]["CloneAlertOut"][];
+            /**
+             * Limit
+             * @default 50
+             */
+            limit: number;
+            /**
+             * Offset
+             * @default 0
+             */
+            offset: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        };
+        /** Page[ContestOut] */
+        Page_ContestOut_: {
+            /** Items */
+            items?: components["schemas"]["ContestOut"][];
+            /**
+             * Limit
+             * @default 50
+             */
+            limit: number;
+            /**
+             * Offset
+             * @default 0
+             */
+            offset: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        };
+        /** Page[DeployTaskOut] */
+        Page_DeployTaskOut_: {
+            /** Items */
+            items?: components["schemas"]["DeployTaskOut"][];
+            /**
+             * Limit
+             * @default 50
+             */
+            limit: number;
+            /**
+             * Offset
+             * @default 0
+             */
+            offset: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        };
+        /** Page[EventOut] */
+        Page_EventOut_: {
+            /** Items */
+            items?: components["schemas"]["EventOut"][];
+            /**
+             * Limit
+             * @default 50
+             */
+            limit: number;
+            /**
+             * Offset
+             * @default 0
+             */
+            offset: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        };
+        /** Page[JudgeRunOut] */
+        Page_JudgeRunOut_: {
+            /** Items */
+            items?: components["schemas"]["JudgeRunOut"][];
+            /**
+             * Limit
+             * @default 50
+             */
+            limit: number;
+            /**
+             * Offset
+             * @default 0
+             */
+            offset: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        };
+        /** Page[PendingMachineOut] */
+        Page_PendingMachineOut_: {
+            /** Items */
+            items?: components["schemas"]["PendingMachineOut"][];
+            /**
+             * Limit
+             * @default 50
+             */
+            limit: number;
+            /**
+             * Offset
+             * @default 0
+             */
+            offset: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        };
+        /** Page[PlayerOut] */
+        Page_PlayerOut_: {
+            /** Items */
+            items?: components["schemas"]["PlayerOut"][];
+            /**
+             * Limit
+             * @default 50
+             */
+            limit: number;
+            /**
+             * Offset
+             * @default 0
+             */
+            offset: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        };
+        /** Page[ProblemOut] */
+        Page_ProblemOut_: {
+            /** Items */
+            items?: components["schemas"]["ProblemOut"][];
+            /**
+             * Limit
+             * @default 50
+             */
+            limit: number;
+            /**
+             * Offset
+             * @default 0
+             */
+            offset: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        };
+        /** Page[RosterOut] */
+        Page_RosterOut_: {
+            /** Items */
+            items?: components["schemas"]["RosterOut"][];
+            /**
+             * Limit
+             * @default 50
+             */
+            limit: number;
+            /**
+             * Offset
+             * @default 0
+             */
+            offset: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        };
+        /** Page[SourceFileOut] */
+        Page_SourceFileOut_: {
+            /** Items */
+            items?: components["schemas"]["SourceFileOut"][];
+            /**
+             * Limit
+             * @default 50
+             */
+            limit: number;
+            /**
+             * Offset
+             * @default 0
+             */
+            offset: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        };
         /**
          * PartialDownload
          * @description 客户端本地未完成的下载，服务端据此回填 offset。
@@ -1714,7 +2592,7 @@ export interface components {
         };
         /**
          * PendingMachineOut
-         * @description 一台注册上来、还没认领到人的机器。
+         * @description 一台注册上来、还没配对到人的机器。
          */
         PendingMachineOut: {
             /** Agent Version */
@@ -1744,6 +2622,45 @@ export interface components {
             pair_code_expires_in?: number | null;
             /** Seconds Since Seen */
             seconds_since_seen?: number | null;
+        };
+        /**
+         * PlayerClearIn
+         * @description 清空一个场次的选手名单。
+         *
+         *     ``keep_with_submissions`` 默认 **True**：已经有代码或成绩的选手留着 ——
+         *     误删代码是不可逆的，所以"连提交一起清"必须是显式选择，不能是默认。
+         */
+        PlayerClearIn: {
+            /** Confirm */
+            confirm: string;
+            /**
+             * Keep With Submissions
+             * @default true
+             */
+            keep_with_submissions: boolean;
+        };
+        /**
+         * PlayerImportOut
+         * @description 批量导入选手的结果。
+         *
+         *     这是**动作结果**，不是集合读取 —— 所以它**不用列表信封**（见
+         *     ``docs/api-conventions.md`` §2：信封只属于 GET 集合）。
+         *     返回 ``players`` 是因为调用方（导入界面）要拿到新建行的 id 才能
+         *     接着做"给这几个人应用名单""批量配对"之类的动作。
+         */
+        PlayerImportOut: {
+            /**
+             * Created
+             * @default 0
+             */
+            created: number;
+            /** Players */
+            players?: components["schemas"]["PlayerOut"][];
+            /**
+             * Updated
+             * @default 0
+             */
+            updated: number;
         };
         /** PlayerOut */
         PlayerOut: {
@@ -1890,6 +2807,14 @@ export interface components {
             order_index: number;
             /** Title */
             title?: string | null;
+        };
+        /**
+         * RebindAgentIn
+         * @description 把一台机器改派给名单里的另一个人。
+         */
+        RebindAgentIn: {
+            /** Roster Entry Id */
+            roster_entry_id: number;
         };
         /** ReleaseOut */
         ReleaseOut: {
@@ -2110,6 +3035,18 @@ export interface components {
              */
             total: number;
         };
+        /**
+         * SetAgentContestIn
+         * @description 给一台机器显式指定场次。
+         *
+         *     默认是**动态解析**：找一个"进行中、且名单含此人"的场次。
+         *     只有在一个考点同时跑多场比赛、同一个人两边都在时才需要指定 ——
+         *     那种情况下服务端会明确说"需要指定场次"，而不是自己挑一个。
+         */
+        SetAgentContestIn: {
+            /** Contest Id */
+            contest_id?: number | null;
+        };
         /** SimpleAck */
         SimpleAck: {
             /** Detail */
@@ -2174,6 +3111,11 @@ export interface components {
         };
         /** TickResponse */
         TickResponse: {
+            /**
+             * Bound
+             * @default false
+             */
+            bound: boolean;
             /** Cancel Assets */
             cancel_assets?: number[];
             /**
@@ -2197,6 +3139,8 @@ export interface components {
             pair_code?: string | null;
             /** Player No */
             player_no?: string | null;
+            /** Reason */
+            reason?: string | null;
             /** Server Time */
             server_time: number;
             upgrade?: components["schemas"]["UpgradeInfo"] | null;
@@ -2279,9 +3223,215 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
-    list_bootstrap_keys_api_v1_admin_bootstrap_keys_get: {
+    revoke_agent_api_v1_admin_agents__agent_id__delete: {
+        parameters: {
+            query: {
+                /** @description 原样输入机器名 */
+                confirm: string;
+            };
+            header?: never;
+            path: {
+                agent_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    unbind_agent_api_v1_admin_agents__agent_id__bind_delete: {
         parameters: {
             query?: never;
+            header?: never;
+            path: {
+                agent_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_agent_contest_api_v1_admin_agents__agent_id__contest_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                agent_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetAgentContestIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    rebind_agent_api_v1_admin_agents__agent_id__rebind_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                agent_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RebindAgentIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_asset_api_v1_admin_assets__asset_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                asset_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    rename_asset_api_v1_admin_assets__asset_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                asset_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AssetRenameIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_bootstrap_keys_api_v1_admin_bootstrap_keys_get: {
+        parameters: {
+            query?: {
+                /** @description 每页条数 */
+                limit?: number;
+                /** @description 起始位置 */
+                offset?: number;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -2294,7 +3444,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BootstrapKeyOut"][];
+                    "application/json": components["schemas"]["Page_BootstrapKeyOut_"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -2319,6 +3478,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BootstrapKeyIssuedOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_bootstrap_key_api_v1_admin_bootstrap_keys__key_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                key_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimpleAck"];
                 };
             };
             /** @description Validation Error */
@@ -2365,7 +3555,12 @@ export interface operations {
     };
     list_contests_api_v1_admin_contests_get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description 每页条数 */
+                limit?: number;
+                /** @description 起始位置 */
+                offset?: number;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -2378,7 +3573,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ContestOut"][];
+                    "application/json": components["schemas"]["Page_ContestOut_"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -2403,6 +3607,40 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ContestOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_contest_api_v1_admin_contests__contest_id__delete: {
+        parameters: {
+            query: {
+                /** @description 原样输入场次标识 */
+                confirm: string;
+            };
+            header?: never;
+            path: {
+                contest_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimpleAck"];
                 };
             };
             /** @description Validation Error */
@@ -2453,7 +3691,12 @@ export interface operations {
     };
     list_agents_api_v1_admin_contests__contest_id__agents_get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description 每页条数 */
+                limit?: number;
+                /** @description 起始位置 */
+                offset?: number;
+            };
             header?: never;
             path: {
                 contest_id: number;
@@ -2468,7 +3711,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["AgentRuntimeOut"][];
+                    "application/json": components["schemas"]["Page_AgentRuntimeOut_"];
                 };
             };
             /** @description Validation Error */
@@ -2484,7 +3727,12 @@ export interface operations {
     };
     list_assets_api_v1_admin_contests__contest_id__assets_get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description 每页条数 */
+                limit?: number;
+                /** @description 起始位置 */
+                offset?: number;
+            };
             header?: never;
             path: {
                 contest_id: number;
@@ -2499,7 +3747,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["AssetOut"][];
+                    "application/json": components["schemas"]["Page_AssetOut_"];
                 };
             };
             /** @description Validation Error */
@@ -2552,6 +3800,10 @@ export interface operations {
         parameters: {
             query?: {
                 include_targets?: boolean;
+                /** @description 每页条数 */
+                limit?: number;
+                /** @description 起始位置 */
+                offset?: number;
             };
             header?: never;
             path: {
@@ -2567,7 +3819,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["DeployTaskOut"][];
+                    "application/json": components["schemas"]["Page_DeployTaskOut_"];
                 };
             };
             /** @description Validation Error */
@@ -2619,8 +3871,11 @@ export interface operations {
     list_events_api_v1_admin_contests__contest_id__events_get: {
         parameters: {
             query?: {
-                limit?: number;
                 category?: string | null;
+                /** @description 每页条数 */
+                limit?: number;
+                /** @description 起始位置 */
+                offset?: number;
             };
             header?: never;
             path: {
@@ -2636,7 +3891,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["EventOut"][];
+                    "application/json": components["schemas"]["Page_EventOut_"];
                 };
             };
             /** @description Validation Error */
@@ -2655,7 +3910,10 @@ export interface operations {
             query?: {
                 player_id?: number | null;
                 include_deleted?: boolean;
+                /** @description 每页条数 */
                 limit?: number;
+                /** @description 起始位置 */
+                offset?: number;
             };
             header?: never;
             path: {
@@ -2671,7 +3929,79 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SourceFileOut"][];
+                    "application/json": components["schemas"]["Page_SourceFileOut_"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    clear_source_files_api_v1_admin_contests__contest_id__files_clear_post: {
+        parameters: {
+            query?: {
+                player_id?: number | null;
+            };
+            header?: never;
+            path: {
+                contest_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FileClearIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    export_source_files_api_v1_admin_contests__contest_id__files_export_get: {
+        parameters: {
+            query?: {
+                player_id?: number | null;
+                problem?: string | null;
+                include_deleted?: boolean;
+            };
+            header?: never;
+            path: {
+                contest_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
@@ -2720,6 +4050,10 @@ export interface operations {
         parameters: {
             query?: {
                 parse_status?: string | null;
+                /** @description 每页条数 */
+                limit?: number;
+                /** @description 起始位置 */
+                offset?: number;
             };
             header?: never;
             path: {
@@ -2735,7 +4069,42 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["JudgeRunOut"][];
+                    "application/json": components["schemas"]["Page_JudgeRunOut_"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    clear_judge_runs_api_v1_admin_contests__contest_id__judge_runs_clear_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contest_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JudgeRunClearIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimpleAck"];
                 };
             };
             /** @description Validation Error */
@@ -2789,6 +4158,8 @@ export interface operations {
             query: {
                 player_id: number;
                 problem: string;
+                /** @description 原样输入考号 */
+                confirm: string;
             };
             header?: never;
             path: {
@@ -2820,7 +4191,12 @@ export interface operations {
     };
     list_players_api_v1_admin_contests__contest_id__players_get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description 每页条数 */
+                limit?: number;
+                /** @description 起始位置 */
+                offset?: number;
+            };
             header?: never;
             path: {
                 contest_id: number;
@@ -2835,7 +4211,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["PlayerOut"][];
+                    "application/json": components["schemas"]["Page_PlayerOut_"];
                 };
             };
             /** @description Validation Error */
@@ -2870,7 +4246,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["PlayerOut"][];
+                    "application/json": components["schemas"]["PlayerImportOut"];
                 };
             };
             /** @description Validation Error */
@@ -2919,9 +4295,49 @@ export interface operations {
             };
         };
     };
-    list_problems_api_v1_admin_contests__contest_id__problems_get: {
+    clear_players_api_v1_admin_contests__contest_id__players_clear_post: {
         parameters: {
             query?: never;
+            header?: never;
+            path: {
+                contest_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PlayerClearIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_problems_api_v1_admin_contests__contest_id__problems_get: {
+        parameters: {
+            query?: {
+                /** @description 每页条数 */
+                limit?: number;
+                /** @description 起始位置 */
+                offset?: number;
+            };
             header?: never;
             path: {
                 contest_id: number;
@@ -2936,7 +4352,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ProblemOut"][];
+                    "application/json": components["schemas"]["Page_ProblemOut_"];
                 };
             };
             /** @description Validation Error */
@@ -2972,6 +4388,43 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ProblemImportOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    clear_problems_api_v1_admin_contests__contest_id__problems_clear_post: {
+        parameters: {
+            query?: {
+                idents?: string | null;
+            };
+            header?: never;
+            path: {
+                contest_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConfirmIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimpleAck"];
                 };
             };
             /** @description Validation Error */
@@ -3082,6 +4535,37 @@ export interface operations {
             };
         };
     };
+    delete_deploy_api_v1_admin_deploys__task_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                task_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     cancel_deploy_api_v1_admin_deploys__task_id__cancel_post: {
         parameters: {
             query?: never;
@@ -3147,9 +4631,12 @@ export interface operations {
     list_all_events_api_v1_admin_events_get: {
         parameters: {
             query?: {
-                limit?: number;
                 level?: string | null;
                 category?: string | null;
+                /** @description 每页条数 */
+                limit?: number;
+                /** @description 起始位置 */
+                offset?: number;
             };
             header?: never;
             path?: never;
@@ -3163,7 +4650,106 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["EventOut"][];
+                    "application/json": components["schemas"]["Page_EventOut_"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    clear_events_api_v1_admin_events_clear_post: {
+        parameters: {
+            query?: {
+                contest_id?: number | null;
+                level?: string | null;
+                older_than_days?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConfirmIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_source_file_api_v1_admin_files__file_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                file_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    download_source_file_api_v1_admin_files__file_id__content_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                file_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
@@ -3252,7 +4838,7 @@ export interface operations {
             };
         };
     };
-    claim_machine_by_code_api_v1_admin_machines_claim_by_code_post: {
+    bind_machine_by_code_api_v1_admin_machines_bind_by_code_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -3261,7 +4847,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["ClaimByCodeIn"];
+                "application/json": components["schemas"]["BindByCodeIn"];
             };
         };
         responses: {
@@ -3271,7 +4857,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SimpleAck"];
+                    "application/json": components["schemas"]["BindResultOut"];
                 };
             };
             /** @description Validation Error */
@@ -3287,7 +4873,12 @@ export interface operations {
     };
     list_clone_alerts_api_v1_admin_machines_clone_alerts_get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description 每页条数 */
+                limit?: number;
+                /** @description 起始位置 */
+                offset?: number;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -3300,14 +4891,28 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["CloneAlertOut"][];
+                    "application/json": components["schemas"]["Page_CloneAlertOut_"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
     };
     list_pending_machines_api_v1_admin_machines_pending_get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description 每页条数 */
+                limit?: number;
+                /** @description 起始位置 */
+                offset?: number;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -3320,17 +4925,62 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["PendingMachineOut"][];
+                    "application/json": components["schemas"]["Page_PendingMachineOut_"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
     };
-    revoke_pending_machine_api_v1_admin_machines_pending__claim_id__delete: {
+    clear_pending_machines_api_v1_admin_machines_pending_clear_post: {
         parameters: {
             query?: never;
             header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConfirmIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    revoke_pending_machine_api_v1_admin_machines_pending__agent_id__delete: {
+        parameters: {
+            query: {
+                /** @description 原样输入主机名 */
+                confirm: string;
+            };
+            header?: never;
             path: {
-                claim_id: number;
+                agent_id: number;
             };
             cookie?: never;
         };
@@ -3356,18 +5006,18 @@ export interface operations {
             };
         };
     };
-    claim_machine_by_id_api_v1_admin_machines__claim_id__claim_post: {
+    bind_machine_by_id_api_v1_admin_machines__agent_id__bind_post: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                claim_id: number;
+                agent_id: number;
             };
             cookie?: never;
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["ClaimMachineIn"];
+                "application/json": components["schemas"]["BindMachineIn"];
             };
         };
         responses: {
@@ -3377,7 +5027,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SimpleAck"];
+                    "application/json": components["schemas"]["BindResultOut"];
                 };
             };
             /** @description Validation Error */
@@ -3411,9 +5061,12 @@ export interface operations {
             };
         };
     };
-    issue_enroll_code_api_v1_admin_players__player_id__enroll_code_post: {
+    delete_player_api_v1_admin_players__player_id__delete: {
         parameters: {
-            query?: never;
+            query: {
+                /** @description 原样输入考号 */
+                confirm: string;
+            };
             header?: never;
             path: {
                 player_id: number;
@@ -3428,7 +5081,42 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["EnrollCodeOut"];
+                    "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_player_api_v1_admin_players__player_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                player_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PlayerUpsert"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlayerOut"];
                 };
             };
             /** @description Validation Error */
@@ -3444,7 +5132,10 @@ export interface operations {
     };
     delete_problem_api_v1_admin_problems__problem_id__delete: {
         parameters: {
-            query?: never;
+            query: {
+                /** @description 原样输入题目标识 */
+                confirm: string;
+            };
             header?: never;
             path: {
                 problem_id: number;
@@ -3561,6 +5252,37 @@ export interface operations {
             };
         };
     };
+    delete_release_api_v1_admin_releases__release_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                release_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     update_release_api_v1_admin_releases__release_id__patch: {
         parameters: {
             query?: never;
@@ -3660,7 +5382,10 @@ export interface operations {
     };
     delete_roster_entry_api_v1_admin_roster_entries__entry_id__delete: {
         parameters: {
-            query?: never;
+            query: {
+                /** @description 原样输入考号 */
+                confirm: string;
+            };
             header?: never;
             path: {
                 entry_id: number;
@@ -3689,9 +5414,49 @@ export interface operations {
             };
         };
     };
-    list_rosters_api_v1_admin_rosters_get: {
+    update_roster_entry_api_v1_admin_roster_entries__entry_id__patch: {
         parameters: {
             query?: never;
+            header?: never;
+            path: {
+                entry_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RosterEntryIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RosterEntryOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_rosters_api_v1_admin_rosters_get: {
+        parameters: {
+            query?: {
+                /** @description 每页条数 */
+                limit?: number;
+                /** @description 起始位置 */
+                offset?: number;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -3704,7 +5469,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["RosterOut"][];
+                    "application/json": components["schemas"]["Page_RosterOut_"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -3775,7 +5549,10 @@ export interface operations {
     };
     delete_roster_api_v1_admin_rosters__roster_id__delete: {
         parameters: {
-            query?: never;
+            query: {
+                /** @description 原样输入名单名称 */
+                confirm: string;
+            };
             header?: never;
             path: {
                 roster_id: number;
@@ -3861,6 +5638,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RosterImportOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    clear_roster_entries_api_v1_admin_rosters__roster_id__entries_clear_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                roster_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConfirmIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimpleAck"];
                 };
             };
             /** @description Validation Error */

@@ -345,12 +345,30 @@ class AgentClient:
     # 业务接口
     # ---------------------------------------------------------------- #
 
-    def enroll(self, enroll_code: str, machine_id: str, hostname: str,
-               agent_version: str, os_info: str) -> dict:
+    def enroll(
+        self,
+        enroll_code: Optional[str],
+        machine_id: str,
+        hostname: str,
+        agent_version: str,
+        os_info: str,
+        bootstrap_key: Optional[str] = None,
+        machine_uuid: Optional[str] = None,
+        machine_fingerprint: Optional[str] = None,
+    ) -> dict:
         status, data = self.request_json(
             "POST",
             "/api/v1/agent/enroll",
-            build_enroll_payload(enroll_code, machine_id, hostname, agent_version, os_info),
+            build_enroll_payload(
+                enroll_code,
+                machine_id,
+                hostname,
+                agent_version,
+                os_info,
+                bootstrap_key=bootstrap_key,
+                machine_uuid=machine_uuid,
+                machine_fingerprint=machine_fingerprint,
+            ),
         )
         if status == 200 and isinstance(data, dict):
             return data
@@ -504,19 +522,39 @@ class AgentClient:
 
 
 def build_enroll_payload(
-    enroll_code: str,
+    enroll_code: Optional[str],
     machine_id: str,
     hostname: str,
     agent_version: str,
     os_info: str,
+    bootstrap_key: Optional[str] = None,
+    machine_uuid: Optional[str] = None,
+    machine_fingerprint: Optional[str] = None,
 ) -> Dict[str, object]:
-    return {
-        "enroll_code": enroll_code,
+    """注册报文体。
+
+    **两个凭据都为空时不要把它们塞进去**：服务端把"字段缺失"和"字段是空串"
+    看成两件事，传空串只会让错误信息变得含糊。
+
+    ``machine_uuid`` / ``machine_fingerprint`` 允许为空 —— 后者在虚拟机或
+    SMBIOS 不可读时确实拿不到，服务端见到空值就当新机器处理（走人工配对），
+    而不是拿空值去和别的机器"互相认回"。
+    """
+    payload: Dict[str, object] = {
         "machine_id": machine_id,
         "hostname": hostname,
         "agent_version": agent_version,
         "os_info": os_info,
     }
+    if enroll_code:
+        payload["enroll_code"] = enroll_code
+    if bootstrap_key:
+        payload["bootstrap_key"] = bootstrap_key
+    if machine_uuid:
+        payload["machine_uuid"] = machine_uuid
+    if machine_fingerprint:
+        payload["machine_fingerprint"] = machine_fingerprint
+    return payload
 
 
 # --------------------------------------------------------------------------- #

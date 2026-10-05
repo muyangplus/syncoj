@@ -47,9 +47,13 @@ from .scan import ScanPolicy, scan_directory
 from .state import (
     Credential,
     HashCache,
+    atomic_write_text,
     describe_os,
     load_credential,
+    read_bootstrap_key,
+    resolve_machine_fingerprint,
     resolve_machine_id,
+    resolve_machine_uuid,
     save_credential,
     sha256_file,
 )
@@ -156,6 +160,11 @@ class Agent:
         self.config.state_dir.mkdir(parents=True, exist_ok=True)
 
         self.machine_id = resolve_machine_id(config.machine_id, config.state_dir)
+        #: 本机身份：首次运行时生成并持久化。比 /etc/machine-id 更适合当身份 ——
+        #: 克隆镜像没做通用化时 machine-id 是整批相同的
+        self.machine_uuid = resolve_machine_uuid(config.state_dir)
+        #: 硬件指纹：快照还原后仍然不变，服务端靠它认回"原来那台机器"
+        self.machine_fingerprint = resolve_machine_fingerprint()
         self.client = AgentClient(
             base_url=config.base_url,
             verify_tls=config.verify_tls,
@@ -259,6 +268,15 @@ class Agent:
     # ---------------------------------------------------------------- #
 
     def _ensure_credential(self) -> Credential:
+        return self.ensure_credential()
+
+    def ensure_credential(self) -> Credential:
+        """确保手上有一份可用凭据；没有就注册。
+
+        公开名字（无下划线）是因为 ``--provision`` 也要用它 —— 装机时的 root
+        一次性单元与常驻循环**必须走同一条注册路径**，否则"装机时能注册、
+        开机后认不出来"这类问题会以最难查的方式出现。
+        """
         if self._credential is not None:
             return self._credential
 
@@ -266,35 +284,71 @@ class Agent:
         if stored is not None and stored.server_url in ("", self.config.base_url):
             self._credential = stored
             self.client.set_token(stored.token)
-            log.info("使用已保存的凭据：选手 %s @ %s", stored.player_no, stored.contest_slug)
+            if stored.needs_pairing:
+                log.info("这台机器还没配对到选手（配对码 %s），等待认领", stored.pair_code)
+            else:
+                log.info("使用已保存的凭据：选手 %s @ %s", stored.player_no, stored.contest_slug)
             return stored
 
-        if not self.config.enroll_code:
-            raise ConfigError(
-                "没有可用的凭据，且未配置 agent.enroll_code。"
-                "请向教师索取注册码并写入 %s" % self.config.credential_path
-            )
         return self._enroll()
 
     def _enroll(self) -> Credential:
+        """注册。优先用每选手注册码，其次用镜像里的统一密钥。
+
+        顺序是有意的：单人码是**更明确的意图**（"这台机器就是某个具体选手"），
+        镜像里那份宽泛的密钥不该盖过它。两个都没有就报清楚缺什么 ——
+        而不是笼统地说"注册失败"。
+        """
+        bootstrap_key = None
+        if not self.config.enroll_code:
+            bootstrap_key = read_bootstrap_key(self.config.bootstrap_key_file)
+            if bootstrap_key is None:
+                raise ConfigError(
+                    "没有可用的凭据。三种可能：\n"
+                    "  1. 还没跑过装机时的注册（syncoj-enroll.service）—— 先启动它\n"
+                    "  2. 本机走「每选手注册码」那条路 —— 把注册码写进 agent.ini 的 enroll_code\n"
+                    "  3. 本机走「镜像统一密钥」那条路 —— 让 root 把密钥放到 %s"
+                    % (self.config.bootstrap_key_file or "/etc/syncoj/bootstrap.key")
+                )
+            if not bootstrap_key:
+                raise ConfigError(
+                    "统一密钥文件 %s 存在但读不出来。\n"
+                    "Agent 以选手身份运行，读不到 root 只读的文件 —— 这是**设计如此**：\n"
+                    "密钥能注册整间机房，不该躺在学生读得到的地方。\n"
+                    "请交给装机时的 syncoj-enroll.service 去注册。"
+                    % self.config.bootstrap_key_file
+                )
+
         hostname = socket.gethostname()
-        log.info("正在注册（machine_id=%s）", self.machine_id)
+        fingerprint = resolve_machine_fingerprint()
+        log.info(
+            "正在注册（machine_id=%s，方式=%s）",
+            self.machine_id,
+            "每选手注册码" if self.config.enroll_code else "统一密钥",
+        )
         data = self.client.enroll(
-            enroll_code=self.config.enroll_code,
+            enroll_code=self.config.enroll_code or None,
+            bootstrap_key=bootstrap_key,
             machine_id=self.machine_id,
+            machine_uuid=self.machine_uuid,
+            machine_fingerprint=fingerprint,
             hostname=hostname,
             agent_version=__version__,
             os_info=describe_os(),
         )
+
+        claimed = bool(data.get("claimed", True))
         credential = Credential(
             token=data["token"],
-            agent_id=int(data["agent_id"]),
-            player_no=data["player_no"],
-            contest_id=int(data["contest_id"]),
-            contest_slug=data["contest_slug"],
+            agent_id=int(data.get("agent_id") or 0),
+            player_no=data.get("player_no") or "",
+            contest_id=int(data.get("contest_id") or 0),
+            contest_slug=data.get("contest_slug") or "",
             contest_name=data.get("contest_name", ""),
             machine_id=self.machine_id,
             server_url=self.config.base_url,
+            claimed=claimed,
+            pair_code=data.get("pair_code") or "",
         )
         save_credential(self.config.credential_path, credential)
         self.client.set_token(credential.token)
@@ -304,17 +358,94 @@ class Agent:
         if isinstance(config, dict):
             self.policy = merge_policy(config)
 
-        log.info(
-            "注册成功：选手 %s，场次 %s（agent_id=%d）",
-            credential.player_no, credential.contest_slug, credential.agent_id,
-        )
+        if claimed:
+            log.info(
+                "注册成功：选手 %s，场次 %s（agent_id=%d）",
+                credential.player_no, credential.contest_slug, credential.agent_id,
+            )
+        else:
+            # 未配对时**不要**把凭据当失败丢掉：它是有效的，只是还没有归属。
+            # 丢掉会导致下一轮重新注册，把配对码刷成新的，教师刚读到的那个就失效了。
+            log.warning(
+                "这台机器还没有配对到选手。配对码：%s\n"
+                "请教师在管理界面「机器配对」里用这个码认领到人。",
+                credential.pair_code,
+            )
+            self._show_pair_code(credential.pair_code)
         return credential
+
+    # ---------------------------------------------------------------- #
+    # 配对码展示
+    # ---------------------------------------------------------------- #
+
+    def _pair_code_path(self) -> Path:
+        return self.config.deploy_root / self.config.pairing_file_name
+
+    def _show_pair_code(self, code: str) -> None:
+        """把配对码写到桌面上，并在日志里再说一遍。
+
+        为什么要落到桌面：配对码的价值在于**被人在机器前读到**。日志要
+        journalctl 才看得到，而教师是走到机器前看屏幕的 —— 桌面上一个
+        「配对码.txt」是他最可能看见的东西，也是这个部署方式里唯一顺手的公示位。
+        """
+        if not self.config.pairing_show_on_desktop or not code:
+            return
+        path = self._pair_code_path()
+        text = (
+            "SyncOJ 配对码\n"
+            "\n"
+            "    %s\n"
+            "\n"
+            "把这串码告诉老师，或让老师在管理界面「机器配对」里输入它。\n"
+            "配对成功后这个文件会自动消失。\n" % code
+        )
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_text(path, text, mode=0o644)
+            log.info("配对码已写到 %s", path)
+        except OSError as exc:
+            # 写不进去不算致命：日志里还有一份，教师可以查日志
+            log.warning("无法把配对码写到 %s：%s（日志里还有一份）", path, exc)
+
+    def clear_pair_code_file(self) -> None:
+        """配对成功后把桌面上的那个文件删掉。
+
+        留着它会让人以为还没配对 —— 下一个人走过来看见，就会去问老师，
+        老师再查一遍，白折腾一轮。
+        """
+        path = self._pair_code_path()
+        try:
+            path.unlink()
+            log.info("已删除配对码文件 %s", path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            log.warning("无法删除配对码文件 %s：%s", path, exc)
+
+    def _adopt_identity(self, data: Dict[str, object]) -> None:
+        """从 tick 响应里接住"已配对"以及随之而来的身份。
+
+        服务端把身份放在每次 tick 的响应里，而不是要求 Agent 再 enroll 一次 ——
+        少一次可能失败的网络往返，也不会多刷一条注册审计。
+        """
+        credential = self._credential
+        if credential is None:  # pragma: no cover - 调用方已经确保
+            return
+        credential.claimed = True
+        credential.player_no = str(data.get("player_no") or "")
+        credential.contest_slug = str(data.get("contest_slug") or "")
+        credential.pair_code = ""
+        save_credential(self.config.credential_path, credential)
+        self.clear_pair_code_file()
+        log.info("已配对：选手 %s @ %s", credential.player_no, credential.contest_slug)
 
     def _forget_credential(self, reason: str) -> None:
         """凭据失效时清空本地凭据，下一轮会走重新注册。"""
         log.warning("凭据失效（%s），将尝试重新注册", reason)
         self._credential = None
         self.client.set_token(None)
+        self._roots_ready = False
+        self._roots = []
         try:
             self.config.credential_path.unlink()
         except OSError:
@@ -607,6 +738,40 @@ class Agent:
             }
         )
 
+    def _cycle_pending(self) -> float:
+        """还没配对到选手时的一轮：只心跳，不扫描。
+
+        扫描是**故意**跳过的：没有准考证号，``scan.roots`` 里的 ``{player_no}``
+        展开不出来，扫出来的相对路径也没法归属到任何人。收上去只会污染台账，
+        而服务端也会（正确地）把它丢掉 —— 与其传一堆没人要的数据，不如安静等着。
+        """
+        payload, _oversize, _errors = self._build_tick_payload([], {})
+        tick = self.client.tick(payload)
+
+        remote_config = tick.get("config")
+        if isinstance(remote_config, dict):
+            self.policy = merge_policy(remote_config)
+
+        self._flush_events()
+
+        if bool(tick.get("claimed", True)):
+            self._adopt_identity(tick)
+            credential = self._credential
+            self._ensure_roots(
+                credential.player_no if credential else "",
+                credential.contest_slug if credential else "",
+            )
+            # 立刻进入正常节奏，别让教师等完一整个空闲周期才看到机器"活过来"
+            return float(self.policy.get("tick_active_seconds", 2) or 2)
+
+        credential = self._credential
+        if credential is not None and credential.pair_code:
+            # 每一轮都重写一遍桌面文件：教师可能刚开完机才来看，
+            # 而配对码只在内存里有一份时，重启一次就看不见了
+            self._show_pair_code(credential.pair_code)
+
+        return float(max(5, min(int(tick.get("next_tick_seconds") or 30), 3600)))
+
     def _flush_events(self) -> None:
         if not self._pending_events:
             return
@@ -628,6 +793,13 @@ class Agent:
     def cycle(self) -> float:
         """执行一轮，返回下次执行前的等待秒数。"""
         credential = self._ensure_credential()
+
+        # 还没配对到选手：这台机器没有准考证号，算不出扫描目录，
+        # 扫出来的东西也没法归属到任何人。它这一轮唯一该做的就是心跳一下、
+        # 顺便问一句"认领了没有"。
+        if credential.needs_pairing:
+            return self._cycle_pending()
+
         # 扫描目录里可能含 {player_no} / {contest_slug}，必须等拿到凭据之后才能确定
         self._ensure_roots(credential.player_no, credential.contest_slug)
 
@@ -829,7 +1001,77 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dump-config", action="store_true", help="打印解析后的配置（JSON）后退出"
     )
+    parser.add_argument(
+        "--provision",
+        action="store_true",
+        help="只注册、拿到凭据就退出（供装机时的 root 一次性单元调用）",
+    )
+    parser.add_argument(
+        "--chown-to",
+        default=None,
+        help="配合 --provision：把写出来的凭据/身份文件交给这个用户（root 运行时装机用）",
+    )
+    parser.add_argument(
+        "--pair-code", action="store_true", help="打印本机的配对短码（未配对时才有）"
+    )
     return parser
+
+
+def _run_provision(args, config: AgentConfig, agent: "Agent") -> int:
+    """只注册、拿凭据就退出。供装机时的 root 一次性单元调用。
+
+    为什么要单独一个模式：统一密钥是 **root 只读** 的，而 Agent 服务以选手身份
+    运行、根本读不到它。所以注册这件事必须由 root 做一次，做完把凭据交给选手
+    账号，之后 Agent 只读凭据。
+
+    ``--chown-to`` 只在以 root 运行时有意义：写出来的文件属主是 root，
+    而读它们的是选手 —— 不交出去的话，服务起来了但读不到凭据，
+    表现是"一直重新注册"，很难联想到是属主问题。这两件事我们已经在安装器的
+    配置文件上踩过一次。
+    """
+    try:
+        agent.ensure_credential()
+    except (AgentError, ConfigError) as exc:
+        log.error("注册失败：%s", exc)
+        print("注册失败：%s" % exc, file=sys.stderr)
+        return 1
+    finally:
+        agent.client.close()
+
+    if args.chown_to:
+        _chown_state_files(config, args.chown_to)
+
+    credential = load_credential(config.credential_path)
+    if credential is None:
+        print("注册似乎成功了，但没有读回凭据 —— 请检查状态目录权限。", file=sys.stderr)
+        return 1
+    if credential.needs_pairing:
+        print("已注册，等待配对。配对码：%s" % credential.pair_code)
+    else:
+        print("已注册：选手 %s @ %s" % (credential.player_no, credential.contest_slug))
+        # 注册完就把配对码文件清掉 —— 它可能来自上一次未配对的尝试
+        agent.clear_pair_code_file()
+    return 0
+
+
+def _chown_state_files(config: AgentConfig, user: str) -> None:
+    """把状态目录里 Agent 要读写的文件交给运行用户。"""
+    import shutil
+
+    targets = [
+        config.state_dir,
+        config.credential_path,
+        config.state_dir / "machine_uuid",
+        config.state_dir / "machine_id",
+        config.hash_cache_path,
+    ]
+    for target in targets:
+        if not target.exists():
+            continue
+        try:
+            shutil.chown(str(target), user=user)
+        except (OSError, LookupError) as exc:
+            log.warning("无法把 %s 的属主改为 %s：%s", target, user, exc)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -877,6 +1119,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         log.error("%s", exc)
         print("启动失败：%s" % exc, file=sys.stderr)
         return 2
+
+    if args.pair_code:
+        credential = load_credential(config.credential_path)
+        if credential is None or credential.claimed:
+            print("这台机器已经配对过了（或还没有凭据）。")
+            return 1
+        print(credential.pair_code)
+        return 0
+
+    if args.provision:
+        return _run_provision(args, config, agent)
 
     if args.once:
         try:

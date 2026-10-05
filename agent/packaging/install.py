@@ -55,6 +55,13 @@ SERVICE_NAME = "syncoj-agent"
 
 CONFIG_FILENAME = "agent.ini"
 UNIT_FILENAME = SERVICE_NAME + ".service"
+#: 统一注册密钥。**root 只读** —— 它能注册整间机房，不该躺在学生读得到的地方
+BOOTSTRAP_KEY_FILENAME = "bootstrap.key"
+#: 装机时以 root 身份跑一次注册的单元。
+#:
+#: 为什么必须是独立单元而不是让 Agent 自己注册：Agent 以选手身份运行，
+#: 读不到 root 只读的密钥。注册这件事只能由 root 做一次，做完把凭据交给选手。
+ENROLL_UNIT_FILENAME = SERVICE_NAME + "-enroll.service"
 #: 安装根目录下与 Agent 运行期共享的布局常量，必须与 syncoj_agent/upgrade.py 一致
 RELEASES_DIR = "releases"
 CURRENT_LINK = "current"
@@ -595,6 +602,126 @@ class Installer:
             else:
                 self.report.warn("找不到 systemctl，请手工启用服务")
 
+    def install_enroll_unit(self, has_bootstrap_key: bool) -> None:
+        """装"以 root 身份注册一次"的单元。
+
+        只有走统一密钥的部署才需要它。每选手注册码那条路上，Agent 自己就能
+        注册（注册码就在它读得到的 agent.ini 里），多一个单元只是噪音。
+        """
+        self.enroll_unit_path = self.unit_path.parent / ENROLL_UNIT_FILENAME
+        self.report.section("注册单元")
+
+        if not has_bootstrap_key:
+            # 不在统一密钥模式下就别留一个永远会失败的单元 ——
+            # 它会在每次开机时失败一次，把 journal 刷脏，
+            # 而真正的问题是"这台机器压根不走这条路"
+            self._remove_enroll_unit()
+            self.report.skip("未使用统一密钥，不需要注册单元")
+            return
+
+        content = render_enroll_unit(
+            prefix=self.prefix,
+            config_path=self.config_path,
+            state_dir=self.state_dir,
+            run_user=self.run_user,
+            python=self.options.python or "/usr/bin/python3",
+        )
+
+        existing = None
+        if self.enroll_unit_path.is_file():
+            try:
+                existing = self.enroll_unit_path.read_text(encoding="utf-8")
+            except OSError:
+                existing = None
+
+        if existing == content:
+            self.report.skip("注册单元已是最新: %s" % self.enroll_unit_path)
+        elif self.report.dry_run:
+            self.report.plan("写入 %s" % self.enroll_unit_path)
+        else:
+            self.enroll_unit_path.parent.mkdir(parents=True, exist_ok=True)
+            self.enroll_unit_path.write_text(content, encoding="utf-8", newline="\n")
+            self.report.action("已写入 %s" % self.enroll_unit_path)
+
+            if _which("systemctl"):
+                run(["systemctl", "daemon-reload"], check=False)
+                run(["systemctl", "enable", ENROLL_UNIT_FILENAME], check=False)
+                self.report.action("已启用开机注册")
+            else:
+                self.report.warn("找不到 systemctl，请手工启用 %s" % ENROLL_UNIT_FILENAME)
+
+    def _remove_enroll_unit(self) -> None:
+        if not self.enroll_unit_path.is_file() or self.report.dry_run:
+            return
+        try:
+            if _which("systemctl"):
+                run(["systemctl", "disable", ENROLL_UNIT_FILENAME], check=False)
+            self.enroll_unit_path.unlink()
+            self.report.action("已删除不再需要的注册单元")
+        except OSError as exc:
+            self.report.warn("删除注册单元失败：%s" % exc)
+
+    def install_bootstrap_key(self) -> bool:
+        """把统一密钥文件放到配置目录，**0600 且属主 root**。
+
+        密钥由教师在服务端签发（``syncoj-server bootstrap-key issue``），
+        装机时用 ``--bootstrap-key`` 传进来。它放在这里而不是 agent.ini 里，
+        原因是那个文件 chown 给了选手账号 —— 学生读得到里面的每一个字节。
+        """
+        raw = (self.options.bootstrap_key or "").strip()
+        if not raw:
+            return False
+
+        target = self.config_dir / BOOTSTRAP_KEY_FILENAME
+        self.report.section("统一注册密钥")
+
+        if self.report.dry_run:
+            self.report.plan("写入 %s（0600，属主 root）" % target)
+            return True
+
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            # 先建成 0600 再写内容，避免有一瞬间是宽权限
+            target.touch(mode=0o600, exist_ok=True)
+            os.chmod(str(target), 0o600)
+            target.write_text(raw + "\n", encoding="utf-8", newline="\n")
+        except OSError as exc:
+            self.report.warn("写入 %s 失败：%s" % (target, exc))
+            return False
+
+        self.report.action("已写入 %s（0600，属主 root）" % target)
+        self.report.note("密钥能注册整间机房，所以只给 root 读 —— 不要放进 agent.ini")
+        return True
+
+    def check_identity_leftovers(self) -> None:
+        """建镜像时：状态目录里不该有凭据/身份文件。
+
+        这是**最容易犯也最难查**的一个错误：在母机上装好并跑过一次 Agent，
+        然后把整机做成镜像。这样每一台克隆机都带着**同一个身份**开机，
+        服务端会看到一批同 ID 的机器互相覆盖，而文件是静默错的。
+
+        我们不自动删除（那可能真的删掉一台在用机器的凭据），只大声说出来。
+        """
+        found = [
+            str(entry)
+            for entry in (
+                self.state_dir / "credential.json",
+                self.state_dir / "machine_uuid",
+            )
+            if entry.exists()
+        ]
+        if not found:
+            return
+
+        self.report.warn(
+            "状态目录里已经有身份文件：\n"
+            + "\n".join("    %s" % name for name in found)
+            + "\n  如果这是**在母机上建镜像**，请务必在克隆之前删掉它们，"
+            "否则每一台克隆机都会带着同一个身份开机、互相覆盖。\n"
+            "  命令：rm -f %s/credential.json %s/machine_uuid"
+            % (_posix(self.state_dir), _posix(self.state_dir))
+        )
+
     def start_service(self, restarted: bool) -> None:
         if self.options.skip_service or self.report.dry_run:
             return
@@ -626,8 +753,16 @@ class Installer:
         version = self.install_release(source)
         self.activate(version)
 
+        # 建镜像时最容易犯的错：在母机上跑过一次 Agent 就把整机做成镜像。
+        # 那样每台克隆机都带着同一个身份开机、互相覆盖，而且完全静默。
+        # 放在写配置之前检查 —— 那之后我们就要往状态目录里写东西了。
+        self.check_identity_leftovers()
+
+        key_installed = self.install_bootstrap_key()
+
         self.write_config(version)
         self.install_unit(version)
+        self.install_enroll_unit(has_bootstrap_key=key_installed)
         self.start_service(restarted=True)
 
         self.report.section("完成")
@@ -737,6 +872,69 @@ public_key = {public_key}
         install_root=_posix(install_root),
         public_key=public_key,
     )
+
+
+def render_enroll_unit(
+    prefix: Path,
+    config_path: Path,
+    state_dir: Path,
+    run_user: str,
+    python: str,
+) -> str:
+    """生成"以 root 身份注册一次"的 oneshot 单元。
+
+    要解决的问题：统一密钥是 **root 只读** 的（它泄露等于交出"无限注册"的能力），
+    而 Agent 服务以选手身份运行、根本读不到它。所以注册由这个单元做一次，
+    把凭据写进状态目录并交给选手账号，之后 Agent 只读凭据。
+
+    几个容易踩的点：
+
+    * ``Type=oneshot`` + ``RemainAfterExit=no``：它只在开机时跑一次就好。
+      **必须**在 Agent 之前跑完（``Before=``）—— 否则 Agent 先起来，发现没有
+      凭据就报错退出，然后被 ``Restart=`` 拉起，日志里刷一堆没必要的失败。
+    * **不要 ``Restart=``**：注册失败的原因多半是服务端没起、密钥被吊销、
+      网还没通。无限重试只会把日志刷满，``systemctl status`` 里反而看不清原因。
+      开机一次失败不致命 —— 下次开机还会再试，而且密钥没换的话它本来就会再试。
+    * ``chown-to`` 交给选手：写出来的凭据属主是 root，而读它的是选手。
+      不交出去的话，表现是"服务起来了但一直重新注册"，很难联想到是属主问题 ——
+      我们在 ``agent.ini`` 上已经踩过一次同样的坑。
+    """
+    return """\
+[Unit]
+Description=SyncOJ Agent 注册（用镜像里的统一密钥换回本机凭据，只跑一次）
+# 先有网再注册；Agent 本体必须等这一步做完
+After=network-online.target
+Wants=network-online.target
+Before=%(service)s
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+User=root
+# 和 Agent 本体同一条启动路径：-E -s + run_agent.py。
+# 用同一份代码注册，才不会出现"装机时能注册、开机后认不出来"
+ExecStart=%(python)s -E -s %(prefix)s/%(current)s/%(launcher)s \\
+    --config %(config)s --provision --chown-to %(user)s
+StandardOutput=journal
+StandardError=journal
+# 注册会读 status dir 与 /etc，不需要写系统目录
+ProtectSystem=strict
+ProtectControlGroups=yes
+NoNewPrivileges=yes
+ReadWritePaths=%(state)s
+
+[Install]
+WantedBy=multi-user.target
+""" % {
+        "service": UNIT_FILENAME,
+        "python": python,
+        "prefix": _posix(prefix),
+        "current": CURRENT_LINK,
+        "launcher": LAUNCHER_NAME,
+        "config": _posix(config_path),
+        "user": run_user,
+        "state": _posix(state_dir),
+    }
 
 
 def render_unit(
@@ -946,7 +1144,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     config = parser.add_argument_group("配置")
     config.add_argument("--server", help="服务端地址，如 https://10.0.0.1:8443")
-    config.add_argument("--enroll-code", help="教师端签发的注册码")
+    config.add_argument("--enroll-code", help="教师端签发的注册码（每选手一个那种）")
+    config.add_argument(
+        "--bootstrap-key",
+        help=(
+            "镜像统一注册密钥（syncoj-server bootstrap-key issue 签发的）。"
+            "写入 <config-dir>/bootstrap.key（0600，属主 root），"
+            "并装上开机注册单元。走这条路就不需要逐台发注册码。"
+        ),
+    )
     config.add_argument(
         "--scan-root",
         default=DEFAULT_SCAN_ROOT,

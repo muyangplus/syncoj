@@ -78,6 +78,11 @@ ca_file =
 [agent]
 # 注册码。教师端签发，绑定到本机。机器快照还原后靠它自动重新注册
 enroll_code =
+# 镜像内置的统一注册密钥文件（整间机房一份）。
+# 只有 root 读得到，所以这条路径通常用不上 —— 真正干活的是装机时装的
+# syncoj-enroll.service（root 身份跑一次，把凭据写进 state_dir）。
+# 留在这里是为了：root 直接跑 Agent 时能自己注册，以及排查时能手工触发。
+bootstrap_key_file = /etc/syncoj/bootstrap.key
 # 状态目录：存放凭据、哈希缓存、日志、未完成的下载
 state_dir = /var/lib/syncoj
 # 本机标识。留空则读取 /etc/machine-id（推荐）
@@ -85,6 +90,13 @@ machine_id =
 # 下发文件的落地根目录。
 # {desktop} 会自动探测当前用户的桌面（兼容「桌面」与 Desktop 两种命名）
 deploy_root = {desktop}
+
+[pairing]
+# 还没配对到选手时，把配对短码写到桌面上（<桌面>/配对码.txt），方便教师
+# 走过来读一眼。配对成功后这个文件会被删掉。
+show_on_desktop = true
+# 桌面上的文件名
+file_name = 配对码.txt
 
 [scan]
 # 要回收的代码目录，绝对路径。多个目录用换行或逗号分隔。
@@ -153,8 +165,18 @@ class AgentConfig:
     ca_file: Optional[Path] = None
 
     enroll_code: str = ""
+    #: 统一注册密钥文件（root 只读）。Agent 以选手身份跑时读不到它 ——
+    #: 那种情况下由 syncoj-enroll.service 以 root 身份先换好凭据
+    bootstrap_key_file: Optional[Path] = field(
+        default_factory=lambda: Path("/etc/syncoj/bootstrap.key")
+    )
     state_dir: Path = field(default_factory=lambda: Path("/var/lib/syncoj"))
     machine_id: str = ""
+
+    #: 未配对时是否把配对码写到桌面（教师走过来读一眼）
+    pairing_show_on_desktop: bool = True
+    #: 桌面上那个文件叫什么
+    pairing_file_name: str = "配对码.txt"
 
     scan_roots: List[Path] = field(default_factory=list)
     #: 上报路径的前缀策略：``none`` 不加、``auto`` 取根目录名、其他按字面量
@@ -329,6 +351,10 @@ class AgentConfig:
             verify_tls=_as_bool(parser.get("server", "verify_tls", fallback="true"), True),
             ca_file=_opt_path(parser.get("server", "ca_file", fallback="")),
             enroll_code=(parser.get("agent", "enroll_code", fallback="") or "").strip(),
+            bootstrap_key_file=_templated_path(
+                parser.get("agent", "bootstrap_key_file", fallback="/etc/syncoj/bootstrap.key")
+                or "/etc/syncoj/bootstrap.key"
+            ),
             state_dir=Path(
                 parser.get("agent", "state_dir", fallback="/var/lib/syncoj").strip()
                 or "/var/lib/syncoj"
@@ -348,6 +374,12 @@ class AgentConfig:
             log_level=(parser.get("log", "level", fallback="INFO") or "INFO").strip().upper(),
             log_file=_opt_path(parser.get("log", "file", fallback="")),
             log_to_stderr=_as_bool(parser.get("log", "to_stderr", fallback="false")),
+            pairing_show_on_desktop=_as_bool(
+                parser.get("pairing", "show_on_desktop", fallback="true"), True
+            ),
+            pairing_file_name=(
+                parser.get("pairing", "file_name", fallback="配对码.txt") or "配对码.txt"
+            ).strip(),
             upgrade_mode=(parser.get("upgrade", "mode", fallback="off") or "off").strip().lower(),
             install_root=Path(
                 parser.get("upgrade", "install_root", fallback="/opt/syncoj").strip()

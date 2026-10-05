@@ -142,6 +142,106 @@ def _sanitize(raw: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# 机器身份：UUID 与硬件指纹
+# --------------------------------------------------------------------------- #
+
+#: 硬件指纹的读取位置。SMBIOS UUID 是**物理机器**的标识，整机快照还原后
+#: 依然是同一个值 —— 这正是"还原之后能认出原来那台机器"所依赖的东西。
+#:
+#: 它和 ``/etc/machine-id`` 的区别很关键：machine-id 是**文件**，会随镜像克隆
+#: 被整批复制成同一个值；而 SMBIOS UUID 来自主板，克隆镜像不会克隆硬件。
+_FINGERPRINT_SOURCES = (
+    "/sys/class/dmi/id/product_uuid",
+    "/sys/devices/virtual/dmi/id/product_uuid",
+)
+
+
+def resolve_machine_uuid(state_dir: Path) -> str:
+    """本机身份 UUID，**首次运行时生成**并持久化。
+
+    为什么不用 ``/etc/machine-id`` 当身份：做镜像时如果忘了通用化，50 台克隆机
+    的 machine-id 完全相同，服务端会看到 50 个同 ID 的 Agent 互相覆盖，
+    而文件是**静默错的**。
+
+    生成时机也有讲究：**必须在首次开机之后**。如果在建镜像时跑过一次 Agent
+    （哪怕只是 ``--check``，它已经会建状态目录），UUID 就被烙进镜像了，
+    等于没生成 —— 而且是"看起来做了防护"的那种没做。installer 会在建镜像时
+    检查状态目录里有没有残留凭据并告警。
+    """
+    path = state_dir / "machine_uuid"
+    existing = _read_text(path)
+    if existing:
+        return _sanitize(existing)
+
+    generated = uuid.uuid4().hex
+    try:
+        atomic_write_text(path, generated + "\n", mode=0o600)
+    except OSError as exc:
+        log.warning("无法持久化 machine_uuid（%s），重启后可能被当成新机器", exc)
+    return generated
+
+
+def resolve_machine_fingerprint() -> str:
+    """硬件指纹。读不到就返回空串 —— **不要**退回主机名或 machine-id。
+
+    退回主机名会让一批同名机器互相认成同一台；退回 machine-id 则会在克隆镜像
+    时整批相同。两种"退而求其次"都会把"认回原机器"变成"认错机器"，
+    而认错的代价是一个学生的代码落进另一个人的目录，且完全静默。
+
+    空串是安全的：服务端见到空指纹就当新机器处理，走人工配对。
+    """
+    for candidate in _FINGERPRINT_SOURCES:
+        value = _read_text(candidate)
+        if value:
+            cleaned = _sanitize(value)
+            # 虚拟机与某些 OEM 主板会给出全 0 或全 F 的 UUID，那不是身份
+            compact = cleaned.replace("-", "").lower()
+            if set(compact) <= {"0"} or set(compact) <= {"f"}:
+                continue
+            return cleaned
+    return ""
+
+
+def _read_text(path: Path) -> str:
+    try:
+        with open(str(path), "r", encoding="utf-8") as handle:
+            return handle.read().strip()
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def _read_text_or_none(path: Path) -> Optional[str]:
+    """读文件；**不存在返回 None，读不到返回空串**。
+
+    两者的区别很重要：前者是"这里没有这个文件"，后者是"有这个文件但我没权限"。
+    统一密钥文件必须区分这两种情况 —— 权限不足是部署问题，得说出来；
+    文件不存在才说明"这台机器走的是每选手注册码那条路"。
+    """
+    try:
+        with open(str(path), "r", encoding="utf-8") as handle:
+            return handle.read().strip()
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as exc:
+        log.warning("无法读取 %s：%s", path, exc)
+        return ""
+
+
+def read_bootstrap_key(path: Optional[Path]) -> Optional[str]:
+    """读统一密钥文件。
+
+    返回 ``None`` 表示"没有配置或文件不存在"；返回空串表示"文件在但读不到"。
+    调用方要能区分这两者，见 ``_read_text_or_none``。
+    """
+    if path is None:
+        return None
+    raw = _read_text_or_none(Path(path))
+    if raw is None:
+        return None
+    return raw
+
+
+# --------------------------------------------------------------------------- #
 # 凭据
 # --------------------------------------------------------------------------- #
 
@@ -149,13 +249,21 @@ def _sanitize(raw: str) -> str:
 @dataclass
 class Credential:
     token: str
-    agent_id: int
-    player_no: str
-    contest_id: int
-    contest_slug: str
+    player_no: str = ""
+    contest_id: int = 0
+    contest_slug: str = ""
     contest_name: str = ""
+    #: 服务端分配的机器编号。**未配对时是 0** —— 那时服务端还没有为这台机器
+    #: 建 agent 行，它只是排队等着被认领
+    agent_id: int = 0
     machine_id: str = ""
     server_url: str = ""
+    #: 是否已经配对到选手。False = 这台机器还在服务端的待认领列表里。
+    #: 老版本写的凭据没有这个字段，反序列化时默认为 True（那时只有已配对这一种）
+    claimed: bool = True
+    #: 未配对时的短码。它要被人从这台机器上读出来，所以明文留在这里 ——
+    #: 服务端那边只有哈希，明文只在注册那一刻下发过一次
+    pair_code: str = ""
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2, ensure_ascii=False)
@@ -164,17 +272,29 @@ class Credential:
     def from_dict(cls, data: dict) -> "Credential":
         return cls(
             token=str(data.get("token", "")),
-            agent_id=int(data.get("agent_id", 0) or 0),
             player_no=str(data.get("player_no", "")),
             contest_id=int(data.get("contest_id", 0) or 0),
             contest_slug=str(data.get("contest_slug", "")),
             contest_name=str(data.get("contest_name", "")),
+            agent_id=int(data.get("agent_id", 0) or 0),
             machine_id=str(data.get("machine_id", "")),
             server_url=str(data.get("server_url", "")),
+            claimed=bool(data.get("claimed", True)),
+            pair_code=str(data.get("pair_code", "")),
         )
 
     def is_usable(self) -> bool:
-        return bool(self.token) and self.agent_id > 0
+        """有 token 就能用 —— 未配对的机器也有 token。
+
+        **不要**再把 ``agent_id > 0`` 当成可用的条件：未配对的机器 agent_id 就是
+        0，按老判据会被当成"没有凭据"而反复重新注册，刷限速、刷审计，
+        而真正的原因（还没配对）永远显示不出来。
+        """
+        return bool(self.token)
+
+    @property
+    def needs_pairing(self) -> bool:
+        return bool(self.token) and not self.claimed
 
 
 def load_credential(path: Path) -> Optional[Credential]:

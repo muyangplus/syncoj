@@ -1,0 +1,494 @@
+"""管理后台 API。
+
+单管理员模型：登录换取不透明会话 token（服务端只存哈希，可按会话吊销）。
+M1 阶段只覆盖"建场次 → 导选手 → 发注册码 → 看在线上报"这条闭环。
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from dataclasses import dataclass
+from datetime import timedelta
+from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy import func, select
+
+from ..context import AppContext
+from ..models import (
+    Admin,
+    AdminSession,
+    Agent,
+    Contest,
+    ContestStatus,
+    EnrollCode,
+    EventLog,
+    Player,
+    SourceFile,
+    utcnow,
+)
+from ..paths import slugify
+from ..schemas import (
+    AdminInfo,
+    AgentRuntimeOut,
+    ContestCreate,
+    ContestOut,
+    EnrollCodeOut,
+    EventOut,
+    LoginRequest,
+    LoginResponse,
+    PlayerOut,
+    PlayerUpsert,
+    SimpleAck,
+    SourceFileOut,
+)
+from ..security import (
+    hash_enroll_code,
+    hash_password,
+    hash_token,
+    new_enroll_code,
+    new_token,
+    verify_password,
+)
+from .deps import get_ctx
+
+__all__ = ["router", "require_admin", "AdminIdentity"]
+
+log = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
+
+_ISO = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def _iso(value) -> Optional[str]:
+    return value.strftime(_ISO) if value else None
+
+
+@dataclass
+class AdminIdentity:
+    id: int
+    username: str
+
+
+def _unauthorized(detail: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=detail,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def require_admin(request: Request, ctx: AppContext = Depends(get_ctx)) -> AdminIdentity:
+    header = request.headers.get("authorization") or ""
+    if not header.lower().startswith("bearer "):
+        raise _unauthorized("缺少 Bearer 凭据")
+    raw = header[7:].strip()
+    if not raw:
+        raise _unauthorized("凭据为空")
+
+    now = utcnow()
+    with ctx.db.session() as session:
+        row = session.execute(
+            select(AdminSession, Admin)
+            .join(Admin, AdminSession.admin_id == Admin.id)
+            .where(AdminSession.token_hash == hash_token(raw))
+        ).first()
+        if row is None:
+            raise _unauthorized("会话无效")
+        admin_session, admin = row
+        if admin_session.revoked_at is not None:
+            raise _unauthorized("会话已注销")
+        if admin_session.expires_at < now:
+            raise _unauthorized("会话已过期")
+        if not admin.is_active:
+            raise _unauthorized("账号已停用")
+        return AdminIdentity(id=admin.id, username=admin.username)
+
+
+# --------------------------------------------------------------------------- #
+# 登录
+# --------------------------------------------------------------------------- #
+
+
+@router.post("/login", response_model=LoginResponse)
+def login(payload: LoginRequest, ctx: AppContext = Depends(get_ctx)) -> LoginResponse:
+    now = utcnow()
+    raw_token = new_token(ctx.settings.token_bytes)
+    expires_at = now + timedelta(seconds=ctx.settings.admin_session_ttl_seconds)
+
+    with ctx.db.session() as session:
+        admin = session.execute(
+            select(Admin).where(Admin.username == payload.username)
+        ).scalar_one_or_none()
+
+        # 无论账号是否存在都跑一次口令校验，避免通过响应时间枚举用户名
+        stored = admin.password_hash if admin else _DUMMY_HASH
+        ok = verify_password(payload.password, stored)
+        if admin is None or not ok or not admin.is_active:
+            log.warning("管理员登录失败: %s", payload.username)
+            raise _unauthorized("用户名或口令错误")
+
+        admin.last_login_at = now
+        session.add(
+            AdminSession(
+                admin_id=admin.id,
+                token_hash=hash_token(raw_token),
+                created_at=now,
+                expires_at=expires_at,
+            )
+        )
+        username = admin.username
+
+    return LoginResponse(token=raw_token, username=username, expires_at=_iso(expires_at))
+
+
+#: 用户名不存在时用来消耗等量 CPU 的假哈希（口令为 "invalid"）
+_DUMMY_HASH = hash_password("invalid")
+
+
+@router.post("/logout", response_model=SimpleAck)
+def logout(
+    request: Request,
+    ctx: AppContext = Depends(get_ctx),
+) -> SimpleAck:
+    header = request.headers.get("authorization") or ""
+    raw = header[7:].strip() if header.lower().startswith("bearer ") else ""
+    if not raw:
+        return SimpleAck(ok=True, detail="未提供凭据")
+    with ctx.db.session() as session:
+        row = session.execute(
+            select(AdminSession).where(AdminSession.token_hash == hash_token(raw))
+        ).scalar_one_or_none()
+        if row is not None:
+            row.revoked_at = utcnow()
+    return SimpleAck(ok=True)
+
+
+@router.get("/me", response_model=AdminInfo)
+def me(admin: AdminIdentity = Depends(require_admin)) -> AdminInfo:
+    return AdminInfo(username=admin.username, is_active=True)
+
+
+# --------------------------------------------------------------------------- #
+# 场次
+# --------------------------------------------------------------------------- #
+
+
+@router.post("/contests", response_model=ContestOut)
+def create_contest(
+    payload: ContestCreate,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> ContestOut:
+    status_value = payload.status if payload.status in ContestStatus.ALL else ContestStatus.DRAFT
+    slug = slugify(payload.slug or payload.name, fallback="contest")
+
+    with ctx.db.session() as session:
+        if session.execute(select(Contest).where(Contest.slug == slug)).scalar_one_or_none():
+            raise HTTPException(status_code=409, detail="场次标识已存在: %s" % slug)
+        contest = Contest(slug=slug, name=payload.name, status=status_value, note=payload.note)
+        session.add(contest)
+        session.flush()
+        return _contest_out(contest, player_count=0, online_count=0)
+
+
+@router.get("/contests", response_model=List[ContestOut])
+def list_contests(
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> List[ContestOut]:
+    with ctx.db.session() as session:
+        counts = dict(
+            session.execute(
+                select(Player.contest_id, func.count(Player.id)).group_by(Player.contest_id)
+            ).all()
+        )
+        contests = list(session.execute(select(Contest).order_by(Contest.id)).scalars())
+        result = []
+        for contest in contests:
+            online = sum(1 for a in ctx.registry.all(contest.id) if a.online)
+            result.append(_contest_out(contest, counts.get(contest.id, 0), online))
+        return result
+
+
+def _contest_out(contest: Contest, player_count: int, online_count: int) -> ContestOut:
+    return ContestOut(
+        id=contest.id,
+        slug=contest.slug,
+        name=contest.name,
+        status=contest.status,
+        player_count=player_count,
+        online_count=online_count,
+        created_at=_iso(contest.created_at) or "",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 选手
+# --------------------------------------------------------------------------- #
+
+
+@router.post("/contests/{contest_id}/players", response_model=List[PlayerOut])
+def import_players(
+    contest_id: int,
+    payload: List[PlayerUpsert],
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> List[PlayerOut]:
+    """批量导入/更新选手。按 ``player_no`` 幂等 upsert。"""
+    if not payload:
+        return []
+    if len(payload) > 2000:
+        raise HTTPException(status_code=413, detail="单次最多导入 2000 名选手")
+
+    with ctx.db.session() as session:
+        contest = session.get(Contest, contest_id)
+        if contest is None:
+            raise HTTPException(status_code=404, detail="场次不存在")
+
+        existing = {
+            row.player_no: row
+            for row in session.execute(
+                select(Player).where(Player.contest_id == contest_id)
+            ).scalars()
+        }
+        touched: List[Player] = []
+        for item in payload:
+            row = existing.get(item.player_no)
+            if row is None:
+                row = Player(contest_id=contest_id, player_no=item.player_no)
+                session.add(row)
+                existing[item.player_no] = row
+            row.name = item.name
+            row.seat = item.seat
+            row.group_name = item.group_name
+            touched.append(row)
+
+        # 必须先 flush 才能拿到自增主键 —— 新插入的行在 flush 前 id 为 None
+        session.flush()
+        return [
+            _player_out(row, has_agent=False, online=False, file_count=0, last_tick=None)
+            for row in touched
+        ]
+
+
+@router.get("/contests/{contest_id}/players", response_model=List[PlayerOut])
+def list_players(
+    contest_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> List[PlayerOut]:
+    with ctx.db.session() as session:
+        players = list(
+            session.execute(
+                select(Player).where(Player.contest_id == contest_id).order_by(Player.player_no)
+            ).scalars()
+        )
+        agent_counts = dict(
+            session.execute(
+                select(Agent.player_id, func.count(Agent.id))
+                .where(Agent.revoked_at.is_(None))
+                .group_by(Agent.player_id)
+            ).all()
+        )
+        file_counts = dict(
+            session.execute(
+                select(SourceFile.player_id, func.count(SourceFile.id))
+                .where(SourceFile.deleted_at.is_(None))
+                .group_by(SourceFile.player_id)
+            ).all()
+        )
+
+    # 在线状态走内存注册表，不查库
+    runtime_by_player = {a.player_id: a for a in ctx.registry.all(contest_id)}
+
+    result = []
+    for player in players:
+        runtime = runtime_by_player.get(player.id)
+        result.append(
+            _player_out(
+                player,
+                has_agent=bool(agent_counts.get(player.id, 0)),
+                online=bool(runtime and runtime.online),
+                file_count=file_counts.get(player.id, 0),
+                last_tick=runtime.last_tick_at if runtime else None,
+            )
+        )
+    return result
+
+
+def _player_out(
+    player: Player,
+    has_agent: bool,
+    online: bool,
+    file_count: int,
+    last_tick,
+) -> PlayerOut:
+    return PlayerOut(
+        id=player.id,
+        contest_id=player.contest_id,
+        player_no=player.player_no,
+        name=player.name,
+        seat=player.seat,
+        group_name=player.group_name,
+        has_agent=has_agent,
+        online=online,
+        file_count=file_count,
+        last_tick_at=_iso(last_tick),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 注册码
+# --------------------------------------------------------------------------- #
+
+
+@router.post("/players/{player_id}/enroll-code", response_model=EnrollCodeOut)
+def issue_enroll_code(
+    player_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> EnrollCodeOut:
+    """签发（或重新签发）该选手的注册码。
+
+    注册码长期有效、可重复使用 —— 它是"机器凭据种子"，供快照还原后自愈。
+    重新签发会吊销该选手此前所有未绑定的注册码。
+    """
+    now = utcnow()
+    raw_code = new_enroll_code(ctx.settings.enroll_code_bytes)
+
+    with ctx.db.session() as session:
+        player = session.get(Player, player_id)
+        if player is None:
+            raise HTTPException(status_code=404, detail="选手不存在")
+
+        for old in session.execute(
+            select(EnrollCode).where(
+                EnrollCode.player_id == player_id,
+                EnrollCode.revoked_at.is_(None),
+            )
+        ).scalars():
+            old.revoked_at = now
+
+        session.add(
+            EnrollCode(
+                code_hash=hash_enroll_code(raw_code),
+                player_id=player_id,
+                note="为选手 %s 签发" % player.player_no,
+            )
+        )
+        return EnrollCodeOut(
+            player_id=player_id,
+            player_no=player.player_no,
+            code=raw_code,
+            expires_at=None,
+            note="长期有效；机器还原后可重复使用",
+        )
+
+
+# --------------------------------------------------------------------------- #
+# 在线状态 / 文件台账 / 审计
+# --------------------------------------------------------------------------- #
+
+
+@router.get("/contests/{contest_id}/agents", response_model=List[AgentRuntimeOut])
+def list_agents(
+    contest_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> List[AgentRuntimeOut]:
+    return [AgentRuntimeOut(**a.to_public_dict()) for a in ctx.registry.all(contest_id)]
+
+
+@router.get("/contests/{contest_id}/files", response_model=List[SourceFileOut])
+def list_files(
+    contest_id: int,
+    player_id: Optional[int] = None,
+    include_deleted: bool = False,
+    limit: int = 500,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> List[SourceFileOut]:
+    limit = max(1, min(limit, 5000))
+    with ctx.db.session() as session:
+        stmt = (
+            select(SourceFile, Player.player_no)
+            .join(Player, SourceFile.player_id == Player.id)
+            .where(Player.contest_id == contest_id)
+        )
+        if player_id is not None:
+            stmt = stmt.where(SourceFile.player_id == player_id)
+        if not include_deleted:
+            stmt = stmt.where(SourceFile.deleted_at.is_(None))
+        stmt = stmt.order_by(SourceFile.player_id, SourceFile.rel_path).limit(limit)
+
+        return [
+            SourceFileOut(
+                id=row.id,
+                player_id=row.player_id,
+                player_no=player_no,
+                rel_path=row.rel_path,
+                sha256=row.sha256,
+                size=row.size,
+                revision=row.revision,
+                content_stored=row.content_stored,
+                first_seen_at=_iso(row.first_seen_at) or "",
+                last_seen_at=_iso(row.last_seen_at) or "",
+                deleted_at=_iso(row.deleted_at),
+            )
+            for row, player_no in session.execute(stmt)
+        ]
+
+
+@router.get("/contests/{contest_id}/events", response_model=List[EventOut])
+def list_events(
+    contest_id: int,
+    limit: int = 200,
+    category: Optional[str] = None,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> List[EventOut]:
+    limit = max(1, min(limit, 2000))
+    with ctx.db.session() as session:
+        stmt = (
+            select(EventLog, Player.player_no)
+            .outerjoin(Player, EventLog.player_id == Player.id)
+            .where(EventLog.contest_id == contest_id)
+        )
+        if category:
+            stmt = stmt.where(EventLog.category == category)
+        stmt = stmt.order_by(EventLog.id.desc()).limit(limit)
+
+        out = []
+        for row, player_no in session.execute(stmt):
+            meta = None
+            if row.meta_json:
+                try:
+                    meta = json.loads(row.meta_json)
+                except ValueError:
+                    meta = {"_raw": row.meta_json[:500]}
+            out.append(
+                EventOut(
+                    id=row.id,
+                    ts=_iso(row.ts) or "",
+                    level=row.level,
+                    category=row.category,
+                    player_no=player_no,
+                    message=row.message,
+                    meta=meta,
+                )
+            )
+        return out
+
+
+@router.get("/health")
+def health(ctx: AppContext = Depends(get_ctx)) -> Dict[str, Any]:
+    agents = ctx.registry.all()
+    return {
+        "ok": ctx.db.healthcheck(),
+        "agents_total": len(agents),
+        "agents_online": sum(1 for a in agents if a.online),
+        "data_root": str(ctx.settings.data_root),
+    }

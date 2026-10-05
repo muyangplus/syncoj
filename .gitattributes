@@ -1,0 +1,23 @@
+# 统一换行符策略。
+# 目标机是 Linux：shell 脚本 / systemd unit 若带 CRLF 会直接报
+# "bad interpreter: /bin/bash^M"，必须在索引层强制 LF。
+
+* text=auto
+
+# 必须在 Linux 上以 LF 存在
+*.sh      text eol=lf
+*.py      text eol=lf
+*.ini     text eol=lf
+*.tmpl    text eol=lf
+
+# Windows 侧脚本保持 CRLF
+*.ps1     text eol=crlf
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+
+# 二进制
+*.db      binary
+*.png     binary
+*.jpg     binary
+*.gz      binary
+*.whl     binary

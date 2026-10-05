@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "syncoj-server"
+version = "0.1.0"
+description = "SyncOJ 服务端：选手代码回收、文件下发、在线状态与成绩回写"
+requires-python = ">=3.8"
+dependencies = [
+    "fastapi>=0.100,<1.0",
+    "uvicorn[standard]>=0.23",
+    "sqlalchemy>=2.0,<3.0",
+    "pydantic>=2.0,<3.0",
+    "python-multipart>=0.0.6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "httpx>=0.24",
+]
+
+[project.scripts]
+syncoj-server = "syncoj_server.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["syncoj_server*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

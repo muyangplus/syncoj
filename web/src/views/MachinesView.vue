@@ -38,7 +38,9 @@ const alerts = ref<CloneAlertOut[]>([])
 
 async function loadAlerts(): Promise<void> {
   try {
-    alerts.value = await machineApi.cloneAlerts()
+    // `.items` 不能省：列表接口返回的是信封 {items,total,limit,offset}，
+    // 少了它 `alerts` 就是个对象，v-for 会遍历出 4 个字段名当告警。
+    alerts.value = (await machineApi.cloneAlerts()).items
   } catch {
     // 告警拉不到不影响配对，安静降级：页面主体是配对，不是告警
     alerts.value = []
@@ -259,22 +261,42 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
       <el-button size="small" @click="issueOpen = true">签发统一密钥</el-button>
     </template>
 
-    <!-- 克隆镜像告警：多台机器共用同一个硬件指纹，是"镜像在跑过之后才克隆"的信号 -->
+    <!--
+      克隆镜像告警：多台机器共用同一个硬件指纹，是"镜像在跑过之后才克隆"的信号。
+
+      但严重程度取决于**有没有人已经被绑上去**：一份镜像装遍整间机房时撞指纹是必然
+      也是正常的，那时一台都还没配对，没有任何人的身份可被冒领 —— 对着教师喊"可能
+      混进了别人的凭据"是错的。真的有人挂在这个指纹上时才是警告，因为快照还原那条
+      "按指纹认回原机器"会认错机器，而错的那一头就是某个学生的成绩。
+    -->
     <el-alert
       v-for="alert in alerts"
       :key="alert.fingerprint"
-      type="warning"
+      :type="alert.bound_count > 0 ? 'warning' : 'info'"
       :closable="false"
       show-icon
       style="margin-bottom: 12px"
     >
-        <template #title>疑似克隆镜像：{{ alert.machine_count }} 台机器共用同一个硬件指纹</template>
-        <template #default>
-          {{ alert.fingerprint }}<br />
-          撞指纹说明镜像是在某台机器跑过之后才克隆的，那批机器里可能混进了别人的凭据。
+      <template #title>
+        <template v-if="alert.bound_count > 0">
+          疑似克隆镜像：{{ alert.machine_count }} 台机器共用同一个硬件指纹，
+          其中 {{ alert.bound_count }} 台已经配给了人
+        </template>
+        <template v-else>
+          {{ alert.machine_count }} 台机器共用同一个硬件指纹（都还没配对）
+        </template>
+      </template>
+      <template #default>
+        <span class="mono">{{ alert.fingerprint }}</span><br />
+        <template v-if="alert.bound_count > 0">
           <strong>建议逐台确认配对，别用「从列表里配对」批量点。</strong>
         </template>
-      </el-alert>
+        <template v-else>
+          整间机房用同一份镜像时撞指纹是正常的，现在还没有谁的身份可被冒领。
+          配对之后要留意：快照还原的「按指纹认回原机器」可能认错机器。
+        </template>
+      </template>
+    </el-alert>
 
     <el-card shadow="never" style="margin-bottom: 12px">
       <div class="pair-row">

@@ -259,8 +259,16 @@ export const machineApi = {
   pending: (params: ListParams = {}, signal?: AbortSignal) =>
     listPage<PendingMachineOut>(paths.machinesPending(), { limit: 500, ...params }, signal),
 
-  /** 疑似克隆镜像：多台机器共用同一个硬件指纹。 */
-  cloneAlerts: () => request<CloneAlertOut[]>(paths.machinesCloneAlerts()),
+  /**
+   * 疑似克隆镜像：多台机器共用同一个硬件指纹。
+   *
+   * 必须走 `listPage` —— 服务端返回的是信封。写成 `request<CloneAlertOut[]>` 时
+   * TypeScript 不会拦（那只是一个断言），运行期拿到的是**整个信封对象**，
+   * 而 `v-for` 遍历对象会遍历出它的字段名：items / total / limit / offset，
+   * 于是界面上冒出 4 条一模一样的告警、每条的数字都是空的。
+   */
+  cloneAlerts: (params: ListParams = {}, signal?: AbortSignal) =>
+    listPage<CloneAlertOut>(paths.machinesCloneAlerts(), { limit: 500, ...params }, signal),
 
   /** 按配对码配对：机器上显示什么就输什么。六位数字，用一次即作废。 */
   bindByCode: (pairCode: string, rosterEntryId: number) =>

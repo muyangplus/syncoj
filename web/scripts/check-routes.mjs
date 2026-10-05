@@ -87,6 +87,39 @@ function serverPaths() {
 }
 
 /**
+ * `endpoints.ts` 里的 `名字 → 归一化路径`。
+ *
+ * 需要它才能回答"`index.ts` 里这一行的 `paths.xxx()` 到底打到哪个接口"，
+ * 而下面那条信封规则必须知道这个。
+ */
+function pathNames() {
+  const text = readFileSync(join(SRC, 'api', 'endpoints.ts'), 'utf8')
+  const found = new Map()
+  for (const line of text.split('\n')) {
+    const name = /^\s{2}(\w+):\s*\(\)\s*=>/.exec(line)
+    const path = /`(\$\{ADMIN\}[^`]*)`/.exec(line)
+    if (name && path) {
+      found.set(name[1], normalize(path[1].replace('${ADMIN}', '/api/v1/admin')))
+    }
+  }
+  return found
+}
+
+/** 服务端返回**信封**（`Page_*`）的接口。 */
+function envelopePaths() {
+  const spec = JSON.parse(readFileSync(join(WEB_ROOT, 'openapi.json'), 'utf8'))
+  const found = new Set()
+  for (const [path, operations] of Object.entries(spec.paths ?? {})) {
+    const schema =
+      operations.get?.responses?.['200']?.content?.['application/json']?.schema ?? {}
+    if (typeof schema.$ref === 'string' && schema.$ref.includes('Page_')) {
+      found.add(normalize(path))
+    }
+  }
+  return found
+}
+
+/**
  * `api/index.ts` 里 `export const xApi = {` 下的方法名 → `xApi.method`。
  *
  * 靠**缩进**认方法：每个资源的 `export const xApi = {` 在顶层，它的方法固定在
@@ -147,6 +180,71 @@ for (const [path, line] of declaredPaths) {
   if (!known.has(path)) {
     problems.push(`前端写了服务端没有的路径：${path}\n      ${line}`)
   }
+}
+
+// 信封接口必须用 `listPage` 取。
+//
+// 这条规则来自一个真实故障：`cloneAlerts` 曾写成 `request<CloneAlertOut[]>`。
+// `request<T>` 里的 T 只是一个**类型断言**，TypeScript 不会拦 —— 运行期拿到的
+// 是**整个信封对象**，而 `v-for` 遍历对象会遍历出它的字段名
+// （items / total / limit / offset），界面上就是 4 条一模一样的告警、数字全是空的。
+// 类型系统、vue-tsc、vite build 全程都是绿的，只有人眼能看出来。
+//
+// 不能简单地说"引用了信封路径的行必须含 listPage"：同一个路径往往既被
+// `list`（GET，信封）用、也被 `create`（POST，单个对象）用，后者当然不用
+// `listPage`。所以判据取两个**精确**的：
+//   ① 把信封路径断言成数组（`request<T[]>`）—— 这是那个 bug 的签名
+//   ② 一个信封路径在 index.ts 里被引用过、却没有任何一处走 listPage
+const envelopes = envelopePaths()
+const endpointNames = pathNames()
+const indexLines = readFileSync(join(SRC, 'api', 'index.ts'), 'utf8').split('\n')
+
+const envelopeRefs = new Map()
+let listPageCalls = 0
+for (const line of indexLines) {
+  for (const match of line.matchAll(/\bpaths\.(\w+)\(/g)) {
+    const path = endpointNames.get(match[1])
+    if (!path || !envelopes.has(path)) continue
+
+    const entry = envelopeRefs.get(path) ?? { count: 0, listPage: 0, firstLine: line.trim() }
+    entry.count += 1
+    if (line.includes('listPage')) {
+      entry.listPage += 1
+      listPageCalls += 1
+    }
+    envelopeRefs.set(path, entry)
+
+    if (/request<[^<]*\[\]>/.test(line)) {
+      problems.push(
+        `信封接口被断言成了裸数组：paths.${match[1]}() → ${path}\n` +
+          '      服务端返回 {items,total,limit,offset}。写 request<T[]> 时 TypeScript 不会拦，\n' +
+          '      而 v-for 遍历那个对象会遍历出 items/total/limit/offset 四个假条目；\n' +
+          '      必须用 listPage<T>()。\n' +
+          `      ${line.trim()}`,
+      )
+    }
+  }
+}
+
+for (const [path, entry] of envelopeRefs) {
+  if (entry.listPage === 0) {
+    problems.push(
+      `信封接口没有任何 listPage 调用：${path}\n` +
+        `      它在 index.ts 里被引用了 ${entry.count} 次，却没有一处走 listPage；\n` +
+        `      ${entry.firstLine}`,
+    )
+  }
+}
+
+// 这条规则一旦"什么也没匹配上"就等于没有，那时它会永远绿。所以显式证明它看到了东西。
+if (envelopes.size === 0 || envelopeRefs.size === 0 || listPageCalls === 0) {
+  console.error(
+    '入口对账自身失效：从 openapi.json 认出信封接口 ' + envelopes.size + ' 条、' +
+      `在 index.ts 里匹配到 ${envelopeRefs.size} 条被引用的信封路径、` +
+      `${listPageCalls} 处 listPage 调用。` +
+      '多半是解析规则失效了 —— 改规则，不要放过这条检查。',
+  )
+  process.exit(1)
 }
 
 const sites = callSites()

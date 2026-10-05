@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
+import pytest
 from fastapi.testclient import TestClient
 
 from conftest import agent_headers
@@ -101,6 +102,26 @@ def age_agent(app, machine_id: str, seconds: int = 3600) -> None:
         agent.last_seen_at = utcnow() - timedelta(seconds=seconds)
 
 
+@pytest.fixture()
+def boot_contest(client: TestClient, admin_headers: dict, contest: dict) -> Dict:
+    """把场次切成"镜像统一密钥"模式。
+
+    新建场次的默认是「每选手注册码」，而**服务端会据此拒绝配对** ——
+    一个声明"机器靠注册码进来"的场次，不该悄悄接受统一密钥注册上来的机器
+    （否则那个设置就只是装饰，而一个没有效果的设置比没有设置更糟：
+    它会让人以为自己明明选对了）。
+
+    所以想测配对的用例必须先显式声明这个场次走统一密钥。
+    """
+    response = client.patch(
+        "/api/v1/admin/contests/%d" % contest["id"],
+        json={"enrollment_mode": "bootstrap"},
+        headers=admin_headers,
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
 # --------------------------------------------------------------------------- #
 # 密钥管理
 # --------------------------------------------------------------------------- #
@@ -144,13 +165,13 @@ def test_enroll_needs_some_credential(client: TestClient, admin_headers: dict) -
 
 
 def test_revoking_a_key_does_not_affect_registered_machines(
-    client: TestClient, admin_headers: dict, contest: dict
+    client: TestClient, admin_headers: dict, boot_contest: dict
 ) -> None:
     """已经注册好的机器手里是各自的 token，不是这把密钥。"""
     issued = issue_key(client, admin_headers)
     enrolled = enroll_with_key(client, issued["key"], machine_id="m-1").json()
 
-    player = add_player(client, admin_headers, contest, "S001")
+    player = add_player(client, admin_headers, boot_contest, "S001")
     client.post(
         "/api/v1/admin/machines/claim-by-code",
         json={"pair_code": enrolled["pair_code"], "player_id": player["id"]},
@@ -260,11 +281,11 @@ def test_unclaimed_scan_is_discarded(
 
 
 def test_claim_by_code_binds_the_right_player(
-    client: TestClient, admin_headers: dict, contest: dict
+    client: TestClient, admin_headers: dict, boot_contest: dict
 ) -> None:
     issued = issue_key(client, admin_headers)
     enrolled = enroll_with_key(client, issued["key"], machine_id="m-1").json()
-    player = add_player(client, admin_headers, contest, "S001")
+    player = add_player(client, admin_headers, boot_contest, "S001")
 
     response = client.post(
         "/api/v1/admin/machines/claim-by-code",
@@ -286,12 +307,12 @@ def test_claim_by_code_binds_the_right_player(
 
 
 def test_claim_code_is_case_insensitive(
-    client: TestClient, admin_headers: dict, contest: dict
+    client: TestClient, admin_headers: dict, boot_contest: dict
 ) -> None:
     """教师是照着机器抄的，不该因为大小写或连字符被为难。"""
     issued = issue_key(client, admin_headers)
     enrolled = enroll_with_key(client, issued["key"], machine_id="m-1").json()
-    player = add_player(client, admin_headers, contest, "S001")
+    player = add_player(client, admin_headers, boot_contest, "S001")
 
     messy = enrolled["pair_code"].lower()
     response = client.post(
@@ -303,12 +324,12 @@ def test_claim_code_is_case_insensitive(
 
 
 def test_claim_by_id_without_code(
-    client: TestClient, admin_headers: dict, contest: dict
+    client: TestClient, admin_headers: dict, boot_contest: dict
 ) -> None:
     """从列表里按主机名直接认领（教师能看到主机名时最省事）。"""
     issued = issue_key(client, admin_headers)
     enroll_with_key(client, issued["key"], machine_id="m-1", hostname="exam-pc-07")
-    player = add_player(client, admin_headers, contest, "S001")
+    player = add_player(client, admin_headers, boot_contest, "S001")
     claim_id = pending(client, admin_headers)[0]["id"]
 
     response = client.post(
@@ -320,12 +341,12 @@ def test_claim_by_id_without_code(
 
 
 def test_claim_by_id_with_wrong_code_is_rejected(
-    client: TestClient, admin_headers: dict, contest: dict
+    client: TestClient, admin_headers: dict, boot_contest: dict
 ) -> None:
     """给了配对码就必须对得上 —— 主机名可能是重复的，码才是"我站在机器前"的证据。"""
     issued = issue_key(client, admin_headers)
     enroll_with_key(client, issued["key"], machine_id="m-1")
-    player = add_player(client, admin_headers, contest, "S001")
+    player = add_player(client, admin_headers, boot_contest, "S001")
     claim_id = pending(client, admin_headers)[0]["id"]
 
     response = client.post(
@@ -338,7 +359,7 @@ def test_claim_by_id_with_wrong_code_is_rejected(
 
 
 def test_expired_pair_code_is_rejected(
-    client: TestClient, admin_headers: dict, contest: dict, app
+    client: TestClient, admin_headers: dict, boot_contest: dict, app
 ) -> None:
     from datetime import timedelta
 
@@ -346,7 +367,7 @@ def test_expired_pair_code_is_rejected(
 
     issued = issue_key(client, admin_headers)
     enrolled = enroll_with_key(client, issued["key"], machine_id="m-1").json()
-    player = add_player(client, admin_headers, contest, "S001")
+    player = add_player(client, admin_headers, boot_contest, "S001")
 
     with app.state.ctx.db.session() as session:
         claim = session.query(MachineClaim).one()
@@ -362,7 +383,7 @@ def test_expired_pair_code_is_rejected(
 
 
 def test_one_player_cannot_have_two_machines(
-    client: TestClient, admin_headers: dict, contest: dict
+    client: TestClient, admin_headers: dict, boot_contest: dict
 ) -> None:
     """两台机器认领到同一个选手：代码会往同一个目录里写，而且是静默的。
 
@@ -372,7 +393,7 @@ def test_one_player_cannot_have_two_machines(
     key = issue_key(client, admin_headers)["key"]
     first = enroll_with_key(client, key, machine_id="m-1").json()
     second = enroll_with_key(client, key, machine_id="m-2").json()
-    player = add_player(client, admin_headers, contest, "S001")
+    player = add_player(client, admin_headers, boot_contest, "S001")
 
     ok = client.post(
         "/api/v1/admin/machines/claim-by-code",
@@ -396,6 +417,84 @@ def test_claiming_requires_admin(client: TestClient, contest: dict) -> None:
         json={"pair_code": "ABCDEF", "player_id": 1},
     )
     assert response.status_code == 401
+
+
+def test_claim_is_refused_when_the_contest_uses_per_player_codes(
+    client: TestClient, admin_headers: dict, contest: dict
+) -> None:
+    """场次的注册方式必须**真的起作用**。
+
+    一个声明"机器靠注册码进来"的场次，不该悄悄接受统一密钥注册上来的机器 ——
+    否则那个设置就只是装饰，而一个没有效果的设置比没有设置更糟：
+    它会让人以为自己明明选对了。
+
+    拒绝而不是警告：警告在两个方向上都可能被忽略；而这里拒绝的成本很低
+    （把场次的注册方式改一下，或者用单人码注册这一台），
+    错误信息里也说清了这两条路。
+    """
+    key = issue_key(client, admin_headers)["key"]
+    enrolled = enroll_with_key(client, key, machine_id="m-1").json()
+    player = add_player(client, admin_headers, contest, "S001")
+
+    assert contest["enrollment_mode"] == "per_player_code"
+
+    response = client.post(
+        "/api/v1/admin/machines/claim-by-code",
+        json={"pair_code": enrolled["pair_code"], "player_id": player["id"]},
+        headers=admin_headers,
+    )
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert "注册方式" in detail
+    assert "统一密钥" in detail, "要说清楚怎么改"
+    assert pending(client, admin_headers), "被拒绝之后机器仍应在待配对列表里"
+
+
+def test_switching_the_contest_mode_unblocks_pairing(
+    client: TestClient, admin_headers: dict, contest: dict
+) -> None:
+    """拒绝之后，按错误信息说的改一下就该能配对 —— 不能让人卡死。"""
+    key = issue_key(client, admin_headers)["key"]
+    enrolled = enroll_with_key(client, key, machine_id="m-1").json()
+    player = add_player(client, admin_headers, contest, "S001")
+
+    client.patch(
+        "/api/v1/admin/contests/%d" % contest["id"],
+        json={"enrollment_mode": "bootstrap"},
+        headers=admin_headers,
+    )
+
+    response = client.post(
+        "/api/v1/admin/machines/claim-by-code",
+        json={"pair_code": enrolled["pair_code"], "player_id": player["id"]},
+        headers=admin_headers,
+    )
+    assert response.status_code == 200, response.text
+
+
+def test_per_player_code_still_works_in_a_bootstrap_contest(
+    client: TestClient, admin_headers: dict, contest: dict
+) -> None:
+    """反方向不拦：场次声明用统一密钥时，教师**特意**为某个选手签发的单人码
+    仍然可用 —— 那是有意为之的补位动作（外校选手、重装的机器）。"""
+    client.patch(
+        "/api/v1/admin/contests/%d" % contest["id"],
+        json={"enrollment_mode": "bootstrap"},
+        headers=admin_headers,
+    )
+    player = add_player(client, admin_headers, contest, "S001")
+    code = client.post(
+        "/api/v1/admin/players/%d/enroll-code" % player["id"], headers=admin_headers
+    ).json()["code"]
+
+    response = client.post(
+        "/api/v1/agent/enroll",
+        json={"enroll_code": code, "machine_id": "m-manual", "hostname": "pc-x"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["claimed"] is True
+    assert body["player_no"] == "S001"
 
 
 def test_revoke_pending_machine(client: TestClient, admin_headers: dict) -> None:
@@ -431,7 +530,7 @@ def test_revoked_machine_credential_stops_working(
 
 
 def test_snapshot_restore_keeps_the_pairing(
-    client: TestClient, admin_headers: dict, contest: dict, app
+    client: TestClient, admin_headers: dict, boot_contest: dict, app
 ) -> None:
     """**这条是统一密钥方案能成立的关键。**
 
@@ -449,7 +548,7 @@ def test_snapshot_restore_keeps_the_pairing(
         machine_uuid="uuid-a",
         machine_fingerprint=fingerprint,
     ).json()
-    player = add_player(client, admin_headers, contest, "S001")
+    player = add_player(client, admin_headers, boot_contest, "S001")
     client.post(
         "/api/v1/admin/machines/claim-by-code",
         json={"pair_code": first["pair_code"], "player_id": player["id"]},
@@ -473,7 +572,7 @@ def test_snapshot_restore_keeps_the_pairing(
 
 
 def test_restore_revokes_the_old_token(
-    client: TestClient, admin_headers: dict, contest: dict, app
+    client: TestClient, admin_headers: dict, boot_contest: dict, app
 ) -> None:
     """换发凭据之后旧 token 必须立刻失效 —— 否则快照里那份还能用。"""
     issued = issue_key(client, admin_headers)
@@ -482,7 +581,7 @@ def test_restore_revokes_the_old_token(
     first = enroll_with_key(
         client, issued["key"], machine_id="m-1", machine_fingerprint=fingerprint
     ).json()
-    player = add_player(client, admin_headers, contest, "S001")
+    player = add_player(client, admin_headers, boot_contest, "S001")
     client.post(
         "/api/v1/admin/machines/claim-by-code",
         json={"pair_code": first["pair_code"], "player_id": player["id"]},
@@ -502,7 +601,7 @@ def test_restore_revokes_the_old_token(
 
 
 def test_online_machine_cannot_be_taken_over_by_a_lookalike(
-    client: TestClient, admin_headers: dict, contest: dict
+    client: TestClient, admin_headers: dict, boot_contest: dict
 ) -> None:
     """**指纹认回不能无条件自动执行。**
 
@@ -516,7 +615,7 @@ def test_online_machine_cannot_be_taken_over_by_a_lookalike(
     first = enroll_with_key(
         client, issued["key"], machine_id="m-1", machine_fingerprint=fingerprint
     ).json()
-    player = add_player(client, admin_headers, contest, "S001")
+    player = add_player(client, admin_headers, boot_contest, "S001")
     client.post(
         "/api/v1/admin/machines/claim-by-code",
         json={"pair_code": first["pair_code"], "player_id": player["id"]},
@@ -553,7 +652,7 @@ def test_unknown_fingerprint_means_a_new_machine(
 
 
 def test_ambiguous_fingerprint_does_not_guess(
-    client: TestClient, admin_headers: dict, contest: dict, app
+    client: TestClient, admin_headers: dict, boot_contest: dict, app
 ) -> None:
     """两台机器报同一个指纹时**不能猜**。
 
@@ -566,7 +665,7 @@ def test_ambiguous_fingerprint_does_not_guess(
     first = enroll_with_key(
         client, key, machine_id="m-1", machine_fingerprint=shared
     ).json()
-    player = add_player(client, admin_headers, contest, "S001")
+    player = add_player(client, admin_headers, boot_contest, "S001")
     client.post(
         "/api/v1/admin/machines/claim-by-code",
         json={"pair_code": first["pair_code"], "player_id": player["id"]},
@@ -611,7 +710,7 @@ def test_empty_fingerprint_is_treated_as_unknown(
 
 
 def test_clone_alert_reports_shared_fingerprints(
-    client: TestClient, admin_headers: dict, contest: dict, app
+    client: TestClient, admin_headers: dict, boot_contest: dict, app
 ) -> None:
     issued = issue_key(client, admin_headers)
     shared = "cloned-image-fingerprint"
@@ -620,7 +719,7 @@ def test_clone_alert_reports_shared_fingerprints(
     first = enroll_with_key(
         client, key, machine_id="m-1", hostname="pc-01", machine_fingerprint=shared
     ).json()
-    player = add_player(client, admin_headers, contest, "S001")
+    player = add_player(client, admin_headers, boot_contest, "S001")
     client.post(
         "/api/v1/admin/machines/claim-by-code",
         json={"pair_code": first["pair_code"], "player_id": player["id"]},

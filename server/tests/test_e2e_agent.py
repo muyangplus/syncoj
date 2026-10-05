@@ -502,6 +502,215 @@ def test_desktop_layout_end_to_end(
     assert expected.read_text(encoding="utf-8") == "int main(){return 0;}\n"
 
 
+def build_bootstrap_agent_config(workdir: Path, base_url: str, key_file: Path,
+                                 code_dir: Path, bootstrap_key: str,
+                                 deploy_root: Path = None):
+    """用统一密钥注册的 Agent 配置。
+
+    和每选手注册码那条路的区别只是"凭据从哪来"：密钥放在一个文件里，
+    由装机时的 root 一次性单元读走。这里直接写文件模拟那个场景。
+    """
+    from syncoj_agent.config import AgentConfig
+
+    key_file.parent.mkdir(parents=True, exist_ok=True)
+    key_file.write_text(bootstrap_key + "\n", encoding="utf-8")
+
+    config = build_agent_config(workdir, base_url, "", code_dir)
+    config.enroll_code = ""
+    config.bootstrap_key_file = key_file
+    if deploy_root is not None:
+        config.deploy_root = deploy_root
+    return config
+
+
+def test_bootstrap_enrollment_end_to_end(
+    workdir: Path, settings: Settings, live_server: str, client: TestClient,
+    admin_headers: dict, contest: dict,
+) -> None:
+    """统一密钥这条路的完整链路，跑**真的 Agent 代码**打到**真的服务端**。
+
+    这个流程涉及四个角色的时序（root 装机 → 机器注册 → 教师配对 → 机器开始收代码），
+    单元测试各自覆盖得再好，也覆盖不到它们**接起来**的样子 ——
+    而"接不起来"恰恰是这类多角色流程最常见的失败方式。
+    """
+    from syncoj_agent.main import Agent
+    from syncoj_agent.state import load_credential
+
+    contest_id = contest["id"]
+
+    # 场次声明走统一密钥 —— 否则服务端会拒绝把机器配进来
+    client.patch(
+        "/api/v1/admin/contests/%d" % contest_id,
+        json={"enrollment_mode": "bootstrap"},
+        headers=admin_headers,
+    )
+
+    # 1. 教师签发密钥（明文只出现这一次）
+    key = client.post(
+        "/api/v1/admin/bootstrap-keys",
+        json={"label": "机房镜像"},
+        headers=admin_headers,
+    ).json()["key"]
+
+    player = client.post(
+        "/api/v1/admin/contests/%d/players" % contest_id,
+        json=[{"player_no": "S001", "name": "张三"}],
+        headers=admin_headers,
+    ).json()[0]
+
+    desktop = workdir / "桌面"
+    desktop.mkdir()
+    code_dir = desktop / "S001"
+    code_dir.mkdir()
+
+    config = build_bootstrap_agent_config(
+        workdir, live_server, workdir / "etc" / "bootstrap.key", code_dir, key,
+        deploy_root=desktop,
+    )
+
+    # 2. 机器首次开机：注册，拿到一个"没有归属"的凭据 + 配对码
+    agent = Agent(config)
+    try:
+        delay = agent.cycle()
+    finally:
+        agent.client.close()
+
+    credential = load_credential(config.credential_path)
+    assert credential is not None
+    assert credential.claimed is False, "统一密钥注册出来的机器不该直接有归属"
+    assert credential.pair_code
+
+    # 配对码要落到桌面上 —— 这是教师唯一能看见它的地方
+    pair_file = desktop / config.pairing_file_name
+    assert pair_file.is_file(), "配对码没写到桌面上，教师无从读起"
+    assert credential.pair_code in pair_file.read_text(encoding="utf-8")
+
+    # 未配对时它应当只心跳、不扫描（扫出来的路径没法归属到任何人）
+    assert delay > 0
+    assert sorted(p.name for p in settings.source_root.rglob("*")) == []
+
+    # 3. 教师读码、配对
+    claim = client.post(
+        "/api/v1/admin/machines/claim-by-code",
+        json={"pair_code": credential.pair_code, "player_id": player["id"]},
+        headers=admin_headers,
+    )
+    assert claim.status_code == 200, claim.text
+
+    # 4. 机器下一轮就应当"活过来"：接住身份、开始扫描
+    (code_dir / "p1.cpp").write_text("int main(){return 0;}\n", encoding="utf-8")
+    agent2 = Agent(config)
+    try:
+        agent2.cycle()
+    finally:
+        agent2.client.close()
+
+    adopted = load_credential(config.credential_path)
+    assert adopted is not None
+    assert adopted.claimed is True
+    assert adopted.player_no == "S001"
+    assert adopted.pair_code == "", "配对之后不该再留着配对码"
+    assert not pair_file.exists(), "配对之后桌面上的配对码文件应当消失"
+
+    landed = settings.source_root / contest["slug"] / "S001" / "p1.cpp"
+    assert landed.is_file(), (
+        "配对之后代码应当开始回收\n实际 source/ 内容：%s"
+        % sorted(p.relative_to(settings.source_root).as_posix() for p in settings.source_root.rglob("*"))
+    )
+
+
+def test_bootstrap_restore_keeps_pairing_end_to_end(
+    workdir: Path, settings: Settings, live_server: str, client: TestClient,
+    admin_headers: dict, contest: dict, app, monkeypatch,
+) -> None:
+    """快照还原：凭据没了、UUID 没了、指纹还在 → 认回原机器，**不用重新配对**。
+
+    这条链路的价值全在"不用重新配对"上。如果每个快照还原都要教师配对一次，
+    50 台机器就是 50 次人工，整套方案直接不可用 —— 所以它必须被端到端验证一次，
+    而不是只测服务端的判断逻辑。
+
+    指纹在真实硬件上来自 SMBIOS，开发机上读不到，所以这里 monkeypatch 掉
+    ``resolve_machine_fingerprint``。**不**在 Agent 上开测试专用参数：
+    那会让"指纹到底怎么来的"这件事在测试里失真，而这条路径的全部意义
+    恰恰在于"指纹是硬件给的、还原后不变"。
+    """
+    from datetime import timedelta
+
+    from sqlalchemy import select
+
+    import syncoj_agent.main as agent_main
+    from syncoj_agent.main import Agent
+    from syncoj_agent.state import load_credential
+    from syncoj_server.models import Agent as AgentRecord
+    from syncoj_server.models import utcnow
+
+    fingerprint = "4c4c4544-0031-3010-8043-b7c04f4d4432"
+    monkeypatch.setattr(agent_main, "resolve_machine_fingerprint", lambda: fingerprint)
+
+    contest_id = contest["id"]
+    client.patch(
+        "/api/v1/admin/contests/%d" % contest_id,
+        json={"enrollment_mode": "bootstrap"},
+        headers=admin_headers,
+    )
+    key = client.post(
+        "/api/v1/admin/bootstrap-keys", json={}, headers=admin_headers
+    ).json()["key"]
+    player = client.post(
+        "/api/v1/admin/contests/%d/players" % contest_id,
+        json=[{"player_no": "S001"}],
+        headers=admin_headers,
+    ).json()[0]
+
+    desktop = workdir / "桌面"
+    desktop.mkdir()
+    code_dir = desktop / "S001"
+    code_dir.mkdir()
+    key_file = workdir / "etc" / "bootstrap.key"
+
+    config = build_bootstrap_agent_config(
+        workdir, live_server, key_file, code_dir, key, deploy_root=desktop
+    )
+
+    agent = Agent(config)
+    try:
+        agent.cycle()
+    finally:
+        agent.client.close()
+
+    credential = load_credential(config.credential_path)
+    assert credential is not None and credential.pair_code
+    client.post(
+        "/api/v1/admin/machines/claim-by-code",
+        json={"pair_code": credential.pair_code, "player_id": player["id"]},
+        headers=admin_headers,
+    )
+
+    # 机器关机一段时间（快照还原的真实时序：关机 → 还原 → 再开机）
+    with app.state.ctx.db.session() as session:
+        record = session.execute(select(AgentRecord)).scalar_one()
+        record.last_seen_at = utcnow() - timedelta(hours=2)
+
+    # 还原：凭据与 UUID 一起没了，指纹（与密钥）还在
+    config.credential_path.unlink()
+    (config.state_dir / "machine_uuid").unlink()
+
+    restored = Agent(config)
+    try:
+        restored.cycle()
+    finally:
+        restored.client.close()
+
+    adopted = load_credential(config.credential_path)
+    assert adopted is not None
+    assert adopted.claimed is True, "指纹认回之后不该回到待配对状态"
+    assert adopted.player_no == "S001", "配对关系必须保留"
+
+    # 服务端上也应当还是同一台机器，而不是多出来一台待配对的
+    pending = client.get("/api/v1/admin/machines/pending", headers=admin_headers).json()
+    assert pending == [], "还原不该产生新的待配对机器"
+
+
 def test_prefix_none_avoids_duplicated_player_no(
     workdir: Path, settings: Settings, live_server: str, seeded: dict,
 ) -> None:

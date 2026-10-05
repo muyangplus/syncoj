@@ -738,8 +738,12 @@ class Agent:
             }
         )
 
-    def _cycle_pending(self) -> float:
+    def _pairing_tick(self) -> Tuple[bool, float]:
         """还没配对到选手时的一轮：只心跳，不扫描。
+
+        返回 ``(是否刚被配对, 仍要等待的秒数)``。第一个值为真时调用方接着走
+        正常路径 —— 让教师配对完还要再等一个整周期才开始收代码，
+        在开考前那几分钟很刺眼。
 
         扫描是**故意**跳过的：没有准考证号，``scan.roots`` 里的 ``{player_no}``
         展开不出来，扫出来的相对路径也没法归属到任何人。收上去只会污染台账，
@@ -761,8 +765,7 @@ class Agent:
                 credential.player_no if credential else "",
                 credential.contest_slug if credential else "",
             )
-            # 立刻进入正常节奏，别让教师等完一整个空闲周期才看到机器"活过来"
-            return float(self.policy.get("tick_active_seconds", 2) or 2)
+            return True, 0.0
 
         credential = self._credential
         if credential is not None and credential.pair_code:
@@ -770,7 +773,8 @@ class Agent:
             # 而配对码只在内存里有一份时，重启一次就看不见了
             self._show_pair_code(credential.pair_code)
 
-        return float(max(5, min(int(tick.get("next_tick_seconds") or 30), 3600)))
+        wait = float(max(5, min(int(tick.get("next_tick_seconds") or 30), 3600)))
+        return False, wait
 
     def _flush_events(self) -> None:
         if not self._pending_events:
@@ -798,7 +802,12 @@ class Agent:
         # 扫出来的东西也没法归属到任何人。它这一轮唯一该做的就是心跳一下、
         # 顺便问一句"认领了没有"。
         if credential.needs_pairing:
-            return self._cycle_pending()
+            paired, wait = self._pairing_tick()
+            if not paired:
+                return wait
+            # 刚被配对上的话**同一次 cycle 就接着往下走**：教师配对完还要再等
+            # 一个整周期才开始收代码，在开考前那几分钟很刺眼。
+            credential = self._credential or credential
 
         # 扫描目录里可能含 {player_no} / {contest_slug}，必须等拿到凭据之后才能确定
         self._ensure_roots(credential.player_no, credential.contest_slug)

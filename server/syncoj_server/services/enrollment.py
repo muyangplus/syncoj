@@ -372,9 +372,24 @@ def claim_machine(
     换绑（把一台已经认领过的机器改给别人）走的是另一条路：
     那需要先解绑，属于管理动作，不该混在配对里。
     """
-    from ..models import Player
+    from ..models import EnrollmentMode
 
     now = now or utcnow()
+
+    # 场次的注册方式是**有意义**的：它声明"这个场次的机器是怎么进来的"。
+    # 让配对无视它，那个设置就只是装饰 —— 而一个没有效果的设置比没有设置更糟，
+    # 因为它会让人以为"我明明选对了"。
+    #
+    # 反方向不拦：一个场次声明用统一密钥时，教师**特意**为某个选手签发的
+    # 单人码仍然可用 —— 那是有意为之的补位动作。
+    if contest.effective_enrollment_mode != EnrollmentMode.BOOTSTRAP:
+        raise BootstrapRejected(
+            "场次「%s」的注册方式是「每选手注册码」，不接受统一密钥注册上来的机器。\n"
+            "要么把场次的注册方式改成「镜像统一密钥 + 短码配对」，"
+            "要么用为该选手签发的注册码单独注册这台机器。"
+            % contest.name,
+            status_code=409,
+        )
 
     occupied = session.execute(
         select(Agent).where(Agent.player_id == player.id, Agent.revoked_at.is_(None))

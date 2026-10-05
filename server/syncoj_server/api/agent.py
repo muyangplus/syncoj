@@ -24,6 +24,7 @@ from sqlalchemy.exc import IntegrityError
 from ..context import AppContext
 from ..models import (
     Agent,
+    AgentRelease,
     Asset,
     Contest,
     DeployStatus,
@@ -44,6 +45,7 @@ from ..schemas import (
     SimpleAck,
     TickRequest,
     TickResponse,
+    UpgradeInfo,
     UploadResult,
 )
 from ..security import (
@@ -265,6 +267,8 @@ def tick(
         if payload.completed_assets:
             _mark_deployments_done(session, identity.player_id, payload.completed_assets)
 
+        upgrade = _pending_upgrade(session, ctx)
+
         agent = session.get(Agent, identity.agent_id)
         if agent is not None:
             agent.last_seen_at = now
@@ -293,7 +297,7 @@ def tick(
         need_upload=collect.need_upload[:MAX_NEED_UPLOAD],
         deploy_jobs=jobs,
         cancel_assets=[],
-        upgrade=None,
+        upgrade=upgrade,
         config=_agent_config(ctx),
     )
 
@@ -357,6 +361,35 @@ def _refresh_task_status(session, task_id: int) -> None:
         task.status = DeployStatus.FAILED
     else:
         task.status = DeployStatus.PENDING
+
+
+def _pending_upgrade(session, ctx: AppContext) -> Optional[UpgradeInfo]:
+    """当前是否有向 Agent 铺开的升级版本。
+
+    三个条件同时满足才下发：配置了签名私钥、有已铺开的版本、该版本未被撤回。
+    缺任何一个都返回 None —— 宁可不下发，也不下发一个 Agent 必然拒收的包。
+    """
+    if ctx.signing_key is None:
+        return None
+    row = session.execute(
+        select(AgentRelease)
+        .where(
+            AgentRelease.published_at.isnot(None),
+            AgentRelease.yanked_at.is_(None),
+        )
+        .order_by(AgentRelease.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if row is None:
+        return None
+    return UpgradeInfo(
+        version=row.version,
+        url="/api/v1/agent/releases/%d" % row.id,
+        sha256=row.sha256,
+        signature=row.signature,
+        size=int(row.size),
+        notes=row.notes,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -553,6 +586,43 @@ def _range_response(file_path: Path, request: Request) -> Response:
             "Content-Length": str(length),
         },
     )
+
+
+# --------------------------------------------------------------------------- #
+# 自更新包下载
+# --------------------------------------------------------------------------- #
+
+
+@router.get("/releases/{release_id}")
+def download_release(
+    release_id: int,
+    request: Request,
+    ctx: AppContext = Depends(get_ctx),
+    identity: AgentIdentity = Depends(require_agent),
+) -> Response:
+    """下载 Agent 升级包。
+
+    只提供**已铺开且未撤回**的版本 —— 上传但未 rollout 的包对 Agent 不可见，
+    这样"上传"和"铺开"的风险边界在服务端也是硬的，而不是只靠 Agent 自觉。
+    """
+    with ctx.db.session() as session:
+        row = session.get(AgentRelease, release_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="版本不存在")
+        if row.published_at is None:
+            raise HTTPException(status_code=404, detail="该版本尚未铺开")
+        if row.yanked_at is not None:
+            raise HTTPException(status_code=410, detail="该版本已撤回")
+        sha256 = row.sha256
+        expected_size = int(row.size)
+
+    blob_path = ctx.blobs.path_for(sha256)
+    if not blob_path.is_file():
+        raise HTTPException(status_code=410, detail="发布包内容缺失")
+    if expected_size and blob_path.stat().st_size != expected_size:
+        raise HTTPException(status_code=500, detail="发布包内容损坏，大小与台账不符")
+
+    return _range_response(blob_path, request)
 
 
 # --------------------------------------------------------------------------- #

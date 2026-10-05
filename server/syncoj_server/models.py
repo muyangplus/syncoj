@@ -381,7 +381,12 @@ class EventLog(Base):
 
 
 class AgentRelease(Base, TimestampMixin):
-    """Agent 升级包。签名校验通过才允许下发。"""
+    """Agent 升级包。
+
+    刻意**不自动下发**：``published_at`` 为空表示"已上传但未铺开"。教师必须显式
+    调 rollout 接口才会开始向考试机提供 —— 上传一个包和把它推给 50 台机器是
+    两件风险等级完全不同的事，不该合成一个动作。
+    """
 
     __tablename__ = "agent_release"
 
@@ -390,6 +395,9 @@ class AgentRelease(Base, TimestampMixin):
     channel = Column(String(16), nullable=False, default="stable")
     sha256 = Column(String(64), nullable=False)
     signature = Column(Text, nullable=False)
+    size = Column(BigInteger, nullable=False, default=0)
     notes = Column(Text, nullable=True)
+    #: 非空 = 已铺开，会随 tick 下发给 Agent
     published_at = Column(DateTime, nullable=True)
+    #: 非空 = 已撤回，不再下发
     yanked_at = Column(DateTime, nullable=True)

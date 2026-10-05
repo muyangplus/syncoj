@@ -119,6 +119,8 @@ class UpgradeInfo(_Base):
     url: str
     sha256: str
     signature: str
+    size: int = 0
+    notes: Optional[str] = None
 
 
 class TickResponse(_Base):
@@ -390,3 +392,38 @@ class JudgeScanOut(_Base):
     #: 因教师手工录入而被保留（未覆盖）的条目数
     manual: int = 0
     errors: List[str] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------------- #
+# Agent 发布与自更新
+# --------------------------------------------------------------------------- #
+
+
+class ReleaseOut(_Base):
+    id: int
+    version: str
+    channel: str
+    sha256: str
+    size: int
+    notes: Optional[str] = None
+    #: 已铺开（会对 Agent 下发）
+    rolled_out: bool = False
+    yanked: bool = False
+    created_at: str
+    published_at: Optional[str] = None
+    key_id: Optional[str] = None
+
+
+class ReleaseUpdate(_Base):
+    notes: Optional[str] = Field(default=None, max_length=2000)
+    channel: Optional[str] = Field(default=None, max_length=16)
+
+
+class UpgradeStatusOut(_Base):
+    """自更新总览。教师一眼看清"现在会不会有机器被升级"。"""
+
+    signing_available: bool
+    key_id: Optional[str] = None
+    error: Optional[str] = None
+    active_release: Optional[ReleaseOut] = None
+    releases: List[ReleaseOut] = Field(default_factory=list)

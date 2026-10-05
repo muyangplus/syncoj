@@ -50,6 +50,21 @@ level = INFO
 file =
 # 是否同时输出到 stderr（systemd 会收进 journal）
 to_stderr = false
+
+[upgrade]
+# 自更新模式：
+#   off   = 只上报"有新版本"，什么都不做（默认，考场推荐）
+#   stage = 下载、验签、解包到独立目录，但不激活
+#   apply = 完整执行：解包后原子切换软链并重启
+#
+# 默认关闭是刻意的 —— 静默地在考试机上升级 Agent 是高风险动作。
+# 更关键的是：Agent 必须装在版本化目录 + current 软链布局下（见 installer），
+# 否则 apply 无处可切，会直接失败。
+mode = off
+# 安装根目录（installer 创建；手工部署时可留空）
+install_root = /opt/syncoj
+# 发布签名公钥。留空则任何升级都会被拒绝 —— 没有信任锚的签名毫无意义
+public_key =
 """
 
 
@@ -83,6 +98,14 @@ class AgentConfig:
     log_level: str = "INFO"
     log_file: Optional[Path] = None
     log_to_stderr: bool = False
+
+    # ---- 自更新 ----
+    #: off = 只报告不下载（默认）；stage = 下载验签解包但不激活；apply = 完整执行
+    upgrade_mode: str = "off"
+    #: 安装根目录，内含 releases/<版本>/ 与 current 软链
+    install_root: Path = field(default_factory=lambda: Path("/opt/syncoj"))
+    #: 发布签名公钥（JSON）。缺失时任何升级都会被拒绝 —— 没有信任锚就没有签名
+    release_public_key: Optional[Path] = None
 
     #: 请求超时（秒）
     request_timeout: int = 30
@@ -138,6 +161,21 @@ class AgentConfig:
         if not self.deploy_root.is_absolute():
             problems.append("deploy_root 必须是绝对路径: %s" % self.deploy_root)
 
+        if self.upgrade_mode not in ("off", "stage", "apply"):
+            problems.append("upgrade.mode 只能是 off / stage / apply，实际是 %r" % self.upgrade_mode)
+
+        if self.upgrade_mode != "off":
+            if not self.install_root.is_absolute():
+                problems.append("upgrade.install_root 必须是绝对路径: %s" % self.install_root)
+            if self.release_public_key is None:
+                # 没有公钥就没有信任锚 —— 与其"升级前才发现"，不如启动时就报出来
+                problems.append(
+                    "upgrade.mode=%s 但未配置 upgrade.public_key；"
+                    "没有公钥就无法验证发布包签名，升级会全部失败" % self.upgrade_mode
+                )
+            elif not self.release_public_key.is_file():
+                problems.append("upgrade.public_key 不存在: %s" % self.release_public_key)
+
         if self.scan_interval < 5:
             problems.append("scan.interval 不得小于 5 秒")
 
@@ -191,6 +229,12 @@ class AgentConfig:
             log_level=(parser.get("log", "level", fallback="INFO") or "INFO").strip().upper(),
             log_file=_opt_path(parser.get("log", "file", fallback="")),
             log_to_stderr=_as_bool(parser.get("log", "to_stderr", fallback="false")),
+            upgrade_mode=(parser.get("upgrade", "mode", fallback="off") or "off").strip().lower(),
+            install_root=Path(
+                parser.get("upgrade", "install_root", fallback="/opt/syncoj").strip()
+                or "/opt/syncoj"
+            ),
+            release_public_key=_opt_path(parser.get("upgrade", "public_key", fallback="")),
         )
 
         _apply_env_overrides(config)

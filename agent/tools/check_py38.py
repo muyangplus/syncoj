@@ -90,6 +90,10 @@ NAMES_ADDED_AFTER_38: Dict[str, Set[str]] = {
 ALLOWED_TOP_LEVEL: Set[str] = {
     # 本包
     "syncoj_agent",
+    # 测试里用作**参照实现**：Agent 的签名验证器需要拿 openssl/服务端签名器
+    # 作为 oracle 来交叉验证，自签自验证明不了任何事。测试代码不随 Agent 分发，
+    # 因此这里放行不影响"Agent 零依赖"这一约束。
+    "syncoj_server",
     # __future__
     "__future__",
     # 纯 Python 核心

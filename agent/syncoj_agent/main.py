@@ -36,6 +36,7 @@ from .client import (
 from .config import AgentConfig, ConfigError
 from .download import download_asset, find_partial_sizes, sweep_stale_parts
 from .policy import DEFAULT_POLICY, merge_policy
+from .rsa import RSAPublicKey, SignatureError
 from .scan import ScanPolicy, scan_directory
 from .state import (
     Credential,
@@ -46,6 +47,22 @@ from .state import (
     save_credential,
     sha256_file,
 )
+from .upgrade import (
+    MAX_BUNDLE_BYTES,
+    ReleaseManifest,
+    UpgradeError,
+    UpgradeMode,
+    UpgradeState,
+    activate_release,
+    current_release,
+    mark_healthy,
+    note_boot,
+    parse_version,
+    rollback_release,
+    save_state,
+    stage_release,
+    verify_bundle,
+)
 
 __all__ = ["Agent", "main"]
 
@@ -55,6 +72,10 @@ log = logging.getLogger("syncoj.agent")
 MAX_BACKOFF = 300.0
 #: 事件积压上限，防止长时间离线导致内存里堆一堆事件
 MAX_PENDING_EVENTS = 200
+
+#: 连续多少个成功周期后才认为新版本可信、清掉回滚状态。
+#: 不用"启动成功"作为判据 —— 起得来但一 tick 就崩的版本同样必须回滚。
+HEALTHY_CYCLES_BEFORE_TRUST = 3
 
 
 def build_tick_payload(
@@ -136,6 +157,11 @@ class Agent:
         #: 已确认完整、待上报给服务端的下发资源
         self._completed_assets: List[int] = []
         self._credential: Optional[Credential] = None
+        #: 收到"激活新版本"后置位，主循环据此退出让 systemd 重启
+        self._restart_requested = False
+        #: 连续成功周期计数，用于确认新版本可用后清掉回滚状态
+        self._healthy_cycles = 0
+        self._public_key = self._load_release_public_key()
         #: 服务端可见路径 -> 本地绝对路径。每轮扫描后重建
         self._local_paths: Dict[str, Path] = {}
         self._roots = self._build_roots(config.scan_roots)
@@ -376,6 +402,140 @@ class Agent:
         if asset_id and asset_id not in self._completed_assets:
             self._completed_assets.append(asset_id)
 
+    # ---------------------------------------------------------------- #
+    # 自更新
+    # ---------------------------------------------------------------- #
+
+    def _load_release_public_key(self) -> Optional[RSAPublicKey]:
+        path = self.config.release_public_key
+        if path is None:
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            log.error("发布公钥读取失败 %s: %s", path, exc)
+            return None
+        try:
+            return RSAPublicKey.from_dict(data)
+        except SignatureError as exc:
+            log.error("发布公钥格式不合法 %s: %s", path, exc)
+            return None
+
+    def _guard_boot(self) -> bool:
+        """启动守卫。返回 True 表示刚完成回滚，调用方应当退出让 systemd 重启。
+
+        自更新最可怕的失败模式不是恶意包（签名挡住了），而是**新版本起不来** ——
+        一次操作把 50 台考试机同时变成砖。签名对此毫无帮助，只有回滚能救。
+        """
+        if self.config.upgrade_mode == UpgradeMode.OFF:
+            return False
+
+        install_root = self.config.install_root
+        running = current_release(install_root) or __version__
+        rollback_to = note_boot(install_root, running)
+        if rollback_to is None:
+            return False
+
+        try:
+            rollback_release(install_root, rollback_to)
+        except UpgradeError as exc:
+            log.error("自动回滚失败: %s", exc)
+            self._emit("error", "upgrade_rollback_failed", "自动回滚失败：%s" % exc)
+            return False
+
+        log.warning("版本 %s 反复启动失败，已回滚到 %s", running, rollback_to)
+        self._emit(
+            "warning", "upgrade_rolled_back",
+            "版本 %s 反复启动失败，已自动回滚到 %s" % (running, rollback_to),
+        )
+        return True
+
+    def _handle_upgrade(self, info: dict) -> None:
+        """处理服务端下发的发布清单。任何失败都只是记录，绝不中断服务。"""
+        mode = self.config.upgrade_mode
+        version = str(info.get("version") or "?")
+
+        if mode == UpgradeMode.OFF:
+            # 默认路径。刻意不做任何动作 —— 静默地在考试机上升级是高风险操作，
+            # 必须由教师显式开启。
+            log.info("服务端提供 Agent 版本 %s，但 upgrade.mode=off，不做任何动作", version)
+            return
+
+        public_key = self._public_key
+        if public_key is None:
+            self._emit(
+                "warning", "upgrade_no_key",
+                "upgrade.mode=%s 但缺少可用的发布公钥，拒绝升级 %s" % (mode, version),
+            )
+            return
+
+        try:
+            manifest = ReleaseManifest.from_dict(info)
+        except UpgradeError as exc:
+            self._emit("warning", "upgrade_bad_manifest", "发布清单不合法：%s" % exc)
+            return
+
+        install_root = self.config.install_root
+        running = current_release(install_root) or __version__
+
+        # 版本单调：拒绝"升级"到不高于当前的版本，否则攻击者可以重放一个
+        # 历史版本的真实签名包，把 Agent 退回已知有漏洞的状态
+        try:
+            if parse_version(manifest.version) <= parse_version(running):
+                log.debug("忽略不高于当前版本的发布 %s（当前 %s）", manifest.version, running)
+                return
+        except UpgradeError as exc:
+            log.warning("版本号无法比较，拒绝升级: %s", exc)
+            return
+
+        bundle = self.config.state_dir / "upgrade" / ("%s.tar.gz" % manifest.version)
+        try:
+            size = self.client.download_to_file(manifest.url, bundle, MAX_BUNDLE_BYTES)
+            log.info("已下载发布包 %s（%d 字节），开始校验", manifest.version, size)
+            verify_bundle(public_key, bundle, manifest)
+            stage_release(install_root, manifest.version, bundle)
+        except (UpgradeError, AgentError) as exc:
+            log.error("升级包处理失败: %s", exc)
+            self._emit("warning", "upgrade_failed", "升级 %s 失败：%s" % (version, exc))
+            return
+
+        log.info("版本 %s 已暂存到 %s", manifest.version, install_root)
+        if mode != UpgradeMode.APPLY:
+            self._emit(
+                "info", "upgrade_staged",
+                "版本 %s 已下载并通过签名校验，等待激活（当前 mode=stage）" % manifest.version,
+            )
+            return
+
+        # 顺序很重要：**先写回滚状态再切软链**。
+        # 反过来的话，切完软链、写状态之前崩溃，新版本就没有任何保护。
+        # 按现在的顺序，中途崩溃只会让状态指向一个尚未激活的版本 ——
+        # note_boot 发现版本不符会直接丢弃，不会误判。
+        try:
+            previous = current_release(install_root)
+            save_state(
+                install_root,
+                UpgradeState(
+                    version=manifest.version,
+                    previous=previous,
+                    applied_at=time.time(),
+                ),
+            )
+            activate_release(install_root, manifest.version)
+        except UpgradeError as exc:
+            log.error("激活版本 %s 失败: %s", manifest.version, exc)
+            self._emit("error", "upgrade_activate_failed", "激活失败：%s" % exc)
+            return
+
+        log.warning("已激活版本 %s（原 %s），即将重启以生效", manifest.version, previous)
+        self._emit(
+            "warning", "upgrade_activated",
+            "已升级到 %s 并重启（原版本 %s）" % (manifest.version, previous),
+        )
+        # 由 systemd 的 Restart=always 拉起新版本 —— 不需要我们自己调 systemctl，
+        # 那会要求额外的 polkit 授权，平白扩大 Agent 的权限面
+        self._restart_requested = True
+
     def _emit(self, level: str, category: str, message: str, meta: Optional[dict] = None) -> None:
         if len(self._pending_events) >= MAX_PENDING_EVENTS:
             return
@@ -448,13 +608,19 @@ class Agent:
 
         upgrade = tick.get("upgrade")
         if upgrade:
-            # 自更新属于 M5。这里刻意只记录不执行 —— 静默地在考试机上升级
-            # Agent 是高风险动作，绝不能因为服务端说了就做。
-            log.warning("服务端提供了 Agent 升级包 %s，但自动升级未启用",
-                        upgrade.get("version"))
+            self._handle_upgrade(upgrade)
 
         self._flush_events()
         self.cache.save(self.config.hash_cache_path)
+
+        # 跑够几个周期说明新版本确实能用，清掉回滚状态。
+        # 连续计数而不是"启动就算成功"：起得来但一 tick 就崩的版本同样要回滚。
+        self._healthy_cycles += 1
+        if self._healthy_cycles == HEALTHY_CYCLES_BEFORE_TRUST:
+            try:
+                mark_healthy(self.config.install_root)
+            except OSError as exc:  # pragma: no cover
+                log.debug("清除回滚状态失败: %s", exc)
 
         next_tick = int(tick.get("next_tick_seconds") or self.config.scan_interval)
         return float(max(5, min(next_tick, 3600)))
@@ -465,14 +631,28 @@ class Agent:
 
     def run_forever(self) -> int:
         log.info(
-            "SyncOJ Agent %s 启动（machine_id=%s，扫描 %s）",
+            "SyncOJ Agent %s 启动（machine_id=%s，扫描 %s，自更新 %s）",
             __version__,
             self.machine_id,
             ", ".join(str(r) for _n, r in self._roots),
+            self.config.upgrade_mode,
         )
+
+        # 启动守卫要在做任何网络操作之前跑：如果上一版本留下的状态表明新版本
+        # 反复起不来，应当立刻回滚退出，而不是先联网折腾一圈
+        try:
+            if self._guard_boot():
+                self.client.close()
+                return 0
+        except Exception:
+            log.exception("启动守卫执行失败，继续正常运行")
+
         sweep_stale_parts(self.config.deploy_root)
 
         while not self._stop:
+            if self._restart_requested:
+                log.info("为应用新版本而退出，systemd 将以新版本重新拉起")
+                break
             try:
                 delay = self.cycle()
                 self._backoff = 0.0

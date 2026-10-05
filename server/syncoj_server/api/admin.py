@@ -13,7 +13,16 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+    status,
+)
 from sqlalchemy import func, select
 
 from ..context import AppContext
@@ -21,6 +30,7 @@ from ..models import (
     Admin,
     AdminSession,
     Agent,
+    AgentRelease,
     Asset,
     Contest,
     ContestStatus,
@@ -53,11 +63,14 @@ from ..schemas import (
     ManualScoreIn,
     PlayerOut,
     PlayerUpsert,
+    ReleaseOut,
+    ReleaseUpdate,
     ScoreCellOut,
     ScoreMatrixOut,
     ScoreRowOut,
     SimpleAck,
     SourceFileOut,
+    UpgradeStatusOut,
 )
 from ..security import (
     hash_enroll_code,
@@ -67,6 +80,7 @@ from ..security import (
     new_token,
     verify_password,
 )
+from ..services.signing import parse_version
 from ..storage import BlobTooLarge, HashMismatch
 from .deps import get_ctx
 
@@ -520,7 +534,7 @@ def health(ctx: AppContext = Depends(get_ctx)) -> Dict[str, Any]:
 def upload_asset(
     contest_id: int,
     file: UploadFile = File(...),
-    kind: str = "testdata",
+    kind: str = Form("testdata"),
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> AssetOut:
@@ -1115,3 +1129,228 @@ def clear_judge_score(
             return SimpleAck(ok=True, detail="没有该记录")
         session.delete(run)
     return SimpleAck(ok=True, detail="已清除")
+
+
+# --------------------------------------------------------------------------- #
+# Agent 发布与自更新
+# --------------------------------------------------------------------------- #
+
+
+@router.get("/releases", response_model=UpgradeStatusOut)
+def list_releases(
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> UpgradeStatusOut:
+    with ctx.db.session() as session:
+        rows = list(
+            session.execute(
+                select(AgentRelease).order_by(AgentRelease.id.desc())
+            ).scalars()
+        )
+        releases = [_release_out(row) for row in rows]
+        active = next((r for r in releases if r.rolled_out and not r.yanked), None)
+
+    return UpgradeStatusOut(
+        signing_available=ctx.signing_key is not None,
+        key_id=ctx.signing_key.key_id if ctx.signing_key else None,
+        error=ctx.signing_key_error,
+        active_release=active,
+        releases=releases,
+    )
+
+
+@router.post("/releases", response_model=ReleaseOut)
+def upload_release(
+    file: UploadFile = File(...),
+    # 注意：必须显式声明 Form(...)。带 File 的端点里，裸的 `version: str = ""`
+    # 会被 FastAPI 当成**查询参数**而不是表单字段 —— 客户端在 multipart 里发的
+    # version 会被静默忽略，然后参数取默认空值。这类 bug 不会报错，只会"没生效"。
+    version: str = Form(""),
+    channel: str = Form("stable"),
+    notes: str = Form(""),
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> ReleaseOut:
+    """上传 Agent 升级包。
+
+    **上传不等于铺开**：``published_at`` 保持为空，Agent 不会收到任何东西，
+    直到教师显式调 rollout。上传一个包和把它推给 50 台机器是风险等级完全
+    不同的两件事，不该合成一个动作。
+    """
+    if ctx.signing_key is None:
+        raise HTTPException(
+            status_code=503,
+            detail="未配置发布签名私钥，无法签发升级包：%s"
+            % (ctx.signing_key_error or "请设置 SYNCOJ_RELEASE_KEY"),
+        )
+
+    version = (version or "").strip()
+    if not version:
+        raise HTTPException(status_code=400, detail="必须指定版本号")
+
+    try:
+        parse_version(version)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="版本号不合法: %s" % exc)
+
+    filename = Path(file.filename or "agent-bundle.tar.gz").name
+
+    try:
+        sha256, size = ctx.blobs.put_stream(file.file, max_bytes=ctx.settings.max_release_size)
+    except BlobTooLarge as exc:
+        raise HTTPException(status_code=413, detail=str(exc))
+
+    # 签名对象是 sha256 的十六进制字符串，而不是包本身的字节 ——
+    # 见 agent/syncoj_agent/upgrade.py 的说明。两边必须选同一种，否则所有
+    # 真实升级都会失败，且只在生产环境暴露。
+    signature = _b64(ctx.signing_key.sign(sha256.encode("ascii")))
+
+    with ctx.db.session() as session:
+        existing = session.execute(
+            select(AgentRelease).where(AgentRelease.version == version)
+        ).scalar_one_or_none()
+        if existing is not None:
+            if existing.published_at is not None and existing.yanked_at is None:
+                raise HTTPException(
+                    status_code=409, detail="版本 %s 正在铺开中，先撤回再覆盖" % version
+                )
+            existing.sha256 = sha256
+            existing.signature = signature
+            existing.size = size
+            existing.notes = notes or existing.notes
+            existing.channel = channel or existing.channel
+            existing.yanked_at = None
+            session.flush()
+            row = existing
+        else:
+            row = AgentRelease(
+                version=version,
+                channel=channel or "stable",
+                sha256=sha256,
+                signature=signature,
+                size=size,
+                notes=notes or None,
+            )
+            session.add(row)
+            session.flush()
+
+        session.add(
+            EventLog(
+                level="info",
+                category="release_uploaded",
+                message="上传 Agent 版本 %s（%s，%d 字节，%s）"
+                % (version, filename, size, sha256[:12]),
+            )
+        )
+        return _release_out(row)
+
+
+@router.post("/releases/{release_id}/rollout", response_model=ReleaseOut)
+def rollout_release(
+    release_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> ReleaseOut:
+    """开始向 Agent 提供这个版本。
+
+    同一时刻只允许一个版本处于铺开状态 —— 否则不同机器可能拿到不同版本，
+    排查问题时无法判断"这台机器到底跑的是哪个"。
+    """
+    now = utcnow()
+    with ctx.db.session() as session:
+        target = session.get(AgentRelease, release_id)
+        if target is None:
+            raise HTTPException(status_code=404, detail="版本不存在")
+
+        previous = []
+        for row in session.execute(
+            select(AgentRelease).where(
+                AgentRelease.published_at.isnot(None),
+                AgentRelease.yanked_at.is_(None),
+                AgentRelease.id != release_id,
+            )
+        ).scalars():
+            # 旧版本自动撤回，不需要教师手动点两次
+            row.yanked_at = now
+            previous.append(row.version)
+
+        target.published_at = now
+        target.yanked_at = None
+        session.flush()
+
+        session.add(
+            EventLog(
+                level="warning",
+                category="release_rollout",
+                message="开始铺开 Agent 版本 %s%s"
+                % (target.version, ("（自动撤回 %s）" % ", ".join(previous)) if previous else ""),
+            )
+        )
+        return _release_out(target)
+
+
+@router.post("/releases/{release_id}/yank", response_model=ReleaseOut)
+def yank_release(
+    release_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> ReleaseOut:
+    """撤回：不再向 Agent 提供该版本。
+
+    注意**撤回不能把已经升级的机器降回去** —— 那需要 Agent 侧的回滚机制
+    （升级后连续启动失败会自动回滚）。撤回只是止血，防止影响面继续扩大。
+    """
+    with ctx.db.session() as session:
+        row = session.get(AgentRelease, release_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="版本不存在")
+        row.yanked_at = utcnow()
+        session.flush()
+        session.add(
+            EventLog(
+                level="warning",
+                category="release_yank",
+                message="撤回 Agent 版本 %s" % row.version,
+            )
+        )
+        return _release_out(row)
+
+
+@router.patch("/releases/{release_id}", response_model=ReleaseOut)
+def update_release(
+    release_id: int,
+    payload: ReleaseUpdate,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> ReleaseOut:
+    with ctx.db.session() as session:
+        row = session.get(AgentRelease, release_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="版本不存在")
+        if payload.notes is not None:
+            row.notes = payload.notes
+        if payload.channel is not None:
+            row.channel = payload.channel[:16]
+        session.flush()
+        return _release_out(row)
+
+
+def _release_out(row: AgentRelease) -> ReleaseOut:
+    return ReleaseOut(
+        id=row.id,
+        version=row.version,
+        channel=row.channel,
+        sha256=row.sha256,
+        size=int(row.size),
+        notes=row.notes,
+        rolled_out=row.published_at is not None and row.yanked_at is None,
+        yanked=row.yanked_at is not None,
+        created_at=_iso(row.created_at) or "",
+        published_at=_iso(row.published_at),
+    )
+
+
+def _b64(raw: bytes) -> str:
+    import base64
+
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")

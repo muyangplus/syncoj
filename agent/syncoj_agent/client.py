@@ -398,6 +398,63 @@ class AgentClient:
             return data if isinstance(data, dict) else {}
         raise _as_error(status, data, "事件上报失败")
 
+    def download_to_file(self, path: str, dest: Path, max_bytes: int) -> int:
+        """把 ``path`` 的内容流式下载到 ``dest``，返回写入字节数。
+
+        流式而非 ``request()`` 那样一次性读进内存：发布包可能上百 MB，而 Agent
+        的内存预算只有 200MB。
+        """
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        connection = self._connection(True)
+        url = self.prefix + path
+        headers = {
+            "Host": self.host if self.port in (80, 443) else "%s:%d" % (self.host, self.port),
+            "Accept": "application/octet-stream",
+            "User-Agent": "syncoj-agent",
+        }
+        if self.token:
+            headers["Authorization"] = "Bearer " + self.token
+
+        try:
+            connection.request("GET", url, headers=headers)
+            response = connection.getresponse()
+        except (http.client.HTTPException, OSError, ssl.SSLError) as exc:
+            self._drop(True)
+            raise NetworkError("下载 %s 失败: %s" % (path, exc))
+
+        if response.status != 200:
+            payload = response.read()
+            self._drop(True)
+            data = _decode_json(payload, response.status, path)
+            raise _as_error(response.status, data, "下载 %s 失败" % path)
+
+        written = 0
+        try:
+            with open(str(dest), "wb") as handle:
+                while True:
+                    chunk = response.read(_READ_CHUNK)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > max_bytes:
+                        raise PayloadTooLarge(
+                            "下载内容超过上限 %d 字节" % max_bytes
+                        )
+                    handle.write(chunk)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except BaseException:
+            try:
+                dest.unlink()
+            except OSError:
+                pass
+            self._drop(True)
+            raise
+        finally:
+            _drain_quietly(response)
+
+        return written
+
     def open_download(self, asset_id: int, offset: int = 0):
         """发起下载请求，返回 ``(status, headers, response)``。
 
@@ -465,6 +522,17 @@ def build_enroll_payload(
 # --------------------------------------------------------------------------- #
 # 工具
 # --------------------------------------------------------------------------- #
+
+
+def _drain_quietly(response) -> None:
+    """把响应体读完让连接可复用；读失败就静默放弃（连接会被丢弃）。"""
+    if response is None:
+        return
+    try:
+        while response.read(_READ_CHUNK):
+            pass
+    except Exception:
+        pass
 
 
 def _build_ssl_context(verify_tls: bool, ca_file: Optional[Path]) -> ssl.SSLContext:

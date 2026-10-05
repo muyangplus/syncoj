@@ -35,7 +35,37 @@ __all__ = [
     "load_signing_key",
     "generate_keypair",
     "openssl_available",
+    "parse_version",
 ]
+
+
+def parse_version(text: str) -> Tuple[int, ...]:
+    """把 ``"1.2.3"`` 解析成 ``(1, 2, 3)``。
+
+    数字比较而非字符串比较：``"1.10.0" > "1.9.0"`` 在版本语义上成立，但用字符串
+    比较会得出相反结论 —— 那会让 1.10 被判定为"不比 1.9 新"而拒绝铺开。
+    """
+    if not isinstance(text, str):
+        raise ValueError("版本号必须是字符串")
+    cleaned = text.strip()
+    if not cleaned:
+        raise ValueError("版本号为空")
+
+    parts: List[int] = []
+    for chunk in cleaned.split("."):
+        digits = ""
+        for ch in chunk:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        if not digits:
+            break
+        parts.append(int(digits))
+
+    if not parts:
+        raise ValueError("无法解析版本号: %r" % text)
+    return tuple(parts)
 
 log = logging.getLogger(__name__)
 

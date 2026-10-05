@@ -20,6 +20,11 @@ def _env_path(name: str, default: str) -> Path:
     return Path(raw).expanduser() if raw else Path(default)
 
 
+def _env_opt_path(name: str) -> Optional[Path]:
+    raw = os.environ.get(name)
+    return Path(raw).expanduser() if raw else None
+
+
 def _env_int(name: str, default: int) -> int:
     raw = os.environ.get(name)
     if not raw:
@@ -36,6 +41,10 @@ class Settings:
 
     # ---- 存储 ----
     data_root: Path = field(default_factory=lambda: _env_path("SYNCOJ_DATA_ROOT", "runtime/server"))
+    #: 发布签名私钥路径（环境变量 SYNCOJ_RELEASE_KEY 可覆盖）
+    release_signing_key: Optional[Path] = field(
+        default_factory=lambda: _env_opt_path("SYNCOJ_RELEASE_KEY")
+    )
 
     # ---- 轮询节奏（下发给 Agent，Agent 不得自行决定）----
     # 空闲时放宽到 60s：50 台机器 -> 约 0.8 req/s
@@ -58,6 +67,13 @@ class Settings:
     # ---- 评测成绩扫描 ----
     # 周期扫描 judge_result/ 目录并回写成绩。对延迟不敏感，所以放得比较宽
     judge_scan_interval: float = 10.0
+
+    # ---- 自更新 ----
+    #: 发布签名私钥（PEM/DER/JSON）。**留空则服务端不提供任何升级** ——
+    #: 没有私钥就签不出包，而没有签名的包 Agent 一律拒绝，所以留空是安全的默认值。
+    release_signing_key: Optional[Path] = None
+    #: 发布包大小上限
+    max_release_size: int = 256 * 1024 * 1024
 
     # ---- 认证 ----
     admin_session_ttl_seconds: int = 12 * 3600

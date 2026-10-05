@@ -34,6 +34,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '选手状态' },
       },
       {
+        path: 'machines',
+        name: 'machines',
+        component: () => import('@/views/MachinesView.vue'),
+        meta: { title: '机器配对' },
+      },
+      {
         path: 'files',
         name: 'files',
         component: () => import('@/views/FilesView.vue'),

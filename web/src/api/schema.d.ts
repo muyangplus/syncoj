@@ -4,6 +4,50 @@
  */
 
 export interface paths {
+    "/api/v1/admin/bootstrap-keys": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Bootstrap Keys */
+        get: operations["list_bootstrap_keys_api_v1_admin_bootstrap_keys_get"];
+        put?: never;
+        /**
+         * Issue Bootstrap Key
+         * @description 签发一把统一密钥。**明文只返回这一次**，库里只有哈希。
+         */
+        post: operations["issue_bootstrap_key_api_v1_admin_bootstrap_keys_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/bootstrap-keys/{key_id}/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Revoke Bootstrap Key
+         * @description 吊销一把统一密钥。
+         *
+         *     **已经注册好的机器不受影响** —— 它们手里是各自的 token，不是这把密钥。
+         *     吊销只挡住"以后还想拿它注册"的机器。
+         */
+        post: operations["revoke_bootstrap_key_api_v1_admin_bootstrap_keys__key_id__revoke_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/contests": {
         parameters: {
             query?: never;
@@ -391,6 +435,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List All Events
+         * @description 不按场次过滤的审计事件。
+         *
+         *     有些事件**根本不属于任何场次**，而它们恰恰是最需要被看到的：
+         *     "有机器用统一密钥注册上来了"、"某台机器报的硬件指纹与一台**在线**机器相同"。
+         *     注册发生在配对之前，那台机器那时还没有场次归属 —— 如果只能按场次查，
+         *     这些告警会写进库然后永远没人看见。那和没记录没有区别。
+         */
+        get: operations["list_all_events_api_v1_admin_events_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/health": {
         parameters: {
             query?: never;
@@ -436,6 +505,123 @@ export interface paths {
         put?: never;
         /** Logout */
         post: operations["logout_api_v1_admin_logout_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/machines/claim-by-code": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Claim Machine By Code
+         * @description 按配对码认领：机器上显示什么，教师就输什么。
+         *
+         *     遍历全部待认领机器逐个比对哈希。待认领队列通常只有个位数，
+         *     遍历完全可接受 —— 而按哈希直接查表需要一个"码 → 机器"的索引，
+         *     那意味着要存明文或者可逆的东西，不值得为这点性能换。
+         */
+        post: operations["claim_machine_by_code_api_v1_admin_machines_claim_by_code_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/machines/clone-alerts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Clone Alerts
+         * @description 疑似克隆镜像：多台机器共用同一个硬件指纹。
+         *
+         *     正常情况下每台物理机的 SMBIOS UUID 都不同。撞了指纹说明镜像是在某台机器
+         *     **跑过之后**才克隆的 —— 那批机器里可能已经有人的凭据被一起拷了进去，
+         *     配对与成绩归属都有串的风险，值得教师停下来看一眼。
+         */
+        get: operations["list_clone_alerts_api_v1_admin_machines_clone_alerts_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/machines/pending": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Pending Machines
+         * @description 待配对的机器。
+         *
+         *     按**最后心跳时间倒序**：教师站在机器前读配对码时，那台机器刚刚才心跳过，
+         *     它就应该在最上面。按注册时间排会让人从一堆久未上线的机器里翻找。
+         */
+        get: operations["list_pending_machines_api_v1_admin_machines_pending_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/machines/pending/{claim_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Revoke Pending Machine
+         * @description 把一台待配对的机器从列表里去掉（认错机器、测试机、刷注册的垃圾）。
+         *
+         *     只是吊销它的临时凭据 —— 那台机器下次心跳会拿到 401，然后按配置重新注册。
+         *     真正的垃圾机器应该先吊销统一密钥，否则它会一直回来。
+         */
+        delete: operations["revoke_pending_machine_api_v1_admin_machines_pending__claim_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/machines/{claim_id}/claim": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Claim Machine By Id
+         * @description 按机器认领（教师从列表里按主机名点选）。
+         *
+         *     给了 ``pair_code`` 就必须对得上 —— 机器名可能是重复的（克隆镜像、
+         *     默认 hostname），而配对码是唯一能证明"教师确实站在这台机器前面"的东西。
+         */
+        post: operations["claim_machine_by_id_api_v1_admin_machines__claim_id__claim_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -706,12 +892,18 @@ export interface paths {
         put?: never;
         /**
          * Enroll
-         * @description 用注册码换长期凭据。
+         * @description 换长期凭据。两条路，二选一。
          *
-         *     刻意允许**重复注册**：NOI Linux 考试机常做整机快照还原，机器上的
-         *     ``credential.json`` 会消失。此时 Agent 用镜像内置的注册码重新 enroll，
+         *     **每选手注册码**（``enroll_code``）：一码一人，绑定 ``player_no + machine_id``。
+         *     刻意允许重复注册 —— NOI Linux 考试机常做整机快照还原，机器上的
+         *     ``credential.json`` 会消失，此时 Agent 用镜像内置的注册码重新 enroll，
          *     服务端按 ``machine_id`` 认出这是老机器，换发新凭据并作废旧凭据。
-         *     因此注册码不是一次性的，而是 "机器凭据种子"。
+         *     所以注册码不是一次性的，而是"机器凭据种子"。
+         *
+         *     **统一密钥**（``bootstrap_key``）：整间机房一份密钥，换回来的机器**没有归属**，
+         *     要靠短码配对认领到人。适合"镜像预装 + 批量克隆"的部署方式。
+         *
+         *     两个都传时以 ``enroll_code`` 为准 —— 单人码是更明确的意图。
          */
         post: operations["enroll_api_v1_agent_enroll_post"];
         delete?: never;
@@ -815,7 +1007,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Tick */
+        /**
+         * Tick
+         * @description 一次心跳。已认领的机器收发文件，未认领的机器只在这里"排队等叫号"。
+         */
         post: operations["tick_api_v1_agent_tick_post"];
         delete?: never;
         options?: never;
@@ -1015,6 +1210,99 @@ export interface components {
              * @default
              */
             version: string;
+        };
+        /** BootstrapKeyIssueIn */
+        BootstrapKeyIssueIn: {
+            /** Expires Days */
+            expires_days?: number | null;
+            /** Label */
+            label?: string | null;
+            /** Note */
+            note?: string | null;
+        };
+        /**
+         * BootstrapKeyIssuedOut
+         * @description 签发结果。``key`` 明文**只在这一刻出现**，之后库里只有哈希。
+         */
+        BootstrapKeyIssuedOut: {
+            /** Created At */
+            created_at: string;
+            /** Expires At */
+            expires_at?: string | null;
+            /** Id */
+            id: number;
+            /** Key */
+            key: string;
+            /** Label */
+            label?: string | null;
+            /** Last Used At */
+            last_used_at?: string | null;
+            /** Note */
+            note?: string | null;
+            /** Revoked At */
+            revoked_at?: string | null;
+            /**
+             * Use Count
+             * @default 0
+             */
+            use_count: number;
+        };
+        /** BootstrapKeyOut */
+        BootstrapKeyOut: {
+            /** Created At */
+            created_at: string;
+            /** Expires At */
+            expires_at?: string | null;
+            /** Id */
+            id: number;
+            /** Label */
+            label?: string | null;
+            /** Last Used At */
+            last_used_at?: string | null;
+            /** Note */
+            note?: string | null;
+            /** Revoked At */
+            revoked_at?: string | null;
+            /**
+             * Use Count
+             * @default 0
+             */
+            use_count: number;
+        };
+        /**
+         * ClaimByCodeIn
+         * @description 用配对码认领：机器上显示什么，教师就输什么。
+         */
+        ClaimByCodeIn: {
+            /** Pair Code */
+            pair_code: string;
+            /** Player Id */
+            player_id: number;
+        };
+        /**
+         * ClaimMachineIn
+         * @description 认领一台机器。
+         *
+         *     ``pair_code`` 可以省略（教师从列表里按主机名直接认领时就省略），
+         *     但只要给了就必须对得上 —— 那是"我确认过这台机器就是那台"的凭据。
+         */
+        ClaimMachineIn: {
+            /** Pair Code */
+            pair_code?: string | null;
+            /** Player Id */
+            player_id: number;
+        };
+        /**
+         * CloneAlertOut
+         * @description 克隆镜像告警：多台机器共用同一个硬件指纹。
+         */
+        CloneAlertOut: {
+            /** Fingerprint */
+            fingerprint: string;
+            /** Hostnames */
+            hostnames?: string[];
+            /** Machine Count */
+            machine_count: number;
         };
         /** ContestCreate */
         ContestCreate: {
@@ -1223,36 +1511,79 @@ export interface components {
             /** Player No */
             player_no: string;
         };
-        /** EnrollRequest */
+        /**
+         * EnrollRequest
+         * @description 注册请求。
+         *
+         *     两种凭据二选一：
+         *
+         *     * ``enroll_code`` —— 每选手一个注册码（原有行为），一码一人
+         *     * ``bootstrap_key`` —— 镜像内置的统一密钥，注册出来的机器**没有归属**，
+         *       要靠短码配对认领到人
+         *
+         *     两个都传时以 ``enroll_code`` 为准：单人码是更明确的意图（"这台机器就是
+         *     某个具体选手"），不该被镜像里那份宽泛的密钥盖过去。
+         */
         EnrollRequest: {
             /** Agent Version */
             agent_version?: string | null;
+            /** Bootstrap Key */
+            bootstrap_key?: string | null;
             /** Enroll Code */
-            enroll_code: string;
+            enroll_code?: string | null;
             /** Hostname */
             hostname?: string | null;
+            /** Machine Fingerprint */
+            machine_fingerprint?: string | null;
             /** Machine Id */
             machine_id: string;
+            /** Machine Uuid */
+            machine_uuid?: string | null;
             /** Os Info */
             os_info?: string | null;
         };
-        /** EnrollResponse */
+        /**
+         * EnrollResponse
+         * @description 注册结果。
+         *
+         *     ``claimed=False`` 表示这是一台**还没有归属**的机器（走统一密钥注册的）。
+         *     此时 Agent 该做的是把 ``pair_code`` 显示给人看、然后等着被认领，
+         *     而不是去扫代码 —— 它连准考证号都不知道，扫出来的路径没有意义。
+         *
+         *     ``player_no`` 等在未认领时为空串，客户端必须按 ``claimed`` 分支处理。
+         */
         EnrollResponse: {
             /** Agent Id */
             agent_id: number;
+            /**
+             * Claimed
+             * @default true
+             */
+            claimed: boolean;
             /** Config */
-            config: {
+            config?: {
                 [key: string]: unknown;
             };
             /** Contest Id */
-            contest_id: number;
-            /** Contest Name */
+            contest_id?: number | null;
+            /**
+             * Contest Name
+             * @default
+             */
             contest_name: string;
-            /** Contest Slug */
+            /**
+             * Contest Slug
+             * @default
+             */
             contest_slug: string;
+            /** Pair Code */
+            pair_code?: string | null;
             /** Player Name */
             player_name?: string | null;
-            /** Player No */
+            /**
+             * Player No
+             * @default
+             */
             player_no: string;
             /** Token */
             token: string;
@@ -1380,6 +1711,39 @@ export interface components {
             asset_id: number;
             /** Bytes Done */
             bytes_done: number;
+        };
+        /**
+         * PendingMachineOut
+         * @description 一台注册上来、还没认领到人的机器。
+         */
+        PendingMachineOut: {
+            /** Agent Version */
+            agent_version?: string | null;
+            /** Created At */
+            created_at: string;
+            /**
+             * Fingerprint Peers
+             * @default 0
+             */
+            fingerprint_peers: number;
+            /** Hostname */
+            hostname?: string | null;
+            /** Id */
+            id: number;
+            /** Last Seen At */
+            last_seen_at?: string | null;
+            /** Machine Fingerprint */
+            machine_fingerprint?: string | null;
+            /** Machine Id */
+            machine_id: string;
+            /** Machine Uuid */
+            machine_uuid?: string | null;
+            /** Os Info */
+            os_info?: string | null;
+            /** Pair Code Expires In */
+            pair_code_expires_in?: number | null;
+            /** Seconds Since Seen */
+            seconds_since_seen?: number | null;
         };
         /** PlayerOut */
         PlayerOut: {
@@ -1789,6 +2153,8 @@ export interface components {
             agent_version?: string | null;
             /** Completed Assets */
             completed_assets?: number[];
+            /** Hostname */
+            hostname?: string | null;
             /** Machine Id */
             machine_id: string;
             /** Partials */
@@ -1810,16 +2176,27 @@ export interface components {
         TickResponse: {
             /** Cancel Assets */
             cancel_assets?: number[];
+            /**
+             * Claimed
+             * @default true
+             */
+            claimed: boolean;
             /** Config */
             config: {
                 [key: string]: unknown;
             };
+            /** Contest Slug */
+            contest_slug?: string | null;
             /** Deploy Jobs */
             deploy_jobs?: components["schemas"]["DeployJob"][];
             /** Need Upload */
             need_upload?: string[];
             /** Next Tick Seconds */
             next_tick_seconds: number;
+            /** Pair Code */
+            pair_code?: string | null;
+            /** Player No */
+            player_no?: string | null;
             /** Server Time */
             server_time: number;
             upgrade?: components["schemas"]["UpgradeInfo"] | null;
@@ -1902,6 +2279,90 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    list_bootstrap_keys_api_v1_admin_bootstrap_keys_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BootstrapKeyOut"][];
+                };
+            };
+        };
+    };
+    issue_bootstrap_key_api_v1_admin_bootstrap_keys_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BootstrapKeyIssueIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BootstrapKeyIssuedOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    revoke_bootstrap_key_api_v1_admin_bootstrap_keys__key_id__revoke_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                key_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BootstrapKeyOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_contests_api_v1_admin_contests_get: {
         parameters: {
             query?: never;
@@ -2683,6 +3144,39 @@ export interface operations {
             };
         };
     };
+    list_all_events_api_v1_admin_events_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                level?: string | null;
+                category?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EventOut"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     health_api_v1_admin_health_get: {
         parameters: {
             query?: never;
@@ -2754,6 +3248,145 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+        };
+    };
+    claim_machine_by_code_api_v1_admin_machines_claim_by_code_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClaimByCodeIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_clone_alerts_api_v1_admin_machines_clone_alerts_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CloneAlertOut"][];
+                };
+            };
+        };
+    };
+    list_pending_machines_api_v1_admin_machines_pending_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PendingMachineOut"][];
+                };
+            };
+        };
+    };
+    revoke_pending_machine_api_v1_admin_machines_pending__claim_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                claim_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    claim_machine_by_id_api_v1_admin_machines__claim_id__claim_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                claim_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClaimMachineIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

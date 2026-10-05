@@ -12,6 +12,10 @@ import type {
   ApplyRosterIn,
   ApplyRosterOut,
   AssetOut,
+  BootstrapKeyIssueIn,
+  BootstrapKeyIssuedOut,
+  BootstrapKeyOut,
+  CloneAlertOut,
   ContestCreate,
   ContestOut,
   ContestUpdate,
@@ -23,6 +27,7 @@ import type {
   JudgeScanOut,
   LoginResponse,
   ManualScoreIn,
+  PendingMachineOut,
   PlayerOut,
   PlayerUpsert,
   ProblemImportOut,
@@ -160,6 +165,52 @@ export const problemApi = {
 
 export const agentApi = {
   list: (contestId: number) => request<AgentRuntimeOut[]>(`${ADMIN}/contests/${contestId}/agents`),
+}
+
+/**
+ * 机器配对。
+ *
+ * 统一密钥注册出来的机器**没有归属**（服务端还不知道它是谁），
+ * 靠这里的几个接口把它认领到名单里的某个选手。
+ */
+export const machineApi = {
+  /** 待认领的机器。按最后心跳倒序 —— 教师站在机器前时它就在最上面 */
+  pending: () => request<PendingMachineOut[]>(`${ADMIN}/machines/pending`),
+
+  /** 疑似克隆镜像：多台机器共用同一个硬件指纹 */
+  cloneAlerts: () => request<CloneAlertOut[]>(`${ADMIN}/machines/clone-alerts`),
+
+  /** 用配对码认领：机器上显示什么就输什么 */
+  claimByCode: (pairCode: string, playerId: number) =>
+    request<SimpleAck>(`${ADMIN}/machines/claim-by-code`, {
+      method: 'POST',
+      body: { pair_code: pairCode, player_id: playerId },
+    }),
+
+  /** 从列表里按主机名认领（给了配对码就必须对得上） */
+  claimById: (claimId: number, playerId: number, pairCode?: string) =>
+    request<SimpleAck>(`${ADMIN}/machines/${claimId}/claim`, {
+      method: 'POST',
+      body: { player_id: playerId, pair_code: pairCode || null },
+    }),
+
+  revokePending: (claimId: number) =>
+    request<SimpleAck>(`${ADMIN}/machines/pending/${claimId}`, { method: 'DELETE' }),
+}
+
+/** 镜像内置的统一注册密钥 */
+export const bootstrapKeyApi = {
+  list: () => request<BootstrapKeyOut[]>(`${ADMIN}/bootstrap-keys`),
+
+  /** 明文**只返回这一次**，之后库里只有哈希 —— 界面必须当场显示给教师抄 */
+  issue: (payload: BootstrapKeyIssueIn) =>
+    request<BootstrapKeyIssuedOut>(`${ADMIN}/bootstrap-keys`, {
+      method: 'POST',
+      body: payload,
+    }),
+
+  revoke: (keyId: number) =>
+    request<BootstrapKeyOut>(`${ADMIN}/bootstrap-keys/${keyId}/revoke`, { method: 'POST' }),
 }
 
 export const fileApi = {

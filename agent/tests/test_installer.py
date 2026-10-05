@@ -166,42 +166,56 @@ def test_read_bundle_version_rejects_missing_version(installer, workdir: Path) -
 # --------------------------------------------------------------------------- #
 
 
-def test_render_config_contains_all_settings(installer) -> None:
-    text = installer.render_config(
+def config_args(**overrides):
+    """render_config 的默认参数。
+
+    ``deploy_root`` 与 ``scan_roots`` 是**字符串模板**（可能含 ``{desktop}`` /
+    ``{player_no}``），不是 Path —— 它们要原样写进配置文件。
+    """
+    args = dict(
         server_url="https://10.0.0.1:8443",
         verify_tls=True,
         ca_file="/etc/syncoj/ca.pem",
         enroll_code="AAAA-BBBB",
         state_dir=Path("/var/lib/syncoj"),
-        deploy_root=Path("/home/student/exam"),
-        scan_roots="/home/student/code",
+        deploy_root="{desktop}",
+        scan_roots="{desktop}/{player_no}",
+        scan_prefix="none",
         upgrade_mode="off",
         install_root=Path("/opt/syncoj"),
         public_key="",
     )
+    args.update(overrides)
+    return args
+
+
+def test_render_config_contains_all_settings(installer) -> None:
+    text = installer.render_config(**config_args())
     assert "url = https://10.0.0.1:8443" in text
     assert "verify_tls = true" in text
     assert "ca_file = /etc/syncoj/ca.pem" in text
     assert "enroll_code = AAAA-BBBB" in text
-    assert "roots = /home/student/code" in text
+    assert "roots = {desktop}/{player_no}" in text
+    assert "deploy_root = {desktop}" in text
+    assert "prefix = none" in text
     assert "mode = off" in text
 
 
 def test_rendered_config_is_parseable(installer, workdir: Path) -> None:
-    """生成出来的配置必须能被 Agent 的解析器读进去 —— 否则安装成功却起不来。"""
+    """生成出来的配置必须能被 Agent 的解析器读进去 —— 否则安装成功却起不来。
+
+    这里把 {desktop} 换成一个真实存在的目录，因为 Agent 载入配置时就会展开它。
+    """
     from syncoj_agent.config import AgentConfig
 
+    desktop = workdir / "桌面"
+    desktop.mkdir()
     text = installer.render_config(
-        server_url="https://10.0.0.1:8443",
-        verify_tls=True,
-        ca_file="",
-        enroll_code="AAAA-BBBB",
-        state_dir=Path("/var/lib/syncoj"),
-        deploy_root=Path("/home/student/exam"),
-        scan_roots="/home/student/code",
-        upgrade_mode="off",
-        install_root=Path("/opt/syncoj"),
-        public_key="",
+        **config_args(
+            ca_file="",
+            deploy_root=str(desktop),
+            scan_roots="%s/{player_no}" % desktop,
+        )
     )
     config_file = workdir / "agent.ini"
     config_file.write_text(text, encoding="utf-8")
@@ -210,7 +224,11 @@ def test_rendered_config_is_parseable(installer, workdir: Path) -> None:
     assert config.server_url == "https://10.0.0.1:8443"
     assert config.enroll_code == "AAAA-BBBB"
     assert config.upgrade_mode == "off"
-    assert config.deploy_root == Path("/home/student/exam")
+    assert config.deploy_root == desktop
+    assert config.scan_prefix == "none"
+    # {player_no} 保留到注册之后才展开。
+    # 用 Path 比较而不是字符串：Windows 上 Path 会把 "/" 归一化成 "\"
+    assert Path(str(config.scan_roots[0]).replace("{player_no}", "S001")) == desktop / "S001"
 
 
 def test_rendered_paths_are_always_posix(installer) -> None:
@@ -219,51 +237,49 @@ def test_rendered_paths_are_always_posix(installer) -> None:
     安装器可能在 Windows 上被运行（开发机/镜像构建机），若直接 ``str(Path)``
     会写出 ``\\opt\\syncoj`` —— 拿到目标机上就是废的，而问题只在现场暴露。
     """
-    config_text = installer.render_config(
-        server_url="https://x", verify_tls=True, ca_file="",
-        enroll_code="", state_dir=Path("/var/lib/syncoj"),
-        deploy_root=Path("/home/student/exam"), scan_roots="/home/student/code",
-        upgrade_mode="off", install_root=Path("/opt/syncoj"), public_key="",
-    )
+    config_text = installer.render_config(**config_args())
     unit_text = installer.render_unit(
         prefix=Path("/opt/syncoj"), config_path=Path("/etc/syncoj/agent.ini"),
-        state_dir=Path("/var/lib/syncoj"), deploy_root=Path("/home/student/exam"),
-        scan_roots="/home/student/code", run_user="syncoj", python="/usr/bin/python3",
+        state_dir=Path("/var/lib/syncoj"), deploy_root="{desktop}",
+        scan_roots="{desktop}/{player_no}", run_user="student", python="/usr/bin/python3",
     )
 
     for text, label in ((config_text, "config"), (unit_text, "unit")):
         assert "\\" not in text, "%s 中出现了反斜杠路径" % label
         assert "/var/lib/syncoj" in text
-        assert "/home/student/exam" in text
 
 
 def test_render_config_with_insecure_tls(installer) -> None:
-    text = installer.render_config(
-        server_url="http://127.0.0.1:8000", verify_tls=False, ca_file="",
-        enroll_code="", state_dir=Path("/s"), deploy_root=Path("/d"),
-        scan_roots="/c", upgrade_mode="off", install_root=Path("/o"), public_key="",
-    )
+    text = installer.render_config(**config_args(verify_tls=False))
     assert "verify_tls = false" in text
 
 
-def test_render_unit_uses_configured_paths(installer) -> None:
-    """systemd 的读写白名单必须跟着实际配置走。
+def test_render_unit_permissions_follow_contestant_user(installer) -> None:
+    """systemd 的读写白名单必须跟着"Agent 以选手身份运行"这个前提走。
 
-    写死成 /home/student/code 的话，换个扫描目录就会被 ProtectSystem=strict
-    挡住，表现为"服务起来了但什么都不传" —— 最难排查的那类故障。
+    原来的配置有 ``ProtectHome=read-only`` —— 那是在 Agent 以专用 syncoj 账号
+    运行的假设下写的。现在 Agent 要往**自己的桌面**写文件，这条会把家目录整个
+    变成只读，表现是"服务起来了但什么都不传"，现场极难排查。
     """
     text = installer.render_unit(
         prefix=Path("/opt/syncoj"),
         config_path=Path("/etc/syncoj/agent.ini"),
         state_dir=Path("/var/lib/syncoj"),
-        deploy_root=Path("/srv/exam"),
-        scan_roots="/srv/contest/code, /srv/contest/backup",
-        run_user="syncoj",
+        deploy_root="{desktop}",
+        scan_roots="{desktop}/{player_no}, /srv/shared/code",
+        run_user="student",
         python="/usr/bin/python3",
     )
-    assert "ReadWritePaths=/var/lib/syncoj /srv/exam" in text
-    assert "ReadOnlyPaths=/srv/contest/code /srv/contest/backup" in text
-    assert "/home/student" not in text
+
+    # %h 由 systemd 展开成 User= 的家目录，正好覆盖 {desktop} 及其下的一切
+    assert "ReadWritePaths=%h /var/lib/syncoj /srv/shared/code" in text
+    # 模板路径不该被塞进去 —— 它们本来就在 %h 之下，重复列没有意义
+    assert "{desktop}" not in text
+    assert "{player_no}" not in text
+    # 这条会把家目录变只读，绝不能出现
+    assert "ProtectHome" not in text
+    # 系统目录仍然全部只读，这才是 ProtectSystem=strict 的价值
+    assert "ProtectSystem=strict" in text
 
 
 def test_render_unit_uses_current_symlink(installer) -> None:
@@ -273,8 +289,8 @@ def test_render_unit_uses_current_symlink(installer) -> None:
     """
     text = installer.render_unit(
         prefix=Path("/opt/syncoj"), config_path=Path("/etc/syncoj/agent.ini"),
-        state_dir=Path("/var/lib/syncoj"), deploy_root=Path("/d"),
-        scan_roots="/c", run_user="u", python="/usr/bin/python3",
+        state_dir=Path("/var/lib/syncoj"), deploy_root="{desktop}",
+        scan_roots="{desktop}/{player_no}", run_user="student", python="/usr/bin/python3",
     )
     assert (
         "ExecStart=/usr/bin/python3 -E -s /opt/syncoj/current/run_agent.py"
@@ -373,12 +389,16 @@ def test_bundle_contains_launcher(workdir: Path) -> None:
     assert "syncoj_agent/main.py" in names
 
 
-def test_render_unit_without_scan_roots(installer) -> None:
+def test_render_unit_without_extra_paths(installer) -> None:
+    """没配额外路径时，白名单只剩 %h 与状态目录 —— 但 %h 必须在。
+
+    少了它，ProtectSystem=strict 会把家目录也变成只读。
+    """
     text = installer.render_unit(
         prefix=Path("/o"), config_path=Path("/c"), state_dir=Path("/s"),
-        deploy_root=Path("/d"), scan_roots="", run_user="u", python="python3",
+        deploy_root="", scan_roots="", run_user="student", python="python3",
     )
-    assert "ReadOnlyPaths" not in text
+    assert "ReadWritePaths=%h /s" in text
 
 
 # --------------------------------------------------------------------------- #

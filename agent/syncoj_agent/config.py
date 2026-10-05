@@ -15,7 +15,34 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
-__all__ = ["AgentConfig", "ConfigError", "DEFAULT_INI"]
+from .state import detect_desktop
+
+__all__ = ["AgentConfig", "ConfigError", "DEFAULT_INI", "expand_placeholders"]
+
+#: 路径模板里支持的两个占位符。``{desktop}`` 在载入配置时就展开；
+#: ``{player_no}`` 要等注册完成才知道，由 Agent 在拿到凭据后展开。
+PLACEHOLDER_DESKTOP = "{desktop}"
+PLACEHOLDER_PLAYER_NO = "{player_no}"
+
+#: 路径前缀策略：auto = 取根目录名；none = 不加前缀；其余按字面量
+PREFIX_AUTO = "auto"
+PREFIX_NONE = "none"
+
+
+def expand_placeholders(text: str, desktop: Optional[Path] = None,
+                        player_no: Optional[str] = None) -> str:
+    """展开路径模板。
+
+    ``{desktop}`` 现在就能展开（靠探测）；``{player_no}`` 只有在注册之后才知道 ——
+    展开不了的时候**原样保留**，由调用方在合适的时机再展开一次。
+    保留而不是报错，是因为配置校验发生在注册之前。
+    """
+    result = text
+    if PLACEHOLDER_DESKTOP in result:
+        result = result.replace(PLACEHOLDER_DESKTOP, str(desktop or detect_desktop()))
+    if player_no and PLACEHOLDER_PLAYER_NO in result:
+        result = result.replace(PLACEHOLDER_PLAYER_NO, player_no)
+    return result
 
 DEFAULT_INI = """\
 [server]
@@ -33,12 +60,26 @@ enroll_code =
 state_dir = /var/lib/syncoj
 # 本机标识。留空则读取 /etc/machine-id（推荐）
 machine_id =
-# 下发文件的落地根目录。服务端只能在这下面写相对路径
-deploy_root = /home/student/exam
+# 下发文件的落地根目录。
+# {desktop} 会自动探测当前用户的桌面（兼容「桌面」与 Desktop 两种命名）
+deploy_root = {desktop}
 
 [scan]
-# 要监控的代码目录，绝对路径。多个目录用换行或逗号分隔
-roots = /home/student/code
+# 要回收的代码目录，绝对路径。多个目录用换行或逗号分隔。
+#
+# 默认约定：桌面/<准考证号>/<题目名>/<题目名>.cpp
+#   {desktop}   = 当前用户的桌面（自动探测）
+#   {player_no} = 准考证号（注册成功后由 Agent 展开）
+#
+# 想改成别的位置直接改这一行，例如：
+#   roots = /home/student/code
+#   roots = {desktop}/我的代码
+roots = {desktop}/{player_no}
+# 上报路径的前缀：
+#   none = 不加前缀（本机只有一个选手时推荐 —— 否则 source/ 里准考证号会出现两次）
+#   auto = 取根目录名。配置了多个扫描目录时用它可以区分同名文件
+#   其他字面量 = 就用这个字符串
+prefix = none
 # 两轮扫描之间的最小间隔（秒）。实际节奏由服务端 tick 响应控制
 interval = 60
 # 单文件大小上限（字节）。超过则跳过并上报
@@ -89,6 +130,8 @@ class AgentConfig:
     machine_id: str = ""
 
     scan_roots: List[Path] = field(default_factory=list)
+    #: 上报路径的前缀策略：``none`` 不加、``auto`` 取根目录名、其他按字面量
+    scan_prefix: str = PREFIX_NONE
     scan_interval: int = 60
     max_file_size: int = 2 * 1024 * 1024
 
@@ -133,6 +176,18 @@ class AgentConfig:
     def base_url(self) -> str:
         return self.server_url.rstrip("/")
 
+    @property
+    def needs_player_no(self) -> bool:
+        """是否有路径要等注册拿到准考证号之后才能确定。"""
+        return any(PLACEHOLDER_PLAYER_NO in str(root) for root in self.scan_roots)
+
+    def resolved_roots(self, player_no: str) -> List[Path]:
+        """展开 ``{player_no}`` 之后的扫描目录。
+
+        必须在拿到凭据之后调用 —— 准考证号是注册的产物。
+        """
+        return [Path(expand_placeholders(str(root), player_no=player_no)) for root in self.scan_roots]
+
     def validate(self) -> None:
         """检查配置自洽性。**不做网络请求**，便于离线自检。"""
         problems: List[str] = []
@@ -153,9 +208,25 @@ class AgentConfig:
             problems.append("scan.roots 至少要配置一个目录")
 
         for root in self.scan_roots:
+            text = str(root)
             if not root.is_absolute():
                 problems.append("扫描目录必须是绝对路径: %s" % root)
-            elif not root.is_dir():
+                continue
+            if PLACEHOLDER_PLAYER_NO in text:
+                # 还没注册，准考证号未知，没法检查最终目录是否存在。
+                # 但可以检查占位符**左边那一段**——它现在已经能确定了。
+                #
+                # 注意是直接取 split 的前半段（末尾带分隔符，Path 会归一化掉），
+                # 不要再取 .parent：那会跳到祖父目录，检查的是已经存在的工作区，
+                # 于是永远不报错。
+                prefix_dir = Path(text.split(PLACEHOLDER_PLAYER_NO)[0])
+                if str(prefix_dir) not in ("", ".") and not prefix_dir.is_dir():
+                    problems.append(
+                        "扫描目录的父目录不存在: %s（%s 会在注册后展开）"
+                        % (prefix_dir, PLACEHOLDER_PLAYER_NO)
+                    )
+                continue
+            if not root.is_dir():
                 problems.append("扫描目录不存在或不是目录: %s" % root)
 
         if not self.deploy_root.is_absolute():
@@ -219,13 +290,17 @@ class AgentConfig:
                 or "/var/lib/syncoj"
             ),
             machine_id=(parser.get("agent", "machine_id", fallback="") or "").strip(),
-            scan_roots=_split_paths(parser.get("scan", "roots", fallback="")),
+            # {desktop} 在这里就展开（靠探测）；{player_no} 要等注册后才展开
+            deploy_root=_templated_path(
+                parser.get("agent", "deploy_root", fallback="{desktop}") or "{desktop}"
+            ),
+            scan_roots=[
+                Path(expand_placeholders(item))
+                for item in _split_paths(parser.get("scan", "roots", fallback="") or "{desktop}/{player_no}")
+            ],
+            scan_prefix=(parser.get("scan", "prefix", fallback=PREFIX_NONE) or PREFIX_NONE).strip(),
             scan_interval=int(parser.get("scan", "interval", fallback="60")),
             max_file_size=int(parser.get("scan", "max_file_size", fallback=str(2 * 1024 * 1024))),
-            deploy_root=Path(
-                parser.get("agent", "deploy_root", fallback="/home/student/exam").strip()
-                or "/home/student/exam"
-            ),
             log_level=(parser.get("log", "level", fallback="INFO") or "INFO").strip().upper(),
             log_file=_opt_path(parser.get("log", "file", fallback="")),
             log_to_stderr=_as_bool(parser.get("log", "to_stderr", fallback="false")),
@@ -247,17 +322,17 @@ def _opt_path(raw: Optional[str]) -> Optional[Path]:
     return Path(text).expanduser() if text else None
 
 
-def _split_paths(raw: Optional[str]) -> List[Path]:
+def _templated_path(raw: str) -> Path:
+    """展开 ``{desktop}`` 与 ``~``，但**保留** ``{player_no}``。"""
+    return Path(expand_placeholders(raw.strip() or "{desktop}")).expanduser()
+
+
+def _split_paths(raw: Optional[str]) -> List[str]:
     """支持换行、逗号、分号分隔 —— 教师在配置文件里怎么写都行。"""
     if not raw:
         return []
     normalized = raw.replace(",", "\n").replace(";", "\n")
-    result: List[Path] = []
-    for line in normalized.splitlines():
-        text = line.strip()
-        if text:
-            result.append(Path(text).expanduser())
-    return result
+    return [line.strip() for line in normalized.splitlines() if line.strip()]
 
 
 #: 环境变量覆盖表：env 名 -> 属性名

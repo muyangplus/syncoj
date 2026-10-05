@@ -41,6 +41,7 @@ from ..models import (
     EventLog,
     JudgeRun,
     Player,
+    Problem,
     SourceFile,
     utcnow,
 )
@@ -63,6 +64,10 @@ from ..schemas import (
     ManualScoreIn,
     PlayerOut,
     PlayerUpsert,
+    ProblemColumnOut,
+    ProblemImportOut,
+    ProblemOut,
+    ProblemUpsert,
     ReleaseOut,
     ReleaseUpdate,
     ScoreCellOut,
@@ -80,6 +85,7 @@ from ..security import (
     new_token,
     verify_password,
 )
+from ..services.deploy import validate_dest_template
 from ..services.signing import parse_version
 from ..storage import BlobTooLarge, HashMismatch
 from .deps import get_ctx
@@ -630,12 +636,15 @@ def create_deploy(
     # 反过来先 strip("/") 再校验是错的 —— 那会把 "/etc" 就地洗成 "etc"
     # 然后顺利通过，等于校验形同虚设。落点虽然仍被限制在 deploy_root 内，
     # 但"绝对路径"这个明确错误意图被静默重新解释了，教师无从察觉。
-    raw_dest = (payload.dest_dir or "").strip().rstrip("/")
+    #
+    # dest_dir 支持 {player_no} 占位符（全员下发时每台机器的目标目录不同），
+    # 校验时先把它换成一个合法样例再走路径规则，但**入库的是模板本身**。
+    raw_dest = (payload.dest_dir or "").strip()
     if raw_dest:
         try:
-            dest_dir = validate_relpath(raw_dest, max_length=512)
-        except PathValidationError as exc:
-            raise HTTPException(status_code=400, detail="目标目录不合法: %s" % exc)
+            dest_dir = validate_dest_template(raw_dest)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
     else:
         dest_dir = ""
 
@@ -901,6 +910,184 @@ def _derive_task_status(task: DeployTask, counts: Dict[str, int]) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# 题目
+# --------------------------------------------------------------------------- #
+
+
+def _validate_problem_ident(raw: str) -> str:
+    """校验题目标识。
+
+    它会同时成为目录名、代码文件名与成绩矩阵列名，所以必须能安全用作**单个**
+    路径段。这里先按路径规则校验，再额外禁止斜杠（题目名不该带层级）。
+    """
+    text = (raw or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="题目标识不能为空")
+    if "/" in text:
+        raise HTTPException(
+            status_code=400, detail="题目标识不能包含斜杠：%s（它应当是单个目录名）" % text
+        )
+    try:
+        validate_relpath(text, max_length=64)
+    except PathValidationError as exc:
+        raise HTTPException(status_code=400, detail="题目标识不合法: %s" % exc)
+    return text
+
+
+@router.get("/contests/{contest_id}/problems", response_model=List[ProblemOut])
+def list_problems(
+    contest_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> List[ProblemOut]:
+    with ctx.db.session() as session:
+        rows = session.execute(
+            select(Problem)
+            .where(Problem.contest_id == contest_id)
+            .order_by(Problem.order_index, Problem.ident)
+        ).scalars()
+        return [_problem_out(row) for row in rows]
+
+
+@router.post("/contests/{contest_id}/problems", response_model=ProblemImportOut)
+def import_problems(
+    contest_id: int,
+    payload: List[ProblemUpsert],
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> ProblemImportOut:
+    """批量登记/更新题目。按 ``ident`` 幂等 upsert —— 名单可以反复导。
+
+    单条不合法只跳过那一条并在 ``errors`` 里说明，不让整批失败 ——
+    教师一次粘贴十道题，不该因为其中一个名字打错就全部白填。
+    """
+    if not payload:
+        return ProblemImportOut()
+    if len(payload) > 200:
+        raise HTTPException(status_code=413, detail="单次最多登记 200 道题")
+
+    result = ProblemImportOut()
+    with ctx.db.session() as session:
+        contest = session.get(Contest, contest_id)
+        if contest is None:
+            raise HTTPException(status_code=404, detail="场次不存在")
+
+        existing = {
+            row.ident: row
+            for row in session.execute(
+                select(Problem).where(Problem.contest_id == contest_id)
+            ).scalars()
+        }
+        # 未指定顺序时按提交顺序自动编号，避免全部堆在 0
+        auto_order = max([row.order_index for row in existing.values()] + [0])
+
+        for index, item in enumerate(payload):
+            try:
+                ident = _validate_problem_ident(item.ident)
+            except HTTPException as exc:
+                result.errors.append("%s：%s" % (item.ident, exc.detail))
+                continue
+
+            row = existing.get(ident)
+            if row is None:
+                auto_order += 1
+                row = Problem(
+                    contest_id=contest_id,
+                    ident=ident,
+                    order_index=item.order_index or auto_order,
+                )
+                session.add(row)
+                existing[ident] = row
+                result.created += 1
+            else:
+                result.updated += 1
+                if item.order_index:
+                    row.order_index = item.order_index
+
+            row.title = item.title or row.title
+            row.note = item.note or row.note
+            session.flush()
+            result.problems.append(_problem_out(row))
+
+        if result.created or result.updated:
+            session.add(
+                EventLog(
+                    level="info",
+                    category="problem_import",
+                    contest_id=contest_id,
+                    message="题目清单更新：新增 %d 道，更新 %d 道"
+                    % (result.created, result.updated),
+                )
+            )
+
+    return result
+
+
+@router.patch("/problems/{problem_id}", response_model=ProblemOut)
+def update_problem(
+    problem_id: int,
+    payload: ProblemUpsert,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> ProblemOut:
+    with ctx.db.session() as session:
+        row = session.get(Problem, problem_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="题目不存在")
+
+        ident = _validate_problem_ident(payload.ident)
+        if ident != row.ident:
+            clash = session.execute(
+                select(Problem).where(
+                    Problem.contest_id == row.contest_id,
+                    Problem.ident == ident,
+                    Problem.id != problem_id,
+                )
+            ).scalar_one_or_none()
+            if clash is not None:
+                raise HTTPException(status_code=409, detail="题目标识 %s 已被占用" % ident)
+            row.ident = ident
+
+        row.title = payload.title
+        row.note = payload.note
+        if payload.order_index:
+            row.order_index = payload.order_index
+        session.flush()
+        return _problem_out(row)
+
+
+@router.delete("/problems/{problem_id}", response_model=SimpleAck)
+def delete_problem(
+    problem_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> SimpleAck:
+    """删除题目登记。
+
+    只删"清单里的一条"，**不动已有的成绩记录** —— 已经收到的评测结果不该因为
+    清单调整而消失。那些成绩会以"未登记"的形式继续显示在矩阵里。
+    """
+    with ctx.db.session() as session:
+        row = session.get(Problem, problem_id)
+        if row is None:
+            return SimpleAck(ok=True, detail="没有该题目")
+        ident = row.ident
+        session.delete(row)
+    return SimpleAck(ok=True, detail="已删除题目 %s（已有成绩记录保留）" % ident)
+
+
+def _problem_out(row: Problem) -> ProblemOut:
+    return ProblemOut(
+        id=row.id,
+        contest_id=row.contest_id,
+        ident=row.ident,
+        title=row.title,
+        order_index=int(row.order_index),
+        note=row.note,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # 评测成绩
 # --------------------------------------------------------------------------- #
 
@@ -934,15 +1121,34 @@ def score_matrix(
     problems = sorted({run.problem for run in runs})
     by_key = {(run.player_id, run.problem): run for run in runs}
 
+    # 列顺序：**先按教师的题目清单**（有稳定的人工顺序），再把只在评测结果里
+    # 出现过的题目补在后面。补的那些要标出来 —— 它们可能是漏登记，
+    # 也可能是历史遗留；无论哪种都不该被静默隐藏。
+    declared = list(
+        session.execute(
+            select(Problem)
+            .where(Problem.contest_id == contest_id)
+            .order_by(Problem.order_index, Problem.ident)
+        ).scalars()
+    )
+    declared_idents = [row.ident for row in declared]
+    declared_set = set(declared_idents)
+    undeclared = [name for name in problems if name not in declared_set]
+
+    columns = [
+        ProblemColumnOut(ident=row.ident, title=row.title, declared=True)
+        for row in declared
+    ] + [ProblemColumnOut(ident=name, title=None, declared=False) for name in undeclared]
+
     rows: List[ScoreRowOut] = []
     unparsed = 0
     for player in players:
         cells: List[ScoreCellOut] = []
         total = 0
-        for problem in problems:
-            run = by_key.get((player.id, problem))
+        for column in columns:
+            run = by_key.get((player.id, column.ident))
             if run is None:
-                cells.append(ScoreCellOut(problem=problem, parse_status="missing"))
+                cells.append(ScoreCellOut(problem=column.ident, parse_status="missing"))
                 continue
             if run.parse_status == "unparsed":
                 unparsed += 1
@@ -950,7 +1156,7 @@ def score_matrix(
                 total += run.score
             cells.append(
                 ScoreCellOut(
-                    problem=problem,
+                    problem=column.ident,
                     score=run.score,
                     max_score=run.max_score,
                     status=run.status,
@@ -971,7 +1177,7 @@ def score_matrix(
 
     return ScoreMatrixOut(
         contest_id=contest_id,
-        problems=problems,
+        columns=columns,
         rows=rows,
         unparsed=unparsed,
         complete=unparsed == 0,

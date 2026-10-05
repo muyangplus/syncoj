@@ -218,6 +218,40 @@ class EnrollCodeOut(_Base):
     note: Optional[str] = None
 
 
+# --------------------------------------------------------------------------- #
+# 题目
+# --------------------------------------------------------------------------- #
+
+
+class ProblemUpsert(_Base):
+    """登记一道题。
+
+    ``ident`` 会同时成为目录名、代码文件名与成绩矩阵的列名，
+    所以要按路径段的规则校验（服务端会做）。
+    """
+
+    ident: str = Field(min_length=1, max_length=64)
+    title: Optional[str] = Field(default=None, max_length=200)
+    order_index: int = Field(default=0, ge=0, le=9999)
+    note: Optional[str] = Field(default=None, max_length=2000)
+
+
+class ProblemOut(_Base):
+    id: int
+    contest_id: int
+    ident: str
+    title: Optional[str] = None
+    order_index: int = 0
+    note: Optional[str] = None
+
+
+class ProblemImportOut(_Base):
+    created: int = 0
+    updated: int = 0
+    problems: List[ProblemOut] = Field(default_factory=list)
+    errors: List[str] = Field(default_factory=list)
+
+
 class AgentRuntimeOut(_Base):
     agent_id: int
     player_id: int
@@ -347,9 +381,21 @@ class ScoreRowOut(_Base):
     cells: List[ScoreCellOut] = Field(default_factory=list)
 
 
+class ProblemColumnOut(_Base):
+    """成绩矩阵的一列。
+
+    ``declared=False`` 表示这个题目**只在评测结果里出现过，没在题目清单里登记**。
+    仍然显示出来，避免因为漏登记而丢掉真实成绩；界面上应当标注提醒教师去补登记。
+    """
+
+    ident: str
+    title: Optional[str] = None
+    declared: bool = True
+
+
 class ScoreMatrixOut(_Base):
     contest_id: int
-    problems: List[str] = Field(default_factory=list)
+    columns: List[ProblemColumnOut] = Field(default_factory=list)
     rows: List[ScoreRowOut] = Field(default_factory=list)
     #: 尚未解析出成绩的单元格数 —— 界面应当把它显示成待办而不是"0 分"
     unparsed: int = 0

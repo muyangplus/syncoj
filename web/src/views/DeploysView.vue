@@ -1,36 +1,58 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from 'vue'
-import { storeToRefs } from 'pinia'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
-import { assetApi, deployApi, playerApi } from '@/api'
-import type { AssetOut, DeployTaskOut, PlayerOut } from '@/api/types'
-import { usePolling } from '@/composables/usePolling'
+import { assetApi, deployApi, playerApi, problemApi } from '@/api'
+import type { AssetOut, DeployTaskOut, PlayerOut, ProblemOut } from '@/api/types'
+import { useContestData } from '@/composables/useContestData'
 import { useContestStore } from '@/stores/contest'
 import { formatBytes, formatTime, percent } from '@/utils/format'
 
 const contest = useContestStore()
-const { currentId } = storeToRefs(contest)
 
-const assets = ref<AssetOut[]>([])
-const tasks = ref<DeployTaskOut[]>([])
-const players = ref<PlayerOut[]>([])
-const loading = ref(false)
-const error = ref<string | null>(null)
 const uploading = ref(false)
 
 const createDialog = ref(false)
 const submitting = ref(false)
 const fileInput = ref<HTMLInputElement>()
 
+/**
+ * 目标目录模板。
+ *
+ * ``{player_no}`` 由**服务端**逐选手展开 —— 全员下发时每台机器的目标目录都
+ * 不同（``桌面/<各自的准考证号>/…``），这个替换客户端做不了（它不知道这次
+ * 下发是给谁的）。
+ *
+ * 默认值对应约定：``桌面/<准考证号>/<题目名>/``。
+ * 而 agent 侧的 ``deploy_root`` 默认就是桌面，所以这里的相对路径从准考证号写起。
+ */
 const form = reactive({
   assetId: undefined as number | undefined,
   targetKind: 'all' as 'all' | 'player' | 'group',
   playerIds: [] as number[],
   targetGroup: '',
-  destDir: 'exam',
+  problemIdent: '',
+  destDir: '{player_no}',
   mode: 'overwrite' as 'overwrite' | 'skip_exist',
 })
+
+const { data, loading, error, reload } = useContestData(
+  async (contestId) => {
+    const [assets, tasks, players, problems] = await Promise.all([
+      assetApi.list(contestId),
+      deployApi.list(contestId),
+      playerApi.list(contestId),
+      problemApi.list(contestId),
+    ])
+    return { assets, tasks, players, problems }
+  },
+  { interval: 10000 },
+)
+
+const assets = computed<AssetOut[]>(() => data.value?.assets ?? [])
+const tasks = computed<DeployTaskOut[]>(() => data.value?.tasks ?? [])
+const players = computed<PlayerOut[]>(() => data.value?.players ?? [])
+const problems = computed<ProblemOut[]>(() => data.value?.problems ?? [])
 
 const groups = computed(() => {
   const set = new Set<string>()
@@ -43,31 +65,23 @@ const groups = computed(() => {
 /** 展开行里的逐选手进度。 */
 const expanded = ref<DeployTaskOut[]>([])
 
-async function refresh(): Promise<void> {
-  if (!currentId.value) {
-    assets.value = []
-    tasks.value = []
-    return
-  }
-  try {
-    const [assetList, taskList, playerList] = await Promise.all([
-      assetApi.list(currentId.value),
-      deployApi.list(currentId.value),
-      players.value.length ? Promise.resolve(players.value) : playerApi.list(currentId.value),
-    ])
-    assets.value = assetList
-    tasks.value = taskList
-    players.value = playerList
-    error.value = null
-  } catch (err) {
-    error.value = (err as Error).message
-  } finally {
-    loading.value = false
-  }
-}
+/**
+ * 目标目录的实时预览。
+ *
+ * 模板里有占位符，教师看到 ``{player_no}/p1`` 不一定想得到最终落到哪。
+ * 这里把第一个目标选手代入算给他看 —— 比写一段说明文字有用得多。
+ */
+const destPreview = computed(() => {
+  const probe = players.value[0]?.player_no ?? 'S001'
+  return form.destDir.trim().replace(/\{player_no\}/g, probe) || '（桌面根目录）'
+})
 
-// 下发任务里可能有几百 MB 的文件在传，10 秒一刷足够且不打搅
-usePolling(refresh, { interval: 10000 })
+/** 选题时自动把题目名拼进目标目录 —— 教师不用手打。 */
+function applyProblem(ident: string): void {
+  form.problemIdent = ident
+  const base = '{player_no}'
+  form.destDir = ident ? `${base}/${ident}` : base
+}
 
 async function loadTargets(task: DeployTaskOut): Promise<void> {
   try {
@@ -88,13 +102,13 @@ async function handleFileChange(event: Event): Promise<void> {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
   input.value = '' // 允许连续上传同一个文件
-  if (!file || !currentId.value) return
+  if (!file || !contest.currentId) return
 
   uploading.value = true
   try {
-    const asset = await assetApi.upload(currentId.value, file)
+    const asset = await assetApi.upload(contest.currentId, file)
     ElMessage.success(`已上传 ${asset.filename}（${formatBytes(asset.size)}）`)
-    await refresh()
+    await reload()
   } catch (err) {
     ElMessage.error((err as Error).message)
   } finally {
@@ -107,13 +121,16 @@ function openCreate(asset?: AssetOut): void {
   form.targetKind = 'all'
   form.playerIds = []
   form.targetGroup = groups.value[0] ?? ''
-  form.destDir = 'exam'
+  // 默认按约定落到 桌面/<准考证号>/。若已有登记的题目就顺手带上第一道，
+  // 省得教师每次都要手选一遍。
+  form.problemIdent = problems.value[0]?.ident ?? ''
+  form.destDir = form.problemIdent ? `{player_no}/${form.problemIdent}` : '{player_no}'
   form.mode = 'overwrite'
   createDialog.value = true
 }
 
 async function submitCreate(): Promise<void> {
-  if (!currentId.value || !form.assetId) {
+  if (!contest.currentId || !form.assetId) {
     ElMessage.warning('请选择要下发的文件')
     return
   }
@@ -128,7 +145,7 @@ async function submitCreate(): Promise<void> {
 
   submitting.value = true
   try {
-    const task = await deployApi.create(currentId.value, {
+    const task = await deployApi.create(contest.currentId, {
       asset_id: form.assetId,
       target_kind: form.targetKind,
       player_ids: form.playerIds,
@@ -139,7 +156,7 @@ async function submitCreate(): Promise<void> {
     })
     ElMessage.success(`已创建下发任务，目标 ${task.total} 台`)
     createDialog.value = false
-    await refresh()
+    await reload()
   } catch (err) {
     ElMessage.error((err as Error).message)
   } finally {
@@ -161,7 +178,7 @@ async function cancelTask(task: DeployTaskOut): Promise<void> {
   try {
     const result = await deployApi.cancel(task.id)
     ElMessage.success(result.detail ?? '已取消')
-    await refresh()
+    await reload()
   } catch (err) {
     ElMessage.error((err as Error).message)
   }
@@ -171,7 +188,7 @@ async function retryTask(task: DeployTaskOut): Promise<void> {
   try {
     const result = await deployApi.retry(task.id)
     ElMessage.success(result.detail ?? '已重置')
-    await refresh()
+    await reload()
   } catch (err) {
     ElMessage.error((err as Error).message)
   }
@@ -212,7 +229,7 @@ function statusLabel(status: string): string {
         <el-button size="small" type="primary" :disabled="!assets.length" @click="openCreate()">
           新建下发
         </el-button>
-        <el-button size="small" :loading="loading" @click="refresh">刷新</el-button>
+        <el-button size="small" :loading="loading" @click="reload">刷新</el-button>
       </div>
     </div>
 
@@ -413,11 +430,42 @@ function statusLabel(status: string): string {
           </el-select>
         </el-form-item>
 
+        <el-form-item label="所属题目">
+          <el-select
+            v-model="form.problemIdent"
+            placeholder="选择题目（会自动填好目标目录）"
+            clearable
+            style="width: 100%"
+            @change="applyProblem"
+          >
+            <el-option
+              v-for="problem in problems"
+              :key="problem.id"
+              :label="problem.title ? `${problem.title}（${problem.ident}）` : problem.ident"
+              :value="problem.ident"
+            />
+          </el-select>
+          <div v-if="!problems.length" class="page-hint">
+            本场次还没登记题目。可以先去「场次管理 → 题目」登记，或直接手填目标目录。
+          </div>
+        </el-form-item>
+
         <el-form-item label="目标目录">
-          <el-input v-model="form.destDir" placeholder="例如 exam（相对客户端落地根目录）" />
+          <el-input
+            v-model="form.destDir"
+            placeholder="{player_no}/题目名"
+          />
           <div class="page-hint">
-            相对于客户端配置里的 <code>deploy_root</code>。留空表示直接放在根目录。
-            不接受绝对路径与 <code>..</code>。
+            相对于客户端配置里的 <code>deploy_root</code>（默认就是**桌面**）。
+            <br />
+            <code>{player_no}</code> 会由服务端**逐选手展开**成准考证号 ——
+            全员下发时每台机器的目标目录都不同。
+            <br />
+            默认 <code>{player_no}/题目名</code> 对应约定：
+            <code>桌面/&lt;准考证号&gt;/&lt;题目名&gt;/</code>。
+            <br />
+            <strong>实际落点预览：</strong>
+            <code>{{ destPreview }}</code>
           </div>
         </el-form-item>
 

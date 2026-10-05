@@ -33,7 +33,13 @@ from .client import (
     ProtocolError,
     StaleUpload,
 )
-from .config import AgentConfig, ConfigError
+from .config import (
+    PREFIX_AUTO,
+    PREFIX_NONE,
+    AgentConfig,
+    ConfigError,
+    expand_placeholders,
+)
 from .download import download_asset, find_partial_sizes, sweep_stale_parts
 from .policy import DEFAULT_POLICY, merge_policy
 from .rsa import RSAPublicKey, SignatureError
@@ -64,7 +70,7 @@ from .upgrade import (
     verify_bundle,
 )
 
-__all__ = ["Agent", "main"]
+__all__ = ["Agent", "main", "build_tick_payload", "join_report_path"]
 
 log = logging.getLogger("syncoj.agent")
 
@@ -78,6 +84,15 @@ MAX_PENDING_EVENTS = 200
 HEALTHY_CYCLES_BEFORE_TRUST = 3
 
 
+def join_report_path(prefix: str, rel_path: str) -> str:
+    """拼出上报给服务端的路径。
+
+    ``prefix`` 为空时直接返回相对路径 —— 本机只有一个选手时不需要前缀，
+    否则 ``source/<场次>/<选手编号>/<准考证号>/…`` 里准考证号会出现两次。
+    """
+    return "%s/%s" % (prefix, rel_path) if prefix else rel_path
+
+
 def build_tick_payload(
     machine_id: str,
     agent_version: str,
@@ -89,7 +104,7 @@ def build_tick_payload(
 ):
     """构造 tick 请求体。
 
-    ``results`` 是 ``[(根目录名, ScanOutcome), ...]``。
+    ``results`` 是 ``[(前缀, ScanOutcome), ...]``；前缀可以为空串。
     返回 ``(payload, oversize, errors)`` —— 后两项只用于产出审计事件，不进请求体；
     报文体里只放统计摘要，避免随问题数量膨胀。
 
@@ -105,12 +120,12 @@ def build_tick_payload(
     for name, outcome in results:
         for entry in outcome.entries:
             item = entry.to_dict()
-            item["path"] = "%s/%s" % (name, entry.path)
+            item["path"] = join_report_path(name, entry.path)
             entries.append(item)
         if not outcome.complete:
             complete = False
-        oversize.extend("%s/%s" % (name, item) for item in outcome.oversize)
-        errors.extend("%s: %s" % (name, item) for item in outcome.errors[:5])
+        oversize.extend(join_report_path(name, item) for item in outcome.oversize)
+        errors.extend("%s: %s" % (name or "-", item) for item in outcome.errors[:5])
 
     final_stats = {
         "disk_free": stats.get("disk_free"),
@@ -162,9 +177,11 @@ class Agent:
         #: 连续成功周期计数，用于确认新版本可用后清掉回滚状态
         self._healthy_cycles = 0
         self._public_key = self._load_release_public_key()
+        #: 扫描根与上报前缀。注册拿到准考证号之后才能确定，见 _resolve_roots()
+        self._roots: List[Tuple[str, Path]] = []
+        self._roots_ready = False
         #: 服务端可见路径 -> 本地绝对路径。每轮扫描后重建
         self._local_paths: Dict[str, Path] = {}
-        self._roots = self._build_roots(config.scan_roots)
 
     # ---------------------------------------------------------------- #
     # 生命周期
@@ -175,28 +192,68 @@ class Agent:
             log.info("收到停止信号，将在当前轮结束后退出")
         self._stop = True
 
-    def _build_roots(self, roots: List[Path]) -> List[Tuple[str, Path]]:
-        """给每个扫描根起一个短名，作为上报路径的前缀。
+    def _resolve_roots(self, player_no: str) -> List[Tuple[str, Path]]:
+        """确定扫描根与上报前缀。
 
-        多个根目录下可能有同名文件（``code/main.cpp`` 与 ``backup/main.cpp``），
-        因此服务端可见路径必须带根目录前缀。前缀用目录名而不是完整路径，
-        是为了让教师端看到的文件树可读。
+        前缀策略：
+          ``none``  不加前缀 —— 本机只有一个选手时路径最干净
+          ``auto``  取根目录名 —— 配了多个扫描目录时用它区分同名文件
+          其他      字面量（支持 ``{player_no}``）
+
+        **必须在拿到凭据后调用**：默认的扫描目录是 ``桌面/<准考证号>``，
+        准考证号是注册的产物。注册之前那个目录叫什么名字根本无从得知。
         """
+        roots = self.config.resolved_roots(player_no)
+        if not roots:
+            raise ConfigError("scan.roots 至少要配置一个目录")
+
+        policy = (self.config.scan_prefix or PREFIX_NONE).strip()
         named: List[Tuple[str, Path]] = []
         used: Dict[str, Path] = {}
+
         for root in roots:
-            name = root.name or "root"
-            if name in used:
-                raise ConfigError(
-                    "扫描目录存在重名，无法作为路径前缀区分：%s 与 %s。"
-                    "请给其中一个换个目录名，或只配置一个扫描根。" % (used[name], root)
-                )
-            used[name] = root
+            if policy == PREFIX_NONE:
+                name = ""
+            elif policy == PREFIX_AUTO:
+                name = root.name or "root"
+            else:
+                name = expand_placeholders(policy, player_no=player_no)
+
+            if name:
+                if name in used:
+                    raise ConfigError(
+                        "扫描目录的上报前缀重复：%s（%s 与 %s）。"
+                        "请改 scan.prefix，或给其中一个目录换个名字。"
+                        % (name, used[name], root)
+                    )
+                used[name] = root
             named.append((name, root))
+
+        # 扫描根不存在时**创建它**，而不是报错。
+        # 它是选手的工作目录，此刻选手可能还没建 —— 提前建好反而省事；
+        # 报错则会在开考前刷一屏"目录不存在"，掩盖真正的问题。
+        for _name, root in named:
+            try:
+                root.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                log.warning("无法创建扫描目录 %s: %s", root, exc)
+
         return named
 
+    def _ensure_roots(self, player_no: str) -> None:
+        if self._roots_ready:
+            return
+        self._roots = self._resolve_roots(player_no)
+        self._roots_ready = True
+        log.info(
+            "扫描目录: %s",
+            ", ".join(
+                "%s%s" % (name + "/" if name else "", root) for name, root in self._roots
+            ),
+        )
+
     # ---------------------------------------------------------------- #
-    # 注册
+    # 扫描
     # ---------------------------------------------------------------- #
 
     def _ensure_credential(self) -> Credential:
@@ -276,7 +333,7 @@ class Agent:
             outcome = scan_directory(root, scan_policy, self.cache, max_files=max_files)
             results.append((name, outcome))
             for entry in outcome.entries:
-                local_paths["%s/%s" % (name, entry.path)] = root / entry.path
+                local_paths[join_report_path(name, entry.path)] = root / entry.path
 
         return results, local_paths
 
@@ -569,6 +626,8 @@ class Agent:
     def cycle(self) -> float:
         """执行一轮，返回下次执行前的等待秒数。"""
         credential = self._ensure_credential()
+        # 扫描目录里可能含 {player_no}，必须等拿到凭据之后才能确定
+        self._ensure_roots(credential.player_no)
 
         results, self._local_paths = self._scan()
         payload, oversize, errors = self._build_tick_payload(results, self._local_paths)
@@ -631,10 +690,9 @@ class Agent:
 
     def run_forever(self) -> int:
         log.info(
-            "SyncOJ Agent %s 启动（machine_id=%s，扫描 %s，自更新 %s）",
+            "SyncOJ Agent %s 启动（machine_id=%s，自更新 %s）",
             __version__,
             self.machine_id,
-            ", ".join(str(r) for _n, r in self._roots),
             self.config.upgrade_mode,
         )
 

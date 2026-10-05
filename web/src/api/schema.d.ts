@@ -203,6 +203,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/contests/{contest_id}/problems": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Problems */
+        get: operations["list_problems_api_v1_admin_contests__contest_id__problems_get"];
+        put?: never;
+        /**
+         * Import Problems
+         * @description 批量登记/更新题目。按 ``ident`` 幂等 upsert —— 名单可以反复导。
+         *
+         *     单条不合法只跳过那一条并在 ``errors`` 里说明，不让整批失败 ——
+         *     教师一次粘贴十道题，不该因为其中一个名字打错就全部白填。
+         */
+        post: operations["import_problems_api_v1_admin_contests__contest_id__problems_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/contests/{contest_id}/scores": {
         parameters: {
             query?: never;
@@ -376,6 +400,30 @@ export interface paths {
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/problems/{problem_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Problem
+         * @description 删除题目登记。
+         *
+         *     只删"清单里的一条"，**不动已有的成绩记录** —— 已经收到的评测结果不该因为
+         *     清单调整而消失。那些成绩会以"未登记"的形式继续显示在矩阵里。
+         */
+        delete: operations["delete_problem_api_v1_admin_problems__problem_id__delete"];
+        options?: never;
+        head?: never;
+        /** Update Problem */
+        patch: operations["update_problem_api_v1_admin_problems__problem_id__patch"];
         trace?: never;
     };
     "/api/v1/admin/releases": {
@@ -1133,6 +1181,79 @@ export interface components {
             /** Seat */
             seat?: string | null;
         };
+        /**
+         * ProblemColumnOut
+         * @description 成绩矩阵的一列。
+         *
+         *     ``declared=False`` 表示这个题目**只在评测结果里出现过，没在题目清单里登记**。
+         *     仍然显示出来，避免因为漏登记而丢掉真实成绩；界面上应当标注提醒教师去补登记。
+         */
+        ProblemColumnOut: {
+            /**
+             * Declared
+             * @default true
+             */
+            declared: boolean;
+            /** Ident */
+            ident: string;
+            /** Title */
+            title?: string | null;
+        };
+        /** ProblemImportOut */
+        ProblemImportOut: {
+            /**
+             * Created
+             * @default 0
+             */
+            created: number;
+            /** Errors */
+            errors?: string[];
+            /** Problems */
+            problems?: components["schemas"]["ProblemOut"][];
+            /**
+             * Updated
+             * @default 0
+             */
+            updated: number;
+        };
+        /** ProblemOut */
+        ProblemOut: {
+            /** Contest Id */
+            contest_id: number;
+            /** Id */
+            id: number;
+            /** Ident */
+            ident: string;
+            /** Note */
+            note?: string | null;
+            /**
+             * Order Index
+             * @default 0
+             */
+            order_index: number;
+            /** Title */
+            title?: string | null;
+        };
+        /**
+         * ProblemUpsert
+         * @description 登记一道题。
+         *
+         *     ``ident`` 会同时成为目录名、代码文件名与成绩矩阵的列名，
+         *     所以要按路径段的规则校验（服务端会做）。
+         */
+        ProblemUpsert: {
+            /** Ident */
+            ident: string;
+            /** Note */
+            note?: string | null;
+            /**
+             * Order Index
+             * @default 0
+             */
+            order_index: number;
+            /** Title */
+            title?: string | null;
+        };
         /** ReleaseOut */
         ReleaseOut: {
             /** Channel */
@@ -1207,6 +1328,8 @@ export interface components {
         };
         /** ScoreMatrixOut */
         ScoreMatrixOut: {
+            /** Columns */
+            columns?: components["schemas"]["ProblemColumnOut"][];
             /**
              * Complete
              * @default true
@@ -1214,8 +1337,6 @@ export interface components {
             complete: boolean;
             /** Contest Id */
             contest_id: number;
-            /** Problems */
-            problems?: string[];
             /** Rows */
             rows?: components["schemas"]["ScoreRowOut"][];
             /**
@@ -1880,6 +2001,72 @@ export interface operations {
             };
         };
     };
+    list_problems_api_v1_admin_contests__contest_id__problems_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contest_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemOut"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    import_problems_api_v1_admin_contests__contest_id__problems_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contest_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProblemUpsert"][];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemImportOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     score_matrix_api_v1_admin_contests__contest_id__scores_get: {
         parameters: {
             query?: never;
@@ -2117,6 +2304,72 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["EnrollCodeOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_problem_api_v1_admin_problems__problem_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                problem_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_problem_api_v1_admin_problems__problem_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                problem_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProblemUpsert"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemOut"];
                 };
             };
             /** @description Validation Error */

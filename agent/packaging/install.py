@@ -41,14 +41,15 @@ import tarfile
 import tempfile
 import urllib.error
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Iterable, List, Optional, Tuple
 
 DEFAULT_PREFIX = Path("/opt/syncoj")
 DEFAULT_CONFIG_DIR = Path("/etc/syncoj")
 DEFAULT_STATE_DIR = Path("/var/lib/syncoj")
-DEFAULT_DEPLOY_ROOT = Path("/home/student/exam")
-DEFAULT_SCAN_ROOT = Path("/home/student/code")
+DEFAULT_DEPLOY_ROOT = "{desktop}"
+DEFAULT_SCAN_ROOT = "{desktop}/{player_no}"
+DEFAULT_SCAN_PREFIX = "none"
 DEFAULT_RUN_USER = "syncoj"
 SERVICE_NAME = "syncoj-agent"
 
@@ -248,8 +249,9 @@ class Installer:
         self.prefix = Path(options.prefix)
         self.config_dir = Path(options.config_dir)
         self.state_dir = Path(options.state_dir)
-        self.scan_root = Path(options.scan_root)
-        self.deploy_root = Path(options.deploy_root)
+        # 保留为字符串：这两个是路径模板，可能含 {desktop} / {player_no}
+        self.scan_root = options.scan_root
+        self.deploy_root = options.deploy_root
         self.run_user = options.user
         self.service_name = options.service_name
         self.unit_path = Path(options.unit_dir) / UNIT_FILENAME
@@ -490,8 +492,11 @@ class Installer:
             ca_file=self.options.ca_file or "",
             enroll_code=self.options.enroll_code or "",
             state_dir=self.state_dir,
-            deploy_root=self.deploy_root,
+            # deploy_root / scan_roots 是**字符串模板**，可能含 {desktop}/{player_no}，
+            # 不能当 Path 处理（Path 会保留大括号，但改配置时容易误伤）
+            deploy_root=self.options.deploy_root,
             scan_roots=self.options.scan_root,
+            scan_prefix=self.options.scan_prefix,
             upgrade_mode=self.options.upgrade_mode,
             install_root=self.prefix,
             public_key=self.options.public_key or "",
@@ -618,8 +623,9 @@ def render_config(
     ca_file: str,
     enroll_code: str,
     state_dir: Path,
-    deploy_root: Path,
+    deploy_root: str,
     scan_roots: str,
+    scan_prefix: str,
     upgrade_mode: str,
     install_root: Path,
     public_key: str,
@@ -628,6 +634,9 @@ def render_config(
 
     由代码生成而不是 `sed` 替换模板：注册码、路径里可能含特殊字符，
     `sed` 会因为分隔符或转义把它们改坏，而且失败得悄无声息。
+
+    ``deploy_root`` 与 ``scan_roots`` 是**字符串模板**（可能含
+    ``{desktop}`` / ``{player_no}``），不能当成 Path 处理。
     """
     return """\
 ; SyncOJ Agent 配置（由安装器生成）
@@ -646,11 +655,20 @@ ca_file = {ca_file}
 enroll_code = {enroll_code}
 state_dir = {state_dir}
 machine_id =
+; 下发文件的落地根目录。{{desktop}} 自动探测当前用户的桌面
+; （兼容「桌面」与 Desktop 两种命名）。
+; 最终落点：桌面/<准考证号>/<题目名>/<文件名>
 deploy_root = {deploy_root}
 
 [scan]
-; 多个目录用换行或逗号分隔；目录名必须互不相同（会作为上报路径前缀）
+; 要回收的代码目录。{{desktop}} 与 {{player_no}} 在运行时展开：
+;   {{desktop}}   = 当前用户的桌面（自动探测）
+;   {{player_no}} = 准考证号（注册成功后才知道）
+; 默认约定：桌面/<准考证号>/<题目名>/<题目名>.cpp
 roots = {scan_roots}
+; 上报路径前缀：none = 不加（本机只有一个选手时推荐，否则 source/ 里
+; 准考证号会出现两次）；auto = 取根目录名；其他字面量直接用
+prefix = {scan_prefix}
 interval = 60
 max_file_size = 2097152
 
@@ -670,8 +688,9 @@ public_key = {public_key}
         ca_file=ca_file,
         enroll_code=enroll_code,
         state_dir=_posix(state_dir),
-        deploy_root=_posix(deploy_root),
+        deploy_root=deploy_root,
         scan_roots=scan_roots,
+        scan_prefix=scan_prefix,
         upgrade_mode=upgrade_mode,
         install_root=_posix(install_root),
         public_key=public_key,
@@ -682,19 +701,47 @@ def render_unit(
     prefix: Path,
     config_path: Path,
     state_dir: Path,
-    deploy_root: Path,
+    deploy_root: str,
     scan_roots: str,
     run_user: str,
     python: str,
 ) -> str:
     """生成 systemd 单元。
 
-    ``ReadWritePaths`` / ``ReadOnlyPaths`` 按实际配置的路径生成 —— 写死成
-    /home/student/code 的话，换个扫描目录就会被 ProtectSystem=strict 挡住，
-    表现为"服务起来了但什么都不传"。
+    **权限模型变了**：Agent 现在以**选手登录用户的身份**运行（而不是专用的
+    syncoj 账号），因为代码和下发文件都在选手自己的桌面下，跨用户授权在现场
+    很容易装成"服务起来了但什么都不传"。
+
+    这带来一个直接后果：``ProtectHome=read-only`` 与 ``ProtectSystem=strict``
+    会把家目录整个变成只读，Agent 就没法往桌面写东西了。所以：
+
+    - **不设 ProtectHome**（Agent 本来就要读写自己的家目录）
+    - ``ReadWritePaths=%h`` —— systemd 会把 ``%h`` 展开成 ``User=`` 的家目录，
+      正好覆盖 ``{desktop}`` 及其下的一切
+    - 显式写死的绝对路径（不含占位符的）单独加进来；模板路径都在 ``%h`` 之下，
+      再加一遍是多余的
+
+    ``ProtectSystem=strict`` 仍然保留：它把 ``/usr``、``/etc``、``/boot`` 等
+    系统目录全部只读，这才是这条指令的价值所在。
     """
-    writable = [_posix(state_dir), _posix(deploy_root)]
-    readable = [entry.strip() for entry in scan_roots.replace(",", "\n").splitlines() if entry.strip()]
+    writable = ["%h", _posix(state_dir)]
+
+    # 只把**不含占位符的绝对路径**加进来；含 {desktop}/{player_no} 的都在 %h 下
+    #
+    # 用 PurePosixPath 而不是 Path 判绝对性：安装器可能在 Windows 上跑
+    # （构建镜像的开发机），而 Path("/srv/code").is_absolute() 在 Windows 上是
+    # False —— 那条路径就会被静默漏掉白名单，表现为"服务起来了但读不到目录"。
+    # 目标机是 Linux，判定必须用 POSIX 语义。
+    for candidate in [deploy_root] + scan_roots.replace(",", "\n").splitlines():
+        text = candidate.strip()
+        if not text or "{" in text:
+            continue
+        if PurePosixPath(text).is_absolute():
+            writable.append(text)
+
+    # 去重但保持顺序
+    seen = set()
+    writable = [p for p in writable if not (p in seen or seen.add(p))]
 
     lines = [
         "[Unit]",
@@ -737,8 +784,10 @@ def render_unit(
         "NoNewPrivileges=yes",
         "PrivateTmp=yes",
         "PrivateDevices=yes",
+        # strict 把 /usr /etc /boot 等系统目录全部只读 —— 这才是它的价值
         "ProtectSystem=strict",
-        "ProtectHome=read-only",
+        # 刻意**不设 ProtectHome**：Agent 以选手身份运行，本来就要读写自己的桌面。
+        # 设成 read-only 会让它一个文件都写不出去，表现为"服务起来了但什么都不传"。
         "ProtectKernelTunables=yes",
         "ProtectKernelModules=yes",
         "ProtectControlGroups=yes",
@@ -748,8 +797,8 @@ def render_unit(
         "RestrictAddressFamilies=AF_INET AF_INET6",
         "LockPersonality=yes",
         "",
+        # %h 由 systemd 展开成 User= 的家目录，覆盖 {desktop} 及其下的一切
         "ReadWritePaths=%s" % " ".join(writable),
-        ("ReadOnlyPaths=%s" % " ".join(readable)) if readable else "",
         "",
         "# ---- 资源限制 ----",
         "MemoryMax=200M",
@@ -856,10 +905,22 @@ def build_parser() -> argparse.ArgumentParser:
     config = parser.add_argument_group("配置")
     config.add_argument("--server", help="服务端地址，如 https://10.0.0.1:8443")
     config.add_argument("--enroll-code", help="教师端签发的注册码")
-    config.add_argument("--scan-root", default=str(DEFAULT_SCAN_ROOT),
-                        help="选手代码目录，多个用逗号分隔")
-    config.add_argument("--deploy-root", default=str(DEFAULT_DEPLOY_ROOT),
-                        help="下发文件落地目录")
+    config.add_argument(
+        "--scan-root",
+        default=DEFAULT_SCAN_ROOT,
+        help="选手代码目录；支持 {desktop} 与 {player_no} 占位符，多个用逗号分隔"
+        "（默认 %s）" % DEFAULT_SCAN_ROOT,
+    )
+    config.add_argument(
+        "--scan-prefix",
+        default=DEFAULT_SCAN_PREFIX,
+        help="上报路径前缀：none=不加（默认）、auto=取根目录名、其他字面量",
+    )
+    config.add_argument(
+        "--deploy-root",
+        default=DEFAULT_DEPLOY_ROOT,
+        help="下发文件落地根目录；支持 {desktop} 占位符（默认 %s）" % DEFAULT_DEPLOY_ROOT,
+    )
     config.add_argument("--ca-file", default="", help="自签 CA 证书路径")
     config.add_argument("--insecure", action="store_true",
                         help="不校验服务端证书（仅调试用，会让中间人读走凭据）")

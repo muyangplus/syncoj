@@ -1,38 +1,44 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { storeToRefs } from 'pinia'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 import { agentApi, playerApi } from '@/api'
 import type { AgentRuntimeOut, EnrollCodeOut, PlayerOut } from '@/api/types'
 import PlayerImportDialog from '@/components/PlayerImportDialog.vue'
-import { usePolling } from '@/composables/usePolling'
+import { useContestData } from '@/composables/useContestData'
 import { useContestStore } from '@/stores/contest'
 import { formatBytes, formatSince, formatTime } from '@/utils/format'
 
 const contest = useContestStore()
-const { currentId } = storeToRefs(contest)
 
-const players = ref<PlayerOut[]>([])
-const agents = ref<AgentRuntimeOut[]>([])
-const loading = ref(false)
-const error = ref<string | null>(null)
+/**
+ * 加载交给 useContestData 统一驱动：场次确定/变化时立刻加载，之后定时兜底刷新。
+ *
+ * **不要自己写 onMounted + setInterval** —— 组件挂载的时刻 `currentId` 往往还没
+ * 从场次接口回来，首屏会拉个空，要等下一轮轮询才补上；刷新页面时最明显。
+ */
+const { data, loading, error, reload } = useContestData(
+  async (contestId) => {
+    const [players, agents] = await Promise.all([
+      playerApi.list(contestId),
+      agentApi.list(contestId),
+    ])
+    return { players, agents }
+  },
+  { interval: 5000 },
+)
+
+const players = computed<PlayerOut[]>(() => data.value?.players ?? [])
+const agents = computed<AgentRuntimeOut[]>(() => data.value?.agents ?? [])
 
 const keyword = ref('')
 const onlyOffline = ref(false)
 
 const importVisible = ref(false)
 
-/** 签发出来的注册码。只在这里展示一次，所以用对话框而不是表格列。 */
 const issuedCode = ref<EnrollCodeOut | null>(null)
 const codeDialog = ref(false)
 
-/**
- * 批量签发：把所有还没注册过的选手一次性发出注册码。
- *
- * 逐个点太痛苦了 —— 一个班五十号人。这里一次发完，把结果列在一个对话框里
- * 供教师抄写或导出。注意每个注册码只在服务端存哈希，**关掉就再也看不到**。
- */
 const batchDialog = ref(false)
 const batchIssuing = ref(false)
 const batchCodes = ref<EnrollCodeOut[]>([])
@@ -63,30 +69,6 @@ const summary = computed(() => {
   const withFiles = players.value.filter((p) => p.file_count > 0).length
   return { total, online, offline: total - online, withFiles }
 })
-
-async function refresh(): Promise<void> {
-  if (!currentId.value) {
-    players.value = []
-    agents.value = []
-    return
-  }
-  try {
-    const [playerList, agentList] = await Promise.all([
-      playerApi.list(currentId.value),
-      agentApi.list(currentId.value),
-    ])
-    players.value = playerList
-    agents.value = agentList
-    error.value = null
-  } catch (err) {
-    error.value = (err as Error).message
-  } finally {
-    loading.value = false
-  }
-}
-
-// 5 秒一刷：在线状态与最后心跳是这页的全部意义
-usePolling(refresh, { interval: 5000, immediate: true })
 
 async function issueCode(player: PlayerOut): Promise<void> {
   try {
@@ -157,9 +139,7 @@ async function issueForAllUnregistered(): Promise<void> {
 }
 
 async function copyBatchCodes(): Promise<void> {
-  const text = batchCodes.value
-    .map((item) => `${item.player_no}\t${item.code}`)
-    .join('\n')
+  const text = batchCodes.value.map((item) => `${item.player_no}\t${item.code}`).join('\n')
   try {
     await navigator.clipboard.writeText(text)
     ElMessage.success('已复制全部（编号 + 注册码，制表符分隔）')
@@ -174,13 +154,13 @@ function exportBatchCodes(): void {
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
   anchor.href = url
-  anchor.download = `enroll-codes-${currentId.value ?? 'contest'}.csv`
+  anchor.download = `enroll-codes-${contest.currentId ?? 'contest'}.csv`
   anchor.click()
   URL.revokeObjectURL(url)
 }
 
 function handleImported(): void {
-  void refresh()
+  void reload()
 }
 </script>
 
@@ -202,7 +182,7 @@ function handleImported(): void {
           style="width: 180px"
         />
         <el-checkbox v-model="onlyOffline" size="small">只看离线</el-checkbox>
-        <el-button size="small" :loading="loading" @click="refresh">刷新</el-button>
+        <el-button size="small" :loading="loading" @click="reload">刷新</el-button>
         <el-button size="small" type="primary" @click="importVisible = true">导入选手</el-button>
         <el-button
           size="small"
@@ -227,7 +207,9 @@ function handleImported(): void {
     <el-row :gutter="12" class="stats">
       <el-col :span="6">
         <el-card shadow="never">
-          <div class="stat-value">{{ summary.online }}<span class="stat-unit">/{{ summary.total }}</span></div>
+          <div class="stat-value">
+            {{ summary.online }}<span class="stat-unit">/{{ summary.total }}</span>
+          </div>
           <div class="stat-label">在线选手</div>
         </el-card>
       </el-col>
@@ -340,9 +322,33 @@ function handleImported(): void {
 
     <PlayerImportDialog
       v-model="importVisible"
-      :contest-id="currentId"
+      :contest-id="contest.currentId"
       @imported="handleImported"
     />
+
+    <el-dialog v-model="codeDialog" title="注册码" width="520px">
+      <template v-if="issuedCode">
+        <el-alert
+          type="warning"
+          :closable="false"
+          show-icon
+          title="这个注册码只显示这一次"
+          description="请立即记录。它长期有效且可重复使用 —— 考试机被快照还原后，Agent 靠它自动重新注册，无需人工干预。"
+        />
+        <div class="code-box">
+          <span class="code mono">{{ issuedCode.code }}</span>
+        </div>
+        <p class="page-hint">
+          选手：{{ issuedCode.player_no }} ·
+          使用方式：写入考试机的 <code>/etc/syncoj/agent.ini</code> 的
+          <code>enroll_code</code> 字段，或安装时通过 <code>--enroll-code</code> 传入。
+        </p>
+      </template>
+      <template #footer>
+        <el-button @click="codeDialog = false">关闭</el-button>
+        <el-button type="primary" @click="copyCode">复制</el-button>
+      </template>
+    </el-dialog>
 
     <el-dialog v-model="batchDialog" title="批量签发的注册码" width="620px">
       <el-alert
@@ -368,30 +374,6 @@ function handleImported(): void {
         <el-button @click="batchDialog = false">关闭</el-button>
         <el-button @click="exportBatchCodes">导出 CSV</el-button>
         <el-button type="primary" @click="copyBatchCodes">复制全部</el-button>
-      </template>
-    </el-dialog>
-
-    <el-dialog v-model="codeDialog" title="注册码" width="520px">
-      <template v-if="issuedCode">
-        <el-alert
-          type="warning"
-          :closable="false"
-          show-icon
-          title="这个注册码只显示这一次"
-          description="请立即记录。它长期有效且可重复使用 —— 考试机被快照还原后，Agent 靠它自动重新注册，无需人工干预。"
-        />
-        <div class="code-box">
-          <span class="code mono">{{ issuedCode.code }}</span>
-        </div>
-        <p class="page-hint">
-          选手：{{ issuedCode.player_no }} ·
-          使用方式：写入考试机的 <code>/etc/syncoj/agent.ini</code> 的
-          <code>enroll_code</code> 字段，或安装时通过 <code>--enroll-code</code> 传入。
-        </p>
-      </template>
-      <template #footer>
-        <el-button @click="codeDialog = false">关闭</el-button>
-        <el-button type="primary" @click="copyCode">复制</el-button>
       </template>
     </el-dialog>
   </div>

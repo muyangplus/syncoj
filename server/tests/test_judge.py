@@ -372,7 +372,9 @@ def test_score_matrix_endpoint(judge_setup, client: TestClient, admin_headers: d
         "/api/v1/admin/contests/%d/scores" % judge_setup["contest_id"], headers=admin_headers
     ).json()
 
-    assert matrix["problems"] == ["p1"]
+    # 没登记题目清单时，列从评测结果里推导出来，并标注为"未登记"
+    assert [c["ident"] for c in matrix["columns"]] == ["p1"]
+    assert matrix["columns"][0]["declared"] is False
     assert len(matrix["rows"]) == 1
     assert matrix["rows"][0]["total"] == 100
     assert matrix["rows"][0]["cells"][0]["parse_status"] == "ok"

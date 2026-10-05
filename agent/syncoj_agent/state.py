@@ -23,7 +23,15 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
-__all__ = ["Credential", "HashCache", "atomic_write_text", "resolve_machine_id"]
+__all__ = [
+    "Credential",
+    "HashCache",
+    "atomic_write_text",
+    "resolve_machine_id",
+    "describe_os",
+    "detect_desktop",
+    "DESKTOP_CANDIDATES",
+]
 
 log = logging.getLogger(__name__)
 
@@ -267,6 +275,70 @@ def describe_os() -> str:
     except (OSError, UnicodeDecodeError):
         pass
     return " ".join(p for p in parts if p)[:200]
+
+
+# --------------------------------------------------------------------------- #
+# 桌面目录探测
+# --------------------------------------------------------------------------- #
+
+#: 桌面目录的候选名字。中文 locale 是「桌面」，英文是 Desktop，
+#: 而 NOI Linux 各版本的中文环境不一定都装了语言包，所以两种都得认。
+DESKTOP_CANDIDATES = ("Desktop", "桌面", "desktop")
+
+
+def detect_desktop(home: Optional[Path] = None) -> Path:
+    """找出当前用户的桌面目录。
+
+    顺序：
+    1. ``~/.config/user-dirs.dirs`` 里的 ``XDG_DESKTOP_DIR``（最权威 ——
+       用户可能把桌面挪到别处，或者设成英文名）
+    2. ``~/桌面`` / ``~/Desktop`` / ``~/desktop`` 里**实际存在**的那个
+    3. 都不存在时返回 ``~/桌面``
+
+    第 3 条是刻意的：探测不出就按中文环境猜，而不是退回家目录 ——
+    退回家目录会让 Agent 把整个家目录当成工作区扫，收到一堆无关文件。
+    """
+    home_dir = Path(home) if home else Path.home()
+
+    from_xdg = _desktop_from_xdg_config(home_dir)
+    if from_xdg is not None:
+        return from_xdg
+
+    for name in DESKTOP_CANDIDATES:
+        candidate = home_dir / name
+        if candidate.is_dir():
+            return candidate
+
+    return home_dir / "桌面"
+
+
+def _desktop_from_xdg_config(home_dir: Path) -> Optional[Path]:
+    """读 ``~/.config/user-dirs.dirs``。
+
+    文件里是 shell 变量形式：``XDG_DESKTOP_DIR="$HOME/桌面"``。
+    这里只做最小的解析，不引入任何依赖。
+    """
+    config_file = home_dir / ".config" / "user-dirs.dirs"
+    try:
+        with open(config_file, "r", encoding="utf-8") as handle:
+            content = handle.read()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+    for line in content.splitlines():
+        text = line.strip()
+        if not text.startswith("XDG_DESKTOP_DIR"):
+            continue
+        _, _, value = text.partition("=")
+        value = value.strip().strip('"').strip("'")
+        if not value:
+            continue
+        # 文件里写的是 $HOME/... 这种 shell 展开形式
+        value = value.replace("$HOME", str(home_dir)).replace("${HOME}", str(home_dir))
+        candidate = Path(value).expanduser()
+        if candidate.is_dir():
+            return candidate
+    return None
 
 
 def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:

@@ -1274,6 +1274,167 @@
         "title": "PlayerUpsert",
         "type": "object"
       },
+      "ProblemColumnOut": {
+        "additionalProperties": false,
+        "description": "成绩矩阵的一列。\n\n``declared=False`` 表示这个题目**只在评测结果里出现过，没在题目清单里登记**。\n仍然显示出来，避免因为漏登记而丢掉真实成绩；界面上应当标注提醒教师去补登记。",
+        "properties": {
+          "declared": {
+            "default": true,
+            "title": "Declared",
+            "type": "boolean"
+          },
+          "ident": {
+            "title": "Ident",
+            "type": "string"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "required": [
+          "ident"
+        ],
+        "title": "ProblemColumnOut",
+        "type": "object"
+      },
+      "ProblemImportOut": {
+        "additionalProperties": false,
+        "properties": {
+          "created": {
+            "default": 0,
+            "title": "Created",
+            "type": "integer"
+          },
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "problems": {
+            "items": {
+              "$ref": "#/components/schemas/ProblemOut"
+            },
+            "title": "Problems",
+            "type": "array"
+          },
+          "updated": {
+            "default": 0,
+            "title": "Updated",
+            "type": "integer"
+          }
+        },
+        "title": "ProblemImportOut",
+        "type": "object"
+      },
+      "ProblemOut": {
+        "additionalProperties": false,
+        "properties": {
+          "contest_id": {
+            "title": "Contest Id",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "ident": {
+            "title": "Ident",
+            "type": "string"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "order_index": {
+            "default": 0,
+            "title": "Order Index",
+            "type": "integer"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "required": [
+          "id",
+          "contest_id",
+          "ident"
+        ],
+        "title": "ProblemOut",
+        "type": "object"
+      },
+      "ProblemUpsert": {
+        "additionalProperties": false,
+        "description": "登记一道题。\n\n``ident`` 会同时成为目录名、代码文件名与成绩矩阵的列名，\n所以要按路径段的规则校验（服务端会做）。",
+        "properties": {
+          "ident": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Ident",
+            "type": "string"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "order_index": {
+            "default": 0,
+            "maximum": 9999.0,
+            "minimum": 0.0,
+            "title": "Order Index",
+            "type": "integer"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "required": [
+          "ident"
+        ],
+        "title": "ProblemUpsert",
+        "type": "object"
+      },
       "ReleaseOut": {
         "additionalProperties": false,
         "properties": {
@@ -1498,6 +1659,13 @@
       "ScoreMatrixOut": {
         "additionalProperties": false,
         "properties": {
+          "columns": {
+            "items": {
+              "$ref": "#/components/schemas/ProblemColumnOut"
+            },
+            "title": "Columns",
+            "type": "array"
+          },
           "complete": {
             "default": true,
             "title": "Complete",
@@ -1506,13 +1674,6 @@
           "contest_id": {
             "title": "Contest Id",
             "type": "integer"
-          },
-          "problems": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Problems",
-            "type": "array"
           },
           "rows": {
             "items": {
@@ -2802,6 +2963,107 @@
         ]
       }
     },
+    "/api/v1/admin/contests/{contest_id}/problems": {
+      "get": {
+        "operationId": "list_problems_api_v1_admin_contests__contest_id__problems_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ProblemOut"
+                  },
+                  "title": "Response List Problems Api V1 Admin Contests  Contest Id  Problems Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Problems",
+        "tags": [
+          "admin"
+        ]
+      },
+      "post": {
+        "description": "批量登记/更新题目。按 ``ident`` 幂等 upsert —— 名单可以反复导。\n\n单条不合法只跳过那一条并在 ``errors`` 里说明，不让整批失败 ——\n教师一次粘贴十道题，不该因为其中一个名字打错就全部白填。",
+        "operationId": "import_problems_api_v1_admin_contests__contest_id__problems_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/ProblemUpsert"
+                },
+                "title": "Payload",
+                "type": "array"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemImportOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Import Problems",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/api/v1/admin/contests/{contest_id}/scores": {
       "get": {
         "description": "「选手 × 题目」成绩矩阵。\n\n**区分\"0 分\"和\"没有成绩\"**：``parse_status`` 为 ``missing`` 表示从未收到\n结果，``unparsed`` 表示收到了但看不懂。界面上这两者都不该显示成 0 ——\n那会让教师以为选手考砸了。",
@@ -3117,6 +3379,99 @@
           }
         },
         "summary": "Issue Enroll Code",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/problems/{problem_id}": {
+      "delete": {
+        "description": "删除题目登记。\n\n只删\"清单里的一条\"，**不动已有的成绩记录** —— 已经收到的评测结果不该因为\n清单调整而消失。那些成绩会以\"未登记\"的形式继续显示在矩阵里。",
+        "operationId": "delete_problem_api_v1_admin_problems__problem_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "problem_id",
+            "required": true,
+            "schema": {
+              "title": "Problem Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Problem",
+        "tags": [
+          "admin"
+        ]
+      },
+      "patch": {
+        "operationId": "update_problem_api_v1_admin_problems__problem_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "problem_id",
+            "required": true,
+            "schema": {
+              "title": "Problem Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProblemUpsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Problem",
         "tags": [
           "admin"
         ]

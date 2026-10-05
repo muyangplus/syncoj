@@ -4,25 +4,66 @@
 
 ```bash
 # 1. 镜像预装（构建考试机镜像时跑，网络可达）
+#    --user 必须填**选手登录账号**（见下方"运行身份"）
 sudo python3 install.py \
     --download-url https://10.0.0.1:8443/dist/syncoj-agent-bundle.tar.gz \
     --sha256 <从服务端界面抄下来的校验和> \
     --server https://10.0.0.1:8443 \
-    --enroll-code XXXX-XXXX-XXXX-XXXX
+    --enroll-code XXXX-XXXX-XXXX-XXXX \
+    --user student
 
 # 2. 离线包安装（考场无网，U 盘拷过去）
 sudo python3 install.py \
     --bundle ./syncoj-agent-0.1.0.tar.gz \
     --sha256 <校验和> \
     --server https://10.0.0.1:8443 \
-    --enroll-code XXXX-XXXX-XXXX-XXXX
+    --enroll-code XXXX-XXXX-XXXX-XXXX \
+    --user student
 
 # 3. 在线自举（一条命令）
 curl -fsSL https://10.0.0.1:8443/dist/bootstrap.sh | sudo sh -s -- \
-    --server https://10.0.0.1:8443 --enroll-code XXXX-XXXX-XXXX-XXXX
+    --server https://10.0.0.1:8443 --enroll-code XXXX-XXXX-XXXX-XXXX --user student
 
 # 先看看会做什么（不需要 root，不做任何改动）
 python3 install.py --bundle ./x.tar.gz --server https://x --dry-run
+```
+
+## 运行身份（重要）
+
+**Agent 以选手登录用户的身份运行**（`--user`），不是专用账号。原因：代码和下发
+文件都在选手自己的桌面上，跨用户授权在现场很容易装成"服务起来了但什么都不传"。
+
+这决定了 systemd 单元的权限模型：
+
+- **不设 `ProtectHome`** —— 设成 `read-only` 会把家目录整个变只读，Agent 一个
+  文件都写不出去
+- `ReadWritePaths=%h <状态目录>` —— `%h` 由 systemd 展开成 `User=` 的家目录，
+  正好覆盖桌面
+- `ProtectSystem=strict` 保留：`/usr`、`/etc`、`/boot` 等系统目录仍然全部只读
+
+## 目录约定
+
+```
+桌面/                               ← deploy_root = {desktop}
+└── <准考证号>/                      ← scan.roots = {desktop}/{player_no}
+    ├── p1/                        ← 服务端按 {player_no}/<题目名>/ 下发
+    │   ├── 题面.pdf
+    │   └── p1.cpp                 ← 选手写代码的位置
+    └── p2/p2.cpp
+```
+
+`{desktop}` 会自动探测：先读 `~/.config/user-dirs.dirs` 里的 `XDG_DESKTOP_DIR`，
+再依次试 `~/桌面`、`~/Desktop`、`~/desktop`。
+
+要改路径就改 `agent.ini`：
+
+```ini
+[agent]
+deploy_root = {desktop}          ; 或写死 /home/student/桌面
+
+[scan]
+roots = {desktop}/{player_no}    ; 或 /home/student/code
+prefix = none                    ; none / auto / 字面量
 ```
 
 ## 安装后的布局
@@ -30,9 +71,11 @@ python3 install.py --bundle ./x.tar.gz --server https://x --dry-run
 ```
 /opt/syncoj/
 ├── releases/
-│   ├── 0.1.0/syncoj_agent/...   每个版本一份，互不覆盖
-│   └── 0.1.1/syncoj_agent/...
-└── current -> releases/0.1.1    原子切换的软链；systemd 跑的就是它
+│   ├── 0.1.0/                   每个版本一份，互不覆盖
+│   │   ├── run_agent.py         ← systemd 的 ExecStart 指向它
+│   │   └── syncoj_agent/...
+│   └── 0.1.1/...
+└── current -> releases/0.1.1    原子切换的软链
 
 /etc/syncoj/agent.ini            配置（已存在时**不覆盖**，见下）
 /var/lib/syncoj/                 凭据、哈希缓存、日志、未完成的下载

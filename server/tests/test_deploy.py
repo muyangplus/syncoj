@@ -156,6 +156,87 @@ def test_deploy_accepts_natural_dest_dir_spellings(client: TestClient, contest: 
         assert response.json()["dest_dir"] == expected
 
 
+# --------------------------------------------------------------------------- #
+# 目标目录模板 {player_no}
+# --------------------------------------------------------------------------- #
+
+
+def test_dest_template_helpers() -> None:
+    from syncoj_server.services.deploy import (
+        DEST_PLAYER_TOKEN,
+        expand_dest_template,
+        validate_dest_template,
+    )
+
+    assert DEST_PLAYER_TOKEN == "{player_no}"
+    assert expand_dest_template("{player_no}/p1", "S001") == "S001/p1"
+    assert expand_dest_template("fixed/p1", "S001") == "fixed/p1"
+    assert expand_dest_template("", "S001") == ""
+
+    # 入库的是模板本身（只归一化末尾斜杠），不是展开后的样例
+    assert validate_dest_template("{player_no}/p1/") == "{player_no}/p1"
+
+    # 校验时占位符会被换成合法样例，所以非法结构照样能拦下 ——
+    # 直接拿 "{player_no}/../x" 去匹配路径规则是匹配不出来的
+    for bad in ("../{player_no}", "/{player_no}", "{player_no}/../x", "{player_no}\\x"):
+        try:
+            validate_dest_template(bad)
+        except ValueError:
+            continue
+        raise AssertionError("dest_dir=%r 应当被拒绝" % bad)
+
+
+def test_deploy_expands_player_no_per_target(client: TestClient, contest: dict,
+                                             admin_headers: dict, enrolled: dict) -> None:
+    """**全员下发时每台机器的目标目录都不同** —— 这正是必须由服务端展开的原因。
+
+    客户端只知道自己的准考证号，不知道这次下发是给谁的。
+    """
+    asset = upload_asset(client, contest, admin_headers, "p1.pdf", b"statement").json()
+    response = make_deploy(
+        client, contest, admin_headers, asset["id"], dest_dir="{player_no}/p1"
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["dest_dir"] == "{player_no}/p1"
+
+    body = tick(client, enrolled["token"], [], machine_id=enrolled["machine_id"])
+    assert len(body["deploy_jobs"]) == 1
+    assert body["deploy_jobs"][0]["dest"] == "%s/p1/p1.pdf" % enrolled["player_no"]
+
+
+def test_dest_template_keeps_players_isolated(client: TestClient, contest: dict,
+                                              admin_headers: dict, enrolled: dict, app) -> None:
+    """两个选手拿到的目标路径必须不同。"""
+    from sqlalchemy import select
+
+    from syncoj_server.models import Player
+
+    client.post(
+        "/api/v1/admin/contests/%d/players" % contest["id"],
+        json=[{"player_no": "S002"}], headers=admin_headers,
+    )
+    asset = upload_asset(client, contest, admin_headers, "p1.pdf", b"statement").json()
+    make_deploy(client, contest, admin_headers, asset["id"], dest_dir="{player_no}/p1")
+
+    first = tick(client, enrolled["token"], [], machine_id=enrolled["machine_id"])
+    assert first["deploy_jobs"][0]["dest"] == "%s/p1/p1.pdf" % enrolled["player_no"]
+
+    with app.state.ctx.db.session() as session:
+        other = session.execute(select(Player).where(Player.player_no == "S002")).scalar_one()
+        code = client.post(
+            "/api/v1/admin/players/%d/enroll-code" % other.id, headers=admin_headers
+        ).json()["code"]
+
+    second_token = client.post(
+        "/api/v1/agent/enroll",
+        json={"enroll_code": code, "machine_id": "machine-S002"},
+    ).json()["token"]
+
+    second = tick(client, second_token, [], machine_id="machine-S002")
+    assert second["deploy_jobs"][0]["dest"] == "S002/p1/p1.pdf"
+    assert second["deploy_jobs"][0]["dest"] != first["deploy_jobs"][0]["dest"]
+
+
 def test_deploy_rejects_bad_mode(client: TestClient, contest: dict, admin_headers: dict,
                                  player: dict) -> None:
     asset = upload_asset(client, contest, admin_headers, "p.zip", b"data").json()

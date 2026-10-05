@@ -262,7 +262,9 @@ def tick(
         )
 
         partials = {p.asset_id: int(p.bytes_done) for p in payload.partials}
-        jobs = collect_deploy_jobs(session, identity.player_id, partials)
+        jobs = collect_deploy_jobs(
+            session, identity.player_id, identity.player_no, partials
+        )
 
         if payload.completed_assets:
             _mark_deployments_done(session, identity.player_id, payload.completed_assets)

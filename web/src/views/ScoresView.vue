@@ -1,25 +1,25 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from 'vue'
-import { storeToRefs } from 'pinia'
 import { ElMessage } from 'element-plus'
 
 import { scoreApi } from '@/api'
-import type { JudgeRunOut, ScoreCellOut, ScoreMatrixOut, ScoreRowOut } from '@/api/types'
-import { usePolling } from '@/composables/usePolling'
+import type { JudgeRunOut, ScoreCellOut, ScoreRowOut } from '@/api/types'
+import { useContestData } from '@/composables/useContestData'
 import { useContestStore } from '@/stores/contest'
 
 const contest = useContestStore()
-const { currentId } = storeToRefs(contest)
 
-const matrix = ref<ScoreMatrixOut | null>(null)
-const loading = ref(false)
 const rescanning = ref(false)
-const error = ref<string | null>(null)
+
+const { data: matrix, loading, error, reload } = useContestData(
+  (contestId) => scoreApi.matrix(contestId),
+  { interval: 10000 },
+)
 
 /**
  * 归一化后的矩阵。
  *
- * 生成的 TS 类型里 `rows` / `problems` / `cells` 是可选的（pydantic 的
+ * 生成的 TS 类型里 `rows` / `columns` / `cells` 是可选的（pydantic 的
  * `default_factory=list` 在 OpenAPI 里不算 required），但服务端**一定会**发它们。
  * 与其在模板里到处写 `?.` 和 `?? []`，不如在这里补一次默认值 —— 语义更清楚，
  * 模板也更干净；真要遇到字段缺失也不会白屏。
@@ -28,7 +28,7 @@ const view = computed(() => {
   const source = matrix.value
   if (!source) return null
   return {
-    problems: source.problems ?? [],
+    columns: source.columns ?? [],
     rows: (source.rows ?? []).map((row) => ({ ...row, cells: row.cells ?? [] })),
   }
 })
@@ -43,23 +43,6 @@ const form = reactive({
   maxScore: 100,
   status: '',
 })
-
-async function refresh(): Promise<void> {
-  if (!currentId.value) {
-    matrix.value = null
-    return
-  }
-  try {
-    matrix.value = await scoreApi.matrix(currentId.value)
-    error.value = null
-  } catch (err) {
-    error.value = (err as Error).message
-  } finally {
-    loading.value = false
-  }
-}
-
-usePolling(refresh, { interval: 10000 })
 
 /**
  * 单元格外观。
@@ -127,10 +110,10 @@ function openManual(row: ScoreRowOut, problem: string, cell?: ScoreCellOut): voi
 }
 
 async function submitManual(): Promise<void> {
-  if (!currentId.value) return
+  if (!contest.currentId) return
   submitting.value = true
   try {
-    await scoreApi.setManual(currentId.value, {
+    await scoreApi.setManual(contest.currentId, {
       player_id: form.playerId,
       problem: form.problem,
       score: form.score,
@@ -139,7 +122,7 @@ async function submitManual(): Promise<void> {
     })
     ElMessage.success('已保存。手工录入的成绩不会被自动扫描覆盖。')
     editing.value = false
-    await refresh()
+    await reload()
   } catch (err) {
     ElMessage.error((err as Error).message)
   } finally {
@@ -148,28 +131,28 @@ async function submitManual(): Promise<void> {
 }
 
 async function clearManual(playerId: number, problem: string): Promise<void> {
-  if (!currentId.value) return
+  if (!contest.currentId) return
   try {
-    await scoreApi.clear(currentId.value, playerId, problem)
+    await scoreApi.clear(contest.currentId, playerId, problem)
     ElMessage.success('已清除，自动扫描将重新接管这一格')
     editing.value = false
-    await refresh()
+    await reload()
   } catch (err) {
     ElMessage.error((err as Error).message)
   }
 }
 
 async function rescan(): Promise<void> {
-  if (!currentId.value) return
+  if (!contest.currentId) return
   rescanning.value = true
   try {
-    const report = await scoreApi.rescan(currentId.value)
+    const report = await scoreApi.rescan(contest.currentId)
     const parts = [`解析 ${report.parsed} 条`]
     if (report.unparsed) parts.push(`未解析 ${report.unparsed} 条`)
     if (report.unchanged) parts.push(`未变化 ${report.unchanged} 条`)
     if (report.manual) parts.push(`保留手工录入 ${report.manual} 条`)
     ElMessage.success(parts.join('，'))
-    await refresh()
+    await reload()
   } catch (err) {
     ElMessage.error((err as Error).message)
   } finally {
@@ -189,17 +172,17 @@ const runs = ref<JudgeRunOut[]>([])
 const runsFilter = ref<string>('')
 
 async function openRuns(status = ''): Promise<void> {
-  if (!currentId.value) return
+  if (!contest.currentId) return
   runsVisible.value = true
   runsFilter.value = status
   await loadRuns()
 }
 
 async function loadRuns(): Promise<void> {
-  if (!currentId.value) return
+  if (!contest.currentId) return
   runsLoading.value = true
   try {
-    runs.value = await scoreApi.runs(currentId.value, runsFilter.value || undefined)
+    runs.value = await scoreApi.runs(contest.currentId, runsFilter.value || undefined)
   } catch (err) {
     ElMessage.error((err as Error).message)
   } finally {
@@ -227,11 +210,17 @@ function runStatusLabel(status: string): string {
 async function exportCsv(): Promise<void> {
   const data = view.value
   if (!data) return
-  const header = ['选手编号', '姓名', '总分', ...data.problems]
+  // 列名用「标题（标识）」或纯标识 —— 教师看标题，机器认标识
+  const header = [
+    '选手编号',
+    '姓名',
+    '总分',
+    ...data.columns.map((c) => (c.title ? `${c.title}(${c.ident})` : c.ident)),
+  ]
   const lines = [header.join(',')]
   for (const row of data.rows) {
-    const cells = data.problems.map((problem) => {
-      const cell = row.cells.find((c) => c.problem === problem)
+    const cells = data.columns.map((column) => {
+      const cell = row.cells.find((c) => c.problem === column.ident)
       if (!cell || cell.parse_status === 'missing') return ''
       if (cell.parse_status === 'unparsed') return '未解析'
       return cell.score ?? ''
@@ -243,7 +232,7 @@ async function exportCsv(): Promise<void> {
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
   anchor.href = url
-  anchor.download = `scores-${currentId.value ?? 'contest'}.csv`
+  anchor.download = `scores-${contest.currentId ?? 'contest'}.csv`
   anchor.click()
   URL.revokeObjectURL(url)
 }
@@ -269,7 +258,7 @@ async function exportCsv(): Promise<void> {
         <el-button size="small" :disabled="!view?.rows.length" @click="exportCsv">
           导出 CSV
         </el-button>
-        <el-button size="small" :loading="loading" @click="refresh">刷新</el-button>
+        <el-button size="small" :loading="loading" @click="reload">刷新</el-button>
       </div>
     </div>
 
@@ -314,7 +303,7 @@ async function exportCsv(): Promise<void> {
     </el-alert>
 
     <el-table
-      v-if="view && view.problems.length"
+      v-if="view && view.columns.length"
       :data="view.rows"
       v-loading="loading"
       border
@@ -335,22 +324,44 @@ async function exportCsv(): Promise<void> {
       </el-table-column>
 
       <el-table-column
-        v-for="problem in view.problems"
-        :key="problem"
-        :label="problem"
+        v-for="column in view.columns"
+        :key="column.ident"
         width="130"
         align="center"
       >
+        <!-- 列头优先显示标题，副行显示标识（标识才是目录名与文件名） -->
+        <template #header>
+          <div>{{ column.title || column.ident }}</div>
+          <div v-if="column.title" class="cell-sub mono">{{ column.ident }}</div>
+          <!-- 结果里有、清单里没有的题目：标注出来提醒去补登记 -->
+          <el-tag
+            v-else-if="!column.declared"
+            size="small"
+            type="warning"
+            effect="plain"
+            title="只在评测结果里出现过，没在题目清单里登记"
+          >
+            未登记
+          </el-tag>
+        </template>
         <template #default="{ row }">
-          <el-tooltip :content="cellView(row.cells.find((c: ScoreCellOut) => c.problem === problem)).tooltip">
+          <el-tooltip
+            :content="cellView(row.cells.find((c: ScoreCellOut) => c.problem === column.ident)).tooltip"
+          >
             <el-tag
-              :type="cellView(row.cells.find((c: ScoreCellOut) => c.problem === problem)).type"
+              :type="cellView(row.cells.find((c: ScoreCellOut) => c.problem === column.ident)).type"
               size="small"
               effect="plain"
               class="clickable"
-              @click="openManual(row, problem, row.cells.find((c: ScoreCellOut) => c.problem === problem))"
+              @click="
+                openManual(
+                  row,
+                  column.ident,
+                  row.cells.find((c: ScoreCellOut) => c.problem === column.ident),
+                )
+              "
             >
-              {{ cellView(row.cells.find((c: ScoreCellOut) => c.problem === problem)).text }}
+              {{ cellView(row.cells.find((c: ScoreCellOut) => c.problem === column.ident)).text }}
             </el-tag>
           </el-tooltip>
         </template>
@@ -363,11 +374,11 @@ async function exportCsv(): Promise<void> {
 
     <el-card v-else shadow="never">
       <div class="empty-block">
-        <p>还没有任何评测成绩。</p>
+        <p>还没有任何评测成绩，也没有登记题目。</p>
         <p class="page-hint">
-          把 LemonLime / Arbiter 的结果输出目录指到
+          先在「场次管理」里登记题目清单，或把 LemonLime / Arbiter 的结果输出目录指到
           <code>&lt;数据目录&gt;/judge_result/&lt;场次 slug&gt;/&lt;选手编号&gt;/&lt;题目标识&gt;/</code>
-          下即可自动汇总。也可以点右上角「立即重扫」。
+          —— 结果里出现的题目会自动补进矩阵（标注"未登记"）。也可以点右上角「立即重扫」。
         </p>
       </div>
     </el-card>

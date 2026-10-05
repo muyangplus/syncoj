@@ -1,24 +1,33 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed, ref } from 'vue'
-import { storeToRefs } from 'pinia'
 
 import { fileApi, playerApi } from '@/api'
 import type { PlayerOut, SourceFileOut } from '@/api/types'
-import { usePolling } from '@/composables/usePolling'
-import { useContestStore } from '@/stores/contest'
+import { useContestData } from '@/composables/useContestData'
 import { formatBytes, formatTime } from '@/utils/format'
-
-const contest = useContestStore()
-const { currentId } = storeToRefs(contest)
-
-const files = ref<SourceFileOut[]>([])
-const players = ref<PlayerOut[]>([])
-const loading = ref(false)
-const error = ref<string | null>(null)
 
 const playerFilter = ref<number | null>(null)
 const includeDeleted = ref(false)
 const keyword = ref('')
+
+// 场次确定/变化时立刻加载；切换选手筛选后调 reload() 重新拉
+const { data, loading, error, reload } = useContestData(
+  async (contestId) => {
+    const [files, players] = await Promise.all([
+      fileApi.list(contestId, {
+        playerId: playerFilter.value ?? undefined,
+        includeDeleted: includeDeleted.value,
+        limit: 2000,
+      }),
+      playerApi.list(contestId),
+    ])
+    return { files, players }
+  },
+  { interval: 8000 },
+)
+
+const files = computed<SourceFileOut[]>(() => data.value?.files ?? [])
+const players = computed<PlayerOut[]>(() => data.value?.players ?? [])
 
 /** 同名文件的多个版本只在台账里保留最新一条，所以这里直接按修订号看"改过几次"。 */
 const rows = computed(() => {
@@ -39,33 +48,6 @@ const stats = computed(() => {
   const playersWithFiles = new Set(active.map((f) => f.player_id)).size
   return { active: active.length, totalBytes, deleted, playersWithFiles }
 })
-
-async function refresh(): Promise<void> {
-  if (!currentId.value) {
-    files.value = []
-    players.value = []
-    return
-  }
-  try {
-    const [fileList, playerList] = await Promise.all([
-      fileApi.list(currentId.value, {
-        playerId: playerFilter.value ?? undefined,
-        includeDeleted: includeDeleted.value,
-        limit: 2000,
-      }),
-      players.value.length ? Promise.resolve(players.value) : playerApi.list(currentId.value),
-    ])
-    files.value = fileList
-    players.value = playerList
-    error.value = null
-  } catch (err) {
-    error.value = (err as Error).message
-  } finally {
-    loading.value = false
-  }
-}
-
-usePolling(refresh, { interval: 8000 })
 </script>
 
 <template>
@@ -85,7 +67,7 @@ usePolling(refresh, { interval: 8000 })
           placeholder="全部选手"
           clearable
           style="width: 150px"
-          @change="refresh"
+          @change="reload"
         >
           <el-option
             v-for="player in players"
@@ -94,7 +76,7 @@ usePolling(refresh, { interval: 8000 })
             :value="player.id"
           />
         </el-select>
-        <el-checkbox v-model="includeDeleted" size="small" @change="refresh">
+        <el-checkbox v-model="includeDeleted" size="small" @change="reload">
           含已删除
         </el-checkbox>
         <el-input
@@ -104,7 +86,7 @@ usePolling(refresh, { interval: 8000 })
           clearable
           style="width: 190px"
         />
-        <el-button size="small" :loading="loading" @click="refresh">刷新</el-button>
+        <el-button size="small" :loading="loading" @click="reload">刷新</el-button>
       </div>
     </div>
 

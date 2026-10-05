@@ -84,7 +84,14 @@ def seeded(settings: Settings, client: TestClient, admin_headers: dict, contest:
     return {"contest": contest, "player": player, "code": code}
 
 
-def build_agent_config(workdir: Path, base_url: str, code: str, code_dir: Path):
+def build_agent_config(
+    workdir: Path,
+    base_url: str,
+    code: str,
+    code_dir: Path,
+    scan_root=None,
+    prefix: str = "none",
+):
     from syncoj_agent.config import AgentConfig
 
     state_dir = workdir / "state"
@@ -99,7 +106,8 @@ def build_agent_config(workdir: Path, base_url: str, code: str, code_dir: Path):
     config.enroll_code = code
     config.state_dir = state_dir
     config.deploy_root = deploy_root
-    config.scan_roots = [code_dir]
+    config.scan_roots = [scan_root if scan_root is not None else code_dir]
+    config.scan_prefix = prefix
     config.scan_interval = 5
     config.log_level = "DEBUG"
     config.log_to_stderr = False
@@ -130,12 +138,12 @@ def test_agent_cycle_uploads_source_code(
 
     assert (config.state_dir / "credential.json").is_file(), "注册后应保存凭据"
 
-    # 上报路径带扫描根目录名做前缀（多根目录下同名文件靠它区分），
-    # 这个前缀会原样体现在 source/ 目录结构里
+    # 默认 scan.prefix = none（不加前缀）：本机只有一个选手时，
+    # 加前缀会让 source/ 里准考证号出现两次
     landed = settings.source_root / seeded["contest"]["slug"] / seeded["player"]["player_no"]
-    assert (landed / "code" / "main.cpp").read_text(encoding="utf-8") == "int main(){return 0;}\n"
-    assert (landed / "code" / "sub" / "util.h").is_file()
-    assert not (landed / "code" / "notes.txt").exists(), "非白名单后缀不该被回收"
+    assert (landed / "main.cpp").read_text(encoding="utf-8") == "int main(){return 0;}\n"
+    assert (landed / "sub" / "util.h").is_file()
+    assert not (landed / "notes.txt").exists(), "非白名单后缀不该被回收"
 
 
 def test_agent_reuses_credential_without_re_enrolling(
@@ -199,7 +207,7 @@ def test_incremental_upload_only_sends_changed_file(
     finally:
         agent.client.close()
 
-    assert uploaded == ["code/changing.cpp"], (
+    assert uploaded == ["changing.cpp"], (
         "只有变化的文件该被上传，实际上传：%r" % uploaded
     )
 
@@ -401,3 +409,120 @@ def test_agent_self_heals_after_credential_loss(
     with Database(settings).session() as session:
         agents = list(session.execute(select(AgentRecord)).scalars())
     assert len(agents) == 1, "重复注册不该产生第二台机器记录：%r" % agents
+
+
+# --------------------------------------------------------------------------- #
+# 桌面路径约定
+# --------------------------------------------------------------------------- #
+#
+# 约定：代码在 桌面/<准考证号>/<题目名>/<题目名>.cpp
+#
+# 这条链路上有三个必须对齐的地方，任何一处不对都会在开考时才暴露：
+#   1. Agent 的扫描根是 桌面/<准考证号>（准考证号要等注册后才知道）
+#   2. Agent 的上报前缀为空（否则 source/ 里准考证号会出现两次）
+#   3. 服务端下发时把 {player_no} 逐选手展开成各自的准考证号
+
+
+def test_desktop_layout_end_to_end(
+    workdir: Path, settings: Settings, live_server: str, seeded: dict,
+    client: TestClient, admin_headers: dict,
+) -> None:
+    """完整走一遍约定：登记题目 → 下发到 桌面/<准考证号>/<题目名>/ →
+    选手在约定位置写代码 → 回收落到 source/<场次>/<编号>/<题目名>/<题目名>.cpp。"""
+    from syncoj_agent.main import Agent
+
+    contest_id = seeded["contest"]["id"]
+    player_no = seeded["player"]["player_no"]
+
+    # 1. 登记题目
+    client.post(
+        "/api/v1/admin/contests/%d/problems" % contest_id,
+        json=[{"ident": "p1", "title": "签到题", "order_index": 10}],
+        headers=admin_headers,
+    )
+
+    # 2. 下发题面到 {player_no}/p1 —— 即 桌面/<准考证号>/p1/
+    statement = b"# A+B Problem\n"
+    asset = client.post(
+        "/api/v1/admin/contests/%d/assets" % contest_id,
+        files={"file": ("题面.md", statement, "text/markdown")},
+        headers=admin_headers,
+    ).json()
+    task = client.post(
+        "/api/v1/admin/contests/%d/deploys" % contest_id,
+        json={"asset_id": asset["id"], "target_kind": "all", "dest_dir": "{player_no}/p1"},
+        headers=admin_headers,
+    ).json()
+    assert task["dest_dir"] == "{player_no}/p1", "入库的应当是模板本身"
+
+    # 3. Agent 的扫描根是 桌面/<准考证号>，用 {player_no} 占位符表示
+    desktop = workdir / "桌面"
+    desktop.mkdir()
+    config = build_agent_config(
+        workdir,
+        live_server,
+        seeded["code"],
+        desktop,  # 占位，会被 scan_root 覆盖
+        scan_root=desktop / "{player_no}",
+        prefix="none",
+    )
+    # 下发根目录 = 桌面（与 agent.ini 的默认值一致）
+    config.deploy_root = desktop
+
+    agent = Agent(config)
+    try:
+        # 第一轮：注册 + 领下发任务 + 下载题面
+        agent.cycle()
+    finally:
+        agent.client.close()
+
+    landed_dir = desktop / player_no / "p1"
+    assert landed_dir.is_dir(), "应当按 {player_no}/p1 展开后落到桌面下"
+    assert (landed_dir / "题面.md").read_bytes() == statement
+    assert task["id"]
+
+    # 4. 选手在约定位置写代码
+    (landed_dir / "p1.cpp").write_text("int main(){return 0;}\n", encoding="utf-8")
+
+    # 5. 第二轮：扫描并回收
+    agent2 = Agent(config)
+    try:
+        agent2.cycle()
+    finally:
+        agent2.client.close()
+
+    expected = (
+        settings.source_root / seeded["contest"]["slug"] / player_no / "p1" / "p1.cpp"
+    )
+    assert expected.is_file(), (
+        "代码应当落到 source/<场次>/<准考证号>/<题目名>/<题目名>.cpp\n"
+        "实际 source/ 内容：%s"
+        % sorted(p.relative_to(settings.source_root).as_posix() for p in settings.source_root.rglob("*"))
+    )
+    assert expected.read_text(encoding="utf-8") == "int main(){return 0;}\n"
+
+
+def test_prefix_none_avoids_duplicated_player_no(
+    workdir: Path, settings: Settings, live_server: str, seeded: dict,
+) -> None:
+    """前缀为空是默认值，理由很具体：扫描根的名字就是准考证号，
+    再加前缀会让 source/ 里准考证号出现两次。"""
+    from syncoj_agent.main import Agent
+
+    player_no = seeded["player"]["player_no"]
+    desktop = workdir / "桌面"
+    desktop.mkdir()
+
+    config = build_agent_config(
+        workdir, live_server, seeded["code"], desktop,
+        scan_root=desktop / "{player_no}", prefix="none",
+    )
+    agent = Agent(config)
+    try:
+        agent._ensure_credential()
+        agent._ensure_roots(player_no)
+        assert agent._roots == [("", desktop / player_no)], agent._roots
+        # 扫描根不存在时会被创建出来（选手可能还没建过目录）
+        assert (desktop / player_no).is_dir()
+    finally:
+        agent.client.close()

@@ -113,7 +113,32 @@ python agent/run_agent.py --config agent/config.example.ini --once
 | M3 下发：资产管理 / 任务编排（全员·按人·按分组）/ Range 断点续传 / 进度聚合 | ✅ 完成 |
 | M4 成绩：结果扫描回写 / 成绩矩阵 / 手工补录 / 原始记录 | ✅ 完成 |
 | M5 运维：RSA 签名自更新 / 安全解包 / 自动回滚 / 幂等安装器 / 可复现打包 | ✅ 完成 |
-| 管理界面：8 个页面 + 初始化闭环（建场次 / 导选手 / 批量签注册码） | ✅ 完成 |
+| 管理界面：8 个页面 + 初始化闭环（建场次 / 导选手 / 维护题目 / 批量签注册码） | ✅ 完成 |
+
+## 目录约定
+
+```
+桌面/                               ← Agent 的 deploy_root（自动探测「桌面」或 Desktop）
+└── <准考证号>/                      ← Agent 的扫描根 scan.roots = {desktop}/{player_no}
+    ├── p1/                        ← 服务端按 {player_no}/<题目名>/ 落目录
+    │   ├── 题面.pdf
+    │   └── p1.cpp                 ← 选手写代码的位置（约定：<题目名>/<题目名>.cpp）
+    └── p2/
+        └── p2.cpp
+```
+
+回收后在服务端的落点：`source/<场次>/<准考证号>/p1/p1.cpp`。
+
+**这些路径都可以改**（见 `agent/config.example.ini`）：
+
+| 配置项 | 默认值 | 说明 |
+|---|---|---|
+| `agent.deploy_root` | `{desktop}` | 下发落地根目录。`{desktop}` 自动探测当前用户桌面 |
+| `scan.roots` | `{desktop}/{player_no}` | 代码目录。`{player_no}` 在**注册成功后**才展开 |
+| `scan.prefix` | `none` | 上报路径前缀。`none` 不加；`auto` 取根目录名；也可写死字面量 |
+
+> `prefix` 默认 `none` 是有原因的：扫描根的名字就是准考证号，再加前缀会让
+> `source/` 里准考证号出现两次。配了多个扫描目录时改用 `auto` 区分同名文件。
 
 ## 教师上手流程
 
@@ -121,12 +146,14 @@ python agent/run_agent.py --config agent/config.example.ini --once
 
 ```bash
 # ── 界面 ──────────────────────────────────────────────
-# 1. syncoj-server init          建库 + 建管理员
-# 2. 打开 http://<服务端>:8000    登录
+# 1. syncoj-server init                建库 + 建管理员
+# 2. 打开 http://<服务端>:8000          登录
 # 3. 场次管理 → 新建场次
-# 4. 选手状态 → 导入选手（可直接从 Excel 粘贴）
-# 5. 选手状态 → 批量签发注册码 → 复制或导出 CSV
-# 6. 装 Agent（见 agent/packaging/README.md），把注册码传给它
+# 4. 场次管理 → 题目                  → 登记题目（标识会用作目录名与代码文件名）
+# 5. 选手状态 → 导入选手                （可直接从 Excel 粘贴）
+# 6. 选手状态 → 批量签发注册码          → 复制或导出 CSV
+# 7. 文件下发 → 上传题面 → 选题目       （自动填好目标目录）→ 下发
+# 8. 装 Agent（见 agent/packaging/README.md），把注册码传给它
 
 # ── 命令行等价流程（批量部署时更顺手）────────────────
 syncoj-server contest create --name "2025 校内模拟赛"
@@ -138,7 +165,7 @@ syncoj-server contest list
 名单 CSV 的列顺序是 `选手编号,姓名,座位,分组`（只有编号必填），
 逗号或制表符分隔都认，表头与 `#` 注释行会被自动跳过。
 
-测试规模：**服务端 227 项、Agent 154 项**，含端到端集成测试（真实 Agent 代码
+测试规模：**服务端 285 项、Agent 154 项**，含端到端集成测试（真实 Agent 代码
 通过真实 HTTP 打到真实服务端）与 **openssl 交叉验证**（手写密码学代码唯一可信的
 证据是独立实现能互相验通）。
 

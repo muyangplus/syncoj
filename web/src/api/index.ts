@@ -22,6 +22,9 @@ import type {
   ManualScoreIn,
   PlayerOut,
   PlayerUpsert,
+  ProblemImportOut,
+  ProblemOut,
+  ProblemUpsert,
   ReleaseOut,
   ReleaseUpdate,
   ScoreMatrixOut,
@@ -70,6 +73,27 @@ export const playerApi = {
 
   issueEnrollCode: (playerId: number) =>
     request<EnrollCodeOut>(`${ADMIN}/players/${playerId}/enroll-code`, { method: 'POST' }),
+}
+
+export const problemApi = {
+  list: (contestId: number) =>
+    request<ProblemOut[]>(`${ADMIN}/contests/${contestId}/problems`),
+
+  /** 批量登记 / 更新。按 ident 幂等 —— 清单可以反复导。 */
+  import: (contestId: number, problems: ProblemUpsert[]) =>
+    request<ProblemImportOut>(`${ADMIN}/contests/${contestId}/problems`, {
+      method: 'POST',
+      body: problems,
+    }),
+
+  update: (problemId: number, payload: ProblemUpsert) =>
+    request<ProblemOut>(`${ADMIN}/problems/${problemId}`, {
+      method: 'PATCH',
+      body: payload,
+    }),
+
+  remove: (problemId: number) =>
+    request<SimpleAck>(`${ADMIN}/problems/${problemId}`, { method: 'DELETE' }),
 }
 
 export const agentApi = {

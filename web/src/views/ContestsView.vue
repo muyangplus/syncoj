@@ -4,6 +4,7 @@ import { ElMessage } from 'element-plus'
 import { useRouter } from 'vue-router'
 
 import ContestCreateDialog from '@/components/ContestCreateDialog.vue'
+import ProblemManageDialog from '@/components/ProblemManageDialog.vue'
 import { useContestStore } from '@/stores/contest'
 import { contestStatusLabel, contestStatusType, formatTime } from '@/utils/format'
 
@@ -11,6 +12,8 @@ const contest = useContestStore()
 const router = useRouter()
 
 const createVisible = ref(false)
+const problemVisible = ref(false)
+const problemContestId = ref<number | null>(null)
 
 async function refresh(): Promise<void> {
   await contest.load()
@@ -19,6 +22,14 @@ async function refresh(): Promise<void> {
 function useContest(id: number): void {
   contest.select(id)
   ElMessage.success('已切换当前场次')
+}
+
+function openProblems(id: number): void {
+  // 题目是挂在具体场次下的：先切过去再打开，
+  // 避免"看着是这场、改的却是那场"
+  contest.select(id)
+  problemContestId.value = id
+  problemVisible.value = true
 }
 
 function handleCreated(): void {
@@ -131,9 +142,17 @@ refresh()
         </template>
       </el-table-column>
 
-      <el-table-column label="操作" width="110" fixed="right">
+      <el-table-column label="操作" width="170" fixed="right">
         <template #default="{ row }">
-          <el-button link type="primary" size="small" @click="useContest(row.id); openPlayers()">
+          <el-button link type="primary" size="small" @click="openProblems(row.id)">
+            题目
+          </el-button>
+          <el-button
+            link
+            type="primary"
+            size="small"
+            @click="useContest(row.id); openPlayers()"
+          >
             进入
           </el-button>
         </template>
@@ -154,6 +173,11 @@ refresh()
     </el-card>
 
     <ContestCreateDialog v-model="createVisible" :existing="contest.contests" @created="handleCreated" />
+    <ProblemManageDialog
+      v-model="problemVisible"
+      :contest-id="problemContestId"
+      @changed="refresh"
+    />
   </div>
 </template>
 

@@ -34,6 +34,7 @@ __all__ = [
     "AdminSession",
     "Contest",
     "Player",
+    "Problem",
     "EnrollCode",
     "Agent",
     "AgentStatus",
@@ -146,6 +147,40 @@ class Player(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("contest_id", "player_no", name="uq_player_contest_no"),
         Index("ix_player_contest", "contest_id"),
+    )
+
+
+class Problem(Base, TimestampMixin):
+    """场次内的题目清单。
+
+    题目在这里是**显式声明**的，而不是从评测结果反向推导。三个理由：
+
+    1. 成绩矩阵的列需要稳定顺序 —— 应当是教师排的顺序，不是字典序，
+       更不该随着"哪个选手先被评测"而变
+    2. 下发时要按题目落目录（``桌面/<准考证号>/<题目名>/``），得先知道有哪些题目
+    3. 代码命名规范（``<题目名>/<题目名>.cpp``）需要题目名才能给出提示
+
+    ``ident`` 同时充当三个角色：目录名、代码文件名、成绩矩阵的列标识。
+    所以它必须能安全用作目录名 —— 服务端会对它跑一遍路径校验。
+
+    评测结果里出现的、但没登记在这里的题目**仍会出现在矩阵里**（标注未登记），
+    避免因为漏登记而丢掉真实成绩。
+    """
+
+    __tablename__ = "problem"
+
+    id = Column(Integer, primary_key=True)
+    contest_id = Column(Integer, ForeignKey("contest.id", ondelete="CASCADE"), nullable=False)
+    #: 题目标识：目录名 + 代码文件名 + 成绩列名
+    ident = Column(String(64), nullable=False)
+    #: 显示标题，留空则显示 ident
+    title = Column(String(200), nullable=True)
+    order_index = Column(Integer, nullable=False, default=0)
+    note = Column(Text, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("contest_id", "ident", name="uq_problem_contest_ident"),
+        Index("ix_problem_contest", "contest_id"),
     )
 
 

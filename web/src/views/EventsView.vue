@@ -1,19 +1,10 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { storeToRefs } from 'pinia'
 
 import { eventApi } from '@/api'
 import type { EventOut } from '@/api/types'
-import { usePolling } from '@/composables/usePolling'
-import { useContestStore } from '@/stores/contest'
+import { useContestData } from '@/composables/useContestData'
 import { eventCategoryLabel, eventLevelLabel, formatTime } from '@/utils/format'
-
-const contest = useContestStore()
-const { currentId } = storeToRefs(contest)
-
-const events = ref<EventOut[]>([])
-const loading = ref(false)
-const error = ref<string | null>(null)
 
 const category = ref<string>('')
 const onlyProblems = ref(false)
@@ -31,30 +22,18 @@ const CATEGORIES = [
   'release_rollout',
 ]
 
+const { data, loading, error, reload } = useContestData(
+  (contestId) =>
+    eventApi.list(contestId, { limit: 500, category: category.value || undefined }),
+  { interval: 8000 },
+)
+
+const events = computed<EventOut[]>(() => data.value ?? [])
+
 const rows = computed(() => {
   if (!onlyProblems.value) return events.value
   return events.value.filter((e) => e.level !== 'info')
 })
-
-async function refresh(): Promise<void> {
-  if (!currentId.value) {
-    events.value = []
-    return
-  }
-  try {
-    events.value = await eventApi.list(currentId.value, {
-      limit: 500,
-      category: category.value || undefined,
-    })
-    error.value = null
-  } catch (err) {
-    error.value = (err as Error).message
-  } finally {
-    loading.value = false
-  }
-}
-
-usePolling(refresh, { interval: 8000 })
 
 function levelType(level: string): 'info' | 'warning' | 'danger' {
   if (level === 'error') return 'danger'
@@ -89,7 +68,7 @@ function metaText(meta: EventOut['meta']): string {
           placeholder="全部分类"
           clearable
           style="width: 170px"
-          @change="refresh"
+          @change="reload"
         >
           <el-option
             v-for="item in CATEGORIES"
@@ -99,7 +78,7 @@ function metaText(meta: EventOut['meta']): string {
           />
         </el-select>
         <el-checkbox v-model="onlyProblems" size="small">只看异常</el-checkbox>
-        <el-button size="small" :loading="loading" @click="refresh">刷新</el-button>
+        <el-button size="small" :loading="loading" @click="reload">刷新</el-button>
       </div>
     </div>
 

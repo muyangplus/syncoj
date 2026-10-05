@@ -198,8 +198,12 @@ def test_validate_reports_all_problems_at_once(workdir: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_duplicate_root_names_are_rejected(workdir: Path) -> None:
-    """两个根目录同名会让上报路径前缀冲突，必须拒绝并给出可操作的错误。"""
+def test_duplicate_root_names_are_rejected_under_auto_prefix(workdir: Path) -> None:
+    """前缀取根目录名时，两个同名根目录会让上报路径冲突 —— 必须拒绝。
+
+    注意这只在 ``prefix = auto`` 下成立。默认的 ``prefix = none`` 不加前缀，
+    多个根目录互不干扰，重名无所谓。
+    """
     from syncoj_agent.main import Agent
 
     a = workdir / "x" / "code"
@@ -209,9 +213,135 @@ def test_duplicate_root_names_are_rejected(workdir: Path) -> None:
 
     config = AgentConfig.load(write_config(workdir))
     config.scan_roots = [a, b]
+    config.scan_prefix = "auto"
 
-    with pytest.raises(ConfigError, match="重名"):
-        Agent(config)
+    agent = Agent(config)
+    with pytest.raises(ConfigError, match="前缀重复"):
+        agent._resolve_roots(player_no="S001")
+
+
+def test_duplicate_root_names_are_fine_without_prefix(workdir: Path) -> None:
+    """不加前缀时多个同名根目录完全没问题 —— 这是默认配置。"""
+    from syncoj_agent.main import Agent
+
+    a = workdir / "x" / "code"
+    b = workdir / "y" / "code"
+    a.mkdir(parents=True)
+    b.mkdir(parents=True)
+
+    config = AgentConfig.load(write_config(workdir))
+    config.scan_roots = [a, b]
+    config.scan_prefix = "none"
+
+    agent = Agent(config)
+    roots = agent._resolve_roots(player_no="S001")
+    assert [name for name, _root in roots] == ["", ""]
+
+
+# --------------------------------------------------------------------------- #
+# 路径占位符
+# --------------------------------------------------------------------------- #
+
+
+def test_expand_placeholders_for_desktop_and_player() -> None:
+    from syncoj_agent.config import expand_placeholders
+
+    desktop = Path("/home/student/桌面")
+    text = expand_placeholders(
+        "{desktop}/{player_no}", desktop=desktop, player_no="S001"
+    )
+    # 用 Path 比较而不是字符串：Windows 上 str(Path("/d")) 是 "\\d"，
+    # 直接比字符串会得到与实现无关的失败
+    assert Path(text) == desktop / "S001"
+
+
+def test_expand_placeholders_keeps_player_no_when_unknown() -> None:
+    """注册之前准考证号还不知道，占位符要**原样保留**而不是报错 ——
+    配置校验发生在注册之前。"""
+    from syncoj_agent.config import expand_placeholders
+
+    text = expand_placeholders("{desktop}/{player_no}", desktop=Path("/d"))
+    assert text.endswith("/{player_no}")
+    assert Path(text.split("{player_no}")[0]) == Path("/d")
+
+
+def test_default_config_uses_desktop_layout() -> None:
+    """默认就是 桌面/<准考证号>，且不加前缀（否则 source/ 里准考证号出现两次）。"""
+    config = AgentConfig.load(None)
+    assert len(config.scan_roots) == 1
+    root = str(config.scan_roots[0])
+    assert "{player_no}" in root, root
+    assert "{desktop}" not in root, "载入时应当已经把 {desktop} 展开了"
+    assert config.scan_prefix == "none"
+    assert "{desktop}" not in str(config.deploy_root)
+
+
+def test_resolved_roots_substitutes_player_no(workdir: Path) -> None:
+    config = AgentConfig.load(write_config(workdir))
+    config.scan_roots = [workdir / "{player_no}" / "code"]
+
+    resolved = config.resolved_roots("S042")
+    assert resolved == [workdir / "S042" / "code"]
+    assert config.needs_player_no is True
+
+
+def test_needs_player_no_is_false_for_static_root(workdir: Path) -> None:
+    config = AgentConfig.load(write_config(workdir))
+    config.scan_roots = [workdir / "code"]
+    assert config.needs_player_no is False
+
+
+def test_prefix_none_produces_bare_relative_paths(workdir: Path) -> None:
+    """前缀为空时上报路径就是纯相对路径。"""
+    from syncoj_agent.main import join_report_path
+
+    assert join_report_path("", "p1/p1.cpp") == "p1/p1.cpp"
+    assert join_report_path("S001", "p1/p1.cpp") == "S001/p1/p1.cpp"
+
+
+def test_prefix_literal_can_reference_player_no(workdir: Path) -> None:
+    from syncoj_agent.main import Agent
+
+    root = workdir / "code"
+    root.mkdir()
+
+    config = AgentConfig.load(write_config(workdir))
+    config.scan_roots = [root]
+    config.scan_prefix = "{player_no}"
+
+    agent = Agent(config)
+    roots = agent._resolve_roots(player_no="S007")
+    assert roots == [("S007", root)]
+
+
+def test_scan_root_is_created_if_missing(workdir: Path) -> None:
+    """扫描根不存在时创建它，而不是报错。
+
+    它是选手的工作目录，开考前可能还没建；报错会在开考前刷一屏"目录不存在"，
+    把真正的问题淹掉。
+    """
+    from syncoj_agent.main import Agent
+
+    missing = workdir / "还没建的目录"
+    assert not missing.exists()
+
+    config = AgentConfig.load(write_config(workdir))
+    config.scan_roots = [missing]
+    config.scan_prefix = "none"
+
+    Agent(config)._resolve_roots(player_no="S001")
+    assert missing.is_dir()
+
+
+def test_templated_root_validation_skips_existence(workdir: Path) -> None:
+    """带 {player_no} 的目录没法检查存在性，但父目录要检查。"""
+    config = AgentConfig.load(write_config(workdir))
+    config.scan_roots = [workdir / "{player_no}"]
+    config.validate()  # workdir 存在，不该报错
+
+    config.scan_roots = [workdir / "不存在" / "{player_no}"]
+    with pytest.raises(ConfigError, match="父目录"):
+        config.validate()
 
 
 # --------------------------------------------------------------------------- #

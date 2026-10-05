@@ -31,6 +31,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 #: 是生成物，改它没意义。
 BOM_SENSITIVE_SUFFIXES = (
     ".sh",
+    ".ps1",
     ".py",
     ".ini",
     ".md",
@@ -44,6 +45,8 @@ BOM_SENSITIVE_SUFFIXES = (
 )
 
 #: 运行在 Linux 上、行尾必须是 LF 的文件类型。
+#: ``.ps1`` 不在其中：PowerShell 两种行尾都认，而它的主要读者是 Windows ——
+#: 为了一个不会出错的约束去要求 LF，只会让编辑器反复改回来。
 LF_ONLY_SUFFIXES = (".sh", ".py", ".ini", ".service", ".tmpl")
 
 
@@ -90,14 +93,6 @@ def find_cr_offenders(paths: List[Path]) -> List[str]:
             label = str(path.relative_to(REPO_ROOT)) if path.is_relative_to(REPO_ROOT) else str(path)
             offenders.append("%s（%d 处 CR）" % (label, data.count(b"\r")))
     return offenders
-
-
-@pytest.fixture(scope="module")
-def files() -> List[Path]:
-    try:
-        return tracked_files()
-    except (OSError, subprocess.CalledProcessError) as exc:  # pragma: no cover
-        pytest.skip("拿不到 git 文件清单: %s" % exc)
 
 
 def test_no_file_starts_with_a_utf8_bom(files: List[Path]) -> None:
@@ -163,3 +158,25 @@ def test_cr_check_actually_catches_crlf(workdir: Path) -> None:
 
     offenders = find_cr_offenders([bad, good])
     assert len(offenders) == 1 and "bad.sh" in offenders[0], offenders
+
+
+def test_generated_openapi_json_uses_lf() -> None:
+    """生成物不能带 CR。
+
+    `web/openapi.json` 由 `server/tools/dump_openapi.py` 写出来。Windows 上
+    ``Path.write_text()`` 默认把 ``\\n`` 翻成 ``\\r\\n``，于是开发机上的生成物
+    和 CI 上的差了一整个文件的字节数 —— diff 里"全变了"，真正改动的两行淹在
+    里面。而 ``read_text()`` 又会把 CRLF 翻译回 LF，所以"是否已最新"的检查
+    完全看不见这件事。已在脚本里显式写 ``newline="\\n"``，这里守住它。
+
+    `.json` 刻意不在 :data:`LF_ONLY_SUFFIXES` 里（JSON 规范允许 CRLF），所以
+    这条针对具体生成物的检查是必需的，不是重复。
+    """
+    path = REPO_ROOT / "web" / "openapi.json"
+    if not path.is_file():  # pragma: no cover
+        pytest.skip("web/openapi.json 不存在")
+
+    assert b"\r" not in path.read_bytes(), (
+        "web/openapi.json 里有 CR；请重新运行 "
+        "python server/tools/dump_openapi.py（它会写 LF）"
+    )

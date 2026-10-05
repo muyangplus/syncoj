@@ -27,9 +27,16 @@ web/openapi.json.tmp
 .uv-cache/
 .pytest-tmp/
 .tmp/
+.tmp-state/
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
+
+# ---- 本地密钥（绝不入库） ----
+# .key/ 里是发布签名私钥与统一注册密钥，泄漏任意一把都等于交出整个机房。
+# 它自己带了一个 `*` 的 .gitignore，但那是**一个可以被删掉的文件** ——
+# 私钥的安全不该只挂在那一个文件上，所以这里再挡一道。
+/.key/
 
 # ---- SyncOJ 运行时数据（绝不入库） ----
 runtime/

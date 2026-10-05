@@ -51,6 +51,17 @@ def serialized(schema: Dict[str, Any]) -> str:
     return json.dumps(schema, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
 
 
+def read_raw(path: Path) -> str:
+    """读文件，**不做换行翻译**。
+
+    ``Path.read_text()`` 默认会把 ``\\r\\n`` 统一成 ``\\n``，于是"文件里其实是
+    CRLF"这件事被它悄悄盖住了：``--check`` 照样报"最新"，而 git 里存的是另一个
+    东西。这里的目的是比较字节，所以必须关掉翻译。
+    """
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        return handle.read()
+
+
 def main(argv: list) -> int:
     parser = argparse.ArgumentParser(description="导出服务端 OpenAPI 描述")
     parser.add_argument("--out", default=str(DEFAULT_OUT))
@@ -65,7 +76,7 @@ def main(argv: list) -> int:
         if not out.is_file():
             print("错误：%s 不存在。请运行 python server/tools/dump_openapi.py" % out, file=sys.stderr)
             return 1
-        if out.read_text(encoding="utf-8") != text:
+        if read_raw(out) != text:
             print(
                 "错误：%s 已过期 —— 服务端 schema 改了但前端类型没重新生成。\n"
                 "      请运行：python server/tools/dump_openapi.py && "
@@ -77,7 +88,10 @@ def main(argv: list) -> int:
         return 0
 
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(text, encoding="utf-8")
+    # 必须显式指明换行符：Windows 上 Path.write_text 默认会把 \n 翻成 \r\n，
+    # 于是同一个生成物在开发机上带 CR、在 CI 上不带。首当其冲的是 diff ——
+    # 整个文件看起来"全变了"，而真正改动的两行淹在里面没人看得见。
+    out.write_text(text, encoding="utf-8", newline="\n")
     print("已写入 %s（%d 字节）" % (out, len(text)))
     return 0
 

@@ -143,6 +143,41 @@ def test_generate_refuses_to_overwrite(key_dir: Path) -> None:
         generate_keypair(existing)
 
 
+def _to_pkcs1_der(openssl: str, pem: Path, out: Path) -> None:
+    """把 PEM 转成 **PKCS#1** DER，不管这台机器上是哪个 openssl。
+
+    ``-traditional`` 是 OpenSSL **3.0** 才有的开关：3.0 起 ``openssl rsa`` 默认
+    输出 PKCS#8，所以要显式要求老格式；而 1.x 里没有这个开关，它的默认输**出就是**
+    PKCS#1（实测 Git 自带的 1.1.1q 会直接报 ``rsa: Unrecognized flag traditional``）。
+
+    所以按能力选参数，而不是假定一个版本。这也是本测试的原意 ——
+    "换个 openssl 版本就崩是不可接受的"。
+    """
+    base = [openssl, "rsa", "-in", str(pem)]
+    attempt = subprocess.run(
+        base + ["-traditional", "-outform", "DER", "-out", str(out)],
+        capture_output=True,
+    )
+    if attempt.returncode == 0:
+        return
+    subprocess.run(base + ["-outform", "DER", "-out", str(out)], check=True, capture_output=True)
+
+
+def _looks_like_pkcs1_der(data: bytes) -> bool:
+    """这个 DER 是不是真的 PKCS#1 ``RSAPrivateKey``。
+
+    ``RSAPrivateKey`` 与 PKCS#8 ``PrivateKeyInfo`` 都以 SEQUENCE 开头，区别在
+    紧随其后的东西：前者是 ``INTEGER version, INTEGER modulus``（``02 01 00 02``），
+    后者是 ``INTEGER version, SEQUENCE(AlgorithmIdentifier)``。
+
+    必须真的验一下：否则哪天某个 openssl 版本又改了默认值，这个测试会**安静地
+    把 PKCS#8 读两遍**，而它存在的全部意义就是证明两种格式都读得了。
+    """
+    head = data[:12]
+    # 长度头可能是 4 字节（30 82 LL LL）或 3 字节（30 81 LL）
+    return head[4:8] == b"\x02\x01\x00\x02" or head[3:7] == b"\x02\x01\x00\x02"
+
+
 @requires_openssl
 def test_loads_pkcs1_and_pkcs8(keypair: SigningKey, key_pem: Path, key_dir: Path) -> None:
     """OpenSSL 3.0 起 ``openssl rsa`` 默认输出 PKCS#8，老版本输出 PKCS#1 ——
@@ -150,9 +185,10 @@ def test_loads_pkcs1_and_pkcs8(keypair: SigningKey, key_pem: Path, key_dir: Path
     openssl = openssl_available()
 
     der = key_dir / "pkcs1.der"
-    subprocess.run(
-        [openssl, "rsa", "-in", str(key_pem), "-traditional", "-outform", "DER", "-out", str(der)],
-        check=True, capture_output=True,
+    _to_pkcs1_der(openssl, key_pem, der)
+    body = der.read_bytes()
+    assert _looks_like_pkcs1_der(body), (
+        "这台 openssl 生成的并不是 PKCS#1，测试会在不知情的情况下把 PKCS#8 读两遍"
     )
     assert load_signing_key(der).n == keypair.n
 

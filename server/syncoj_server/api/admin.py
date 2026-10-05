@@ -29,6 +29,7 @@ from ..models import (
     DeployTask,
     EnrollCode,
     EventLog,
+    JudgeRun,
     Player,
     SourceFile,
     utcnow,
@@ -45,10 +46,16 @@ from ..schemas import (
     DeployTaskOut,
     EnrollCodeOut,
     EventOut,
+    JudgeRunOut,
+    JudgeScanOut,
     LoginRequest,
     LoginResponse,
+    ManualScoreIn,
     PlayerOut,
     PlayerUpsert,
+    ScoreCellOut,
+    ScoreMatrixOut,
+    ScoreRowOut,
     SimpleAck,
     SourceFileOut,
 )
@@ -877,3 +884,234 @@ def _derive_task_status(task: DeployTask, counts: Dict[str, int]) -> str:
     if counts.get(DeployStatus.DONE, 0) + counts.get(DeployStatus.FAILED, 0) == total:
         return DeployStatus.FAILED  # 部分失败
     return DeployStatus.PENDING
+
+
+# --------------------------------------------------------------------------- #
+# 评测成绩
+# --------------------------------------------------------------------------- #
+
+
+@router.get("/contests/{contest_id}/scores", response_model=ScoreMatrixOut)
+def score_matrix(
+    contest_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> ScoreMatrixOut:
+    """「选手 × 题目」成绩矩阵。
+
+    **区分"0 分"和"没有成绩"**：``parse_status`` 为 ``missing`` 表示从未收到
+    结果，``unparsed`` 表示收到了但看不懂。界面上这两者都不该显示成 0 ——
+    那会让教师以为选手考砸了。
+    """
+    with ctx.db.session() as session:
+        contest = session.get(Contest, contest_id)
+        if contest is None:
+            raise HTTPException(status_code=404, detail="场次不存在")
+
+        players = list(
+            session.execute(
+                select(Player).where(Player.contest_id == contest_id).order_by(Player.player_no)
+            ).scalars()
+        )
+        runs = list(
+            session.execute(select(JudgeRun).where(JudgeRun.contest_id == contest_id)).scalars()
+        )
+
+    problems = sorted({run.problem for run in runs})
+    by_key = {(run.player_id, run.problem): run for run in runs}
+
+    rows: List[ScoreRowOut] = []
+    unparsed = 0
+    for player in players:
+        cells: List[ScoreCellOut] = []
+        total = 0
+        for problem in problems:
+            run = by_key.get((player.id, problem))
+            if run is None:
+                cells.append(ScoreCellOut(problem=problem, parse_status="missing"))
+                continue
+            if run.parse_status == "unparsed":
+                unparsed += 1
+            if run.score:
+                total += run.score
+            cells.append(
+                ScoreCellOut(
+                    problem=problem,
+                    score=run.score,
+                    max_score=run.max_score,
+                    status=run.status,
+                    parse_status=run.parse_status,
+                    detail=run.detail,
+                    updated_at=_iso(run.updated_at),
+                )
+            )
+        rows.append(
+            ScoreRowOut(
+                player_id=player.id,
+                player_no=player.player_no,
+                player_name=player.name,
+                total=total,
+                cells=cells,
+            )
+        )
+
+    return ScoreMatrixOut(
+        contest_id=contest_id,
+        problems=problems,
+        rows=rows,
+        unparsed=unparsed,
+        complete=unparsed == 0,
+    )
+
+
+@router.get("/contests/{contest_id}/judge/runs", response_model=List[JudgeRunOut])
+def list_judge_runs(
+    contest_id: int,
+    parse_status: Optional[str] = None,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> List[JudgeRunOut]:
+    with ctx.db.session() as session:
+        stmt = (
+            select(JudgeRun, Player.player_no)
+            .join(Player, JudgeRun.player_id == Player.id)
+            .where(JudgeRun.contest_id == contest_id)
+        )
+        if parse_status:
+            stmt = stmt.where(JudgeRun.parse_status == parse_status)
+        stmt = stmt.order_by(Player.player_no, JudgeRun.problem)
+
+        return [
+            JudgeRunOut(
+                id=run.id,
+                player_id=run.player_id,
+                player_no=player_no,
+                problem=run.problem,
+                score=run.score,
+                max_score=run.max_score,
+                status=run.status,
+                parse_status=run.parse_status,
+                detail=run.detail,
+                source_path=run.source_path,
+                updated_at=_iso(run.updated_at) or "",
+            )
+            for run, player_no in session.execute(stmt)
+        ]
+
+
+@router.post("/contests/{contest_id}/judge/rescan", response_model=JudgeScanOut)
+def rescan_judge_results(
+    contest_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> JudgeScanOut:
+    """立即重扫成绩目录（忽略 mtime 缓存）。"""
+    from ..services.judge import scan_contest_results
+
+    with ctx.db.session() as session:
+        contest = session.get(Contest, contest_id)
+        if contest is None:
+            raise HTTPException(status_code=404, detail="场次不存在")
+        report = scan_contest_results(session, ctx.settings, contest, force=True)
+        return JudgeScanOut(
+            parsed=report.parsed,
+            unparsed=report.unparsed,
+            unchanged=report.unchanged,
+            skipped=report.skipped,
+            manual=report.manual,
+            errors=report.errors[:50],
+        )
+
+
+@router.put("/contests/{contest_id}/judge/score", response_model=JudgeRunOut)
+def set_judge_score(
+    contest_id: int,
+    payload: ManualScoreIn,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> JudgeRunOut:
+    """教师手工录入或修正成绩。
+
+    这是"解析器覆盖不到"的兜底出口。手工录入的记录会标记成 ``manual``，
+    后续自动扫描**不会覆盖**它 —— 教师既然亲手改了，就该由教师负责。
+    """
+    problem = (payload.problem or "").strip()
+    if not problem:
+        raise HTTPException(status_code=400, detail="题目标识不能为空")
+
+    with ctx.db.session() as session:
+        player = session.get(Player, payload.player_id)
+        if player is None or player.contest_id != contest_id:
+            raise HTTPException(status_code=404, detail="选手不存在或不属于本场次")
+
+        run = session.execute(
+            select(JudgeRun).where(
+                JudgeRun.contest_id == contest_id,
+                JudgeRun.player_id == payload.player_id,
+                JudgeRun.problem == problem,
+            )
+        ).scalar_one_or_none()
+
+        if run is None:
+            run = JudgeRun(
+                contest_id=contest_id,
+                player_id=payload.player_id,
+                problem=problem,
+                scanned_at=utcnow(),
+            )
+            session.add(run)
+
+        run.score = payload.score
+        run.max_score = payload.max_score
+        run.status = payload.status
+        run.parse_status = "manual"
+        run.detail = "教师手工录入"
+        run.updated_at = utcnow()
+        session.flush()
+
+        session.add(
+            EventLog(
+                level="info",
+                category="judge_manual",
+                contest_id=contest_id,
+                player_id=payload.player_id,
+                message="手工录入成绩：%s %s = %s"
+                % (player.player_no, problem, payload.score),
+            )
+        )
+
+        return JudgeRunOut(
+            id=run.id,
+            player_id=run.player_id,
+            player_no=player.player_no,
+            problem=run.problem,
+            score=run.score,
+            max_score=run.max_score,
+            status=run.status,
+            parse_status=run.parse_status,
+            detail=run.detail,
+            source_path=run.source_path,
+            updated_at=_iso(run.updated_at) or "",
+        )
+
+
+@router.delete("/contests/{contest_id}/judge/score", response_model=SimpleAck)
+def clear_judge_score(
+    contest_id: int,
+    player_id: int,
+    problem: str,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> SimpleAck:
+    with ctx.db.session() as session:
+        run = session.execute(
+            select(JudgeRun).where(
+                JudgeRun.contest_id == contest_id,
+                JudgeRun.player_id == player_id,
+                JudgeRun.problem == problem,
+            )
+        ).scalar_one_or_none()
+        if run is None:
+            return SimpleAck(ok=True, detail="没有该记录")
+        session.delete(run)
+    return SimpleAck(ok=True, detail="已清除")

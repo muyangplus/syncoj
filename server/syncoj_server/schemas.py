@@ -319,3 +319,74 @@ class DeployTaskOut(_Base):
     failed: int = 0
     pending: int = 0
     targets: List[DeployTargetOut] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------------- #
+# 评测成绩
+# --------------------------------------------------------------------------- #
+
+
+class ScoreCellOut(_Base):
+    problem: str
+    score: Optional[int] = None
+    max_score: Optional[int] = None
+    status: Optional[str] = None
+    #: ok / unparsed / manual / missing（从未收到结果）
+    parse_status: str = "missing"
+    detail: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class ScoreRowOut(_Base):
+    player_id: int
+    player_no: str
+    player_name: Optional[str] = None
+    total: int = 0
+    cells: List[ScoreCellOut] = Field(default_factory=list)
+
+
+class ScoreMatrixOut(_Base):
+    contest_id: int
+    problems: List[str] = Field(default_factory=list)
+    rows: List[ScoreRowOut] = Field(default_factory=list)
+    #: 尚未解析出成绩的单元格数 —— 界面应当把它显示成待办而不是"0 分"
+    unparsed: int = 0
+    complete: bool = True
+
+
+class ManualScoreIn(_Base):
+    """教师手工录入 / 修正成绩。
+
+    未解析的文件靠它兜底 —— 我们无法覆盖所有评测器格式，但绝不能因此让教师
+    只能干瞪眼。
+    """
+
+    player_id: int
+    problem: str = Field(min_length=1, max_length=64)
+    score: Optional[int] = Field(default=None, ge=0)
+    max_score: Optional[int] = Field(default=None, ge=0)
+    status: Optional[str] = Field(default=None, max_length=32)
+
+
+class JudgeRunOut(_Base):
+    id: int
+    player_id: int
+    player_no: str
+    problem: str
+    score: Optional[int] = None
+    max_score: Optional[int] = None
+    status: Optional[str] = None
+    parse_status: str
+    detail: Optional[str] = None
+    source_path: Optional[str] = None
+    updated_at: str
+
+
+class JudgeScanOut(_Base):
+    parsed: int = 0
+    unparsed: int = 0
+    unchanged: int = 0
+    skipped: int = 0
+    #: 因教师手工录入而被保留（未覆盖）的条目数
+    manual: int = 0
+    errors: List[str] = Field(default_factory=list)

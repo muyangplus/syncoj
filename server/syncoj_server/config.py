@@ -55,6 +55,10 @@ class Settings:
     # 内存持有实时状态，按此周期合并成一个事务刷入 SQLite
     flush_interval_seconds: float = 5.0
 
+    # ---- 评测成绩扫描 ----
+    # 周期扫描 judge_result/ 目录并回写成绩。对延迟不敏感，所以放得比较宽
+    judge_scan_interval: float = 10.0
+
     # ---- 认证 ----
     admin_session_ttl_seconds: int = 12 * 3600
     enroll_code_bytes: int = 16

@@ -23,6 +23,7 @@ from .config import Settings, default_settings
 from .context import AppContext
 from .paths import PathValidationError
 from .tasks.flush import run_maintenance_loop
+from .tasks.judge import run_judge_scan_loop
 
 __all__ = ["create_app"]
 
@@ -37,13 +38,18 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
         log.info("SyncOJ 启动，数据目录 %s", settings.data_root)
-        maintenance = asyncio.ensure_future(run_maintenance_loop(ctx))
+        background = [
+            asyncio.ensure_future(run_maintenance_loop(ctx)),
+            asyncio.ensure_future(run_judge_scan_loop(ctx)),
+        ]
         try:
             yield
         finally:
-            maintenance.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await maintenance
+            for task in background:
+                task.cancel()
+            for task in background:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
             ctx.db.dispose()
             log.info("SyncOJ 已停止")
 

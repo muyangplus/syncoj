@@ -325,6 +325,13 @@ class DeployTarget(Base):
 
 
 class JudgeRun(Base):
+    """一条评测成绩。
+
+    ``parse_status`` 是刻意存在的：我们无法覆盖所有评测器的输出格式，遇到看不懂
+    的文件时**必须留下痕迹**，让教师在界面上看到"这个文件没解析出来"并手动补录。
+    静默丢弃会让人以为"还没跑评测"，静默猜一个分数更糟 —— 教师会拿它当真。
+    """
+
     __tablename__ = "judge_run"
 
     id = Column(Integer, primary_key=True)
@@ -334,9 +341,17 @@ class JudgeRun(Base):
     score = Column(Integer, nullable=True)
     max_score = Column(Integer, nullable=True)
     status = Column(String(32), nullable=True)
+    #: ok = 解析成功 | unparsed = 有文件但看不懂 | manual = 教师手工录入
+    parse_status = Column(String(16), nullable=False, default="ok")
+    #: 解析来源文件（相对 judge_result 根目录）
     source_path = Column(String(1024), nullable=True)
+    #: 来源文件的 mtime，用于跳过未变化的文件
+    source_mtime = Column(BigInteger, nullable=False, default=0)
+    #: 解析器名称 / 未解析原因
+    detail = Column(String(512), nullable=True)
     raw_json = Column(Text, nullable=True)
     scanned_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, nullable=False)
 
     __table_args__ = (
         UniqueConstraint("contest_id", "player_id", "problem", name="uq_judge_run"),

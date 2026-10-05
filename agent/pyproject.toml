@@ -1,0 +1,11 @@
+# 这个文件**只**用来放开发工具的配置。
+#
+# Agent 本身是零依赖的：它只用 Python 3.8 标准库，不通过 pip 安装，部署方式
+# 是把 agent/ 目录整个拷到 /opt/syncoj/。所以这里刻意**没有** [project] 段 ——
+# 一旦声明了依赖，就等于在暗示"Agent 需要 pip install"，那正是我们要避免的。
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# 让 tests/ 目录可被导入（conftest.py 里有跨文件共用的辅助函数）
+pythonpath = ["."]
+addopts = "-q --no-header"

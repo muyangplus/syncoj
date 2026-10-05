@@ -53,23 +53,41 @@ SyncOJ/
 # 服务端
 python -m venv server/.venv
 server/.venv/Scripts/activate      # Linux: source server/.venv/bin/activate
-pip install -e server[dev]
-syncoj-server --init-db            # 建库 + 生成管理员口令 + 打印注册码
+pip install -e "server[dev]"
+syncoj-server init                 # 建库 + 生成管理员口令
+syncoj-server serve --host 0.0.0.0
 
 # Agent（零依赖，直接跑）
-python agent/syncoj_agent/main.py --config agent/config.example.ini
+python agent/syncoj_agent/main.py --config agent/config.example.ini --check
+python agent/syncoj_agent/main.py --config agent/config.example.ini --once
 ```
 
 ## 开发约定
 
-- **Agent 侧代码必须是 Python 3.8 兼容**。提交前跑 `python agent/tools/check_py38.py agent/`，CI 也会跑。
-- **协议改动必须同时更新** `docs/protocol.md` 与契约测试 fixture。
-- 服务端路径安全校验**独立实现**，绝不信任 Agent 上报的相对路径。
+- **Agent 侧代码必须是 Python 3.8 兼容**（目标机是 NOI Linux 2.0）。
+  提交前跑 `python agent/tools/check_py38.py agent/`，CI 也会跑。
+- **协议改动必须同步三处**：`server/syncoj_server/schemas.py`、
+  `agent/syncoj_agent/` 的报文体构造、`docs/protocol.md`。
+  契约测试 `server/tests/test_agent_contract.py` 会自动发现不一致。
+- **服务端的路径安全校验必须独立实现**，绝不信任 Agent 上报的路径。
+  `agent/syncoj_agent/safepath.py` 是**另一份独立实现**（纵深防御），
+  两者的一致性由契约测试中的 `test_path_validation_parity` 守住。
+
+## 跑全部检查
+
+```bash
+./scripts/check.sh
+```
 
 ## 状态
 
-- [x] M1 骨架：enroll / tick / 在线状态
-- [ ] M2 回收：扫描 / 上传 / `source/` 落盘
-- [ ] M3 下发：asset / deploy / 断点续传
-- [ ] M4 成绩：结果扫描回写 / 审计日志
-- [ ] M5 运维：签名自更新 / 离线包 / installer
+| 里程碑 | 状态 |
+|---|---|
+| M1 骨架：enroll / tick / 在线状态 / 管理后台 | ✅ 完成 |
+| M2 回收：扫描 / 上传 / 内容寻址存储 / `source/` 落盘 / 删除审计 | ✅ 完成 |
+| M3 下发：asset 管理 / deploy 编排 / Range 断点续传 | 🟡 传输层与协议已完成，教师端下发接口未做 |
+| M4 成绩：结果扫描回写 / 成绩矩阵 | ⬜ 待做 |
+| M5 运维：签名自更新 / 离线包 / installer | ⬜ 待做 |
+
+测试规模：服务端 89 项、Agent 67 项，含端到端集成测试（真实 Agent 代码
+通过真实 HTTP 打到真实服务端）。

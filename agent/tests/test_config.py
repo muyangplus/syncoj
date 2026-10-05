@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 import pytest
 
@@ -460,6 +461,72 @@ def test_env_scan_roots_expand_desktop_and_home(
     joined = " ".join(str(root) for root in config.scan_roots)
     assert PLACEHOLDER_DESKTOP not in joined
     assert PLACEHOLDER_HOME not in joined
+
+
+def test_shipped_example_config_is_loadable() -> None:
+    """仓库里那份 config.example.ini 必须真的能被读进来。
+
+    它是最多人照抄的东西，却最容易腐烂 —— 没人 import 它，改代码时也想不到
+    它。这里把它当成契约来守。
+    """
+    example = Path(__file__).resolve().parents[1] / "config.example.ini"
+    assert example.is_file(), "示例配置不见了"
+
+    config = AgentConfig.load(example)
+    assert config.server_url.startswith("https://")
+    assert config.scan_roots, "示例里至少得有一个扫描目录"
+    assert config.deploy_root.is_absolute()
+
+
+def test_shipped_example_config_uses_only_known_placeholders() -> None:
+    """示例里出现的每个 ``{xxx}`` 都必须是真占位符。
+
+    写错一个字母（``{player_no}`` 写成 ``{player}``）不会报错，只会变成一个字面
+    目录名 —— 而且是在考场上才发现扫不到文件。这里把它挡在提交之前。
+    """
+    from syncoj_agent.config import CREDENTIAL_PLACEHOLDERS, PLACEHOLDER_DESKTOP, PLACEHOLDER_HOME
+
+    example = Path(__file__).resolve().parents[1] / "config.example.ini"
+    text = example.read_text(encoding="utf-8")
+
+    # 只看非注释行 —— 注释里会举反例、写说明
+    active = "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith((";", "#"))
+    )
+    known = {PLACEHOLDER_DESKTOP, PLACEHOLDER_HOME} | set(CREDENTIAL_PLACEHOLDERS)
+    used = set(re.findall(r"\{[a-z_]+\}", active))
+    assert used <= known, "示例配置里出现了未定义的占位符：%s" % (used - known)
+
+
+def test_builtin_default_config_passes_check(
+    workdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """README 的「快速开始」里那条 ``run_agent.py --check`` 必须真的能过。
+
+    它用的是内置默认配置。这条路径最容易腐烂：模板里改个字段名、加一条必填的
+    校验，README 不会跟着变，而新人的第一印象就是"这玩意儿装不起来"。
+
+    ``SYNCOJ_STATE_DIR`` 指向临时目录 —— 默认的 ``/var/lib/syncoj`` 在开发机上
+    会落到盘根，测试不该在仓库外面拉屎。
+    """
+    from syncoj_agent.main import main
+
+    monkeypatch.setenv("SYNCOJ_STATE_DIR", str(workdir / "state"))
+    assert main(["--check"]) == 0
+
+
+def test_default_ini_is_the_source_of_truth_for_the_runbook() -> None:
+    """README 里承诺的默认值要和内置模板对得上。"""
+    from syncoj_agent.config import DEFAULT_INI
+
+    config = AgentConfig.load(None)
+    assert config.scan_prefix == "none"
+    # deploy_root 默认为桌面，且载入时就展开
+    assert config.deploy_root.is_absolute()
+    assert "{desktop}" not in str(config.deploy_root)
+    # 默认不启用自更新 —— 静默升级是高风险动作
+    assert "mode = off" in DEFAULT_INI
+    assert config.upgrade_mode == "off"
 
 
 # --------------------------------------------------------------------------- #

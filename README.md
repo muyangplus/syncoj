@@ -73,9 +73,14 @@ npm run build                      # 产出 web/dist
 # 服务端启动时自动探测 web/dist 并挂载；探测不到就只提供 API，/docs 仍可用
 
 # Agent（零依赖）
+python agent/run_agent.py --check                          # 用内置默认配置自检
 python agent/run_agent.py --config agent/config.example.ini --check
-python agent/run_agent.py --config agent/config.example.ini --once
+python agent/run_agent.py --once
 ```
+
+> `--check` **不带 `--config`** 时用的是内置默认值（`ca_file` 留空、服务端
+> `https://127.0.0.1:8000`），所以开箱就能跑。带上 `config.example.ini` 会去
+> 找 `/etc/syncoj/ca.pem` —— 那是个**部署模板**，填好真实路径再用。
 
 > **Agent 必须通过 `run_agent.py` 启动，不能是 `syncoj_agent/main.py`。**
 > 后者使用包内相对导入，当脚本直接执行会报

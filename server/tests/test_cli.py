@@ -7,6 +7,10 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
+import os
+
 import pytest
 from sqlalchemy import select
 
@@ -253,78 +257,159 @@ def test_import_empty_roster_fails(cli_env) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 签发注册码
+# 统一密钥与待配对机器
+#
+# "逐台签注册码"已经被"镜像里一把统一密钥"取代，所以这一节盯的是新模型里
+# 两件在脚本化部署中真正要做的事：**把密钥装进镜像**、**看哪些机器还没配对**。
 # --------------------------------------------------------------------------- #
 
 
-def test_enroll_codes_issued_for_all_players(cli_env, capsys) -> None:
-    prepare_contest(cli_env)
-    roster = cli_env["workdir"] / "roster.csv"
-    roster.write_text("S001,张三\nS002,李四\nS003,王五\n", encoding="utf-8")
-    run_cli(cli_env, ["contest", "import-players", "--contest", "c1", "--file", str(roster)])
-
-    assert run_cli(cli_env, ["contest", "enroll-codes", "--contest", "c1"]) == 0
-
-    output = capsys.readouterr().out
-    lines = lines_of(output)
-    assert len(lines) == 3, "期望 3 行注册码，实际：%r" % lines
-    codes = [line.split(",")[1] for line in lines]
-    assert len(set(codes)) == 3, "每个选手的注册码必须不同"
-    assert all(len(code) >= 16 for code in codes)
-
-
-def test_enroll_codes_stored_hashed_not_plaintext(cli_env, capsys) -> None:
-    """服务端只能存哈希 —— 库里出现明文注册码等于把凭据摊在磁盘上。"""
-    prepare_contest(cli_env)
-    roster = cli_env["workdir"] / "roster.csv"
-    roster.write_text("S001\n", encoding="utf-8")
-    run_cli(cli_env, ["contest", "import-players", "--contest", "c1", "--file", str(roster)])
-
-    capsys.readouterr()  # 丢掉前面的噪声
-    run_cli(cli_env, ["contest", "enroll-codes", "--contest", "c1"])
-    plain = lines_of(capsys.readouterr().out)[0].split(",")[1]
-    assert plain, "没解析出注册码，测试前提不成立"
-
+def open_ctx(cli_env):
     settings = Settings()
     settings.data_root = cli_env["data_root"]
     from syncoj_server.context import AppContext
-    from syncoj_server.models import EnrollCode
 
-    ctx = AppContext.create(settings)
+    return AppContext.create(settings)
+
+
+def issue_key(cli_env) -> str:
+    """签发一把密钥并把明文从输出里捡回来。"""
+    import io
+    import contextlib
+
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        assert run_cli(cli_env, ["bootstrap-key", "issue"]) == 0
+    # 明文是唯一一行"看起来像密钥"的东西：32 字节 base64url
+    candidates = [
+        line.strip()
+        for line in buffer.getvalue().splitlines()
+        if len(line.strip()) >= 32 and "," not in line and not line.startswith("[+]")
+    ]
+    assert candidates, "没能从输出里解析出密钥明文：%r" % buffer.getvalue()
+    return candidates[0]
+
+
+def test_bootstrap_key_is_stored_hashed_not_plaintext(cli_env) -> None:
+    """服务端只能存哈希 —— 库里出现明文密钥等于把整间机房的注册权摊在磁盘上。"""
+    plain = issue_key(cli_env)
+
+    from syncoj_server.models import BootstrapKey
+
+    with open_ctx(cli_env).db.session() as session:
+        key = session.execute(select(BootstrapKey)).scalar_one()
+    assert plain not in key.key_hash
+    assert len(key.key_hash) == 64
+
+
+def test_bootstrap_key_issue_writes_a_private_file(cli_env) -> None:
+    """装机时密钥要放进 root 只读的 /etc 里 —— 文件权限必须一开始就是 0600。
+
+    先建成 0600 再写内容，否则会有"已经写进去了、但权限还是 644"的一瞬间。
+    """
+    target = cli_env["workdir"] / "bootstrap.key"
+    assert run_cli(cli_env, ["bootstrap-key", "issue", "--out", str(target)]) == 0
+
+    assert target.is_file()
+    body = target.read_text(encoding="utf-8").strip()
+    assert body, "文件里必须有明文密钥，否则装机脚本读到空值"
+    assert "\r" not in target.read_text(encoding="utf-8"), "换行必须是 LF，systemd 会读它"
+
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        assert (target.stat().st_mode & 0o077) == 0, "同组/其他用户不该读得到"
+
+    from syncoj_server.security import hash_bootstrap_key
+    from syncoj_server.models import BootstrapKey
+
+    with open_ctx(cli_env).db.session() as session:
+        key = session.execute(select(BootstrapKey)).scalar_one()
+    assert key.key_hash == hash_bootstrap_key(body)
+
+
+def test_revoked_bootstrap_key_cannot_enroll_any_more(cli_env) -> None:
+    """吊销只挡住"以后还想拿它注册"的机器 —— 已经注册好的机器不受影响。
+
+    这条是排错方向的分水岭：如果吊销会把在线机器一起踢掉，
+    教师就不敢在比赛期间吊销泄漏出去的密钥。
+    """
+    from syncoj_server.errors import ERROR_CODES
+    from syncoj_server.models import BootstrapKey
+    from syncoj_server import services
+
+    plain = issue_key(cli_env)
+    ctx = open_ctx(cli_env)
+
+    from syncoj_server.services import enrollment
+
+    def try_enroll(ctx, machine_uuid):
+        with ctx.db.session() as session:
+            try:
+                enrollment.enroll_machine(
+                    session, plain,
+                    machine_id="m-1", machine_uuid=machine_uuid,
+                    machine_fingerprint=None, hostname="pc", os_info=None,
+                    agent_version="0.1.0", raw_token="t", raw_pair_code="123456",
+                    offline_after_seconds=180,
+                )
+                return "ok"
+            except enrollment.BootstrapRejected as exc:
+                assert exc.code in ERROR_CODES, exc.code
+                return exc.code
+
+    assert try_enroll(ctx, "uuid-1") == "ok"
+
+    with open_ctx(cli_env).db.session() as session:
+        key = session.execute(select(BootstrapKey)).scalar_one()
+        key_id = key.id
+
+    assert run_cli(cli_env, ["bootstrap-key", "revoke", "--id", str(key_id)]) == 0
+
+    fresh = open_ctx(cli_env)
+    assert try_enroll(fresh, "uuid-2") == "bootstrap_key_revoked"
+
+
+def test_bootstrap_key_revoke_unknown_id_fails(cli_env) -> None:
+    assert run_cli(cli_env, ["bootstrap-key", "revoke", "--id", "999"]) == 1
+
+
+def pending_rows(output: str) -> list:
+    """只留真正的数据行（以 id 开头）—— 表头与结尾提示都不是行。"""
+    return [line for line in output.splitlines() if line[:1].isdigit()]
+
+
+def test_pending_lists_machines_that_are_not_paired_yet(cli_env, capsys) -> None:
+    """``bootstrap-key pending`` 是现场排查的第一站：机器到底上来没有。
+
+    按**最后心跳倒序** —— 教师站在机器前的时候，那台机器刚刚才心跳过，
+    它就该在最上面；按注册时间排会让人从一堆久未上线的机器里翻找。
+    """
+    from syncoj_server.services import enrollment
+
+    plain = issue_key(cli_env)
+    ctx = open_ctx(cli_env)
     with ctx.db.session() as session:
-        code = session.execute(select(EnrollCode)).scalar_one()
-    assert plain not in code.code_hash
-    assert len(code.code_hash) == 64
+        for i, hostname in enumerate(["pc-a", "pc-b", "pc-c"]):
+            enrollment.enroll_machine(
+                session, plain,
+                machine_id="machine-%d" % i, machine_uuid="uuid-%d" % i,
+                machine_fingerprint=None, hostname=hostname, os_info=None,
+                agent_version="0.1.0", raw_token="token-%d" % i, raw_pair_code="12345%d" % i,
+                offline_after_seconds=180,
+            )
 
-
-def test_enroll_codes_revokes_previous(cli_env, capsys) -> None:
-    """重新签发必须吊销旧的 —— 否则一张流落在外的旧注册码仍然能用。"""
-    prepare_contest(cli_env)
-    roster = cli_env["workdir"] / "roster.csv"
-    roster.write_text("S001\n", encoding="utf-8")
-    run_cli(cli_env, ["contest", "import-players", "--contest", "c1", "--file", str(roster)])
-
-    run_cli(cli_env, ["contest", "enroll-codes", "--contest", "c1"])
     capsys.readouterr()
-    run_cli(cli_env, ["contest", "enroll-codes", "--contest", "c1"])
-    capsys.readouterr()
-
-    settings = Settings()
-    settings.data_root = cli_env["data_root"]
-    from syncoj_server.context import AppContext
-    from syncoj_server.models import EnrollCode
-
-    ctx = AppContext.create(settings)
-    with ctx.db.session() as session:
-        codes = list(session.execute(select(EnrollCode)).scalars())
-    assert len(codes) == 2
-    assert sum(1 for c in codes if c.revoked_at is not None) == 1, "旧码应当被吊销"
-    assert sum(1 for c in codes if c.revoked_at is None) == 1
+    assert run_cli(cli_env, ["bootstrap-key", "pending"]) == 0
+    rows = pending_rows(capsys.readouterr().out)
+    assert len(rows) == 3, rows
+    assert "pc-c" in rows[0], "最后心跳的那台必须排在最前面"
+    assert "1799 秒" in rows[0] or "秒" in rows[0], "要显示配对码还剩多久过期"
 
 
-def test_enroll_codes_without_players_fails(cli_env) -> None:
-    prepare_contest(cli_env)
-    assert run_cli(cli_env, ["contest", "enroll-codes", "--contest", "c1"]) == 1
+def test_pending_says_so_when_there_is_nothing_to_pair(cli_env, capsys) -> None:
+    """空列表要说人话，而不是印一个光秃秃的表头。"""
+    assert run_cli(cli_env, ["bootstrap-key", "pending"]) == 0
+    assert "没有待配对的机器" in capsys.readouterr().out
+    assert pending_rows(capsys.readouterr().out) == []
 
 
 # --------------------------------------------------------------------------- #
@@ -344,10 +429,20 @@ def test_full_setup_from_command_line(cli_env, capsys) -> None:
     assert run_cli(
         cli_env, ["contest", "import-players", "--contest", "mock", "--file", str(roster)]
     ) == 0
-    assert run_cli(cli_env, ["contest", "enroll-codes", "--contest", "mock"]) == 0
+    key_file = cli_env["workdir"] / "bootstrap.key"
+    assert run_cli(cli_env, ["bootstrap-key", "issue", "--out", str(key_file)]) == 0
+    assert key_file.read_text(encoding="utf-8").strip(), "密钥必须真的写进文件"
+
     assert run_cli(cli_env, ["contest", "list"]) == 0
 
     output = capsys.readouterr().out
     assert "mock" in output
-    assert "S001" in output and "S002" in output
     assert len(load_players(cli_env, "mock")) == 2
+
+    # 装机的下一步是"把机器配上来"，所以 init 的提示也必须指向新路径
+    hint = io.StringIO()
+    with contextlib.redirect_stdout(hint):
+        assert run_cli(cli_env, ["init", "--admin-password", "x" * 12]) == 0
+    assert "bootstrap-key" in hint.getvalue() or "机器配对" in hint.getvalue()
+    assert "enroll-code" not in hint.getvalue(), "旧注册码链路已经不存在了"
+    assert "注册码" not in hint.getvalue()

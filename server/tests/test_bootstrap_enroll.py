@@ -5,21 +5,33 @@
 **不能悄悄认错人** —— 认错的代价是一个学生的代码落进另一个人的目录，
 而界面上看不出任何异常。
 
-所以这里重点是三件事：
+所以这里重点是四件事：
 
-* 配对必须把机器认到**正确**的选手，且一人一机
+* 配对必须把机器认到**正确**的名单条目，且一人一机、一机一人
 * 配对码是一次性的、会过期的、要管理员才能用
-* 快照还原之后能凭硬件指纹认回同一台机器，**不需要重新配对**
+* 快照还原之后能凭硬件指纹认回同一台机器，**不需要重新配对**；
+  但母机还开着的时候绝不允许"认回"（否则克隆机会拿走别人的身份）
+* 还没配对的机器**什么都干不了**，而且服务端要如实告诉它为什么
 """
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Dict, List, Optional
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
-from conftest import agent_headers
+from syncoj_server.schemas import GLOBAL_CONFIRM
+
+from conftest import (
+    agent_headers,
+    bind_by_code,
+    enroll_machine,
+    issue_bootstrap_key,
+    make_roster,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -33,44 +45,20 @@ def issue_key(client: TestClient, headers: dict, **payload) -> Dict:
     return response.json()
 
 
-def enroll_with_key(
-    client: TestClient,
-    key: str,
-    *,
-    machine_id: str,
-    machine_uuid: Optional[str] = None,
-    machine_fingerprint: Optional[str] = None,
-    hostname: str = "exam-pc",
-) -> Dict:
-    body = {
-        "bootstrap_key": key,
-        "machine_id": machine_id,
-        "hostname": hostname,
-        "agent_version": "0.1.0",
-        "os_info": "NOI Linux 2.0",
-        "machine_uuid": machine_uuid,
-        "machine_fingerprint": machine_fingerprint,
-    }
-    return client.post("/api/v1/agent/enroll", json=body)
-
-
 def pending(client: TestClient, headers: dict) -> List[Dict]:
+    """待配对列表的**数据行**（信封里的 items）。
+
+    这里刻意只回列表：绝大多数断言关心的是"有哪些机器"，
+    信封的形状有专门的用例去盯（见 ``test_pending_envelope_*``）。
+    """
     response = client.get("/api/v1/admin/machines/pending", headers=headers)
     assert response.status_code == 200, response.text
-    return response.json()
+    return response.json()["items"]
 
 
-def add_player(client: TestClient, headers: dict, contest: dict, player_no: str) -> Dict:
-    response = client.post(
-        "/api/v1/admin/contests/%d/players" % contest["id"],
-        json=[{"player_no": player_no}],
-        headers=headers,
-    )
-    assert response.status_code == 200, response.text
-    return response.json()[0]
-
-
-def global_events(client: TestClient, headers: dict, category: Optional[str] = None) -> List[Dict]:
+def global_events(
+    client: TestClient, headers: dict, category: Optional[str] = None
+) -> List[Dict]:
     """不分场次的审计事件。
 
     注册与配对冲突发生在"还没有场次归属"的机器上，所以那些事件查不到任何
@@ -79,44 +67,58 @@ def global_events(client: TestClient, headers: dict, category: Optional[str] = N
     query = "?category=%s" % category if category else ""
     response = client.get("/api/v1/admin/events" + query, headers=headers)
     assert response.status_code == 200, response.text
-    return response.json()
+    return response.json()["items"]
 
 
-def age_agent(app, machine_id: str, seconds: int = 3600) -> None:
+def age_agent(app, machine_uuid: str, seconds: int = 3600) -> None:
     """把某台机器的"最后心跳"推到过去，模拟它关机了一段时间。
 
     快照还原的真实时序是：机器关机 → 打快照 / 还原 → 再开机。
     期间它一定超过了离线判定阈值，所以这个 helper 不是"绕过保护"，
     而是把测试放到真实的时序里。
+
+    直接改库而不是 sleep：测试不该为了等一个超时慢下来，而且
+    ``offline_after_seconds`` 是可配的，sleep 的写法会在改配置时静默失效。
     """
-    from datetime import timedelta
-
-    from sqlalchemy import select
-
     from syncoj_server.models import Agent, utcnow
 
     with app.state.ctx.db.session() as session:
         agent = session.execute(
-            select(Agent).where(Agent.machine_id == machine_id)
+            select(Agent).where(Agent.machine_uuid == machine_uuid)
         ).scalar_one()
         agent.last_seen_at = utcnow() - timedelta(seconds=seconds)
 
 
-@pytest.fixture()
-def boot_contest(client: TestClient, admin_headers: dict, contest: dict) -> Dict:
-    """把场次切成"镜像统一密钥"模式。
+def agent_row(client: TestClient, machine_uuid: str):
+    from syncoj_server.models import Agent
 
-    新建场次的默认是「每选手注册码」，而**服务端会据此拒绝配对** ——
-    一个声明"机器靠注册码进来"的场次，不该悄悄接受统一密钥注册上来的机器
-    （否则那个设置就只是装饰，而一个没有效果的设置比没有设置更糟：
-    它会让人以为自己明明选对了）。
+    with client.app.state.ctx.db.session() as session:
+        return session.execute(
+            select(Agent).where(Agent.machine_uuid == machine_uuid)
+        ).scalar_one()
 
-    所以想测配对的用例必须先显式声明这个场次走统一密钥。
-    """
-    response = client.patch(
-        "/api/v1/admin/contests/%d" % contest["id"],
-        json={"enrollment_mode": "bootstrap"},
-        headers=admin_headers,
+
+def tick_payload(**kwargs) -> Dict:
+    """一次最小可用的 tick 请求体。"""
+    payload = {
+        "agent_version": "0.1.0",
+        "machine_id": "machine-x",
+        "ts": 1767225600,
+        "scan_root": "/home/student/code",
+        "scan": [],
+        "partials": [],
+        "stats": {"disk_free": 10 ** 10, "last_error": None, "queue": 0},
+    }
+    payload.update(kwargs)
+    return payload
+
+
+def do_tick(client: TestClient, token: str, **kwargs) -> Dict:
+    """发一次 tick 并断言成功（返回响应体）。"""
+    response = client.post(
+        "/api/v1/agent/tick",
+        json=tick_payload(**kwargs),
+        headers=agent_headers(token),
     )
     assert response.status_code == 200, response.text
     return response.json()
@@ -133,10 +135,11 @@ def test_issue_and_list_keys(client: TestClient, admin_headers: dict) -> None:
     assert issued["use_count"] == 0
     assert issued["revoked_at"] is None
 
-    rows = client.get("/api/v1/admin/bootstrap-keys", headers=admin_headers).json()
-    assert [r["label"] for r in rows] == ["2025 机房镜像"]
+    body = client.get("/api/v1/admin/bootstrap-keys", headers=admin_headers).json()
+    assert [r["label"] for r in body["items"]] == ["2025 机房镜像"]
     # 列表接口**不能**回显明文
-    assert "key" not in rows[0]
+    assert "key" not in body["items"][0]
+    assert issued["key"] not in str(body)
 
 
 def test_keys_require_admin(client: TestClient) -> None:
@@ -149,44 +152,65 @@ def test_revoked_key_is_rejected(client: TestClient, admin_headers: dict) -> Non
         "/api/v1/admin/bootstrap-keys/%d/revoke" % issued["id"], headers=admin_headers
     )
 
-    response = enroll_with_key(client, issued["key"], machine_id="m-1")
-    assert response.status_code == 403
-    assert "吊销" in response.json()["detail"]
+    response = client.post(
+        "/api/v1/agent/enroll",
+        json={"bootstrap_key": issued["key"], "machine_id": "m-1"},
+    )
+    assert response.status_code == 403, response.text
+    body = response.json()
+    assert body["code"] == "bootstrap_key_revoked"
+    assert "吊销" in body["detail"]
+
+
+def test_expired_key_is_rejected(client: TestClient, admin_headers: dict) -> None:
+    """过期与吊销是不同的 code —— Agent 对两者的处置不同（前者等人换镜像，
+    后者要查是谁把密钥贴出去了）。"""
+    from syncoj_server.models import BootstrapKey, utcnow
+
+    issued = issue_key(client, admin_headers)
+    with client.app.state.ctx.db.session() as session:
+        key = session.get(BootstrapKey, issued["id"])
+        key.expires_at = utcnow() - timedelta(days=1)
+
+    response = client.post(
+        "/api/v1/agent/enroll",
+        json={"bootstrap_key": issued["key"], "machine_id": "m-1"},
+    )
+    assert response.status_code == 403, response.text
+    assert response.json()["code"] == "bootstrap_key_expired"
 
 
 def test_unknown_key_is_rejected(client: TestClient, admin_headers: dict) -> None:
-    response = enroll_with_key(client, "AAAA-BBBB-CCCC-DDDD", machine_id="m-1")
-    assert response.status_code == 404
+    response = client.post(
+        "/api/v1/agent/enroll",
+        json={"bootstrap_key": "AAAA-BBBB-CCCC-DDDD", "machine_id": "m-1"},
+    )
+    assert response.status_code == 404, response.text
+    assert response.json()["code"] == "bootstrap_key_invalid"
 
 
-def test_enroll_needs_some_credential(client: TestClient, admin_headers: dict) -> None:
+def test_enroll_needs_the_key(client: TestClient) -> None:
+    """没给密钥是 422（请求不合法），不是 404（密钥不存在）—— 排错方向不同。"""
     response = client.post("/api/v1/agent/enroll", json={"machine_id": "m-1"})
-    assert response.status_code == 400
+    assert response.status_code == 422, response.text
+    assert response.json()["code"] == "validation_error"
 
 
 def test_revoking_a_key_does_not_affect_registered_machines(
-    client: TestClient, admin_headers: dict, boot_contest: dict
+    client: TestClient, admin_headers: dict, bootstrap_key: str, enrolled: dict
 ) -> None:
-    """已经注册好的机器手里是各自的 token，不是这把密钥。"""
-    issued = issue_key(client, admin_headers)
-    enrolled = enroll_with_key(client, issued["key"], machine_id="m-1").json()
+    """已经注册好的机器手里是各自的 token，不是这把密钥。
 
-    player = add_player(client, admin_headers, boot_contest, "S001")
+    这条决定了教师**敢不敢**在比赛期间吊销一把泄漏出去的密钥。
+    """
+    body = client.get("/api/v1/admin/bootstrap-keys", headers=admin_headers).json()
+    key_id = body["items"][0]["id"]
     client.post(
-        "/api/v1/admin/machines/claim-by-code",
-        json={"pair_code": enrolled["pair_code"], "player_id": player["id"]},
-        headers=admin_headers,
-    )
-    client.post(
-        "/api/v1/admin/bootstrap-keys/%d/revoke" % issued["id"], headers=admin_headers
+        "/api/v1/admin/bootstrap-keys/%d/revoke" % key_id, headers=admin_headers
     )
 
-    tick = client.post(
-        "/api/v1/agent/tick",
-        json=_tick_payload(),
-        headers=agent_headers(enrolled["token"]),
-    )
-    assert tick.status_code == 200, tick.text
+    tick = do_tick(client, enrolled["token"], machine_id=enrolled["machine_id"])
+    assert tick["claimed"] is True and tick["bound"] is True
 
 
 # --------------------------------------------------------------------------- #
@@ -194,12 +218,8 @@ def test_revoking_a_key_does_not_affect_registered_machines(
 # --------------------------------------------------------------------------- #
 
 
-def test_bootstrap_enroll_is_unclaimed(client: TestClient, admin_headers: dict) -> None:
-    issued = issue_key(client, admin_headers)
-    response = enroll_with_key(client, issued["key"], machine_id="m-1")
-
-    assert response.status_code == 200, response.text
-    body = response.json()
+def test_enroll_is_unclaimed(client: TestClient, bootstrap_key: str) -> None:
+    body = enroll_machine(client, bootstrap_key)
     assert body["token"]
     assert body["claimed"] is False
     assert body["pair_code"]
@@ -208,10 +228,9 @@ def test_bootstrap_enroll_is_unclaimed(client: TestClient, admin_headers: dict) 
 
 
 def test_unclaimed_machine_shows_up_in_pending(
-    client: TestClient, admin_headers: dict
+    client: TestClient, admin_headers: dict, bootstrap_key: str
 ) -> None:
-    issued = issue_key(client, admin_headers)
-    enroll_with_key(client, issued["key"], machine_id="m-1", hostname="exam-pc-07")
+    enroll_machine(client, bootstrap_key, machine_id="m-1", hostname="exam-pc-07")
 
     rows = pending(client, admin_headers)
     assert len(rows) == 1
@@ -219,33 +238,28 @@ def test_unclaimed_machine_shows_up_in_pending(
     assert rows[0]["hostname"] == "exam-pc-07"
     # 配对码的**明文不能**回给界面：库里只有哈希，服务端自己也不该留
     assert "pair_code" not in rows[0]
+    assert rows[0]["pair_code_expires_in"] > 0
 
 
 def test_unclaimed_tick_says_not_claimed(
-    client: TestClient, admin_headers: dict
+    client: TestClient, bootstrap_key: str
 ) -> None:
-    issued = issue_key(client, admin_headers)
-    enrolled = enroll_with_key(client, issued["key"], machine_id="m-1").json()
-
-    response = client.post(
-        "/api/v1/agent/tick",
-        json=_tick_payload(),
-        headers=agent_headers(enrolled["token"]),
-    )
-    assert response.status_code == 200, response.text
-    assert response.json()["claimed"] is False
+    enrolled = enroll_machine(client, bootstrap_key, machine_id="m-1")
+    body = do_tick(client, enrolled["token"], machine_id="m-1")
+    assert body["claimed"] is False
+    assert body["bound"] is False
+    assert body["next_tick_seconds"] == 60, "它本来就没事可做，用空闲周期"
 
 
 def test_unclaimed_machine_cannot_upload(
-    client: TestClient, admin_headers: dict
+    client: TestClient, bootstrap_key: str
 ) -> None:
     """没归属的机器连准考证号都不知道，上传只能是污染台账。
 
     返回 403 而不是 401 也很重要：401 会让 Agent 以为凭据坏了，于是反复重新
     注册，把真正的"还没配对"盖掉。
     """
-    issued = issue_key(client, admin_headers)
-    enrolled = enroll_with_key(client, issued["key"], machine_id="m-1").json()
+    enrolled = enroll_machine(client, bootstrap_key, machine_id="m-1")
 
     response = client.post(
         "/api/v1/agent/files",
@@ -253,26 +267,29 @@ def test_unclaimed_machine_cannot_upload(
         files={"file": ("p1.cpp", b"int main(){}", "application/octet-stream")},
         headers=agent_headers(enrolled["token"]),
     )
-    assert response.status_code == 403
-    assert "配对" in response.json()["detail"]
+    assert response.status_code == 403, response.text
+    body = response.json()
+    assert body["code"] == "pairing_required"
+    assert "配对" in body["detail"]
 
 
 def test_unclaimed_scan_is_discarded(
-    client: TestClient, admin_headers: dict, contest: dict
+    client: TestClient, admin_headers: dict, bootstrap_key: str, contest: dict
 ) -> None:
-    """未认领机器上报的扫描结果一律丢弃 —— 没有准考证号，路径没法归属。"""
-    issued = issue_key(client, admin_headers)
-    enrolled = enroll_with_key(client, issued["key"], machine_id="m-1").json()
-
-    payload = _tick_payload(scan=[{"path": "p1/p1.cpp", "sha256": "a" * 64, "size": 3, "mtime": 1}])
-    client.post(
-        "/api/v1/agent/tick", json=payload, headers=agent_headers(enrolled["token"])
+    """未配对机器上报的扫描结果一律丢弃 —— 没有准考证号，路径没法归属。"""
+    enrolled = enroll_machine(client, bootstrap_key, machine_id="m-1")
+    do_tick(
+        client,
+        enrolled["token"],
+        machine_id="m-1",
+        scan=[{"path": "p1/p1.cpp", "sha256": "a" * 64, "size": 3, "mtime": 1}],
     )
 
     files = client.get(
         "/api/v1/admin/contests/%d/files" % contest["id"], headers=admin_headers
     ).json()
-    assert files == []
+    assert files["items"] == []
+    assert files["total"] == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -280,502 +297,344 @@ def test_unclaimed_scan_is_discarded(
 # --------------------------------------------------------------------------- #
 
 
-def test_claim_by_code_binds_the_right_player(
-    client: TestClient, admin_headers: dict, boot_contest: dict
+def test_bind_by_code_pairs_the_machine_to_the_person(
+    client: TestClient, admin_headers: dict, bootstrap_key: str, roster: dict
 ) -> None:
-    issued = issue_key(client, admin_headers)
-    enrolled = enroll_with_key(client, issued["key"], machine_id="m-1").json()
-    player = add_player(client, admin_headers, boot_contest, "S001")
+    entry = next(e for e in roster["entries"] if e["player_no"] == "S001")
+    enrolled = enroll_machine(client, bootstrap_key, machine_id="m-1")
 
-    response = client.post(
-        "/api/v1/admin/machines/claim-by-code",
-        json={"pair_code": enrolled["pair_code"], "player_id": player["id"]},
-        headers=admin_headers,
-    )
-    assert response.status_code == 200, response.text
-    assert "S001" in response.json()["detail"]
+    result = bind_by_code(client, admin_headers, enrolled["pair_code"], entry["id"])
+    assert result["player_no"] == "S001"
+    assert result["roster_entry_id"] == entry["id"]
 
     assert pending(client, admin_headers) == []
 
-    tick = client.post(
-        "/api/v1/agent/tick",
-        json=_tick_payload(),
-        headers=agent_headers(enrolled["token"]),
-    ).json()
+    tick = do_tick(client, enrolled["token"], machine_id="m-1")
     assert tick["claimed"] is True
-    assert tick["player_no"] == "S001"
 
 
-def test_claim_code_is_case_insensitive(
-    client: TestClient, admin_headers: dict, boot_contest: dict
+def test_bind_by_id_needs_the_pair_code_when_given(
+    client: TestClient, admin_headers: dict, bootstrap_key: str, roster: dict
 ) -> None:
-    """教师是照着机器抄的，不该因为大小写或连字符被为难。"""
-    issued = issue_key(client, admin_headers)
-    enrolled = enroll_with_key(client, issued["key"], machine_id="m-1").json()
-    player = add_player(client, admin_headers, boot_contest, "S001")
+    """主机名可能是重复的（克隆镜像、默认 hostname），所以给了配对码就必须对得上。
 
-    messy = enrolled["pair_code"].lower()
-    response = client.post(
-        "/api/v1/admin/machines/claim-by-code",
-        json={"pair_code": messy, "player_id": player["id"]},
-        headers=admin_headers,
-    )
-    assert response.status_code == 200, response.text
-
-
-def test_claim_by_id_without_code(
-    client: TestClient, admin_headers: dict, boot_contest: dict
-) -> None:
-    """从列表里按主机名直接认领（教师能看到主机名时最省事）。"""
-    issued = issue_key(client, admin_headers)
-    enroll_with_key(client, issued["key"], machine_id="m-1", hostname="exam-pc-07")
-    player = add_player(client, admin_headers, boot_contest, "S001")
-    claim_id = pending(client, admin_headers)[0]["id"]
-
-    response = client.post(
-        "/api/v1/admin/machines/%d/claim" % claim_id,
-        json={"player_id": player["id"]},
-        headers=admin_headers,
-    )
-    assert response.status_code == 200, response.text
-
-
-def test_claim_by_id_with_wrong_code_is_rejected(
-    client: TestClient, admin_headers: dict, boot_contest: dict
-) -> None:
-    """给了配对码就必须对得上 —— 主机名可能是重复的，码才是"我站在机器前"的证据。"""
-    issued = issue_key(client, admin_headers)
-    enroll_with_key(client, issued["key"], machine_id="m-1")
-    player = add_player(client, admin_headers, boot_contest, "S001")
-    claim_id = pending(client, admin_headers)[0]["id"]
-
-    response = client.post(
-        "/api/v1/admin/machines/%d/claim" % claim_id,
-        json={"player_id": player["id"], "pair_code": "WRONG1"},
-        headers=admin_headers,
-    )
-    assert response.status_code == 400
-    assert pending(client, admin_headers), "配对失败的机器不该从列表里消失"
-
-
-def test_expired_pair_code_is_rejected(
-    client: TestClient, admin_headers: dict, boot_contest: dict, app
-) -> None:
-    from datetime import timedelta
-
-    from syncoj_server.models import MachineClaim, utcnow
-
-    issued = issue_key(client, admin_headers)
-    enrolled = enroll_with_key(client, issued["key"], machine_id="m-1").json()
-    player = add_player(client, admin_headers, boot_contest, "S001")
-
-    with app.state.ctx.db.session() as session:
-        claim = session.query(MachineClaim).one()
-        claim.pair_code_expires_at = utcnow() - timedelta(seconds=1)
-
-    response = client.post(
-        "/api/v1/admin/machines/claim-by-code",
-        json={"pair_code": enrolled["pair_code"], "player_id": player["id"]},
-        headers=admin_headers,
-    )
-    assert response.status_code == 404
-    assert "过期" in response.json()["detail"]
-
-
-def test_one_player_cannot_have_two_machines(
-    client: TestClient, admin_headers: dict, boot_contest: dict
-) -> None:
-    """两台机器认领到同一个选手：代码会往同一个目录里写，而且是静默的。
-
-    成绩矩阵只会看起来"这个人交了两遍"，谁也不知道哪一份是真的 ——
-    所以必须在入口拒绝。
+    这是"教师确实站在那台机器前面"的唯一证明。
     """
-    key = issue_key(client, admin_headers)["key"]
-    first = enroll_with_key(client, key, machine_id="m-1").json()
-    second = enroll_with_key(client, key, machine_id="m-2").json()
-    player = add_player(client, admin_headers, boot_contest, "S001")
+    entry = next(e for e in roster["entries"] if e["player_no"] == "S001")
+    enrolled = enroll_machine(client, bootstrap_key, machine_id="m-1")
+
+    wrong = client.post(
+        "/api/v1/admin/machines/%d/bind" % enrolled["agent_id"],
+        json={"roster_entry_id": entry["id"], "pair_code": "000000"},
+        headers=admin_headers,
+    )
+    assert wrong.status_code == 400, wrong.text
+    assert wrong.json()["code"] == "pair_code_invalid"
 
     ok = client.post(
-        "/api/v1/admin/machines/claim-by-code",
-        json={"pair_code": first["pair_code"], "player_id": player["id"]},
+        "/api/v1/admin/machines/%d/bind" % enrolled["agent_id"],
+        json={"roster_entry_id": entry["id"], "pair_code": enrolled["pair_code"]},
         headers=admin_headers,
     )
-    assert ok.status_code == 200
-
-    clash = client.post(
-        "/api/v1/admin/machines/claim-by-code",
-        json={"pair_code": second["pair_code"], "player_id": player["id"]},
-        headers=admin_headers,
-    )
-    assert clash.status_code == 409
-    assert "已经绑定" in clash.json()["detail"]
+    assert ok.status_code == 200, ok.text
 
 
-def test_claiming_requires_admin(client: TestClient, contest: dict) -> None:
+def test_bind_requires_admin(client: TestClient, bootstrap_key: str) -> None:
+    enrolled = enroll_machine(client, bootstrap_key, machine_id="m-1")
     response = client.post(
-        "/api/v1/admin/machines/claim-by-code",
-        json={"pair_code": "ABCDEF", "player_id": 1},
+        "/api/v1/admin/machines/bind-by-code",
+        json={"pair_code": enrolled["pair_code"], "roster_entry_id": 1},
     )
     assert response.status_code == 401
 
 
-def test_claim_is_refused_when_the_contest_uses_per_player_codes(
-    client: TestClient, admin_headers: dict, contest: dict
+def test_expired_pair_code_is_rejected(
+    client: TestClient, admin_headers: dict, bootstrap_key: str, roster: dict
 ) -> None:
-    """场次的注册方式必须**真的起作用**。
+    entry = next(e for e in roster["entries"] if e["player_no"] == "S001")
+    enrolled = enroll_machine(client, bootstrap_key, machine_id="m-1")
 
-    一个声明"机器靠注册码进来"的场次，不该悄悄接受统一密钥注册上来的机器 ——
-    否则那个设置就只是装饰，而一个没有效果的设置比没有设置更糟：
-    它会让人以为自己明明选对了。
+    # 把码的有效期推到过去（教师走下讲台花了太久，或者机器被晾了一晚上）
+    from datetime import timedelta
 
-    拒绝而不是警告：警告在两个方向上都可能被忽略；而这里拒绝的成本很低
-    （把场次的注册方式改一下，或者用单人码注册这一台），
-    错误信息里也说清了这两条路。
-    """
-    key = issue_key(client, admin_headers)["key"]
-    enrolled = enroll_with_key(client, key, machine_id="m-1").json()
-    player = add_player(client, admin_headers, contest, "S001")
+    from syncoj_server.models import Agent, utcnow
 
-    assert contest["enrollment_mode"] == "per_player_code"
+    with client.app.state.ctx.db.session() as session:
+        agent = session.get(Agent, enrolled["agent_id"])
+        agent.pair_code_expires_at = utcnow() - timedelta(seconds=1)
 
     response = client.post(
-        "/api/v1/admin/machines/claim-by-code",
-        json={"pair_code": enrolled["pair_code"], "player_id": player["id"]},
+        "/api/v1/admin/machines/bind-by-code",
+        json={"pair_code": enrolled["pair_code"], "roster_entry_id": entry["id"]},
         headers=admin_headers,
     )
-    assert response.status_code == 409
-    detail = response.json()["detail"]
-    assert "注册方式" in detail
-    assert "统一密钥" in detail, "要说清楚怎么改"
-    assert pending(client, admin_headers), "被拒绝之后机器仍应在待配对列表里"
+    assert response.status_code == 404, response.text
+    assert response.json()["code"] == "pair_code_invalid"
+
+    # 但下一轮心跳会让机器拿到一个新码 —— 现场不用重启、不用重新装机
+    tick = do_tick(client, enrolled["token"], machine_id="m-1")
+    assert tick["pair_code"] and tick["pair_code"] != enrolled["pair_code"]
+
+    assert bind_by_code(
+        client, admin_headers, tick["pair_code"], entry["id"]
+    )["player_no"] == "S001"
 
 
-def test_switching_the_contest_mode_unblocks_pairing(
-    client: TestClient, admin_headers: dict, contest: dict
+def test_one_person_cannot_have_two_machines(
+    client: TestClient, admin_headers: dict, bootstrap_key: str, roster: dict
 ) -> None:
-    """拒绝之后，按错误信息说的改一下就该能配对 —— 不能让人卡死。"""
-    key = issue_key(client, admin_headers)["key"]
-    enrolled = enroll_with_key(client, key, machine_id="m-1").json()
-    player = add_player(client, admin_headers, contest, "S001")
+    entry = next(e for e in roster["entries"] if e["player_no"] == "S001")
+    first = enroll_machine(client, bootstrap_key, machine_id="m-1", hostname="pc-1")
+    second = enroll_machine(client, bootstrap_key, machine_id="m-2", hostname="pc-2")
 
-    client.patch(
-        "/api/v1/admin/contests/%d" % contest["id"],
-        json={"enrollment_mode": "bootstrap"},
-        headers=admin_headers,
-    )
-
+    bind_by_code(client, admin_headers, first["pair_code"], entry["id"])
     response = client.post(
-        "/api/v1/admin/machines/claim-by-code",
-        json={"pair_code": enrolled["pair_code"], "player_id": player["id"]},
+        "/api/v1/admin/machines/bind-by-code",
+        json={"pair_code": second["pair_code"], "roster_entry_id": entry["id"]},
         headers=admin_headers,
     )
-    assert response.status_code == 200, response.text
+    assert response.status_code == 409, response.text
+    assert response.json()["code"] == "roster_entry_taken"
 
 
-def test_per_player_code_still_works_in_a_bootstrap_contest(
-    client: TestClient, admin_headers: dict, contest: dict
+def test_revoke_pending_machine_removes_it_from_the_queue(
+    client: TestClient, admin_headers: dict, bootstrap_key: str
 ) -> None:
-    """反方向不拦：场次声明用统一密钥时，教师**特意**为某个选手签发的单人码
-    仍然可用 —— 那是有意为之的补位动作（外校选手、重装的机器）。"""
-    client.patch(
-        "/api/v1/admin/contests/%d" % contest["id"],
-        json={"enrollment_mode": "bootstrap"},
+    enrolled = enroll_machine(client, bootstrap_key, machine_id="m-1", hostname="pc-1")
+
+    missing = client.delete(
+        "/api/v1/admin/machines/pending/%d" % enrolled["agent_id"], headers=admin_headers
+    )
+    assert missing.status_code == 422, "删机器要打机器名"
+
+    ok = client.delete(
+        "/api/v1/admin/machines/pending/%d?confirm=pc-1" % enrolled["agent_id"],
         headers=admin_headers,
     )
-    player = add_player(client, admin_headers, contest, "S001")
-    code = client.post(
-        "/api/v1/admin/players/%d/enroll-code" % player["id"], headers=admin_headers
-    ).json()["code"]
-
-    response = client.post(
-        "/api/v1/agent/enroll",
-        json={"enroll_code": code, "machine_id": "m-manual", "hostname": "pc-x"},
-    )
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["claimed"] is True
-    assert body["player_no"] == "S001"
-
-
-def test_revoke_pending_machine(client: TestClient, admin_headers: dict) -> None:
-    issued = issue_key(client, admin_headers)
-    enroll_with_key(client, issued["key"], machine_id="junk")
-    claim_id = pending(client, admin_headers)[0]["id"]
-
-    assert client.delete(
-        "/api/v1/admin/machines/pending/%d" % claim_id, headers=admin_headers
-    ).status_code == 200
+    assert ok.status_code == 200, ok.text
     assert pending(client, admin_headers) == []
 
 
 def test_revoked_machine_credential_stops_working(
-    client: TestClient, admin_headers: dict
+    client: TestClient, admin_headers: dict, bootstrap_key: str
 ) -> None:
-    issued = issue_key(client, admin_headers)
-    enrolled = enroll_with_key(client, issued["key"], machine_id="junk").json()
-    claim_id = pending(client, admin_headers)[0]["id"]
-    client.delete("/api/v1/admin/machines/pending/%d" % claim_id, headers=admin_headers)
+    """401（凭据坏了）而不是 403（还没配对）：机器该清掉本地凭据、重新注册。
+
+    这是 401/403 分工里最容易写反的一处 —— 写反了那台被移除的机器会一直
+    以"还没配对"的姿态安静地等下去，而现场以为已经把它踢掉了。
+    """
+    enrolled = enroll_machine(client, bootstrap_key, machine_id="m-1", hostname="pc-1")
+    client.delete(
+        "/api/v1/admin/machines/pending/%d?confirm=pc-1" % enrolled["agent_id"],
+        headers=admin_headers,
+    )
 
     response = client.post(
         "/api/v1/agent/tick",
-        json=_tick_payload(),
+        json=tick_payload(machine_id="m-1"),
         headers=agent_headers(enrolled["token"]),
     )
-    assert response.status_code == 401
+    assert response.status_code == 401, response.text
+    assert response.json()["code"] == "machine_revoked"
+
+
+def test_clear_pending_machines_requires_the_whole_word(
+    client: TestClient, admin_headers: dict, bootstrap_key: str
+) -> None:
+    """清空待配对列表是范围删除 —— 确认内容是固定字面量 all。"""
+    for i in range(2):
+        enroll_machine(client, bootstrap_key, hostname="pc-%d" % i)
+
+    refused = client.post(
+        "/api/v1/admin/machines/pending/clear",
+        json={"confirm": "pc-0"},
+        headers=admin_headers,
+    )
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["code"] == "name_mismatch"
+
+    ok = client.post(
+        "/api/v1/admin/machines/pending/clear",
+        json={"confirm": GLOBAL_CONFIRM},
+        headers=admin_headers,
+    )
+    assert ok.status_code == 200, ok.text
+    assert pending(client, admin_headers) == []
 
 
 # --------------------------------------------------------------------------- #
-# 快照还原：凭硬件指纹认回原机器
+# 快照还原：凭指纹认回同一台机器
 # --------------------------------------------------------------------------- #
 
 
 def test_snapshot_restore_keeps_the_pairing(
-    client: TestClient, admin_headers: dict, boot_contest: dict, app
+    client: TestClient, admin_headers: dict, app, bootstrap_key: str, roster: dict,
+    player: dict,
 ) -> None:
-    """**这条是统一密钥方案能成立的关键。**
+    """整机快照还原会把 ``machine_uuid`` 一起抹掉，但**配对结果不该丢**。
 
-    机器上的 credential.json 会随快照还原消失，连自己生成的 UUID 也一起没了。
-    如果服务端不能靠硬件指纹认出"这是原来那台机器"，每还原一次就要教师重新
-    配对一次 —— 50 台机器就是 50 次人工，方案直接不可用。
+    还原之后机器重新注册：UUID 认不出来，指纹认得出 —— 于是它还是原来那个人，
+    教师不用走到每台机器跟前重新配对 50 次。
     """
-    issued = issue_key(client, admin_headers)
-    fingerprint = "4c4c4544-0031-3010-8043-b7c04f4d4432"
+    entry = next(e for e in roster["entries"] if e["player_no"] == "S001")
+    fingerprint = "smbios-" + "c" * 24
+    original = enroll_machine(
+        client, bootstrap_key, machine_id="m-1", fingerprint=fingerprint
+    )
+    bind_by_code(client, admin_headers, original["pair_code"], entry["id"])
 
-    first = enroll_with_key(
-        client,
-        issued["key"],
-        machine_id="m-1",
-        machine_uuid="uuid-a",
-        machine_fingerprint=fingerprint,
-    ).json()
-    player = add_player(client, admin_headers, boot_contest, "S001")
-    client.post(
-        "/api/v1/admin/machines/claim-by-code",
-        json={"pair_code": first["pair_code"], "player_id": player["id"]},
-        headers=admin_headers,
+    # 关机 → 还原 → 开机
+    age_agent(app, original["machine_uuid"])
+    restored = enroll_machine(
+        client, bootstrap_key, machine_id="m-1", fingerprint=fingerprint
     )
 
-    # 关机 → 还原 → 再开机：凭据和 UUID 都没了，指纹还在
-    age_agent(app, "m-1")
-    restored = enroll_with_key(
-        client,
-        issued["key"],
-        machine_id="m-1",
-        machine_uuid="uuid-b",
-        machine_fingerprint=fingerprint,
-    ).json()
-
-    assert restored["claimed"] is True
+    assert restored["agent_id"] == original["agent_id"], "应当认回同一台机器"
+    assert restored["claimed"] is True, "配对关系必须保留"
+    assert restored["bound"] is True, "而且它下一轮就知道自己该扫哪"
     assert restored["player_no"] == "S001"
-    assert restored["token"] != first["token"], "凭据应当换发"
-    assert pending(client, admin_headers) == [], "不该多出一台待配对机器"
 
 
 def test_restore_revokes_the_old_token(
-    client: TestClient, admin_headers: dict, boot_contest: dict, app
+    client: TestClient, admin_headers: dict, app, bootstrap_key: str, roster: dict,
+    player: dict,
 ) -> None:
-    """换发凭据之后旧 token 必须立刻失效 —— 否则快照里那份还能用。"""
-    issued = issue_key(client, admin_headers)
-    fingerprint = "fingerprint-abcdefgh"
+    """认回之后旧凭据必须立刻失效。
 
-    first = enroll_with_key(
-        client, issued["key"], machine_id="m-1", machine_fingerprint=fingerprint
-    ).json()
-    player = add_player(client, admin_headers, boot_contest, "S001")
-    client.post(
-        "/api/v1/admin/machines/claim-by-code",
-        json={"pair_code": first["pair_code"], "player_id": player["id"]},
-        headers=admin_headers,
-    )
-    age_agent(app, "m-1")
-    enroll_with_key(
-        client, issued["key"], machine_id="m-1", machine_fingerprint=fingerprint
-    )
+    否则被打快照的那台"母机"（或者它的副本）还能拿着旧 token 继续上传，
+    而服务端会把它当成同一个学生 —— 这正是克隆镜像最隐蔽的后果。
+    """
+    entry = next(e for e in roster["entries"] if e["player_no"] == "S001")
+    fingerprint = "smbios-" + "d" * 24
+    original = enroll_machine(client, bootstrap_key, fingerprint=fingerprint)
+    bind_by_code(client, admin_headers, original["pair_code"], entry["id"])
+
+    age_agent(app, original["machine_uuid"])
+    restored = enroll_machine(client, bootstrap_key, fingerprint=fingerprint)
+    assert restored["token"] != original["token"]
 
     stale = client.post(
         "/api/v1/agent/tick",
-        json=_tick_payload(),
-        headers=agent_headers(first["token"]),
+        json=tick_payload(machine_id=original["machine_id"]),
+        headers=agent_headers(original["token"]),
     )
-    assert stale.status_code == 401
+    assert stale.status_code == 401, stale.text
 
 
 def test_online_machine_cannot_be_taken_over_by_a_lookalike(
-    client: TestClient, admin_headers: dict, boot_contest: dict
+    client: TestClient, admin_headers: dict, bootstrap_key: str, roster: dict
 ) -> None:
-    """**指纹认回不能无条件自动执行。**
+    """**克隆镜像保护。**
 
-    指纹只证明硬件相同。原机器还在心跳时，另一台报同样指纹的机器几乎只可能是
-    克隆出来的 —— 它要是把身份拿走了，那个学生的成绩就会被别的机器的代码污染，
-    而且完全静默。所以在线时一律不认回，改走人工配对。
+    指纹只能证明硬件相同。母机**还开着**的时候又冒出一台报同样指纹的机器，
+    这几乎不可能是"同一台机器回来了" —— 更可能是镜像被克隆了。
+    让它拿走原机器的身份，那个学生的成绩就会被另一台机器的代码污染，
+    而且完全静默（成绩矩阵只是看起来"他交了两遍"）。
     """
-    issued = issue_key(client, admin_headers)
-    fingerprint = "fingerprint-shared-1"
+    entry = next(e for e in roster["entries"] if e["player_no"] == "S001")
+    fingerprint = "smbios-" + "e" * 24
+    original = enroll_machine(client, bootstrap_key, fingerprint=fingerprint)
+    bind_by_code(client, admin_headers, original["pair_code"], entry["id"])
 
-    first = enroll_with_key(
-        client, issued["key"], machine_id="m-1", machine_fingerprint=fingerprint
-    ).json()
-    player = add_player(client, admin_headers, boot_contest, "S001")
-    client.post(
-        "/api/v1/admin/machines/claim-by-code",
-        json={"pair_code": first["pair_code"], "player_id": player["id"]},
-        headers=admin_headers,
+    # 母机没关机，克隆机就上线了
+    clone = enroll_machine(
+        client, bootstrap_key, fingerprint=fingerprint, hostname="克隆机"
     )
 
-    # m-1 刚刚才配对过，是"在线"的
-    impostor = enroll_with_key(
-        client, issued["key"], machine_id="m-2", machine_fingerprint=fingerprint
-    ).json()
-
-    assert impostor["claimed"] is False, "在线机器的身份被另一台机器拿走了"
-    assert impostor["player_no"] == ""
-    assert len(pending(client, admin_headers)) == 1
+    assert clone["agent_id"] != original["agent_id"], "克隆机绝不能拿到母机的身份"
+    assert clone["claimed"] is False, "该走人工配对"
+    assert clone["pair_code"]
 
     events = global_events(client, admin_headers, category="enroll_conflict")
-    assert events, "应当留下审计事件"
-    assert "在线" in events[0]["message"]
+    assert events, "拒绝自动认回必须留下痕迹，否则事后无从解释"
+    assert fingerprint[:16] in events[0]["message"]
 
 
 def test_unknown_fingerprint_means_a_new_machine(
-    client: TestClient, admin_headers: dict
+    client: TestClient, bootstrap_key: str
 ) -> None:
-    issued = issue_key(client, admin_headers)
-    enroll_with_key(
-        client, issued["key"], machine_id="m-1", machine_fingerprint="fingerprint-11111111"
-    )
-    other = enroll_with_key(
-        client, issued["key"], machine_id="m-2", machine_fingerprint="fingerprint-22222222"
-    ).json()
-
-    assert other["claimed"] is False
-    assert len(pending(client, admin_headers)) == 2
+    first = enroll_machine(client, bootstrap_key, fingerprint="smbios-" + "f" * 24)
+    second = enroll_machine(client, bootstrap_key, fingerprint="smbios-" + "1" * 24)
+    assert second["agent_id"] != first["agent_id"]
+    assert second["claimed"] is False
 
 
 def test_ambiguous_fingerprint_does_not_guess(
-    client: TestClient, admin_headers: dict, boot_contest: dict, app
+    client: TestClient, admin_headers: dict, app, bootstrap_key: str
 ) -> None:
-    """两台机器报同一个指纹时**不能猜**。
+    """两台机器共用同一个指纹时**不许自动认回任何一台**。
 
-    猜错就是把成绩算到别人头上，而且看不出异常。宁可让教师人工确认一次。
+    猜错的代价是身份串到别人身上，而现场完全看不出来。宁可让它进待配对列表，
+    让教师花十秒确认一下。
     """
-    issued = issue_key(client, admin_headers)
-    shared = "shared-fingerprint-xxxx"
-    key = issued["key"]
+    fingerprint = "smbios-" + "2" * 24
+    first = enroll_machine(client, bootstrap_key, fingerprint=fingerprint)
+    second = enroll_machine(client, bootstrap_key, fingerprint=fingerprint)
+    assert first["agent_id"] != second["agent_id"]
 
-    first = enroll_with_key(
-        client, key, machine_id="m-1", machine_fingerprint=shared
-    ).json()
-    player = add_player(client, admin_headers, boot_contest, "S001")
-    client.post(
-        "/api/v1/admin/machines/claim-by-code",
-        json={"pair_code": first["pair_code"], "player_id": player["id"]},
-        headers=admin_headers,
-    )
+    # 两台都离线（模拟镜像是在两台机器都跑过之后才做的）
+    age_agent(app, first["machine_uuid"])
+    age_agent(app, second["machine_uuid"])
 
-    # 母机还在线时又来了两台报同样指纹的机器 —— 明显是克隆
-    second = enroll_with_key(
-        client, key, machine_id="m-2", machine_fingerprint=shared
-    ).json()
-    assert second["claimed"] is False, "指纹撞了就该进待配对，而不是擅自认回"
+    third = enroll_machine(client, bootstrap_key, fingerprint=fingerprint)
+    assert third["agent_id"] not in (first["agent_id"], second["agent_id"])
 
-    third = enroll_with_key(
-        client, key, machine_id="m-3", machine_fingerprint=shared
-    ).json()
-    assert third["claimed"] is False
-
-    events = global_events(client, admin_headers, category="enroll_conflict")
-    assert len(events) == 2, "两次冲突都该留下记录"
-    assert "指纹" in events[0]["message"]
+    events = global_events(client, admin_headers, category="enroll_ambiguous")
+    assert events, "无法自动认回时要说清原因，而不是静默新建"
 
 
 def test_empty_fingerprint_is_treated_as_unknown(
-    client: TestClient, admin_headers: dict
+    client: TestClient, bootstrap_key: str
 ) -> None:
-    """没有指纹（虚拟机、SMBIOS 不可读）时不该拿空值去互相匹配。
+    """读不到指纹（虚拟机、SMBIOS 不可读）的机器**不能互相认回**。
 
-    不然所有读不到指纹的机器会彼此"认回"，那就是把一台机器的身份白送给另一台。
+    否则所有读不到指纹的机器会彼此"认回"，等于把一台机器的身份白送给另一台。
     """
-    issued = issue_key(client, admin_headers)
-    first = enroll_with_key(client, issued["key"], machine_id="m-1").json()
-    second = enroll_with_key(client, issued["key"], machine_id="m-2").json()
+    first = enroll_machine(client, bootstrap_key, fingerprint=None)
+    second = enroll_machine(client, bootstrap_key, fingerprint=None)
+    assert second["agent_id"] != first["agent_id"]
 
-    assert first["claimed"] is False
-    assert second["claimed"] is False
-    assert len(pending(client, admin_headers)) == 2
+    # 太短的指纹同样不认（半截字符串可能来自读取失败，不是真的相同）
+    short = enroll_machine(client, bootstrap_key, fingerprint="abc")
+    assert short["agent_id"] not in (first["agent_id"], second["agent_id"])
 
 
 # --------------------------------------------------------------------------- #
-# 克隆镜像告警
+# 克隆告警
 # --------------------------------------------------------------------------- #
 
 
 def test_clone_alert_reports_shared_fingerprints(
-    client: TestClient, admin_headers: dict, boot_contest: dict, app
+    client: TestClient, admin_headers: dict, bootstrap_key: str
 ) -> None:
-    issued = issue_key(client, admin_headers)
-    shared = "cloned-image-fingerprint"
-    key = issued["key"]
+    shared = "smbios-" + "3" * 24
+    enroll_machine(client, bootstrap_key, hostname="pc-1", fingerprint=shared)
+    enroll_machine(client, bootstrap_key, hostname="pc-2", fingerprint=shared)
+    enroll_machine(client, bootstrap_key, hostname="pc-3", fingerprint="smbios-" + "4" * 24)
 
-    first = enroll_with_key(
-        client, key, machine_id="m-1", hostname="pc-01", machine_fingerprint=shared
-    ).json()
-    player = add_player(client, admin_headers, boot_contest, "S001")
-    client.post(
-        "/api/v1/admin/machines/claim-by-code",
-        json={"pair_code": first["pair_code"], "player_id": player["id"]},
-        headers=admin_headers,
-    )
-    # 母机（pc-01）还在心跳，pc-02 却报出同样的指纹 —— 克隆镜像的典型形态
-    enroll_with_key(
-        client, key, machine_id="m-2", hostname="pc-02", machine_fingerprint=shared
-    )
-
-    alerts = client.get("/api/v1/admin/machines/clone-alerts", headers=admin_headers).json()
-    assert len(alerts) == 1
-    assert alerts[0]["machine_count"] == 2
-    assert "pc-01" in alerts[0]["hostnames"]
-    assert "pc-02（待配对）" in alerts[0]["hostnames"]
+    body = client.get("/api/v1/admin/machines/clone-alerts", headers=admin_headers).json()
+    assert body["total"] == 1
+    assert body["items"][0]["machine_count"] == 2
+    # 待配对的机器会带上这个后缀，让人一眼看出它们还没归属
+    assert body["items"][0]["hostnames"] == ["pc-1（待配对）", "pc-2（待配对）"]
 
 
 def test_no_clone_alert_for_distinct_fingerprints(
-    client: TestClient, admin_headers: dict
+    client: TestClient, admin_headers: dict, bootstrap_key: str
 ) -> None:
-    issued = issue_key(client, admin_headers)
-    enroll_with_key(
-        client, issued["key"], machine_id="m-1", machine_fingerprint="fingerprint-aaaaaaaa"
-    )
-    enroll_with_key(
-        client, issued["key"], machine_id="m-2", machine_fingerprint="fingerprint-bbbbbbbb"
-    )
-
-    assert client.get("/api/v1/admin/machines/clone-alerts", headers=admin_headers).json() == []
+    enroll_machine(client, bootstrap_key, fingerprint="smbios-" + "5" * 24)
+    enroll_machine(client, bootstrap_key, fingerprint="smbios-" + "6" * 24)
+    body = client.get("/api/v1/admin/machines/clone-alerts", headers=admin_headers).json()
+    assert body["items"] == []
 
 
 def test_pending_list_flags_fingerprint_peers(
-    client: TestClient, admin_headers: dict
+    client: TestClient, admin_headers: dict, bootstrap_key: str
 ) -> None:
-    issued = issue_key(client, admin_headers)
-    shared = "peer-fingerprint-cccc"
-    enroll_with_key(client, issued["key"], machine_id="m-1", machine_fingerprint=shared)
-    enroll_with_key(client, issued["key"], machine_id="m-2", machine_fingerprint=shared)
+    """待配对列表里要能直接看出"这个指纹上还挂着别的机器"。"""
+    shared = "smbios-" + "7" * 24
+    enroll_machine(client, bootstrap_key, hostname="pc-1", fingerprint=shared)
+    enroll_machine(client, bootstrap_key, hostname="pc-2", fingerprint=shared)
 
     rows = pending(client, admin_headers)
-    assert all(row["fingerprint_peers"] == 2 for row in rows)
-
-
-# --------------------------------------------------------------------------- #
-# 限速
-# --------------------------------------------------------------------------- #
-
-
-def _tick_payload(scan=None, hostname=None) -> Dict:
-    return {
-        "agent_version": "0.1.0",
-        "machine_id": "m-1",
-        "hostname": hostname,
-        "ts": 1767225600,
-        "scan_root": "/home/student/code",
-        "scan": scan or [],
-        "partials": [],
-        "stats": {"disk_free": 10 ** 10, "last_error": None, "queue": 0},
-    }
+    assert [row["fingerprint_peers"] for row in rows] == [2, 2]

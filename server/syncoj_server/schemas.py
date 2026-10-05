@@ -9,7 +9,7 @@ OpenAPI 生成；Agent 侧因为必须零依赖（不能 import pydantic），�
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Generic, List, Optional, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -26,6 +26,7 @@ __all__ = [
     "UploadResult",
     "AgentEvent",
     "SimpleAck",
+    "Page",
 ]
 
 SHA256_PATTERN = r"^[0-9a-f]{64}$"
@@ -36,6 +37,51 @@ class _Base(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
+# 列表信封
+# --------------------------------------------------------------------------- #
+
+T = TypeVar("T")
+
+
+class Page(BaseModel, Generic[T]):
+    """**所有** GET 集合接口的统一形状。
+
+    ``total`` 是**忽略分页后的真实总数**，不是 ``len(items)``：前端的分页器与
+    "清空 N 条"的确认文案都靠它，拿本页条数充数会让第二页显示"共 50 条"。
+
+    这里刻意**不继承** ``_Base``：它是响应模型，没有"请求体多了个字段"这回事，
+    而 ``extra="forbid"`` 在响应用途上毫无意义、只会让开放 API 的时候多点噪音。
+    """
+
+    items: List[T] = Field(default_factory=list)
+    total: int = 0
+    limit: int = 50
+    offset: int = 0
+
+
+def page_of(items: List[T], total: int, params: Any) -> "Page[T]":
+    """把已经切好页的一批对象装进信封。
+
+    只做装配，不碰 SQL —— 分页由调用方决定是真的 ``LIMIT/OFFSET`` 还是
+    Python 切片（见 ``docs/api-conventions.md`` §2）。
+    """
+    return Page(
+        items=items, total=int(total), limit=int(params.limit), offset=int(params.offset)
+    )
+
+
+def slice_page(rows: List[T], params: Any) -> "Page[T]":
+    """对有界集合用 Python 切片分页。
+
+    只在"天然就很小"的集合上用（场次、名单、题目、资产…）。
+    ``total`` 仍然是完整长度，所以前端看到的分页信息是真的。
+    """
+    return page_of(
+        rows[params.offset : params.offset + params.limit], len(rows), params
+    )
+
+
+# --------------------------------------------------------------------------- #
 # 注册
 # --------------------------------------------------------------------------- #
 
@@ -43,14 +89,17 @@ class _Base(BaseModel):
 class EnrollRequest(_Base):
     """注册请求。
 
-    两种凭据二选一：
+    只有一条路了：**镜像内置的统一密钥**。每选手注册码已经被"机器永久绑定
+    名单条目"取代 —— 逐台发码在"一份镜像装遍整间机房"的现实里根本不可行，
+    而两种模式并存意味着每种都要维护、测试、并且迟早有人选错。
 
-    * ``enroll_code`` —— 每选手一个注册码（原有行为），一码一人
-    * ``bootstrap_key`` —— 镜像内置的统一密钥，注册出来的机器**没有归属**，
-      要靠短码配对认领到人
+    机器身份的三个要素，作用各不相同：
 
-    两个都传时以 ``enroll_code`` 为准：单人码是更明确的意图（"这台机器就是
-    某个具体选手"），不该被镜像里那份宽泛的密钥盖过去。
+    * ``machine_uuid`` —— Agent 首次运行时生成。**配对之后认机器主要靠它**，
+      换凭据、重新注册都按它匹配，不再需要配对码
+    * ``machine_fingerprint`` —— 硬件指纹（SMBIOS UUID）。UUID 会随整机快照还原
+      一起消失，指纹不会，所以它是第二道依据
+    * ``machine_id`` —— 仅供人工辨认（列表里显示），不参与身份判定
     """
 
     machine_id: str = Field(min_length=1, max_length=128)
@@ -58,30 +107,41 @@ class EnrollRequest(_Base):
     agent_version: Optional[str] = Field(default=None, max_length=32)
     os_info: Optional[str] = Field(default=None, max_length=200)
 
-    enroll_code: Optional[str] = Field(default=None, max_length=64)
-    bootstrap_key: Optional[str] = Field(default=None, max_length=256)
-
-    #: Agent 首次运行时自己生成的 UUID。比 ``/etc/machine-id`` 更适合当身份 ——
-    #: 克隆镜像没做通用化时 machine-id 是整批相同的
+    bootstrap_key: str = Field(min_length=1, max_length=256)
     machine_uuid: Optional[str] = Field(default=None, max_length=64)
-    #: 硬件指纹。**快照还原后仍然不变**，用来认回原来那台机器与它已认领的选手
     machine_fingerprint: Optional[str] = Field(default=None, max_length=128)
 
 
 class EnrollResponse(_Base):
     """注册结果。
 
-    ``claimed=False`` 表示这是一台**还没有归属**的机器（走统一密钥注册的）。
-    此时 Agent 该做的是把 ``pair_code`` 显示给人看、然后等着被认领，
-    而不是去扫代码 —— 它连准考证号都不知道，扫出来的路径没有意义。
+    三种状态，客户端必须分清 —— 它们看起来都像"注册成功了"，但该做的事完全不同：
 
-    ``player_no`` 等在未认领时为空串，客户端必须按 ``claimed`` 分支处理。
+    ==================  =========  =============  ==============================
+    ``claimed``         ``bound``  ``contest``    客户端该做什么
+    ==================  =========  =============  ==============================
+    ``false``           false      —              把 ``pair_code`` 显示给人看，等配对
+    ``true``            false      ``null``       已配对，但还没有含你的场次：等
+    ``true``            true       有值           正常干活：扫代码、收下发
+    ==================  =========  =============  ==============================
+
+    "已配对但没场次"这一档是新的：机器绑的是**人**，而某个场次有没有这个人，
+    取决于那份名单有没有被应用到场次里。所以配对成功不等于马上能干活 ——
+    这个中间状态必须说得出来，否则客户端只能猜（猜错的后果是它去扫一个
+    展开不出准考证号的目录）。
     """
 
     token: str
     agent_id: int
+    #: 已经绑定了名单条目（人）
     claimed: bool = True
+    #: 未绑定时的一次性配对码，**六位数字**
     pair_code: Optional[str] = None
+    #: 已解析出可用的场次与选手
+    bound: bool = False
+    #: 没能解析出场次时的人话原因（界面与日志都用它）
+    reason: Optional[str] = None
+
     player_no: str = ""
     player_name: Optional[str] = None
     contest_id: Optional[int] = None
@@ -166,11 +226,16 @@ class TickResponse(_Base):
     upgrade: Optional[UpgradeInfo] = None
     config: Dict[str, Any]
 
-    #: 这台机器是否已经认领到选手。走统一密钥注册、还没配对时为 False
+    #: 这台机器是否已经绑定到名单条目（人）。未配对时为 False
     claimed: bool = True
-    #: 未认领时的配对短码。Agent 要把它显示给人看（桌面文件 + 日志）
+    #: 未配对时的六位配对码。Agent 要把它显示给人看（桌面文件 + 日志）。
+    #: **只在绑定时用一次** —— 配对之后按 machine_uuid 认机器，不再需要它
     pair_code: Optional[str] = None
-    #: 认领完成后回填的身份，Agent 拿到就把它存进凭据里，之后才能扫代码
+    #: 是否已经解析出可用的场次与选手（见 ``EnrollResponse`` 的三态说明）
+    bound: bool = False
+    #: 没解析出场次时的人话原因
+    reason: Optional[str] = None
+    #: 解析出来的身份，Agent 拿到就存进凭据，之后才能扫代码
     player_no: Optional[str] = None
     contest_slug: Optional[str] = None
 
@@ -192,6 +257,57 @@ class AgentEvent(_Base):
 class SimpleAck(_Base):
     ok: bool = True
     detail: Optional[str] = None
+
+
+class ConfirmIn(_Base):
+    """批量清空的确认体。
+
+    "清空"删的是一**批**对象，没有单个名字可以打，所以确认内容是**范围的名字**：
+    场次范围内的清空用场次 ``slug``、名单范围内用名单 ``name``；
+    范围本身是"全部"的（审计日志、待配对机器）用固定字面量 ``all``。
+
+    为什么要走请求体而不是 query：清空是破坏性动作，把确认值放在 JSON 体里，
+    浏览器、curl、前端都更不容易在一个 copy-paste 里把它丢掉。
+    """
+
+    confirm: str = Field(min_length=1, max_length=200)
+
+
+class FileClearIn(ConfirmIn):
+    """清代码台账。
+
+    ``purge=False``（默认）只打墓碑 —— 行还在、``?include_deleted=true`` 仍能
+    查到，导出里也仍然带着（见 ``docs/api-conventions.md`` §5.2）。
+    ``purge=True`` 才连行一起删，只在"这些记录本来就是误传"时才该用。
+    """
+
+    purge: bool = False
+
+
+#: 全局范围清空时要求输入的确认字面量。前端把这句话原样显示给教师：
+#: "这次删的不是某一个对象，整个范围都要清掉，请输入 all 确认"。
+GLOBAL_CONFIRM = "all"
+
+
+class PlayerClearIn(ConfirmIn):
+    """清空一个场次的选手名单。
+
+    ``keep_with_submissions`` 默认 **True**：已经有代码或成绩的选手留着 ——
+    误删代码是不可逆的，所以"连提交一起清"必须是显式选择，不能是默认。
+    """
+
+    keep_with_submissions: bool = True
+
+
+class JudgeRunClearIn(ConfirmIn):
+    """清空成绩记录。
+
+    ``player_id`` 把范围缩小到一个人；``keep_manual`` 默认 True，
+    因为手工录入的分数是全场最贵的数据，不该被"重扫一遍"顺手清掉。
+    """
+
+    player_id: Optional[int] = None
+    keep_manual: bool = True
 
 
 # --------------------------------------------------------------------------- #
@@ -222,8 +338,6 @@ class ContestCreate(_Base):
     note: Optional[str] = None
     #: 默认名单。只作为"一键应用"的预设，不参与鉴权也不影响已有选手
     default_roster_id: Optional[int] = None
-    #: 见 ``EnrollmentMode``。留空 = 每选手注册码（原有行为）
-    enrollment_mode: Optional[str] = Field(default=None, max_length=24)
 
 
 class ContestOut(_Base):
@@ -236,8 +350,9 @@ class ContestOut(_Base):
     created_at: str
     default_roster_id: Optional[int] = None
     default_roster_name: Optional[str] = None
-    #: 实际生效的注册方式。老数据可能没这个字段，所以由服务端算好再下发
-    enrollment_mode: str = "per_player_code"
+    #: 备注。**必须回显** —— ``PATCH`` 收下它却读不回来的话，界面上就是
+    #: "改完保存再打开又变回空的"，而教师会以为是自己没保存成功
+    note: Optional[str] = None
 
 
 class ContestUpdate(_Base):
@@ -247,7 +362,6 @@ class ContestUpdate(_Base):
     status: Optional[str] = Field(default=None, max_length=16)
     note: Optional[str] = None
     default_roster_id: Optional[int] = None
-    enrollment_mode: Optional[str] = Field(default=None, max_length=24)
     #: 显式置空用的开关。``None`` 字段没法区分"没传"和"传了 null"，
     #: 所以要多一个布尔 —— 否则教师永远清不掉已经选错的名单。
     clear_default_roster: bool = False
@@ -345,7 +459,7 @@ class ApplyRosterOut(_Base):
 
 
 class PendingMachineOut(_Base):
-    """一台注册上来、还没认领到人的机器。"""
+    """一台注册上来、还没配对到人的机器。"""
 
     id: int
     machine_id: str
@@ -361,32 +475,62 @@ class PendingMachineOut(_Base):
     #: 配对码还剩多少秒过期。**不返回码本身**：库里只有哈希，
     #: 明文只在注册那一刻发给过机器，服务端自己也不该留
     pair_code_expires_in: Optional[int] = None
-    #: 同一硬件指纹上还有几台机器。>0 说明疑似克隆镜像，界面要报警
+    #: 同一硬件指纹上还有几台机器。>1 说明疑似克隆镜像，界面要报警
     fingerprint_peers: int = 0
 
 
-class ClaimMachineIn(_Base):
-    """认领一台机器。
+class BindMachineIn(_Base):
+    """把一台机器配对到名单里的某个人。
 
-    ``pair_code`` 可以省略（教师从列表里按主机名直接认领时就省略），
-    但只要给了就必须对得上 —— 那是"我确认过这台机器就是那台"的凭据。
+    这是"永久配对"：绑的是**人**（名单条目），不是某场比赛的选手。
+    所以同一个学生换一场比赛不用重新配 —— 只要新场次应用了那份名单。
+
+    ``pair_code`` 可以省略（教师从列表里按主机名直接点选时），
+    但只要给了就必须对得上：主机名可能是重复的，而配对码是唯一能证明
+    "我确实站在那台机器前面"的东西。
     """
 
-    player_id: int
+    roster_entry_id: int
     pair_code: Optional[str] = Field(default=None, max_length=32)
 
 
-class ClaimByCodeIn(_Base):
-    """用配对码认领：机器上显示什么，教师就输什么。"""
+class BindByCodeIn(_Base):
+    """用配对码配对：机器上显示什么，教师就输什么。"""
 
     pair_code: str = Field(min_length=1, max_length=32)
-    player_id: int
+    roster_entry_id: int
 
 
 class RebindAgentIn(_Base):
-    """把一台机器改派给另一位选手。"""
+    """把一台机器改派给名单里的另一个人。"""
 
-    player_id: int
+    roster_entry_id: int
+
+
+class BindResultOut(_Base):
+    """配对成功的结果。
+
+    回显"绑到了谁、在哪份名单里"，是因为配对是**永久**动作：
+    教师按下的这一刻决定了这台机器以后是谁的。给一句明确的回执，
+    比让他在列表里自己找那台机器现在归属谁要可靠得多。
+    """
+
+    agent_id: int
+    roster_entry_id: int
+    player_no: str
+    roster_name: str = ""
+    detail: str = ""
+
+
+class SetAgentContestIn(_Base):
+    """给一台机器显式指定场次。
+
+    默认是**动态解析**：找一个"进行中、且名单含此人"的场次。
+    只有在一个考点同时跑多场比赛、同一个人两边都在时才需要指定 ——
+    那种情况下服务端会明确说"需要指定场次"，而不是自己挑一个。
+    """
+
+    contest_id: Optional[int] = None
 
 
 class CloneAlertOut(_Base):
@@ -427,6 +571,20 @@ class PlayerUpsert(_Base):
     group_name: Optional[str] = Field(default=None, max_length=64)
 
 
+class PlayerImportOut(_Base):
+    """批量导入选手的结果。
+
+    这是**动作结果**，不是集合读取 —— 所以它**不用列表信封**（见
+    ``docs/api-conventions.md`` §2：信封只属于 GET 集合）。
+    返回 ``players`` 是因为调用方（导入界面）要拿到新建行的 id 才能
+    接着做"给这几个人应用名单""批量配对"之类的动作。
+    """
+
+    created: int = 0
+    updated: int = 0
+    players: List[PlayerOut] = Field(default_factory=list)
+
+
 class PlayerOut(_Base):
     id: int
     contest_id: int
@@ -438,33 +596,6 @@ class PlayerOut(_Base):
     online: bool = False
     file_count: int = 0
     last_tick_at: Optional[str] = None
-
-
-class EnrollCodeOut(_Base):
-    player_id: int
-    player_no: str
-    code: str
-    expires_at: Optional[str] = None
-    note: Optional[str] = None
-
-
-class EnrollCodeStateOut(_Base):
-    """一把注册码的**状态**，不含明文。
-
-    库里只有哈希，明文只在签发那一刻出现过 —— 所以这里回答的是
-    "谁手上还有一把能用的钥匙、谁已经用过了"，而不是"那把钥匙长什么样"。
-    """
-
-    id: int
-    player_id: int
-    player_no: str
-    #: 已经绑定的机器。为空表示这把码还没被用过
-    bound_machine_id: Optional[str] = None
-    #: 还能不能用来注册
-    usable: bool = True
-    created_at: Optional[str] = None
-    expires_at: Optional[str] = None
-    revoked_at: Optional[str] = None
 
 
 # --------------------------------------------------------------------------- #
@@ -590,6 +721,10 @@ class AssetOut(_Base):
     filename: str
     kind: str
     created_at: str
+    #: 还有几个选手**没下载完**这个资产（下发目标里处于 pending/ready 的数量）。
+    #: 界面靠它说清"改名/删除会对谁生效"：已经落地的文件不受影响，
+    #: 没落地的会按新名字落地 —— 不说的话教师只能靠猜。
+    pending_targets: int = 0
 
 
 class AssetRenameIn(_Base):

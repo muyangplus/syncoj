@@ -9,7 +9,15 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from conftest import agent_headers, do_tick as tick, scan_entry as entry, sha256_of
+from conftest import (
+    agent_headers,
+    bind_by_code,
+    enroll_machine,
+    make_roster,
+    do_tick as tick,
+    scan_entry as entry,
+    sha256_of,
+)
 from syncoj_server.config import Settings
 
 
@@ -57,96 +65,157 @@ def test_enroll_full_flow(client: TestClient, enrolled: dict, contest: dict, pla
     assert ".cpp" in enrolled["config"]["extensions"]
 
 
-def test_enroll_rejects_bad_code(client: TestClient, contest: dict, player: dict) -> None:
+def test_enroll_returns_the_three_states(
+    client: TestClient, admin_headers: dict, contest: dict, player: dict,
+    bootstrap_key: str, roster_entry: dict,
+) -> None:
+    """三种状态看起来都像"注册成功了"，但客户端该做的事完全不同。
+
+    这是整个协议里最容易埋坑的地方：分不清的状态会让机器去扫一个展开不出
+    准考证号的目录（`bound` 没到就干活），或者永远停在"等配对"（`claimed`
+    到了却不显示配对码让人来配）。
+    """
+    # ① 新机器：没配对 → 必须带一个配对码让机器显示出来
+    fresh = enroll_machine(client, bootstrap_key)
+    assert fresh["claimed"] is False
+    assert fresh["bound"] is False
+    assert fresh["pair_code"] and len(fresh["pair_code"]) == 6
+    assert fresh["reason"] and "配对" in fresh["reason"], "要告诉人「该做什么」，而不只是「不行」"
+
+    # ② 配好了，但这场比赛没有这个人（名单没被应用）
+    empty = make_roster(client, admin_headers, "空名单", entries=[{"player_no": "S777"}])
+    other_entry = empty["entries"][0]
+    bind_by_code(client, admin_headers, fresh["pair_code"], other_entry["id"])
+
+    # 用同一台机器重新注册，拿回新凭据
+    again = enroll_machine(
+        client, bootstrap_key, machine_uuid=fresh["machine_uuid"],
+        machine_id=fresh["machine_id"],
+    )
+    assert again["claimed"] is True
+    assert again["bound"] is False
+    assert again["pair_code"] is None, "配好了就**不要**再给配对码 —— 教师会以为配对没生效"
+    assert "S777" in again["reason"] or "场次" in again["reason"]
+
+    # ③ 正常干活
+    working = enroll_machine(client, bootstrap_key)
+    bind_by_code(client, admin_headers, working["pair_code"], roster_entry["id"])
+    final = enroll_machine(
+        client, bootstrap_key, machine_uuid=working["machine_uuid"],
+        machine_id=working["machine_id"],
+    )
+    assert final["claimed"] is True and final["bound"] is True
+    assert final["player_no"] == "S001"
+    assert final["contest_id"] == contest["id"]
+
+
+def test_enroll_rejects_bad_key(client: TestClient) -> None:
     response = client.post(
         "/api/v1/agent/enroll",
-        json={"enroll_code": "AAAA-BBBB-CCCC-DDDD", "machine_id": "m1"},
+        json={"bootstrap_key": "不是密钥", "machine_id": "m1"},
     )
-    assert response.status_code == 404
+    assert response.status_code == 404, response.text
+    body = response.json()
+    assert body["code"] == "bootstrap_key_invalid"
+    assert isinstance(body["detail"], str)
 
 
-def test_enroll_code_is_bound_to_first_machine(
-    client: TestClient, admin_headers: dict, player: dict
-) -> None:
-    code = client.post(
-        "/api/v1/admin/players/%d/enroll-code" % player["id"], headers=admin_headers
-    ).json()["code"]
-
-    first = client.post(
-        "/api/v1/agent/enroll",
-        json={"enroll_code": code, "machine_id": "machine-A"},
-    )
-    assert first.status_code == 200
-
-    # 同一注册码换一台机器 —— 必须拒绝，否则一台机器的配置可以被整场复制
-    second = client.post(
-        "/api/v1/agent/enroll",
-        json={"enroll_code": code, "machine_id": "machine-B"},
-    )
-    assert second.status_code == 403
+def test_enroll_requires_a_key(client: TestClient) -> None:
+    """没给密钥是 422（请求不合法），不是 404（密钥不存在）—— 两者排错方向不同。"""
+    response = client.post("/api/v1/agent/enroll", json={"machine_id": "m1"})
+    assert response.status_code == 422, response.text
+    assert response.json()["code"] == "validation_error"
 
 
 def test_reenroll_rotates_token_and_invalidates_old(
-    client: TestClient, admin_headers: dict, player: dict
+    client: TestClient, bootstrap_key: str, enrolled: dict
 ) -> None:
-    """快照还原自愈：同一台机器重复 enroll 应换发新凭据，旧凭据立即失效。"""
-    code = client.post(
-        "/api/v1/admin/players/%d/enroll-code" % player["id"], headers=admin_headers
-    ).json()["code"]
+    """快照还原自愈：同一台机器重复 enroll 应换发新凭据，旧凭据立即失效。
 
-    body = {"enroll_code": code, "machine_id": "machine-X", "hostname": "pc-1"}
-    first = client.post("/api/v1/agent/enroll", json=body)
-    assert first.status_code == 200
-    old_token = first.json()["token"]
+    认回靠 ``machine_uuid`` —— 配对之后它就是机器的身份证。凭据换了、
+    绑定关系原样保留（所以新凭据马上就能干活，不用重新配对）。
+    """
+    old_token = enrolled["token"]
 
-    second = client.post("/api/v1/agent/enroll", json=body)
-    assert second.status_code == 200
-    new_token = second.json()["token"]
-    assert new_token != old_token
+    second = enroll_machine(
+        client, bootstrap_key,
+        machine_uuid=enrolled["machine_uuid"],
+        machine_id=enrolled["machine_id"],
+    )
+    assert second["token"] != old_token
+    assert second["agent_id"] == enrolled["agent_id"], "同一台机器不该被反复建行"
+    assert second["player_no"] == "S001", "换凭据不该把配对关系丢掉"
+    assert second["bound"] is True
 
-    # 旧凭据必须已经不能用了
     stale = client.get("/api/v1/agent/me", headers=agent_headers(old_token))
     assert stale.status_code == 401
-    assert client.get("/api/v1/agent/me", headers=agent_headers(new_token)).status_code == 200
+    assert client.get(
+        "/api/v1/agent/me", headers=agent_headers(second["token"])
+    ).status_code == 200
 
 
-def test_enroll_code_issuance_revokes_previous(
-    client: TestClient, admin_headers: dict, player: dict
+def test_fingerprint_reattaches_a_machine_whose_uuid_was_wiped(
+    client: TestClient, bootstrap_key: str, machine: dict
 ) -> None:
-    first = client.post(
-        "/api/v1/admin/players/%d/enroll-code" % player["id"], headers=admin_headers
-    ).json()["code"]
-    second = client.post(
-        "/api/v1/admin/players/%d/enroll-code" % player["id"], headers=admin_headers
-    ).json()["code"]
-    assert first != second
+    """整机快照还原会把 UUID 一起抹掉，但**硬件指纹抹不掉**。
 
-    # 旧注册码应已被吊销
-    response = client.post(
-        "/api/v1/agent/enroll", json={"enroll_code": first, "machine_id": "m-1"}
-    )
-    assert response.status_code == 403
-    assert (
-        client.post(
-            "/api/v1/agent/enroll", json={"enroll_code": second, "machine_id": "m-1"}
-        ).status_code
-        == 200
+    快照还原的时序是"关机 → 还原 → 再开机"，期间原机器是离线的 ——
+    所以"指纹相同 + 原机器离线"可以安全地认回同一台机器。
+    """
+    fingerprint = "smbios-" + "a" * 24
+    first = enroll_machine(client, bootstrap_key, fingerprint=fingerprint)
+
+    # 关机（让心跳过期）→ 还原 → 开机（UUID 换了、指纹没变）
+    _expire_last_seen(client, first["agent_id"])
+    restored = enroll_machine(
+        client, bootstrap_key, fingerprint=fingerprint, hostname="还原后的机器"
     )
 
+    assert restored["agent_id"] == first["agent_id"], "应当认回同一台机器，而不是新建一行"
+    assert restored["token"] != first["token"]
+    assert restored["machine_uuid"] != first["machine_uuid"], "新 UUID 要被记下来"
 
-def test_enroll_code_format_pasted_with_separators(
-    client: TestClient, admin_headers: dict, player: dict
+
+def test_fingerprint_fallback_refuses_while_the_original_is_online(
+    client: TestClient, admin_headers: dict, bootstrap_key: str, roster_entry: dict
 ) -> None:
-    """教师手抄注册码时大小写和连字符都不该成为障碍。"""
-    code = client.post(
-        "/api/v1/admin/players/%d/enroll-code" % player["id"], headers=admin_headers
-    ).json()["code"]
-    messy = code.replace("-", " ").lower()
+    """**克隆镜像保护**：母机还开着的时候，另一台机器报同一指纹不许自动认回。
 
-    response = client.post(
-        "/api/v1/agent/enroll", json={"enroll_code": messy, "machine_id": "m-1"}
-    )
-    assert response.status_code == 200
+    认回的话，那个学生的成绩会被另一台机器的代码污染，而且完全静默 ——
+    所以一律改走人工配对，并留一条告警。
+    """
+    fingerprint = "smbios-" + "b" * 24
+    original = enroll_machine(client, bootstrap_key, fingerprint=fingerprint)
+    # 母机在线（刚刚注册过，last_seen_at 是现在）
+    clone = enroll_machine(client, bootstrap_key, fingerprint=fingerprint, hostname="克隆机")
+
+    assert clone["agent_id"] != original["agent_id"], "克隆机绝不能拿到母机的身份"
+    assert clone["claimed"] is False
+    assert clone["pair_code"], "该走人工配对"
+
+    # 人已经配好的机器也不受影响
+    bind_by_code(client, admin_headers, original["pair_code"], roster_entry["id"])
+
+    events = client.get(
+        "/api/v1/admin/events?category=enroll_conflict", headers=admin_headers
+    ).json()["items"]
+    assert events, "拒绝自动认回必须在审计里留下痕迹，否则事后无从解释"
+
+
+def _expire_last_seen(client: TestClient, agent_id: int) -> None:
+    """把这台机器的 last_seen 拨到很久以前 = 模拟"它关机了"。
+
+    直接改库而不是 sleep：测试不该为了等一个超时慢下来，而且
+    ``offline_after_seconds`` 是可配的，sleep 的写法会在改配置时静默失效。
+    """
+    from syncoj_server.models import Agent, utcnow
+    from datetime import timedelta
+
+    ctx = client.app.state.ctx
+    with ctx.db.session() as session:
+        agent = session.get(Agent, agent_id)
+        assert agent is not None
+        agent.last_seen_at = utcnow() - timedelta(days=1)
 
 
 # --------------------------------------------------------------------------- #
@@ -285,9 +354,12 @@ def test_stale_upload_is_rejected(client: TestClient, enrolled: dict) -> None:
 
     response = upload(client, token, "main.cpp", b"older")
     assert response.status_code == 409
-    detail = response.json()["detail"]
-    assert detail["reason"] == "stale"
-    assert detail["expected"] == sha256_of(b"newer")
+    body = response.json()
+    assert body["code"] == "stale_upload"
+    # detail 永远是**字符串**，结构化信息在 details 里 —— 前端不必猜它是什么类型
+    assert isinstance(body["detail"], str)
+    assert body["details"]["reason"] == "stale"
+    assert body["details"]["expected"] == sha256_of(b"newer")
 
 
 def test_scan_rejects_traversal_and_reports_event(
@@ -303,7 +375,7 @@ def test_scan_rejects_traversal_and_reports_event(
 
     events = client.get(
         "/api/v1/admin/contests/%d/events" % contest["id"], headers=admin_headers
-    ).json()
+    ).json()["items"]
     categories = [e["category"] for e in events]
     assert "scan_rejected" in categories
 
@@ -322,7 +394,7 @@ def test_tick_detects_deleted_file(
 
     events = client.get(
         "/api/v1/admin/contests/%d/events" % contest["id"], headers=admin_headers
-    ).json()
+    ).json()["items"]
     deleted = [e for e in events if e["category"] == "file_deleted"]
     assert deleted, "删除必须留下审计记录"
     assert "main.cpp" in deleted[0]["meta"]["paths"]
@@ -340,7 +412,7 @@ def test_file_listing_reflects_ledger(
 
     rows = client.get(
         "/api/v1/admin/contests/%d/files" % contest["id"], headers=admin_headers
-    ).json()
+    ).json()["items"]
     paths = sorted(r["rel_path"] for r in rows)
     assert paths == ["a/one.cpp", "b/two.cpp"]
     assert all(r["content_stored"] for r in rows)
@@ -364,13 +436,13 @@ def test_incomplete_scan_does_not_mark_files_deleted(
 
     rows = client.get(
         "/api/v1/admin/contests/%d/files" % contest["id"], headers=admin_headers
-    ).json()
+    ).json()["items"]
     assert [r["rel_path"] for r in rows] == ["main.cpp"]
     assert rows[0]["deleted_at"] is None, "扫描不完整时不得标记删除"
 
     events = client.get(
         "/api/v1/admin/contests/%d/events" % contest["id"], headers=admin_headers
-    ).json()
+    ).json()["items"]
     assert "scan_incomplete" in [e["category"] for e in events]
     assert "file_deleted" not in [e["category"] for e in events]
 
@@ -385,7 +457,7 @@ def test_online_status_tracks_ticks(
 ) -> None:
     agents = client.get(
         "/api/v1/admin/contests/%d/agents" % contest["id"], headers=admin_headers
-    ).json()
+    ).json()["items"]
     assert len(agents) == 1
     assert agents[0]["online"] is False, "还没 tick 过，不应是在线"
 
@@ -393,14 +465,14 @@ def test_online_status_tracks_ticks(
 
     agents = client.get(
         "/api/v1/admin/contests/%d/agents" % contest["id"], headers=admin_headers
-    ).json()
+    ).json()["items"]
     assert agents[0]["online"] is True
     assert agents[0]["last_tick_at"] is not None
     assert agents[0]["seconds_since_tick"] is not None
 
     players = client.get(
         "/api/v1/admin/contests/%d/players" % contest["id"], headers=admin_headers
-    ).json()
+    ).json()["items"]
     assert players[0]["online"] is True
     assert players[0]["has_agent"] is True
 

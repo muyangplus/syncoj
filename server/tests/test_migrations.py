@@ -95,14 +95,38 @@ CREATE TABLE problem (
 );
 """
 
-#: 手工维护，用来守上面的 ``LEGACY_SCHEMA`` 不腐烂：这些表在模型里的列，
-#: 与老结构之间**允许**有哪些差异（也就是迁移负责补上的那些）。
+#: 模型里有、老结构里没有的列 —— 迁移负责补上（无论是 ADD COLUMN 还是重建）。
 #:
-#: 模型新增了列却忘了写迁移时，这份清单会红 —— 那正是我们要拦的时刻。
-DECLARED_DIFFERENCES = {
-    "agent": {"machine_uuid", "machine_fingerprint", "claimed_at"},
-    "contest": {"default_roster_id", "enrollment_mode"},
+#: 手工维护，用来守上面那份 ``LEGACY_SCHEMA`` 不腐烂。模型加了列却没人写迁移时，
+#: 这份清单对不上，测试就红 —— 那正是我们要拦的时刻。
+MIGRATION_ADDED_COLUMNS = {
+    "agent": {
+        "roster_entry_id",
+        "contest_id",
+        "machine_uuid",
+        "machine_fingerprint",
+        "pair_code_hash",
+        "pair_code_expires_at",
+        "claimed_at",
+    },
+    "contest": {"default_roster_id"},
     "problem": {"file_patterns"},
+    "player": set(),
+    "agent_status": set(),
+}
+
+#: 老结构里有、模型里已经不要的列 —— 迁移负责**删掉**（只能靠重建表）。
+#:
+#: 这份清单是防"半迁移"的：删了列却没写迁移，老库会带着一列永远没人读的数据
+#: 跑下去，而新库没有那一列 —— 两条路径从此结构不同。
+#:
+#: ``contest.enrollment_mode`` **不在这里**：它是迁移 001 自己加进去的、
+#: 又被 002 拿掉的。对"迁移器之前建的库"来说它压根不存在，
+#: 所以老结构和模型在这张表上是天然一致的。
+MIGRATION_DROPPED_COLUMNS = {
+    "agent": {"player_id"},
+    "contest": set(),
+    "problem": set(),
     "player": set(),
     "agent_status": set(),
 }
@@ -151,34 +175,52 @@ def rows(engine, sql: str):
 def test_legacy_fixture_tracks_the_models(legacy_db: Path) -> None:
     """老结构 fixture 必须跟着模型走 —— 模型加了列却没写迁移，这里要红。
 
-    这是整份测试里唯一一条能拦住"忘了写迁移"的断言。没有它，上面那些
-    "升级后结构一致"的检查会因为两边都从同一份 fixture 出发而自动通过，
-    线上的老库则会在某个接口上以 500 的形式炸掉。
+    这是整份测试里唯一一条能拦住"忘了写迁移"的断言。没有它，那些"升级后结构
+    一致"的检查会因为两边都从同一份 fixture 出发而自动通过，
+    而线上的老库会在某个接口上以 500 的形式炸掉。
 
-    红的时候有两种正确反应，选一种：
-      * 给 ``migrations.py`` 加一步 ``_add_column``（真加了列）
-      * 把它记进 ``DECLARED_DIFFERENCES`` 并在 ``_BASELINE_COLUMNS`` 里补上
-        （确认这列本来就该由基线补齐）
+    两个方向都要拦：
+
+    * 模型有、老结构没有 → 迁移得补上（``MIGRATION_ADDED_COLUMNS``）
+    * 老结构有、模型没有 → 迁移得删掉（``MIGRATION_DROPPED_COLUMNS``）
+
+    第二个方向容易漏。删列只能靠重建表，于是"删了模型里的列、没写迁移"
+    会留下一个永久漂移：老库带着一列没人读的数据跑，新库没有那一列 ——
+    两条路径从此结构不同，而只有老库那条会出问题。
     """
     from syncoj_server.models import Base
 
     engine = make_engine(legacy_db)
-    for table, allowed in DECLARED_DIFFERENCES.items():
+    for table in MIGRATION_ADDED_COLUMNS:
         assert table in Base.metadata.tables, "模型里没有表 %s 了？" % table
         model_columns = {c.name for c in Base.metadata.tables[table].columns}
         legacy_columns = {c["name"] for c in inspect(engine).get_columns(table)}
 
-        unexpected = model_columns - legacy_columns - allowed
+        unexpected = model_columns - legacy_columns - MIGRATION_ADDED_COLUMNS[table]
         assert not unexpected, (
             "表 %s 在模型里有这些列，但既不在老结构里、也没被声明为迁移要补的：%s\n"
-            "请给 migrations.py 加一步，或者把它记进 DECLARED_DIFFERENCES。"
+            "请给 migrations.py 加一步，或把它记进 MIGRATION_ADDED_COLUMNS。"
             % (table, sorted(unexpected))
         )
 
-        stale = legacy_columns - model_columns
+        stale = legacy_columns - model_columns - MIGRATION_DROPPED_COLUMNS[table]
         assert not stale, (
-            "表 %s 的老结构里有模型已经不认的列：%s —— fixture 该更新了"
+            "表 %s 的老结构里有模型已经不认的列：%s\n"
+            "要么把它从 LEGACY_SCHEMA 里删掉，要么在迁移里真的删掉它"
+            "（记进 MIGRATION_DROPPED_COLUMNS 表示「已知、由重建负责」）。"
             % (table, sorted(stale))
+        )
+
+        # 声明过的差异必须真的有人处理：只声明不实现的话，两条路径会悄悄分叉
+        declared_add = MIGRATION_ADDED_COLUMNS[table]
+        declared_drop = MIGRATION_DROPPED_COLUMNS[table]
+        assert declared_add == model_columns - legacy_columns, (
+            "表 %s 的 MIGRATION_ADDED_COLUMNS 和实际差异对不上：声明 %s，实际 %s"
+            % (table, sorted(declared_add), sorted(model_columns - legacy_columns))
+        )
+        assert declared_drop == legacy_columns - model_columns, (
+            "表 %s 的 MIGRATION_DROPPED_COLUMNS 和实际差异对不上：声明 %s，实际 %s"
+            % (table, sorted(declared_drop), sorted(legacy_columns - model_columns))
         )
     engine.dispose()
 
@@ -206,10 +248,67 @@ def test_legacy_upgrade_adds_the_new_columns(legacy_db: Path) -> None:
     agent_columns = {c["name"] for c in inspect(engine).get_columns("agent")}
     contest_columns = {c["name"] for c in inspect(engine).get_columns("contest")}
 
-    assert {"machine_uuid", "machine_fingerprint", "claimed_at"} <= agent_columns
-    assert {"default_roster_id", "enrollment_mode"} <= contest_columns
+    assert {"roster_entry_id", "contest_id", "machine_uuid", "pair_code_hash"} <= agent_columns
+    assert {"default_roster_id"} <= contest_columns
     # 上一轮加的列也要被基线补齐（它当年没留迁移记录）
     assert "file_patterns" in {c["name"] for c in inspect(engine).get_columns("problem")}
+    engine.dispose()
+
+
+def test_legacy_upgrade_drops_the_retired_columns(legacy_db: Path) -> None:
+    """``agent.player_id`` 与 ``contest.enrollment_mode`` 必须真的消失。
+
+    SQLite 删不了列，只能重建表 —— 而重建是这套迁移里唯一会"整表搬动"的动作。
+    没有这条断言的话，重建漏掉了某一列也能跑过去，而两条升级路径从此结构分叉。
+    """
+    engine = make_engine(legacy_db)
+    migrations.migrate(engine)
+
+    assert "player_id" not in {c["name"] for c in inspect(engine).get_columns("agent")}
+    assert "enrollment_mode" not in {
+        c["name"] for c in inspect(engine).get_columns("contest")
+    }
+    engine.dispose()
+
+
+def test_legacy_upgrade_removes_the_retired_tables(legacy_db: Path) -> None:
+    """注册码与待认领表整条链路都去掉了。
+
+    新模型里"未配对"只是 ``agent.roster_entry_id IS NULL``，不需要单独一张表；
+    注册码被统一密钥 + 配对取代。
+    """
+    engine = make_engine(legacy_db)
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE enroll_code (id INTEGER PRIMARY KEY)"))
+        conn.execute(text("CREATE TABLE machine_claim (id INTEGER PRIMARY KEY)"))
+
+    migrations.migrate(engine)
+
+    tables = set(inspect(engine).get_table_names())
+    assert "enroll_code" not in tables
+    assert "machine_claim" not in tables
+    engine.dispose()
+
+
+def test_legacy_rebuild_keeps_child_table_rows(legacy_db: Path) -> None:
+    """**这条是这份文件里最重要的一条。**
+
+    重建 ``agent`` 要关外键强制，而 ``PRAGMA foreign_keys`` **在事务里是空操作**。
+    如果哪天有人把它改回 ``engine.begin()`` 里执行，``DROP TABLE agent`` 会做一次
+    隐式 DELETE，顺着 ``ON DELETE CASCADE`` 把 ``agent_status`` 整个删光 ——
+    静默、无报错，等到现场发现"在线记录全没了"时早就无从追查。
+
+    这是做过对照实验的：裸连接 + autocommit 下关外键，子表行保留；
+    在事务里关（无效），子表行归零。
+    """
+    engine = make_engine(legacy_db)
+    migrations.migrate(engine)
+
+    assert rows(engine, "SELECT COUNT(*) FROM agent")[0][0] == 1
+    status = rows(engine, "SELECT agent_id, file_count, disk_free FROM agent_status")
+    assert status == [(1, 7, 123456)], (
+        "agent_status 的行没了 —— 这是外键没真正关掉的典型症状"
+    )
     engine.dispose()
 
 
@@ -232,19 +331,6 @@ def test_legacy_upgrade_keeps_every_row(legacy_db: Path) -> None:
     assert status == [(1, 7, 123456)], "agent_status 被动过 —— 这是级联删除的典型症状"
 
     assert rows(engine, "SELECT token_hash FROM agent")[0][0] == "hash-a"
-    engine.dispose()
-
-
-def test_legacy_upgrade_backfills_enrollment_mode(legacy_db: Path) -> None:
-    """老场次必须被理解为"每选手注册码" —— 那本来就是它们的行为。
-
-    留成 NULL 的话，新代码读到的默认值如果有偏差，老场次的行为会悄悄变掉。
-    """
-    engine = make_engine(legacy_db)
-    migrations.migrate(engine)
-
-    mode = rows(engine, "SELECT enrollment_mode FROM contest WHERE id=1")[0][0]
-    assert mode == "per_player_code"
     engine.dispose()
 
 
@@ -320,11 +406,12 @@ def test_fresh_and_upgraded_databases_have_the_same_shape(
 
     # 只比对本次迁移会碰到的那些表（见 LEGACY_SCHEMA 的说明），
     # 再加上迁移引入的新表 —— 它们必须真的被建出来
-    interesting = sorted(DECLARED_DIFFERENCES) + [
+    # 本次迁移会碰到的表 + 迁移引入的新表。**已废弃的表不在其中** ——
+    # 它们必须"不存在"，那是另一条测试（test_legacy_upgrade_removes_...）的事
+    interesting = sorted(MIGRATION_ADDED_COLUMNS) + [
         "roster",
         "roster_entry",
         "bootstrap_key",
-        "machine_claim",
     ]
     fresh_tables = set(inspect(fresh).get_table_names())
     for table in interesting:

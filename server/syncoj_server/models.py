@@ -35,7 +35,9 @@ __all__ = [
     "Contest",
     "Player",
     "Problem",
-    "EnrollCode",
+    "RosterEntry",
+    "Roster",
+    "BootstrapKey",
     "Agent",
     "AgentStatus",
     "SourceFile",
@@ -64,25 +66,6 @@ class ContestStatus:
     CLOSED = "closed"
 
     ALL = (DRAFT, RUNNING, FROZEN, CLOSED)
-
-
-class EnrollmentMode:
-    """场次的注册方式。
-
-    ``PER_PLAYER_CODE`` 是原有行为：一个选手一个注册码，绑定
-    ``player_no + machine_id``，长期有效。
-
-    ``BOOTSTRAP`` 是镜像统一密钥：整间机房一份密钥（root 只读）换回每机凭据，
-    注册出来的机器**没有归属**，靠短码配对认领到人。适合"镜像预装 + 批量克隆"
-    的部署方式 —— 逐台发码在那种场景下根本不现实。
-
-    两种并存，按场次切换：外校选手、补位、重装的机器仍然可以走单人码。
-    """
-
-    PER_PLAYER_CODE = "per_player_code"
-    BOOTSTRAP = "bootstrap"
-
-    ALL = (PER_PLAYER_CODE, BOOTSTRAP)
 
 
 class DeployStatus:
@@ -149,8 +132,6 @@ class Contest(Base, TimestampMixin):
     #: 只是**模板**，不参与鉴权也不参与成绩 —— 改了名单不会动已有选手，
     #: 得显式应用一次。这样"名单调整"和"比赛数据"永远是两件分开的事。
     default_roster_id = Column(Integer, ForeignKey("roster.id", ondelete="SET NULL"), nullable=True)
-    #: 见 ``EnrollmentMode``。老场次迁移后一律是 ``per_player_code``
-    enrollment_mode = Column(String(24), nullable=True, default=EnrollmentMode.PER_PLAYER_CODE)
 
     players = relationship("Player", back_populates="contest", cascade="all, delete-orphan")
     default_roster = relationship("Roster")
@@ -158,9 +139,13 @@ class Contest(Base, TimestampMixin):
     __table_args__ = (Index("ix_contest_status", "status"),)
 
     @property
-    def effective_enrollment_mode(self) -> str:
-        """没设过（老数据、或迁移还没回填完）时按原有行为理解。"""
-        return self.enrollment_mode or EnrollmentMode.PER_PLAYER_CODE
+    def is_active(self) -> bool:
+        """还在进行的场次。机器动态解析场次时只看这些。
+
+        ``frozen``（封榜）也算 —— 它只是停止下发，仍然在收卷；
+        把封榜的场次排除掉，会让封榜瞬间所有机器都"找不到场次"而停摆。
+        """
+        return self.status in (ContestStatus.RUNNING, ContestStatus.FROZEN)
 
 
 # --------------------------------------------------------------------------- #
@@ -216,15 +201,16 @@ class RosterEntry(Base, TimestampMixin):
 class BootstrapKey(Base, TimestampMixin):
     """镜像内置的统一注册密钥。
 
-    和 ``EnrollCode`` 的区别：
-
-    * ``EnrollCode`` 绑定到**某个选手**，泄漏一把只影响一个人
-    * ``BootstrapKey`` 是**服务端级**的，泄漏一把等于交出"注册任意多台机器"的
-      能力 —— 所以它不该出现在选手读得到的地方（``/etc/syncoj/agent.ini``
-      对选手账号可读，密钥必须放到 root 只读的单独文件里）
+    它是**服务端级**的：泄漏一把等于交出"注册任意多台机器"的能力 ——
+    所以它不该出现在选手读得到的地方（``/etc/syncoj/agent.ini``
+    对选手账号可读，密钥必须放到 root 只读的单独文件里）。
 
     只存哈希，明文只在签发时打印一次；带 ``use_count`` 便于事后看"这把钥匙
     到底被用过多少次"，异常用量能直接看出来。
+
+    注意它和**配对码**的分工：统一密钥回答"这台机器是不是我们机房的"，
+    配对码回答"这台机器属于哪个人"。前者装在镜像里、长期有效，后者贴在
+    屏幕上一小会儿、只用一次。
     """
 
     __tablename__ = "bootstrap_key"
@@ -239,51 +225,14 @@ class BootstrapKey(Base, TimestampMixin):
     use_count = Column(Integer, nullable=False, default=0)
 
 
-class MachineClaim(Base):
-    """已注册但**还没认领到人**的机器。
+class Player(Base, TimestampMixin):
+    """某个场次的参赛者。
 
-    刻意**不**塞进 ``agent`` 表：那需要把 ``agent.player_id`` 改成可空，
-    而 SQLite 改不了列的可空性，只能重建表 —— 重建要关外键强制，而
-    ``PRAGMA foreign_keys`` 在事务里是空操作，关不掉时 ``DROP TABLE`` 会顺着
-    ``ON DELETE CASCADE`` 把 ``agent_status`` 一起删掉。为了一个"还没归属"的
-    中间状态去冒删数据的风险，不值得。
-
-    另立一张表还有个附带好处：未认领的机器**根本没有 player_no**，
-    它也就算不出扫描目录、扫不了代码、传不了文件，它的全部工作就是"等认领"。
-    状态少，能出的错就少。
-
-    认领成功后这一行被**删除**，同一个 ``token_hash`` 原样转成 ``Agent`` 行 ——
-    客户端不用换 token，也没机会在换 token 的过程中掉线。
+    它是**名单库条目在那个场次的物化**：``player_no`` 与名单条目一致。
+    机器绑的是名单里的人（``Agent.roster_entry_id``），所以同一个人换一场比赛
+    不需要重新配对 —— 只要新场次应用了那份名单，他的机器自然就认得路。
     """
 
-    __tablename__ = "machine_claim"
-
-    id = Column(Integer, primary_key=True)
-    #: 临时凭据。认领后原样变成 agent.token_hash
-    token_hash = Column(String(64), nullable=False, unique=True)
-    #: Agent 首次运行时自己生成的 UUID，用来在服务端识别"同一台机器的重复注册"
-    machine_uuid = Column(String(64), nullable=True)
-    #: 硬件指纹。快照还原后 UUID 会没，指纹不会 —— 靠它认回原来的绑定
-    machine_fingerprint = Column(String(128), nullable=True)
-    machine_id = Column(String(128), nullable=True)
-    hostname = Column(String(128), nullable=True)
-    os_info = Column(String(200), nullable=True)
-    agent_version = Column(String(32), nullable=True)
-    #: 配对短码。只存哈希 —— 知道短码就等于能把这台机器认领走，
-    #: 而认领走一台机器就是在改"谁的成绩算谁的"
-    pair_code_hash = Column(String(64), nullable=True)
-    pair_code_expires_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=utcnow, nullable=False)
-    last_seen_at = Column(DateTime, nullable=True)
-    revoked_at = Column(DateTime, nullable=True)
-
-    __table_args__ = (
-        Index("ix_claim_fingerprint", "machine_fingerprint"),
-        Index("ix_claim_uuid", "machine_uuid"),
-    )
-
-
-class Player(Base, TimestampMixin):
     __tablename__ = "player"
 
     id = Column(Integer, primary_key=True)
@@ -294,7 +243,6 @@ class Player(Base, TimestampMixin):
     group_name = Column(String(64), nullable=True)
 
     contest = relationship("Contest", back_populates="players")
-    agents = relationship("Agent", back_populates="player", cascade="all, delete-orphan")
 
     __table_args__ = (
         UniqueConstraint("contest_id", "player_no", name="uq_player_contest_no"),
@@ -344,68 +292,74 @@ class Problem(Base, TimestampMixin):
     )
 
 
-class EnrollCode(Base, TimestampMixin):
-    """注册码。
-
-    刻意 **不是一次性** 的：NOI Linux 考试机常做整机快照还原，机器上的凭据会消失，
-    Agent 需要用镜像内置的注册码重新 enroll 自愈。因此注册码是绑定
-    ``player_no``（经 ``player_id``）与 ``machine_id`` 的 "机器凭据种子"，长期有效。
-    """
-
-    __tablename__ = "enroll_code"
-
-    id = Column(Integer, primary_key=True)
-    code_hash = Column(String(64), nullable=False, unique=True)
-    player_id = Column(Integer, ForeignKey("player.id", ondelete="CASCADE"), nullable=False)
-    # 为 NULL 表示尚未绑定机器；首次 enroll 时写入，之后只接受同一 machine_id
-    machine_id = Column(String(128), nullable=True)
-    note = Column(String(200), nullable=True)
-    expires_at = Column(DateTime, nullable=True)
-    revoked_at = Column(DateTime, nullable=True)
-
-    player = relationship("Player")
-
-    __table_args__ = (Index("ix_enroll_player", "player_id"),)
-
-
 # --------------------------------------------------------------------------- #
 # Agent 与在线状态
 # --------------------------------------------------------------------------- #
 
 
 class Agent(Base, TimestampMixin):
+    """一台考试机。**绑定的是人，不是场次。**
+
+    老模型里 ``agent.player_id`` 指向某个场次的 ``player``，于是"这台机器是谁的"
+    会随场次变化，题库里每换一场就得重新发码、重新认领一次。
+
+    现在绑的是**名单库条目**（``roster_entry_id``）。名单条目代表一个学生，
+    与场次无关；某个场次有没有他，取决于那份名单有没有被应用到场次里。
+    所以今天绑的机器，明天换一场比赛照样能用 —— 这才是"永久配对"该有的样子。
+
+    ``roster_entry_id`` 为空表示**还没配对**：机器已经注册上来、有凭据，
+    但服务端还不知道它是谁的。这个状态以前放在单独一张 ``machine_claim`` 表里，
+    目的是绕开"改 ``player_id`` 可空性要重建表"这件事；既然这次无论如何都要
+    重建 ``agent``（``player_id`` 整个不要了），就该把两种状态收进同一张表 ——
+    一张表、一次查询、一套状态机，比两张表少一半的分支。
+
+    ``registration_mode`` 一类的场次级开关也随之消失了：只剩一条注册路径，
+    没有"两种模式"可选，也就没有"选错了模式"这种事。
+    """
+
     __tablename__ = "agent"
 
     id = Column(Integer, primary_key=True)
-    player_id = Column(Integer, ForeignKey("player.id", ondelete="CASCADE"), nullable=False)
+
+    # ---- 身份 ----
+    #: 绑定的名单条目（人）。为空 = 已注册但未配对
+    roster_entry_id = Column(
+        Integer, ForeignKey("roster_entry.id", ondelete="SET NULL"), nullable=True
+    )
+    #: 显式指定的场次。为空 = **动态解析**：找一个"进行中且名单含此人"的场次。
+    #: 一个考点同时跑多场比赛、同一个人两边都在时才需要显式指定
+    contest_id = Column(Integer, ForeignKey("contest.id", ondelete="SET NULL"), nullable=True)
+
     token_hash = Column(String(64), nullable=False, unique=True)
     machine_id = Column(String(128), nullable=False)
+    #: Agent 首次运行时生成并持久化的 UUID。**配对之后认机器主要靠它** ——
+    #: 换凭据、重新注册都按它匹配，不再需要配对码。
+    machine_uuid = Column(String(64), nullable=True)
+    #: 硬件指纹。UUID 会随整机快照还原消失，指纹不会 —— 它是第二道认回依据
+    machine_fingerprint = Column(String(128), nullable=True)
+
+    #: 未配对时的 6 位数字配对码。只存哈希：知道它就能把一台机器绑到自己名下
+    pair_code_hash = Column(String(64), nullable=True)
+    pair_code_expires_at = Column(DateTime, nullable=True)
+
     hostname = Column(String(128), nullable=True)
     os_info = Column(String(200), nullable=True)
     agent_version = Column(String(32), nullable=True)
-    #: 首次注册时间
     enrolled_at = Column(DateTime, default=utcnow, nullable=False)
-    #: 最近一次注册/换发凭据时间。快照还原后 Agent 会重新 enroll，这里会更新
     last_enrolled_at = Column(DateTime, default=utcnow, nullable=False)
     last_seen_at = Column(DateTime, nullable=True)
     revoked_at = Column(DateTime, nullable=True)
-
-    #: Agent 首次运行时自己生成的 UUID。比 ``/etc/machine-id`` 更适合当身份：
-    #: 克隆镜像没做通用化时 ``/etc/machine-id`` 是**整批相同**的，而它在首次
-    #: 开机后才生成。代价是快照还原会连它一起丢 —— 所以还需要下面的指纹。
-    machine_uuid = Column(String(64), nullable=True)
-    #: 硬件指纹（SMBIOS UUID / 主机名等）。**快照还原后仍然不变**，
-    #: 用来在 Agent 重新注册时认回原来那台机器与它已认领的选手。
-    machine_fingerprint = Column(String(128), nullable=True)
-    #: 认领（配对）到选手的时间。空表示这台机器是走单人码直接注册的
+    #: 完成配对的时间
     claimed_at = Column(DateTime, nullable=True)
 
-    player = relationship("Player", back_populates="agents")
+    roster_entry = relationship("RosterEntry")
+    contest = relationship("Contest")
 
     __table_args__ = (
-        UniqueConstraint("player_id", "machine_id", name="uq_agent_player_machine"),
+        UniqueConstraint("machine_uuid", name="uq_agent_uuid"),
         Index("ix_agent_machine", "machine_id"),
         Index("ix_agent_fingerprint", "machine_fingerprint"),
+        Index("ix_agent_roster_entry", "roster_entry_id"),
     )
 
 

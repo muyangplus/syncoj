@@ -23,6 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from ..context import AppContext
+from ..errors import ApiError
 from ..models import (
     Agent,
     AgentRelease,
@@ -31,9 +32,7 @@ from ..models import (
     DeployStatus,
     DeployTarget,
     DeployTask,
-    EnrollCode,
     EventLog,
-    MachineClaim,
     Player,
     SourceFile,
     utcnow,
@@ -50,12 +49,7 @@ from ..schemas import (
     UpgradeInfo,
     UploadResult,
 )
-from ..security import (
-    hash_enroll_code,
-    hash_token,
-    new_pair_code,
-    new_token,
-)
+from ..security import hash_token, new_pair_code, new_token
 from ..storage import BlobTooLarge, HashMismatch, materialize
 from ..services import enrollment
 from ..services.collect import reconcile_scan, record_events
@@ -68,6 +62,7 @@ from .deps import (
     get_ctx,
     require_agent,
     require_principal,
+    resolve_machine,
 )
 
 __all__ = ["router"]
@@ -116,9 +111,10 @@ def rate_limit(ctx: AppContext, request: Request, payload: EnrollRequest) -> Non
         log.warning(
             "注册被限速：ip=%s machine_id=%s", client_ip, (payload.machine_id or "")[:16]
         )
-        raise HTTPException(
-            status_code=429,
-            detail=exc.detail,
+        raise ApiError(
+            429,
+            "rate_limited",
+            exc.detail,
             headers={"Retry-After": str(exc.retry_after)},
         )
 
@@ -129,208 +125,99 @@ def enroll(
     request: Request,
     ctx: AppContext = Depends(get_ctx),
 ) -> EnrollResponse:
-    """换长期凭据。两条路，二选一。
+    """用镜像里的统一密钥换回长期凭据。
 
-    **每选手注册码**（``enroll_code``）：一码一人，绑定 ``player_no + machine_id``。
-    刻意允许重复注册 —— NOI Linux 考试机常做整机快照还原，机器上的
-    ``credential.json`` 会消失，此时 Agent 用镜像内置的注册码重新 enroll，
-    服务端按 ``machine_id`` 认出这是老机器，换发新凭据并作废旧凭据。
-    所以注册码不是一次性的，而是"机器凭据种子"。
+    这是**唯一**的注册路径 —— 每选手注册码已经被"机器永久绑定名单条目"取代。
+    逐台发码在"一份镜像装遍整间机房"的现实里根本不可行，而两种模式并存
+    意味着每种都要维护、测试，并且迟早有人选错。
 
-    **统一密钥**（``bootstrap_key``）：整间机房一份密钥，换回来的机器**没有归属**，
-    要靠短码配对认领到人。适合"镜像预装 + 批量克隆"的部署方式。
-
-    两个都传时以 ``enroll_code`` 为准 —— 单人码是更明确的意图。
+    注册出来的是三种状态之一（未配对 / 配好但没场次 / 能干活），
+    Agent 必须按 `claimed` 与 `bound` 分开处理。
     """
     rate_limit(ctx, request, payload)
 
-    if payload.enroll_code:
-        return _enroll_with_code(ctx, payload)
-    if payload.bootstrap_key:
-        return _enroll_with_bootstrap(ctx, payload)
-    raise HTTPException(status_code=400, detail="必须提供 enroll_code 或 bootstrap_key")
-
-
-def _enroll_with_code(ctx: AppContext, payload: EnrollRequest) -> EnrollResponse:
-    code_hash = hash_enroll_code(payload.enroll_code or "")
-    now = utcnow()
-    raw_token = new_token(ctx.settings.token_bytes)
-
-    for attempt in (0, 1):
-        try:
-            return _enroll_once(ctx, payload, code_hash, raw_token, now)
-        except IntegrityError:
-            # 并发注册（同一台机器同时起了两个实例，或重试）触发唯一约束。
-            # 回滚后重试一次即可命中已存在的行。
-            if attempt == 1:
-                raise HTTPException(status_code=409, detail="注册冲突，请重试")
-            log.warning("注册发生唯一约束冲突，重试一次 machine_id=%s", payload.machine_id)
-    raise HTTPException(status_code=409, detail="注册冲突，请重试")  # pragma: no cover
-
-
-def _enroll_with_bootstrap(ctx: AppContext, payload: EnrollRequest) -> EnrollResponse:
-    """用统一密钥注册。见 ``services.enrollment`` 里的详细说明。"""
     raw_token = new_token(ctx.settings.token_bytes)
     raw_pair_code = new_pair_code(ctx.settings.pair_code_length)
 
     with ctx.db.session() as session:
         try:
-            outcome = enrollment.enroll_with_bootstrap_key(
+            outcome = enrollment.enroll_machine(
                 session,
-                payload.bootstrap_key or "",
+                payload.bootstrap_key,
                 machine_id=payload.machine_id,
+                machine_uuid=payload.machine_uuid,
+                machine_fingerprint=payload.machine_fingerprint,
                 hostname=payload.hostname,
                 os_info=payload.os_info,
                 agent_version=payload.agent_version,
-                machine_uuid=payload.machine_uuid,
-                machine_fingerprint=payload.machine_fingerprint,
                 raw_token=raw_token,
                 raw_pair_code=raw_pair_code,
                 offline_after_seconds=ctx.settings.offline_after_seconds,
+                pair_code_ttl_seconds=ctx.settings.pair_code_ttl_seconds,
             )
         except enrollment.BootstrapRejected as exc:
-            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+            # 码原样透出去：Agent 只对 ``bootstrap_key_*`` 做分支，
+            # 「密钥不对」要让它停下来等人来修，而不是无限重试
+            raise ApiError(exc.status_code, exc.code, exc.detail)
 
-        config = _agent_config(ctx)
+        agent = outcome.agent
+        # 用**同一个会话**解析身份：刚注册的机器可能已经配好（UUID 认回），
+        # 也可能还没配对 —— 两种都要如实回报，客户端才知道该做什么
+        resolved = resolve_machine(session, agent)
+        _remember_pair_code(ctx, agent, outcome.new_pair_code)
+        response = _enroll_response(ctx, agent, outcome, resolved, raw_token, raw_pair_code)
 
-        if outcome.is_pending:
-            claim = outcome.require_claim()
-            return EnrollResponse(
-                token=raw_token,
-                agent_id=0,
-                claimed=False,
-                pair_code=raw_pair_code,
-                player_no="",
-                contest_id=None,
-                contest_slug="",
-                contest_name="",
-                config=config,
-            )
-
-        agent = outcome.require_agent()
-        player = session.get(Player, agent.player_id)
-        contest = session.get(Contest, player.contest_id) if player else None
-        if player is None or contest is None:  # pragma: no cover - 外键保证
-            raise HTTPException(status_code=409, detail="这台机器的配对记录已失效，请重新配对")
-
-        return EnrollResponse(
-            token=raw_token,
-            agent_id=agent.id,
-            claimed=True,
-            player_no=player.player_no,
-            player_name=player.name,
-            contest_id=contest.id,
-            contest_slug=contest.slug,
-            contest_name=contest.name,
-            config=config,
-        )
-
-
-def _enroll_once(
-    ctx: AppContext,
-    payload: EnrollRequest,
-    code_hash: str,
-    raw_token: str,
-    now,
-) -> EnrollResponse:
-    with ctx.db.session() as session:
-        code = session.execute(
-            select(EnrollCode).where(EnrollCode.code_hash == code_hash)
-        ).scalar_one_or_none()
-        if code is None:
-            raise HTTPException(status_code=404, detail="注册码无效")
-        if code.revoked_at is not None:
-            raise HTTPException(status_code=403, detail="注册码已被吊销")
-        if code.expires_at is not None and code.expires_at < now:
-            raise HTTPException(status_code=403, detail="注册码已过期")
-
-        player = session.get(Player, code.player_id)
-        if player is None:  # pragma: no cover - 外键保证
-            raise HTTPException(status_code=404, detail="选手不存在")
-        contest = session.get(Contest, player.contest_id)
-        if contest is None:  # pragma: no cover
-            raise HTTPException(status_code=404, detail="场次不存在")
-
-        # 首次使用则该注册码与这台机器绑定；之后只接受同一台机器
-        if code.machine_id is None:
-            code.machine_id = payload.machine_id
-            log.info("注册码绑定到机器 machine_id=%s player=%s",
-                     payload.machine_id, player.player_no)
-        elif code.machine_id != payload.machine_id:
-            raise HTTPException(
-                status_code=403,
-                detail="该注册码已绑定到其他机器（%s）" % code.machine_id[:12],
-            )
-
-        agent = session.execute(
-            select(Agent).where(
-                Agent.player_id == player.id,
-                Agent.machine_id == payload.machine_id,
-            )
-        ).scalar_one_or_none()
-
-        first_time = agent is None
-        if agent is None:
-            agent = Agent(
-                player_id=player.id,
-                token_hash=hash_token(raw_token),
-                machine_id=payload.machine_id,
-                hostname=payload.hostname,
-                os_info=payload.os_info,
-                agent_version=payload.agent_version,
-                enrolled_at=now,
-                last_enrolled_at=now,
-                last_seen_at=now,
-            )
-            session.add(agent)
-        else:
-            if agent.revoked_at is not None:
-                raise HTTPException(status_code=403, detail="该机器凭据已被吊销，请联系教师")
-            # 换发凭据：旧 token 立刻失效
-            agent.token_hash = hash_token(raw_token)
-            agent.last_enrolled_at = now
-            agent.last_seen_at = now
-            agent.hostname = payload.hostname or agent.hostname
-            agent.os_info = payload.os_info or agent.os_info
-            agent.agent_version = payload.agent_version or agent.agent_version
-
-        session.add(
-            EventLog(
-                level="info",
-                category="enroll",
-                contest_id=contest.id,
-                player_id=player.id,
-                message=("首次注册" if first_time else "重新注册（凭据换发）")
-                + "：%s @ %s" % (player.player_no, payload.machine_id[:16]),
-                meta_json=None,
-            )
-        )
-        session.flush()
-
-        agent_id = agent.id
-        player_id = player.id
-        response = EnrollResponse(
-            token=raw_token,
-            agent_id=agent_id,
-            player_no=player.player_no,
-            player_name=player.name,
-            contest_id=contest.id,
-            contest_slug=contest.slug,
-            contest_name=contest.name,
-            config=_agent_config(ctx),
-        )
-
-    ctx.registry.upsert_identity(
-        agent_id=agent_id,
-        player_id=player_id,
-        contest_id=response.contest_id,
-        player_no=response.player_no,
-        player_name=response.player_name,
-        contest_slug=response.contest_slug,
-        machine_id=payload.machine_id,
-        hostname=payload.hostname,
-    )
     return response
+
+
+def _remember_pair_code(ctx: AppContext, agent: Agent, code: Optional[str]) -> None:
+    """把本次下发的配对码明文记进内存缓存。
+
+    协议要求未配对的机器**每一轮 tick** 都带上当前有效的码，而库里只有哈希、
+    还原不出来 —— 所以明文必须留一份在某处。这里选内存：
+    它 30 分钟后自然失效、进程重启就没了，而代价只是教师重看一眼屏幕。
+    理由详见 ``services/paircodes.py``。
+    """
+    if code:
+        ctx.pair_codes.put(agent.id, code, agent.pair_code_expires_at)
+
+
+def _enroll_response(
+    ctx: AppContext,
+    agent: Agent,
+    outcome: enrollment.EnrollOutcome,
+    resolved,
+    raw_token: str,
+    raw_pair_code: str,
+) -> EnrollResponse:
+    """把注册结果翻译成客户端的三个状态。
+
+    这里的每一档都对应客户端一个不同的动作，混在一起就会出现
+    "未配对的机器去扫代码"或者"配好的机器还在显示配对码"这类怪事。
+    """
+    paired = agent.roster_entry_id is not None
+    payload = dict(
+        token=raw_token,
+        agent_id=agent.id,
+        claimed=paired,
+        bound=resolved.ok,
+        config=_agent_config(ctx),
+    )
+    if not paired:
+        payload["pair_code"] = raw_pair_code
+        payload["reason"] = "这台机器还没有配对到人，请把配对码告诉老师"
+    elif not resolved.ok:
+        payload["reason"] = resolved.reason
+    else:
+        payload.update(
+            player_no=resolved.player.player_no,
+            player_name=resolved.player.name,
+            contest_id=resolved.contest.id,
+            contest_slug=resolved.contest.slug,
+            contest_name=resolved.contest.name,
+        )
+    return EnrollResponse(**payload)
+
 
 
 # --------------------------------------------------------------------------- #
@@ -353,7 +240,10 @@ def tick(
         # 凭据与声明的机器不符：可能是凭据被复制到了别的机器
         log.warning("machine_id 不匹配 agent=%s 声明=%s 实际=%s",
                     identity.agent_id, payload.machine_id, identity.machine_id)
-        raise HTTPException(status_code=409, detail="machine_id 与凭据不匹配")
+        # 409 = "内容已不是当前版本"这一类**静默丢弃**的信号，Agent 不会重试；
+        # 这里塞的是凭据被复制这种硬故障，Agent 会记日志并等下一条 tick，
+        # 正是我们要的：不要让它重新注册，那会把现场线索换成一个新配对码
+        raise ApiError(409, "machine_mismatch", "machine_id 与凭据不匹配")
 
     client_ip = request.client.host if request.client else None
     now = utcnow()
@@ -415,6 +305,9 @@ def tick(
         upgrade=upgrade,
         config=_agent_config(ctx),
         claimed=True,
+        # 走到这一支就说明场次与选手都解析出来了 —— 这正是三态里的"能干活"那一档。
+        # 漏掉它会让 Agent 自己都以为"还没轮到"，于是永远不去扫代码。
+        bound=True,
         # 身份随每次 tick 一起回去：快照还原后 Agent 手上只剩 token，
         # 准考证号和场次都是在这一刻重新知道的。让它为此专门再 enroll 一次
         # 没必要 —— 那会多一次限速、多一条审计，还多一个可能失败的网络往返。
@@ -426,30 +319,74 @@ def tick(
 def _tick_pending(
     payload: TickRequest, ctx: AppContext, identity: MachineIdentity
 ) -> TickResponse:
-    """未认领机器的心跳。
+    """还干不了活的机器的心跳。
 
-    **什么都不做**，只是把 last_seen 更新一下、然后告诉它"还没认领"。
-    它扫描出来的东西一律丢弃 —— 没有准考证号，那些相对路径没法归属到任何人，
+    把 last_seen 更新一下、然后如实告诉它卡在哪：
+
+    * 还没配对 → ``claimed=false`` + **一个当前有效的配对码**，客户端把它
+      显示给人看
+    * 配好了但解析不出场次 → ``claimed=true, bound=false`` + 原因；
+      **不要**再给配对码 —— 那会让教师以为配对没生效，跑去重配一遍，
+      把好好的绑定搞乱
+
+    它上报的扫描结果一律丢弃：没有准考证号，那些相对路径没法归属到任何人，
     收下来只会污染台账。
 
     周期固定用空闲值：它本来就没事可做。
+
+    "发配对码"这件事必须在**每一次** tick 上做，而不是只在注册那一刻：
+    机器可能被解绑、配对码可能过期、教师也可能过半小时才走到跟前。
+    只在注册时发的话，解绑之后那台机器就永远拿不到新码了 ——
+    它既没有 root 只读的统一密钥、又没有任何别的渠道能拿到码，
+    只能靠重启碰运气。心跳是它唯一稳定的上行通道。
+
+    还有一条同样重要：**同一个码在有效期内必须原样回同一串**。
+    每轮换一个新的会让教师刚在屏幕上读到的数字当场作废，而现场看起来
+    只是"配对码一直在跳"，没人会往心跳上想。
     """
     now = utcnow()
+    pair_code = None
     with ctx.db.session() as session:
-        claim = session.get(MachineClaim, identity.claim_id)
-        if claim is not None:
-            claim.last_seen_at = now
+        agent = session.get(Agent, identity.agent_id)
+        if agent is not None:
+            agent.last_seen_at = now
             if payload.agent_version:
-                claim.agent_version = payload.agent_version
+                agent.agent_version = payload.agent_version
             # 每次 tick 都更新主机名：教师常常一边装一边按座位改机器名，
             # 列表里显示旧名字会让人对着两台机器猜哪台是哪台
             if payload.hostname:
-                claim.hostname = payload.hostname
+                agent.hostname = payload.hostname
+
+            if not identity.paired:
+                # **有效性以库里的哈希与过期时刻为准**，缓存只负责提供明文。
+                # 反过来（信缓存）的话，任何让库里那条码失效的动作 ——
+                # 手工改过期时间、以后可能加的"立即作废配对码"按钮 ——
+                # 都会被缓存里的旧值盖住，服务端继续回一个已经不该再用的数字。
+                still_valid = (
+                    agent.pair_code_hash is not None
+                    and agent.pair_code_expires_at is not None
+                    and agent.pair_code_expires_at >= now
+                )
+                if still_valid:
+                    # 同一个码在有效期内**原样回同一串**：每轮换新的会让教师
+                    # 刚读到的数字当场作废，而现场看起来只是"配对码一直在跳"
+                    pair_code = ctx.pair_codes.get(agent.id, now)
+
+                if pair_code is None:
+                    # 第一次（缓存没了）、过期了、或者刚被解绑 —— 发一个新的
+                    pair_code = new_pair_code(ctx.settings.pair_code_length)
+                    enrollment.issue_pair_code(
+                        agent, now, pair_code, ctx.settings.pair_code_ttl_seconds
+                    )
+                    ctx.pair_codes.put(agent.id, pair_code, agent.pair_code_expires_at)
 
     return TickResponse(
         server_time=int(now.replace(tzinfo=None).timestamp()),
         next_tick_seconds=ctx.settings.tick_idle_seconds,
-        claimed=False,
+        claimed=identity.paired,
+        pair_code=pair_code,
+        bound=False,
+        reason=identity.reason,
         config=_agent_config(ctx),
     )
 
@@ -605,13 +542,11 @@ def upload_file(
             )
             session.add(row)
         elif row.content_stored and row.sha256 != actual_sha:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "reason": "stale",
-                    "message": "该内容已不是当前版本，已在下一轮 tick 中请求最新版本",
-                    "expected": row.sha256,
-                },
+            raise ApiError(
+                409,
+                "stale_upload",
+                "该内容已不是当前版本，已在下一轮 tick 中请求最新版本",
+                {"reason": "stale", "expected": row.sha256},
             )
 
         row.sha256 = actual_sha

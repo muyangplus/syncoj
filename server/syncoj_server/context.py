@@ -13,6 +13,7 @@ from typing import Optional
 from .config import Settings
 from .db import Database
 from .registry import AgentRegistry
+from .services.paircodes import PairCodeCache
 from .services.ratelimit import RateLimiter
 from .services.signing import DerError, SigningKey, load_signing_key
 from .storage import BlobStore
@@ -38,6 +39,9 @@ class AppContext:
     #: 全局注册限速 —— 挡住"从很多 IP 一起刷"。考场内网 IP 数量有限，
     #: 全局上限才是真正的兜底
     enroll_global_limiter: RateLimiter = field(default_factory=lambda: RateLimiter(limit=0))
+    #: 未配对机器的配对码明文。**只在内存里** —— 协议要求每一轮 tick 都带上
+    #: 当前有效的码，而库里只存哈希（见 ``services/paircodes.py``）
+    pair_codes: PairCodeCache = field(default_factory=PairCodeCache)
 
     @classmethod
     def create(cls, settings: Settings) -> "AppContext":

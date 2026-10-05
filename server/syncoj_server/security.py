@@ -20,8 +20,6 @@ __all__ = [
     "new_token",
     "hash_token",
     "tokens_equal",
-    "new_enroll_code",
-    "hash_enroll_code",
     "new_pair_code",
     "hash_pair_code",
     "new_bootstrap_key",
@@ -30,8 +28,8 @@ __all__ = [
     "verify_password",
 ]
 
-#: 念得出、抄得对的字符集。去掉 I/O/0/1 —— 配对码要被人从考试机屏幕上读出来、
-#: 再在教师的电脑上敲进去，这两个字形是抄错的头号来源。
+#: 念得出、抄得对的字符集。去掉 I/O/0/1 —— 供统一密钥使用，
+#: 它是要被脚本拷进镜像的，不是给人念的
 CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 # scrypt 参数。n=2**14 在服务端约 50~100ms，足以让离线爆破不划算，
@@ -64,18 +62,6 @@ def tokens_equal(a: Optional[str], b: Optional[str]) -> bool:
     if a is None or b is None:
         return False
     return hmac.compare_digest(a, b)
-
-
-def new_enroll_code(nbytes: int = 16) -> str:
-    """生成注册码。为了让教师能念/抄，用大写字母数字分组形式。"""
-    raw = "".join(secrets.choice(CODE_ALPHABET) for _ in range(nbytes))
-    return "-".join(raw[i : i + 4] for i in range(0, len(raw), 4))
-
-
-def hash_enroll_code(raw: str) -> str:
-    """注册码的存储形态。先做规范化，容忍教师输入时的大小写与分隔符差异。"""
-    normalized = "".join(ch for ch in raw.upper() if ch.isalnum())
-    return hashlib.sha256(("enroll:" + normalized).encode("utf-8")).hexdigest()
 
 
 def new_pair_code(length: int = 6) -> str:

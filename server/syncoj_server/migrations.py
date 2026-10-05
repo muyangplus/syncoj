@@ -66,6 +66,109 @@ def _add_column(engine: Engine, table: str, name: str, ddl: str) -> bool:
     return True
 
 
+def _rebuild_table(engine: Engine, table: str) -> bool:
+    """按**当前模型**重建一张表，保留同名同列的数据。
+
+    为什么需要它：SQLite 改不了列的可空性、也删不掉列（3.35 之前），
+    而"删掉 ``agent.player_id``"这种事只能靠重建。
+
+    **必须用裸连接在 autocommit 下关外键。** 对照实验（``.pytest-tmp`` 里留下过）：
+
+    ================================================  =========  ==============
+    重建时外键                                        agent 数据  agent_status
+    ================================================  =========  ==============
+    裸连接 + autocommit 里 ``PRAGMA foreign_keys=OFF``  保留       **保留**
+    在 ``engine.begin()`` 里关（**空操作**）             保留       **被级联删光**
+    ================================================  =========  ==============
+
+    ``PRAGMA foreign_keys`` **在事务里是空操作** —— 这是整件事唯一的坑，
+    而它的后果是静默删掉整张子表。所以这里刻意不走 ``engine.begin()``，
+    而是自己 ``BEGIN`` / ``COMMIT``。
+
+    ``legacy_alter_table=ON`` 同理必要：现代 SQLite 的 ``RENAME`` 会顺手改写
+    *其它表*里对被改名表的引用，而我们正是要在别的表还引用 ``agent`` 的情况下
+    把它换掉。
+    """
+    from sqlalchemy.schema import CreateIndex, CreateTable
+
+    from .models import Base
+
+    if table not in Base.metadata.tables or table not in _tables(engine):
+        return False
+
+    model_table = Base.metadata.tables[table]
+    new_name = "%s__new" % table
+
+    # DDL 从**当前模型**生成，而不是手写一遍：手写的 DDL 会和模型一起腐烂，
+    # 而"迁移建出来的表和模型不一致"极难发现（新库没有它、老库带着它）。
+    #
+    # 表名靠文本替换改掉。试过 ``Table.to_metadata(name=...)``，它因为
+    # 目标 MetaData 里已经有同名表而**静默不复制**（只在日志里留一条 SAWarning），
+    # 于是后面拿到的还是旧定义 —— 那种失败方式在这里是灾难性的。
+    # 只替换 `CREATE TABLE <名字> (` 这一处，不碰约束名里的同名片段。
+    old_prefix = "CREATE TABLE %s (" % table
+    ddl = str(CreateTable(model_table).compile(dialect=engine.dialect))
+    if old_prefix not in ddl:  # pragma: no cover - 方言变了才会走到
+        raise RuntimeError("无法重写建表语句的表名：%s" % ddl[:120])
+    create_sql = ddl.replace(old_prefix, "CREATE TABLE %s (" % new_name, 1)
+
+    old_columns = _columns(engine, table)
+    shared = [c.name for c in model_table.columns if c.name in old_columns]
+
+    raw = engine.raw_connection()
+    try:
+        raw.isolation_level = None  # autocommit：PRAGMA 才不会被事务吞掉
+        cursor = raw.cursor()
+        cursor.execute("PRAGMA foreign_keys=OFF")
+        cursor.execute("PRAGMA legacy_alter_table=ON")
+        cursor.execute("BEGIN")
+        try:
+            cursor.execute("DROP TABLE IF EXISTS %s" % new_name)
+            cursor.execute(create_sql)
+            if shared:
+                cols = ", ".join(shared)
+                cursor.execute(
+                    "INSERT INTO %s (%s) SELECT %s FROM %s"
+                    % (new_name, cols, cols, table)
+                )
+            cursor.execute("DROP TABLE %s" % table)
+            cursor.execute("ALTER TABLE %s RENAME TO %s" % (new_name, table))
+            # 索引跟着模型重建：DROP TABLE 已经把旧索引带走了。
+            # 模型生成的索引 DDL 写的是 `ON <原表名>`，而改名之后那个名字
+            # 正好又是我们的表 —— 所以原样执行即可
+            for index in model_table.indexes:
+                cursor.execute(str(CreateIndex(index).compile(dialect=engine.dialect)))
+            cursor.execute("COMMIT")
+        except Exception:
+            cursor.execute("ROLLBACK")
+            raise
+        finally:
+            cursor.execute("PRAGMA foreign_keys=ON")
+    finally:
+        raw.close()
+
+    log.info("迁移：重建表 %s（保留 %d 列数据）", table, len(shared))
+    return True
+
+
+def _drop_table(engine: Engine, table: str) -> bool:
+    """删表。外键关掉再删 —— 留着子表引用一张已经不存在的表没有意义，
+    而开着外键删会顺着 CASCADE 把子表数据一起带走。"""
+    if table not in _tables(engine):
+        return False
+    raw = engine.raw_connection()
+    try:
+        raw.isolation_level = None
+        cursor = raw.cursor()
+        cursor.execute("PRAGMA foreign_keys=OFF")
+        cursor.execute("DROP TABLE IF EXISTS %s" % table)
+        cursor.execute("PRAGMA foreign_keys=ON")
+    finally:
+        raw.close()
+    log.info("迁移：删除表 %s", table)
+    return True
+
+
 # --------------------------------------------------------------------------- #
 # 基线同步：只为"迁移器出现之前建的库"服务
 # --------------------------------------------------------------------------- #
@@ -132,8 +235,105 @@ def _migration_001_enrollment(engine: Engine) -> None:
             )
 
 
+def _migration_002_roster_binding(engine: Engine) -> None:
+    """机器改为**永久绑定名单条目**，注册码整条链路去掉。
+
+    这一版是**一次性**的：把结构整体推到新形态，不保留任何过渡期兼容。
+    开发阶段的取舍 —— 迁移链每多一环就多一份要维护和测试的兼容代码，
+    而这套结构还没上线过。
+
+    做四件事：
+
+    1. 重建 ``agent``：``player_id`` 换成 ``roster_entry_id`` + ``contest_id``，
+       加配对码列与 UUID 唯一约束
+    2. 尽力把老机器按 ``player_no`` 映射回名单条目 —— 迁移**能救则救**，
+       实在对不上就让它们回到"未配对"状态（教师重新配一次，而不是机器失联）
+    3. 删掉 ``machine_claim`` 与 ``enroll_code`` 两张表
+    4. 重建 ``contest`` 去掉 ``enrollment_mode``
+    """
+    tables = _tables(engine)
+
+    # ---- 1 & 2. agent ----
+    if "agent" in tables:
+        had_player_id = "player_id" in _columns(engine, "agent")
+        # **先**把老的"机器 → 场次选手"读出来：重建之后 player_id 就没了，
+        # 而这份映射是"能救则救"的全部依据
+        legacy_bindings = _read_legacy_agent_bindings(engine) if had_player_id else []
+
+        _rebuild_table(engine, "agent")
+
+        if legacy_bindings:
+            _bind_legacy_agents_to_roster(engine, legacy_bindings)
+
+    # ---- 3. 两张不再需要的表 ----
+    _drop_table(engine, "machine_claim")
+    _drop_table(engine, "enroll_code")
+
+    # ---- 4. contest 去掉注册方式 ----
+    # 只剩一条注册路径，"两种模式二选一"这件事本身就不存在了
+    if "contest" in _tables(engine) and "enrollment_mode" in _columns(engine, "contest"):
+        _rebuild_table(engine, "contest")
+
+
+def _read_legacy_agent_bindings(engine: Engine) -> List[Tuple[int, str]]:
+    """读出 ``[(agent_id, player_no)]``。
+
+    必须在重建 ``agent`` **之前**读 —— 重建之后 ``player_id`` 那一列就没了。
+    """
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT a.id AS agent_id, p.player_no AS player_no "
+                "FROM agent a JOIN player p ON p.id = a.player_id"
+            )
+        ).fetchall()
+    return [(int(row[0]), str(row[1])) for row in rows]
+
+
+def _bind_legacy_agents_to_roster(engine: Engine, bindings: List[Tuple[int, str]]) -> None:
+    """把老机器的归属从"某场次的人"翻译成"名单里的人"。
+
+    映射依据是 ``player_no``：名单条目与场次选手用的是同一个编号，
+    这是整个系统的约定。**只在唯一时映射** —— 同一个编号出现在两份名单里
+    时有歧义，宁可让它回到未配对，也不能绑错人（绑错的代价是一个学生的代码
+    落进另一个人的目录，而且完全静默）。
+    """
+    with engine.begin() as conn:
+        ambiguous: List[str] = []
+        unmatched: List[str] = []
+        bound = 0
+        for agent_id, player_no in bindings:
+            candidates = conn.execute(
+                text("SELECT id FROM roster_entry WHERE player_no = :no"),
+                {"no": player_no},
+            ).fetchall()
+            if len(candidates) == 1:
+                conn.execute(
+                    text("UPDATE agent SET roster_entry_id = :rid WHERE id = :aid"),
+                    {"rid": candidates[0][0], "aid": agent_id},
+                )
+                bound += 1
+            elif len(candidates) > 1:
+                ambiguous.append(player_no)
+            else:
+                unmatched.append(player_no)
+
+    if bound:
+        log.info("迁移：%d 台老机器按编号映射回名单条目", bound)
+    for label, items in (("编号在多份名单里出现", ambiguous), ("编号不在任何名单里", unmatched)):
+        if items:
+            log.warning(
+                "迁移：%d 台老机器无法自动映射（%s）：%s —— 它们会回到未配对状态，"
+                "请在「机器配对」里重新配对",
+                len(items),
+                label,
+                "、".join(sorted(set(items))[:20]),
+            )
+
+
 MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
     (1, "统一密钥注册 + 名单库所需的结构", _migration_001_enrollment),
+    (2, "机器永久绑定名单条目；去掉注册码链路", _migration_002_roster_binding),
 ]
 
 LATEST_VERSION = MIGRATIONS[-1][0] if MIGRATIONS else 0
@@ -163,7 +363,17 @@ def migrate(engine: Engine, create_missing_tables: bool = True) -> List[str]:
 
     每一步失败都**不推进版本号**，于是下一次启动会重试同一步。绝不允许
     "跳过出错的步骤继续往前跑" —— 那会让库停在一个谁也没设计过的中间状态。
+
+    **新表先建、迁移步骤后跑。** 这个顺序是有原因的：迁移步骤可能要引用
+    新表（比如"把老机器按准考证号映射回名单条目"要查 ``roster_entry``），
+    而 ``create_all`` 只建缺失的表、不碰已有的表，所以对老库是安全的。
+    反过来的话，迁移步骤会撞上"表还不存在"。
     """
+    if create_missing_tables:
+        from .models import Base
+
+        Base.metadata.create_all(engine)
+
     version = current_version(engine)
     if version == 0:
         _sync_baseline(engine)
@@ -177,10 +387,5 @@ def migrate(engine: Engine, create_missing_tables: bool = True) -> List[str]:
         _set_version(engine, number)
         version = number
         applied.append("%03d %s" % (number, description))
-
-    if create_missing_tables:
-        from .models import Base
-
-        Base.metadata.create_all(engine)
 
     return applied

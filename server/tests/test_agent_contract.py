@@ -57,9 +57,16 @@ def fixture() -> dict:
 
 
 def test_enroll_payload_matches_server_schema(fixture: dict) -> None:
+    """注册只走"统一密钥"一条路 —— 逐台发注册码的字段必须**彻底消失**。
+
+    留着它最坏的情况不是报错，而是被 ``extra="forbid"`` 以外的方式静默接受，
+    于是一台机器拿着早就作废的旧字段去注册，现场只看到"注册失败"。
+    """
     model = EnrollRequest.model_validate(fixture["enroll"])
     assert model.machine_id
-    assert model.enroll_code
+    assert model.bootstrap_key
+    assert model.machine_uuid, "UUID 是配对之后认机器的依据，注册时必须上报"
+    assert "enroll_code" not in fixture["enroll"], "旧注册码链路已经不存在了"
 
 
 def test_tick_payload_matches_server_schema(fixture: dict) -> None:

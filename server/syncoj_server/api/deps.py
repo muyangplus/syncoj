@@ -1,25 +1,51 @@
-"""FastAPI 依赖：请求上下文与 Agent 身份认证。"""
+"""FastAPI 依赖：请求上下文与 Agent 身份解析。
+
+这个文件是**新配对模型的汇聚点**，值得说清楚它到底在做什么。
+
+机器绑的是**人**（``agent.roster_entry_id`` → 名单条目），不是某场比赛的选手。
+可"收代码、发文件、记成绩"全都要落到**某一场次里的某个选手**上。于是每个请求
+都要做一次翻译：
+
+    机器 ──► 名单条目（人，永久） ──► 某场次的 Player ──► 干活
+
+翻译的第三步是动态的：一个学生今天在 A 场、明天在 B 场，机器不用重新配对 ——
+只要那场比赛应用了含他的名单。所以这里解析出 ``(contest, player)``，
+把它作为 ``AgentIdentity`` 往下传；下游（collect/deploy/judge/upload）
+完全不用知道上面那层变了 —— 它们看到的仍然是一个普通的"某场次的某选手"。
+
+解析不出来的情况有三种，各自的含义完全不同，必须分开：
+
+* **未配对**（``roster_entry_id`` 为空）→ 机器刚注册上来，等教师配对
+* **没有场次** → 配对好了，但没有一场"进行中、且名单含此人"的比赛
+* **场次不唯一** → 一个考点同时跑多场，需要教师显式指定
+
+前两种在 ``/tick`` 里是**正常回应**（机器该安静等着），只有第三种需要人动手。
+把它们混成一个 403，现场就只能猜。
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import List, Optional, Tuple, Union
 
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, Query, Request
 from sqlalchemy import select
 
 from ..context import AppContext
-from ..models import Agent, Contest, MachineClaim, Player
+from ..errors import ApiError
+from ..models import Agent, Contest, Player, RosterEntry
 from ..security import hash_token
-from ..services import enrollment
 
 __all__ = [
     "AgentIdentity",
     "MachineIdentity",
+    "PageParams",
     "Principal",
+    "Resolution",
     "get_ctx",
     "require_agent",
     "require_principal",
+    "resolve_machine",
 ]
 
 
@@ -30,8 +56,32 @@ def get_ctx(request: Request) -> AppContext:
     return ctx
 
 
+class PageParams:
+    """``?limit=&offset=`` —— **每个** GET 集合接口都有的两个参数。
+
+    做成依赖而不是每个接口各写一遍 ``Query(50, ge=1, le=500)``：默认值与上限
+    只要有一处写歪，前端的分页组件就会在某一个页面上突然报 422。
+    """
+
+    def __init__(
+        self,
+        limit: int = Query(50, ge=1, le=500, description="每页条数"),
+        offset: int = Query(0, ge=0, description="起始位置"),
+    ) -> None:
+        self.limit = limit
+        self.offset = offset
+
+    def __repr__(self) -> str:  # pragma: no cover - 只为日志好看
+        return "PageParams(limit=%d, offset=%d)" % (self.limit, self.offset)
+
+
 @dataclass
 class AgentIdentity:
+    """**已经解析到具体场次与选手**的机器。
+
+    下游代码只认这个形状 —— 它是"翻译"之后的产物，与机器怎么绑的无关。
+    """
+
     agent_id: int
     player_id: int
     player_no: str
@@ -40,36 +90,66 @@ class AgentIdentity:
     contest_slug: str
     contest_name: str
     contest_status: str
+    #: 绑定的名单条目。改派、界面显示"这台机器是谁的"都要用它
+    roster_entry_id: Optional[int]
+    roster_entry_name: Optional[str]
     machine_id: str
     hostname: Optional[str]
 
 
 @dataclass
 class MachineIdentity:
-    """还没认领到人的机器。
+    """机器还在，但暂时干不了活。
 
-    它**没有** player_id / contest_id —— 那不是"暂时为空"，而是"根本还不知道"。
-    用可空字段去表示这件事，会让每个消费方都多一层 `if player_id is None`，
-    而漏掉任何一处都会变成 AttributeError 或者更糟：把文件挂到一个不存在的
-    选手身上。
+    两种情况都归到这里，用 ``paired`` 区分：
 
-    所以单独一个类型，`require_agent` 拿不到它 —— 想用它的接口必须显式声明。
+    * ``paired=False`` 还没配对到人 —— 该显示配对码、等人来配
+    * ``paired=True``  配好了但解析不出场次 —— 该安静等着，不要显示配对码
+      （显示的话教师会以为配对没生效，去重配一遍，把好好的绑定搞乱）
+
+    它**没有** player_id / contest_id —— 那不是"暂时为空"，而是"根本还没有"。
+    用可空字段表示这件事，会让每个消费方都多一层 `if ... is None`，
+    而漏掉任何一处都会变成把文件挂到不存在的选手身上。
     """
 
-    claim_id: int
+    agent_id: int
     machine_id: str
     hostname: Optional[str]
-    pair_code: Optional[str]
+    paired: bool
+    roster_entry_id: Optional[int]
+    roster_entry_name: Optional[str]
+    #: 解析不出场次时的人话原因
+    reason: Optional[str] = None
 
 
 Principal = Union[AgentIdentity, MachineIdentity]
 
 
-def _unauthorized(detail: str) -> "HTTPException":
-    return HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail=detail,
-        headers={"WWW-Authenticate": "Bearer"},
+@dataclass
+class Resolution:
+    """解析结果。内部用，外面只看得到 Principal 的两个形状。
+
+    ``code`` 是**给客户端分支用的**：同样是"这台机器暂时干不了活"，
+    "还没配对"要让人去配对、"还没有含你的场次"只要安静等着、
+    "多个场次需要指定"要教师动手 —— 三种该做的事完全不同。
+    ``reason`` 是给人看的中文句子，两者都带上，因为调用方既要分支也要显示。
+    """
+
+    agent: Agent
+    entry: Optional[RosterEntry]
+    contest: Optional[Contest]
+    player: Optional[Player]
+    reason: Optional[str] = None
+    code: Optional[str] = None
+
+    @property
+    def ok(self) -> bool:
+        return self.contest is not None and self.player is not None
+
+
+def _unauthorized(detail: str, code: str = "unauthorized") -> "ApiError":
+    return ApiError(
+        401, code, detail, headers={"WWW-Authenticate": "Bearer"}
     )
 
 
@@ -83,50 +163,146 @@ def _bearer(request: Request) -> str:
     return raw
 
 
+def resolve_machine(session, agent: Agent) -> Resolution:
+    """把一台机器解析到"某场次的某选手"。
+
+    场次的确定顺序：
+
+    1. ``agent.contest_id`` 显式指定 → 就用它（教师为什么指定就是为什么）
+    2. 否则找**进行中、且名单含此人**的场次：
+       * 恰好一个 → 用它
+       * 一个都没有 → 说清"还没有含你的场次"
+       * 多于一个 → 说清"需要指定"，**不自己挑一个**（挑错的后果是代码与成绩
+         落到另一场比赛里，而两场可能同时在跑）
+
+    ``Player`` 行必须已经存在（教师把名单应用到场次时物化出来的）。
+    这里**不自动创建** —— 靠机器在线与否去给一个场次添参赛者，
+    会让"谁在这场比赛里"变成一件悄悄发生的事。
+    """
+    if agent.roster_entry_id is None:
+        return Resolution(
+            agent=agent, entry=None, contest=None, player=None, code="pairing_required"
+        )
+
+    entry = session.get(RosterEntry, agent.roster_entry_id)
+    if entry is None:  # pragma: no cover - 外键 SET NULL 兜底
+        return Resolution(
+            agent=agent,
+            entry=None,
+            contest=None,
+            player=None,
+            reason="绑定的名单条目已被删除",
+            code="pairing_required",
+        )
+
+    if agent.contest_id is not None:
+        contest = session.get(Contest, agent.contest_id)
+        if contest is None:
+            return Resolution(
+                agent=agent,
+                entry=entry,
+                contest=None,
+                player=None,
+                reason="指定的场次已被删除",
+                code="contest_missing",
+            )
+        player = session.execute(
+            select(Player).where(
+                Player.contest_id == contest.id, Player.player_no == entry.player_no
+            )
+        ).scalar_one_or_none()
+        if player is None:
+            return Resolution(
+                agent=agent,
+                entry=entry,
+                contest=contest,
+                player=None,
+                reason="指定场次「%s」里没有编号 %s 的选手，请先把这个人的名单应用到场次"
+                % (contest.name, entry.player_no),
+                code="contest_player_missing",
+            )
+        return Resolution(agent=agent, entry=entry, contest=contest, player=player)
+
+    candidates: List[Tuple[Contest, Player]] = []
+    for contest, player in session.execute(
+        select(Contest, Player)
+        .join(Player, Player.contest_id == Contest.id)
+        .where(Player.player_no == entry.player_no)
+        .order_by(Contest.id)
+    ):
+        if contest.is_active:
+            candidates.append((contest, player))
+
+    if not candidates:
+        return Resolution(
+            agent=agent,
+            entry=entry,
+            contest=None,
+            player=None,
+            reason="还没有进行中的、名单里含 %s 的场次" % entry.player_no,
+            code="no_active_contest",
+        )
+    if len(candidates) > 1:
+        names = "、".join(contest.name for contest, _ in candidates)
+        return Resolution(
+            agent=agent,
+            entry=entry,
+            contest=None,
+            player=None,
+            reason="有多个进行中的场次都含 %s（%s），需要指定这一个（在界面上给这台机器选场次）"
+            % (entry.player_no, names),
+            code="ambiguous_contest",
+        )
+    contest, player = candidates[0]
+    return Resolution(agent=agent, entry=entry, contest=contest, player=player)
+
+
+def _load_agent(session, token_hash: str) -> Optional[Agent]:
+    return session.execute(
+        select(Agent).where(Agent.token_hash == token_hash)
+    ).scalar_one_or_none()
+
+
 def require_agent(request: Request, ctx: AppContext = Depends(get_ctx)) -> AgentIdentity:
-    """从 ``Authorization: Bearer <token>`` 解析 Agent 身份。
+    """要求一台**能干活**的机器。
 
-    服务端只存 token 的 SHA-256，用哈希做等值查询（索引命中），不存在明文比对。
-
-    **未认领机器的临时凭据会被明确拒绝**（403 而不是 401），并且说明原因：
-    如果这里返回 401，Agent 会以为凭据坏了，于是反复重新注册 ——
-    刷注册限速、刷审计日志，而真正的问题（还没配对）反而看不见。
+    解析不出来时给的是 403 + 具体原因 + 具体 ``code``，不是 401。这个区别很重要：
+    401 会让 Agent 以为凭据坏了，于是反复重新注册 —— 而它其实好好的，
+    只是还没配对、或者还没有它的场次。**用错状态码会把一个安静等待
+    变成一场注册风暴**，还会把真正的原因埋进日志噪音里。
     """
     token_hash = hash_token(_bearer(request))
     with ctx.db.session() as session:
-        row = session.execute(
-            select(Agent, Player, Contest)
-            .join(Player, Agent.player_id == Player.id)
-            .join(Contest, Player.contest_id == Contest.id)
-            .where(Agent.token_hash == token_hash)
-        ).first()
-
-        if row is None:
-            claim = enrollment.find_claim_by_token(session, token_hash)
-            if claim is not None:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="这台机器还没配对到选手，请在管理界面完成配对",
-                )
+        agent = _load_agent(session, token_hash)
+        if agent is None:
             raise _unauthorized("凭据无效")
-        agent, player, contest = row
         if agent.revoked_at is not None:
-            raise _unauthorized("该机器的凭据已被吊销")
+            raise _unauthorized("该机器的凭据已作废", code="machine_revoked")
 
-        identity = AgentIdentity(
-            agent_id=agent.id,
-            player_id=player.id,
-            player_no=player.player_no,
-            player_name=player.name,
-            contest_id=contest.id,
-            contest_slug=contest.slug,
-            contest_name=contest.name,
-            contest_status=contest.status,
-            machine_id=agent.machine_id,
-            hostname=agent.hostname,
-        )
+        resolved = resolve_machine(session, agent)
+        if not resolved.ok:
+            raise ApiError(
+                403,
+                resolved.code or "pairing_required",
+                _blocked_detail(agent.id, resolved),
+                {"agent_id": agent.id, "paired": resolved.entry is not None},
+            )
 
-    # 静态身份写入内存注册表，后续 tick 只更新动态部分
+        identity = _to_identity(resolved)
+        machine_id = agent.machine_id
+        hostname = agent.hostname
+
+    _remember(ctx, identity, machine_id, hostname)
+    return identity
+
+
+def _remember(ctx: AppContext, identity: AgentIdentity, machine_id, hostname) -> None:
+    """把"这台机器现在是谁、在哪场比赛"写进内存注册表。
+
+    在线状态**只存在于内存里**（心跳时更新），所以每一个能干活请求都必须
+    经过这里。漏掉任何一个（特别是 ``/tick`` —— 它才是心跳）的后果是
+    管理界面上那一页永远是空的，而且不报错。
+    """
     ctx.registry.upsert_identity(
         agent_id=identity.agent_id,
         player_id=identity.player_id,
@@ -134,54 +310,72 @@ def require_agent(request: Request, ctx: AppContext = Depends(get_ctx)) -> Agent
         player_no=identity.player_no,
         player_name=identity.player_name,
         contest_slug=identity.contest_slug,
-        machine_id=identity.machine_id,
-        hostname=identity.hostname,
+        machine_id=machine_id,
+        hostname=hostname,
     )
-    return identity
 
 
-def require_principal(
-    request: Request, ctx: AppContext = Depends(get_ctx)
-) -> Principal:
-    """接受**任意**有效凭据：已认领的 Agent，或一台还没配对的机器。
+def _blocked_detail(agent_id: int, resolved: Resolution) -> str:
+    if resolved.entry is None:
+        return "这台机器还没配对到人，请在管理界面「机器配对」里认领（机器上有配对码）"
+    return "这台机器已经配对给 %s，但暂时不能干活：%s" % (
+        resolved.entry.player_no,
+        resolved.reason or "找不到可用的场次",
+    )
 
-    只有 ``/tick`` 用它 —— 未配对的机器唯一要做的事就是定期问一句
-    "认领了没有"。别的接口（上传、下载、事件）一律走 ``require_agent``：
-    它们都需要选手身份，让未配对的机器进来没有任何意义，只会多出一堆
-    需要判空的分支。
+
+def _to_identity(resolved: Resolution) -> AgentIdentity:
+    assert resolved.entry is not None and resolved.contest is not None
+    assert resolved.player is not None
+    return AgentIdentity(
+        agent_id=resolved.agent.id,
+        player_id=resolved.player.id,
+        player_no=resolved.player.player_no,
+        player_name=resolved.player.name,
+        contest_id=resolved.contest.id,
+        contest_slug=resolved.contest.slug,
+        contest_name=resolved.contest.name,
+        contest_status=resolved.contest.status,
+        roster_entry_id=resolved.entry.id,
+        roster_entry_name=resolved.entry.name,
+        machine_id=resolved.agent.machine_id,
+        hostname=resolved.agent.hostname,
+    )
+
+
+def require_principal(request: Request, ctx: AppContext = Depends(get_ctx)) -> Principal:
+    """接受任意有效凭据：能干活就干活，不能干活就如实说明卡在哪。
+
+    只有 ``/tick`` 用它 —— 干不了活的机器唯一要做的事就是定期问一句
+    "轮到我了吗"。别的接口（上传、下载、事件）一律走 ``require_agent``：
+    它们都需要选手身份，让干不了活的机器进来没有任何意义，
+    只会多出一堆需要判空的分支。
     """
     token_hash = hash_token(_bearer(request))
     with ctx.db.session() as session:
-        row = session.execute(
-            select(Agent, Player, Contest)
-            .join(Player, Agent.player_id == Player.id)
-            .join(Contest, Player.contest_id == Contest.id)
-            .where(Agent.token_hash == token_hash)
-        ).first()
-        if row is not None:
-            agent, player, contest = row
-            if agent.revoked_at is not None:
-                raise _unauthorized("该机器的凭据已被吊销")
-            return AgentIdentity(
-                agent_id=agent.id,
-                player_id=player.id,
-                player_no=player.player_no,
-                player_name=player.name,
-                contest_id=contest.id,
-                contest_slug=contest.slug,
-                contest_name=contest.name,
-                contest_status=contest.status,
-                machine_id=agent.machine_id,
-                hostname=agent.hostname,
-            )
+        agent = _load_agent(session, token_hash)
+        if agent is None:
+            raise _unauthorized("凭据无效")
+        if agent.revoked_at is not None:
+            raise _unauthorized("该机器的凭据已作废", code="machine_revoked")
 
-        claim = enrollment.find_claim_by_token(session, token_hash)
-        if claim is not None:
-            return MachineIdentity(
-                claim_id=claim.id,
-                machine_id=claim.machine_id or "unknown",
-                hostname=claim.hostname,
-                pair_code=None,  # 明文只在注册那一刻存在，之后只有哈希
-            )
+        resolved = resolve_machine(session, agent)
+        if resolved.ok:
+            identity = _to_identity(resolved)
+            machine_id = agent.machine_id
+            hostname = agent.hostname
+            # /tick 是**唯一**的心跳入口，而在线状态只活在内存注册表里。
+            # 不在这里登记的话，管理界面看到的永远是一页空白 —— 而且不报错。
+            _remember(ctx, identity, machine_id, hostname)
+            return identity
 
-    raise _unauthorized("凭据无效")
+        entry = resolved.entry
+        return MachineIdentity(
+            agent_id=agent.id,
+            machine_id=agent.machine_id,
+            hostname=agent.hostname,
+            paired=entry is not None,
+            roster_entry_id=entry.id if entry else None,
+            roster_entry_name=entry.name if entry else None,
+            reason=resolved.reason,
+        )

@@ -8,10 +8,11 @@
 from __future__ import annotations
 
 import argparse
-import getpass
+import json
 import logging
 import secrets
 import sys
+from pathlib import Path
 from typing import List, Optional
 
 from . import __version__
@@ -104,6 +105,56 @@ def _cmd_info(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_genkey(args: argparse.Namespace) -> int:
+    """生成发布签名密钥对。
+
+    私钥留在服务端（用于签发升级包），公钥要分发到每台考试机的
+    ``/etc/syncoj/release-key.pub.json`` —— 它就是 Agent 的信任锚。
+    """
+    from .services.signing import DerError, generate_keypair, openssl_available
+
+    if not openssl_available():
+        print(
+            "错误：找不到 openssl。密钥生成依赖它（Miller-Rabin 与随机素数搜索是\n"
+            "      极易写错的密码学代码，不适合自己实现）。\n"
+            "      Debian/Ubuntu: apt install openssl",
+            file=sys.stderr,
+        )
+        return 2
+
+    out = Path(args.out).expanduser()
+    if out.exists() and not args.force:
+        print("错误：私钥已存在，拒绝覆盖: %s" % out, file=sys.stderr)
+        print("      覆盖它会让所有已发布的签名失效。要强制覆盖请加 --force。", file=sys.stderr)
+        return 2
+    if out.exists() and args.force:
+        out.unlink()
+
+    try:
+        key = generate_keypair(out, bits=args.bits)
+    except (DerError, RuntimeError, OSError) as exc:
+        print("生成失败：%s" % exc, file=sys.stderr)
+        return 1
+
+    pub_path = Path(args.public_out) if args.public_out else out.with_suffix(".pub.json")
+    pub_path.parent.mkdir(parents=True, exist_ok=True)
+    pub_path.write_text(
+        json.dumps(key.public_key_dict(), indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    print("[+] 私钥: %s  (权限 0600，绝不外传)" % out)
+    print("[+] 公钥: %s" % pub_path)
+    print("    密钥长度: %d 位    key_id: %s" % (key.bits, key.key_id))
+    print()
+    print("下一步:")
+    print("  1. 服务端启动时带上私钥: SYNCOJ_RELEASE_KEY=%s syncoj-server serve" % out)
+    print("  2. 把公钥分发到每台考试机: /etc/syncoj/release-key.pub.json")
+    print("     并在 agent.ini 的 [upgrade] 段写 public_key = <该路径>")
+    print("  3. 未配置这两项时自更新整体关闭 —— 这是安全的默认状态")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="syncoj-server",
@@ -133,6 +184,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_info = sub.add_parser("info", help="打印配置与统计")
     p_info.set_defaults(func=_cmd_info)
+
+    p_key = sub.add_parser("genkey", help="生成发布签名密钥对（自更新用）")
+    p_key.add_argument(
+        "--out",
+        default="/etc/syncoj/release-key.pem",
+        help="私钥输出路径（默认 /etc/syncoj/release-key.pem）",
+    )
+    p_key.add_argument("--public-out", default=None, help="公钥输出路径（默认同目录 .pub.json）")
+    p_key.add_argument("--bits", type=int, default=2048, help="密钥长度，不得低于 2048")
+    p_key.add_argument("--force", action="store_true", help="覆盖已存在的私钥")
+    p_key.set_defaults(func=_cmd_genkey)
 
     return parser
 

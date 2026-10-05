@@ -3,8 +3,8 @@ import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 
-import { contestApi } from '@/api'
-import type { ContestOut } from '@/api/types'
+import { contestApi, rosterApi } from '@/api'
+import type { ContestOut, RosterOut } from '@/api/types'
 
 const props = defineProps<{
   modelValue: boolean
@@ -27,11 +27,28 @@ const submitting = ref(false)
 /** slug 是否由用户手工编辑过。没有的话跟着名称自动走。 */
 const slugTouched = ref(false)
 
+const rosters = ref<RosterOut[]>([])
+
+/**
+ * 名单列表在打开对话框时才拉 —— 名单库是全局的，和场次无关，
+ * 而这里只需要一个下拉选项，没必要进主视图的数据流。
+ */
+async function loadRosters(): Promise<void> {
+  try {
+    rosters.value = await rosterApi.list()
+  } catch {
+    // 拉不到就当成"没有名单"，不拦住建场次 —— 名单本来就是可选项
+    rosters.value = []
+  }
+}
+
 const form = reactive({
   name: '',
   slug: '',
   status: 'draft',
   note: '',
+  defaultRosterId: null as number | null,
+  enrollmentMode: 'per_player_code',
 })
 
 const rules: FormRules = {
@@ -68,8 +85,11 @@ watch(visible, (open) => {
   form.slug = ''
   form.status = 'running'
   form.note = ''
+  form.defaultRosterId = null
+  form.enrollmentMode = 'per_player_code'
   slugTouched.value = false
   formRef.value?.clearValidate()
+  void loadRosters()
 })
 
 async function submit(): Promise<void> {
@@ -85,6 +105,8 @@ async function submit(): Promise<void> {
       slug: form.slug.trim() || null,
       status: form.status,
       note: form.note.trim() || null,
+      default_roster_id: form.defaultRosterId,
+      enrollment_mode: form.enrollmentMode,
     })
     ElMessage.success(`场次「${contest.name}」已创建`)
     visible.value = false
@@ -126,6 +148,41 @@ async function submit(): Promise<void> {
         </el-select>
       </el-form-item>
 
+      <el-form-item label="默认名单">
+        <el-select
+          v-model="form.defaultRosterId"
+          placeholder="可选：留空则之后手动导入选手"
+          clearable
+          style="width: 100%"
+        >
+          <el-option
+            v-for="roster in rosters"
+            :key="roster.id"
+            :label="`${roster.name}（${roster.entry_count} 人）`"
+            :value="roster.id"
+          />
+        </el-select>
+        <div class="page-hint">
+          只是一个<strong>预设</strong> —— 创建后到「名单库」页点一次「应用」才会把
+          选手落到这个场次。改名单不会自动影响场次。
+          <span v-if="!rosters.length">
+            还没有名单，可以先去「名单库」建一份。
+          </span>
+        </div>
+      </el-form-item>
+
+      <el-form-item label="注册方式">
+        <el-radio-group v-model="form.enrollmentMode">
+          <el-radio value="per_player_code">每人一个注册码</el-radio>
+          <el-radio value="bootstrap">镜像统一密钥 + 短码配对</el-radio>
+        </el-radio-group>
+        <div class="page-hint">
+          一个选手一个注册码适合临时加人、小规模现场发码；
+          统一密钥适合整间机房用同一份镜像预装 —— 机器注册后没有归属，
+          由教师在「机器配对」里认领到人。
+        </div>
+      </el-form-item>
+
       <el-form-item label="备注">
         <el-input v-model="form.note" type="textarea" :rows="2" maxlength="500" />
       </el-form-item>
@@ -134,7 +191,8 @@ async function submit(): Promise<void> {
     <el-alert type="info" :closable="false" show-icon>
       <template #title>创建后还需要两步才能用</template>
       <template #default>
-        ① 在「选手状态」页导入选手　② 为每位选手签发注册码并装到考试机上。
+        ① 把选手落到场次（导入，或从「名单库」应用一份）
+        ② 让考试机注册上来（签发注册码，或装好带统一密钥的镜像）
       </template>
     </el-alert>
 

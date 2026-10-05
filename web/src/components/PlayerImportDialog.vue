@@ -4,6 +4,7 @@ import { ElMessage } from 'element-plus'
 
 import { playerApi } from '@/api'
 import type { PlayerOut, PlayerUpsert } from '@/api/types'
+import { parsePasteLines } from '@/utils/paste'
 
 const props = defineProps<{
   modelValue: boolean
@@ -35,30 +36,18 @@ interface ParsedRow {
 /**
  * 按行解析。
  *
- * 列分隔符依次尝试 **制表符 → 英文逗号 → 中文逗号 → 连续空白**：
- * 教师多半是从 Excel 粘过来的（制表符），也可能是手敲的（空格或逗号）。
- * 直接按空白切会把"张 三"这种带空格的名字切坏，所以逗号优先于空白。
+ * 分隔符的尝试顺序（制表符 → 逗号 → 空白）见 ``utils/paste.ts``：
+ * 教师多半是从 Excel 粘过来的（制表符），也可能是手敲的。
  */
-function splitColumns(line: string): string[] {
-  if (line.includes('\t')) return line.split('\t')
-  if (line.includes(',')) return line.split(',')
-  if (line.includes('，')) return line.split('，')
-  return line.split(/\s+/)
-}
-
 const parsed = computed<ParsedRow[]>(() => {
   const seen = new Set<string>()
   const rows: ParsedRow[] = []
 
-  raw.value.split(/\r?\n/).forEach((line, index) => {
-    const text = line.trim()
-    if (!text || text.startsWith('#')) return // 允许用 # 写注释
-
-    const columns = splitColumns(text).map((cell) => cell.trim())
+  for (const { line, columns } of parsePasteLines(raw.value)) {
     const [playerNo = '', name = '', seat = '', group = ''] = columns
 
     const row: ParsedRow = {
-      line: index + 1,
+      line,
       player_no: playerNo,
       name,
       seat,
@@ -75,7 +64,7 @@ const parsed = computed<ParsedRow[]>(() => {
       seen.add(playerNo)
     }
     rows.push(row)
-  })
+  }
 
   return rows
 })

@@ -281,3 +281,36 @@ def test_every_api_method_is_wired_to_the_ui() -> None:
         + "\n\n要么把它接上界面，要么删掉声明 —— "
         "留着一个没人调用的方法，就是一处伪装成已完成的功能缺失。"
     )
+
+
+# --------------------------------------------------------------------------- #
+# 界面覆盖：每个 view 必须真的挂在路由上
+# --------------------------------------------------------------------------- #
+#
+# 和上面那条是同一类问题：写了页面但没挂路由，**从界面上永远到不了**。
+# 编译能过、类型能过，只有"文件存在但路由里没有它"这个静态事实能暴露。
+#
+# 导航菜单不在这里查：菜单是给常用页面用的，把每个页面都塞进侧栏并不合适，
+# 路由才是"能到达"的唯一判据。
+
+
+def test_every_view_is_reachable_by_a_route() -> None:
+    router_source = (FRONTEND_ROOT / "router" / "index.ts").read_text(encoding="utf-8")
+
+    unreachable = []
+    for path in sorted((FRONTEND_ROOT / "views").glob("*.vue")):
+        # 路由里用 "@/views/XxxView.vue" 引用，按文件名匹配即可
+        if path.name not in router_source:
+            unreachable.append(path.name)
+
+    assert not unreachable, (
+        "以下页面没有挂在路由上，从界面上永远点不到：\n"
+        + "\n".join("  %s" % name for name in unreachable)
+        + "\n\n要么在 web/src/router/index.ts 里挂上，要么把文件删掉。"
+    )
+
+
+def test_some_views_were_found() -> None:
+    """防止上面那条因为 glob 失效而永远通过。"""
+    views = list((FRONTEND_ROOT / "views").glob("*.vue"))
+    assert len(views) >= 8, "只找到 %d 个页面：%r" % (len(views), [p.name for p in views])

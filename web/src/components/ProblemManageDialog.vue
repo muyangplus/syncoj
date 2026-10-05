@@ -4,6 +4,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 
 import { problemApi } from '@/api'
 import type { ProblemMatchOut, ProblemOut, ProblemUpsert } from '@/api/types'
+import { parsePasteLines } from '@/utils/paste'
 
 const props = defineProps<{
   modelValue: boolean
@@ -37,21 +38,14 @@ interface ParsedRow {
 /**
  * 按行解析粘贴的题目清单。
  *
- * 每行 ``标识``、``标识,标题`` 或 ``标识,标题,模式``（逗号、制表符、中文逗号都认）。
+ * 每行 ``标识``、``标识,标题`` 或 ``标识,标题,模式``（逗号、制表符、中文逗号都认，
+ * 分隔符顺序见 ``utils/paste.ts``）。
  * 第三列里的多条模式用 ``;`` 或 ``|`` 分隔 —— 不用空格，因为空格在"整行按空白
  * 分列"的形式下本身就是列分隔符，两种含义混在一起没人猜得准。
  *
  * 标识会同时成为目录名、代码文件名与成绩矩阵列名，所以这里能做的格式检查
  * 尽量做掉，真正的合法性由服务端判定。
  */
-function splitColumns(line: string): string[] {
-  if (line.includes('\t')) return line.split('\t')
-  if (line.includes(',')) return line.split(',')
-  if (line.includes('，')) return line.split('，')
-  return line.split(/\s+/)
-}
-
-/** 拆分第三列里的多条模式。 */
 function splitPatterns(cell: string): string[] {
   return cell
     .split(/[;|]/)
@@ -63,19 +57,14 @@ const parsed = computed<ParsedRow[]>(() => {
   const seen = new Set<string>()
   const rows: ParsedRow[] = []
 
-  raw.value.split(/\r?\n/).forEach((line, index) => {
-    const text = line.trim()
-    if (!text || text.startsWith('#')) return
-
+  for (const { line, columns } of parsePasteLines(raw.value)) {
     // 整行按空白分列时，第三列之后的每一段都当成一条模式 —— 教师直接
     // 从文档里粘 `p1 签到题 p1/**` 是很自然的写法
-    const cells = splitColumns(text).map((cell) => cell.trim())
-    const [ident = '', title = ''] = cells
-    const tail = cells.slice(2)
-    const patterns =
-      tail.length > 1 ? tail.filter(Boolean) : splitPatterns(tail[0] ?? '')
+    const [ident = '', title = ''] = columns
+    const tail = columns.slice(2)
+    const patterns = tail.length > 1 ? tail.filter(Boolean) : splitPatterns(tail[0] ?? '')
 
-    const row: ParsedRow = { line: index + 1, ident, title, patterns }
+    const row: ParsedRow = { line, ident, title, patterns }
 
     if (!ident) {
       row.error = '缺少题目标识'
@@ -92,7 +81,7 @@ const parsed = computed<ParsedRow[]>(() => {
       seen.add(ident)
     }
     rows.push(row)
-  })
+  }
 
   return rows
 })

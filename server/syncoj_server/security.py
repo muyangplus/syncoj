@@ -22,9 +22,17 @@ __all__ = [
     "tokens_equal",
     "new_enroll_code",
     "hash_enroll_code",
+    "new_pair_code",
+    "hash_pair_code",
+    "new_bootstrap_key",
+    "hash_bootstrap_key",
     "hash_password",
     "verify_password",
 ]
+
+#: 念得出、抄得对的字符集。去掉 I/O/0/1 —— 配对码要被人从考试机屏幕上读出来、
+#: 再在教师的电脑上敲进去，这两个字形是抄错的头号来源。
+CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 # scrypt 参数。n=2**14 在服务端约 50~100ms，足以让离线爆破不划算，
 # 又不至于让管理员登录明显卡顿。内存开销约 16MB。
@@ -60,8 +68,7 @@ def tokens_equal(a: Optional[str], b: Optional[str]) -> bool:
 
 def new_enroll_code(nbytes: int = 16) -> str:
     """生成注册码。为了让教师能念/抄，用大写字母数字分组形式。"""
-    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # 去掉 I/O/0/1
-    raw = "".join(secrets.choice(alphabet) for _ in range(nbytes))
+    raw = "".join(secrets.choice(CODE_ALPHABET) for _ in range(nbytes))
     return "-".join(raw[i : i + 4] for i in range(0, len(raw), 4))
 
 
@@ -69,6 +76,40 @@ def hash_enroll_code(raw: str) -> str:
     """注册码的存储形态。先做规范化，容忍教师输入时的大小写与分隔符差异。"""
     normalized = "".join(ch for ch in raw.upper() if ch.isalnum())
     return hashlib.sha256(("enroll:" + normalized).encode("utf-8")).hexdigest()
+
+
+def new_pair_code(length: int = 6) -> str:
+    """生成配对短码。
+
+    6 位、32 个字符可选 ≈ 2^30 ≈ 10 亿种组合。这个空间单独看不算大，
+    但短码**只在几分钟内有效、用一次就作废、而且必须由管理员在后台输入**，
+    所以暴力试的窗口极小。真要靠它当长期凭据就不行了 —— 它从来不是凭据，
+    只是"人在机器前，确认这台是哪台"的凭证。
+    """
+    return "".join(secrets.choice(CODE_ALPHABET) for _ in range(length))
+
+
+def hash_pair_code(raw: str) -> str:
+    """配对码的存储形态。和注册码一样，容忍大小写、空格与连字符。"""
+    normalized = "".join(ch for ch in raw.upper() if ch.isalnum())
+    return hashlib.sha256(("pair:" + normalized).encode("utf-8")).hexdigest()
+
+
+def new_bootstrap_key(nbytes: int = 32) -> str:
+    """生成镜像内置的统一注册密钥。
+
+    比注册码长得多（32 字节 vs 16）：一把注册码对应一个选手，泄漏了只是
+    "多了一台冒充某个人的机器"；一把 bootstrap key 对应**整间机房**，
+    泄漏了等于交出"无限注册"的能力。所以熵要够，而且它不该出现在
+    ``agent.ini`` 这种选手读得到的地方。
+    """
+    raw = "".join(secrets.choice(CODE_ALPHABET) for _ in range(nbytes))
+    return "-".join(raw[i : i + 8] for i in range(0, len(raw), 8))
+
+
+def hash_bootstrap_key(raw: str) -> str:
+    normalized = "".join(ch for ch in raw.upper() if ch.isalnum())
+    return hashlib.sha256(("bootstrap:" + normalized).encode("utf-8")).hexdigest()
 
 
 def _b64(raw: bytes) -> str:

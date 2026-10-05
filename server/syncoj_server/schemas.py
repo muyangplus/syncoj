@@ -178,6 +178,10 @@ class ContestCreate(_Base):
     slug: Optional[str] = Field(default=None, max_length=64)
     status: str = Field(default="draft", max_length=16)
     note: Optional[str] = None
+    #: 默认名单。只作为"一键应用"的预设，不参与鉴权也不影响已有选手
+    default_roster_id: Optional[int] = None
+    #: 见 ``EnrollmentMode``。留空 = 每选手注册码（原有行为）
+    enrollment_mode: Optional[str] = Field(default=None, max_length=24)
 
 
 class ContestOut(_Base):
@@ -188,6 +192,109 @@ class ContestOut(_Base):
     player_count: int = 0
     online_count: int = 0
     created_at: str
+    default_roster_id: Optional[int] = None
+    default_roster_name: Optional[str] = None
+    #: 实际生效的注册方式。老数据可能没这个字段，所以由服务端算好再下发
+    enrollment_mode: str = "per_player_code"
+
+
+class ContestUpdate(_Base):
+    """场次的可改字段。全部可选 —— 只改传了的。"""
+
+    name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    status: Optional[str] = Field(default=None, max_length=16)
+    note: Optional[str] = None
+    default_roster_id: Optional[int] = None
+    enrollment_mode: Optional[str] = Field(default=None, max_length=24)
+    #: 显式置空用的开关。``None`` 字段没法区分"没传"和"传了 null"，
+    #: 所以要多一个布尔 —— 否则教师永远清不掉已经选错的名单。
+    clear_default_roster: bool = False
+
+
+# --------------------------------------------------------------------------- #
+# 名单库
+# --------------------------------------------------------------------------- #
+
+
+class RosterEntryIn(_Base):
+    """名单条目。
+
+    ``player_no`` 的长度上限刻意给得**很宽**（512），真正的 64 字上限由业务层
+    逐条判定。原因：pydantic 的校验是**全有或全无** —— 一条超长会让整个请求
+    422，教师粘的 100 行名单全部白填，而界面上只会弹一句
+    "String should have at most 64 characters"。
+
+    批量接口的逐条错误必须由业务层报，那里才能做到"跳过这一条，其余照常入库"。
+    这里留的宽上限只用来挡住明显荒谬的输入（比如 10MB 的字符串）。
+    """
+
+    player_no: str = Field(max_length=512)
+    name: Optional[str] = Field(default=None, max_length=512)
+    seat: Optional[str] = Field(default=None, max_length=512)
+    group_name: Optional[str] = Field(default=None, max_length=512)
+
+
+class RosterEntryOut(_Base):
+    id: int
+    roster_id: int
+    player_no: str
+    name: Optional[str] = None
+    seat: Optional[str] = None
+    group_name: Optional[str] = None
+
+
+class RosterCreate(_Base):
+    name: str = Field(min_length=1, max_length=200)
+    note: Optional[str] = None
+
+
+class RosterOut(_Base):
+    id: int
+    name: str
+    note: Optional[str] = None
+    created_at: str
+    entry_count: int = 0
+
+
+class RosterDetailOut(RosterOut):
+    entries: List["RosterEntryOut"] = Field(default_factory=list)
+
+
+class RosterImportOut(_Base):
+    """名单导入结果。
+
+    和题目导入一样**逐条容错**：某一行不合法只跳过那一行并在 ``errors``
+    里说明，不让整批失败。一份名单几十上百行，因为一个空格全部白填
+    是没人能接受的。
+    """
+
+    created: int = 0
+    updated: int = 0
+    skipped: int = 0
+    errors: List[str] = Field(default_factory=list)
+    entries: List[RosterEntryOut] = Field(default_factory=list)
+
+
+class ApplyRosterIn(_Base):
+    """把名单应用到场次。
+
+    ``prune`` 默认 **False**，而且**永远不动已经有代码或成绩的选手** ——
+    名单调整是常事，把参赛者的提交一起删掉是不可逆的事故。
+    """
+
+    roster_id: Optional[int] = None
+    prune: bool = False
+
+
+class ApplyRosterOut(_Base):
+    roster_id: Optional[int] = None
+    roster_name: Optional[str] = None
+    created: int = 0
+    updated: int = 0
+    kept: int = 0
+    pruned: int = 0
+    #: 因为"已经有提交/成绩"而被保留下来的选手编号
+    protected: List[str] = Field(default_factory=list)
 
 
 class PlayerUpsert(_Base):

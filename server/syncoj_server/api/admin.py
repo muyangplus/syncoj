@@ -33,16 +33,21 @@ from ..models import (
     Agent,
     AgentRelease,
     Asset,
+    BootstrapKey,
     Contest,
     ContestStatus,
     DeployStatus,
     DeployTarget,
     DeployTask,
+    EnrollmentMode,
     EnrollCode,
     EventLog,
     JudgeRun,
+    MachineClaim,
     Player,
     Problem,
+    Roster,
+    RosterEntry,
     SourceFile,
     utcnow,
 )
@@ -50,9 +55,12 @@ from ..paths import PathValidationError, safe_join, slugify, validate_relpath
 from ..schemas import (
     AdminInfo,
     AgentRuntimeOut,
+    ApplyRosterIn,
+    ApplyRosterOut,
     AssetOut,
     ContestCreate,
     ContestOut,
+    ContestUpdate,
     DeployCreate,
     DeployTargetOut,
     DeployTaskOut,
@@ -73,6 +81,12 @@ from ..schemas import (
     ProblemUpsert,
     ReleaseOut,
     ReleaseUpdate,
+    RosterCreate,
+    RosterDetailOut,
+    RosterEntryIn,
+    RosterEntryOut,
+    RosterImportOut,
+    RosterOut,
     ScoreCellOut,
     ScoreMatrixOut,
     ScoreRowOut,
@@ -88,7 +102,7 @@ from ..security import (
     new_token,
     verify_password,
 )
-from ..services import matching
+from ..services import matching, rosters
 from ..services.deploy import validate_dest_template
 from ..services.signing import parse_version
 from ..storage import BlobTooLarge, HashMismatch
@@ -225,14 +239,23 @@ def create_contest(
 ) -> ContestOut:
     status_value = payload.status if payload.status in ContestStatus.ALL else ContestStatus.DRAFT
     slug = slugify(payload.slug or payload.name, fallback="contest")
+    mode = _validate_enrollment_mode(payload.enrollment_mode)
 
     with ctx.db.session() as session:
         if session.execute(select(Contest).where(Contest.slug == slug)).scalar_one_or_none():
             raise HTTPException(status_code=409, detail="场次标识已存在: %s" % slug)
-        contest = Contest(slug=slug, name=payload.name, status=status_value, note=payload.note)
+        roster = _resolve_roster(session, payload.default_roster_id)
+        contest = Contest(
+            slug=slug,
+            name=payload.name,
+            status=status_value,
+            note=payload.note,
+            default_roster_id=roster.id if roster else None,
+            enrollment_mode=mode,
+        )
         session.add(contest)
         session.flush()
-        return _contest_out(contest, player_count=0, online_count=0)
+        return _contest_out(contest, player_count=0, online_count=0, roster=roster)
 
 
 @router.get("/contests", response_model=List[ContestOut])
@@ -246,15 +269,95 @@ def list_contests(
                 select(Player.contest_id, func.count(Player.id)).group_by(Player.contest_id)
             ).all()
         )
+        rosters = {row.id: row for row in session.execute(select(Roster)).scalars()}
         contests = list(session.execute(select(Contest).order_by(Contest.id)).scalars())
         result = []
         for contest in contests:
             online = sum(1 for a in ctx.registry.all(contest.id) if a.online)
-            result.append(_contest_out(contest, counts.get(contest.id, 0), online))
+            result.append(
+                _contest_out(
+                    contest,
+                    counts.get(contest.id, 0),
+                    online,
+                    roster=rosters.get(contest.default_roster_id),
+                )
+            )
         return result
 
 
-def _contest_out(contest: Contest, player_count: int, online_count: int) -> ContestOut:
+@router.patch("/contests/{contest_id}", response_model=ContestOut)
+def update_contest(
+    contest_id: int,
+    payload: ContestUpdate,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> ContestOut:
+    """改场次设置。只改传了的字段。
+
+    ``default_roster_id`` 有个特殊之处：``None`` 没法区分"没传"和"要清空"。
+    所以清空要靠 ``clear_default_roster`` 这个显式开关 —— 否则教师一次选错
+    名单就再也改不回来了。
+    """
+    with ctx.db.session() as session:
+        contest = session.get(Contest, contest_id)
+        if contest is None:
+            raise HTTPException(status_code=404, detail="场次不存在")
+
+        if payload.name is not None:
+            contest.name = payload.name
+        if payload.note is not None:
+            contest.note = payload.note
+        if payload.status is not None:
+            if payload.status not in ContestStatus.ALL:
+                raise HTTPException(status_code=400, detail="未知的场次状态: %s" % payload.status)
+            contest.status = payload.status
+        if payload.enrollment_mode is not None:
+            contest.enrollment_mode = _validate_enrollment_mode(payload.enrollment_mode)
+
+        roster = None
+        if payload.clear_default_roster:
+            contest.default_roster_id = None
+        elif payload.default_roster_id is not None:
+            roster = _resolve_roster(session, payload.default_roster_id)
+            contest.default_roster_id = roster.id
+        elif contest.default_roster_id is not None:
+            roster = session.get(Roster, contest.default_roster_id)
+
+        session.flush()
+        player_count = session.execute(
+            select(func.count(Player.id)).where(Player.contest_id == contest_id)
+        ).scalar_one()
+        online = sum(1 for a in ctx.registry.all(contest_id) if a.online)
+        return _contest_out(contest, player_count, online, roster=roster)
+
+
+def _validate_enrollment_mode(raw: Optional[str]) -> str:
+    """校验注册方式。空值按原有行为理解 —— 老场次没这个字段。"""
+    if raw is None or raw == "":
+        return EnrollmentMode.PER_PLAYER_CODE
+    if raw not in EnrollmentMode.ALL:
+        raise HTTPException(
+            status_code=400,
+            detail="未知的注册方式: %s（可选 %s）" % (raw, " / ".join(EnrollmentMode.ALL)),
+        )
+    return raw
+
+
+def _resolve_roster(session, roster_id: Optional[int]) -> Optional[Roster]:
+    if roster_id is None:
+        return None
+    roster = session.get(Roster, roster_id)
+    if roster is None:
+        raise HTTPException(status_code=404, detail="名单不存在: %s" % roster_id)
+    return roster
+
+
+def _contest_out(
+    contest: Contest,
+    player_count: int,
+    online_count: int,
+    roster: Optional[Roster] = None,
+) -> ContestOut:
     return ContestOut(
         id=contest.id,
         slug=contest.slug,
@@ -263,7 +366,314 @@ def _contest_out(contest: Contest, player_count: int, online_count: int) -> Cont
         player_count=player_count,
         online_count=online_count,
         created_at=_iso(contest.created_at) or "",
+        default_roster_id=contest.default_roster_id,
+        default_roster_name=(roster.name if roster is not None else None),
+        enrollment_mode=contest.effective_enrollment_mode,
     )
+
+
+# --------------------------------------------------------------------------- #
+# 名单库
+# --------------------------------------------------------------------------- #
+
+
+def _roster_out(roster: Roster, entry_count: int) -> RosterOut:
+    return RosterOut(
+        id=roster.id,
+        name=roster.name,
+        note=roster.note,
+        created_at=_iso(roster.created_at) or "",
+        entry_count=entry_count,
+    )
+
+
+def _first_overlong(*candidates) -> Optional[str]:
+    """返回第一个超长的字段说明，都合规就返回 None。
+
+    ``candidates`` 是 ``(值, 上限, 字段名)`` 三元组。抽成一个小函数是因为
+    校验逻辑一旦散在三处，早晚会漏掉一处，而漏掉的表现是"数据静默超长"。
+    """
+    for value, limit, label in candidates:
+        if value is not None and len(value) > limit:
+            return "%s 超过 %d 字符" % (label, limit)
+    return None
+
+
+def _roster_entry_out(entry: RosterEntry) -> RosterEntryOut:
+    return RosterEntryOut(
+        id=entry.id,
+        roster_id=entry.roster_id,
+        player_no=entry.player_no,
+        name=entry.name,
+        seat=entry.seat,
+        group_name=entry.group_name,
+    )
+
+
+@router.get("/rosters", response_model=List[RosterOut])
+def list_rosters(
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> List[RosterOut]:
+    with ctx.db.session() as session:
+        counts = dict(
+            session.execute(
+                select(RosterEntry.roster_id, func.count(RosterEntry.id)).group_by(
+                    RosterEntry.roster_id
+                )
+            ).all()
+        )
+        rows = session.execute(select(Roster).order_by(Roster.name)).scalars()
+        return [_roster_out(row, counts.get(row.id, 0)) for row in rows]
+
+
+@router.post("/rosters", response_model=RosterOut)
+def create_roster(
+    payload: RosterCreate,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> RosterOut:
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="名单名称不能为空")
+    with ctx.db.session() as session:
+        if session.execute(select(Roster).where(Roster.name == name)).scalar_one_or_none():
+            raise HTTPException(status_code=409, detail="名单名称已存在: %s" % name)
+        roster = Roster(name=name, note=payload.note)
+        session.add(roster)
+        session.flush()
+        return _roster_out(roster, 0)
+
+
+@router.get("/rosters/{roster_id}", response_model=RosterDetailOut)
+def get_roster(
+    roster_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> RosterDetailOut:
+    with ctx.db.session() as session:
+        roster = session.get(Roster, roster_id)
+        if roster is None:
+            raise HTTPException(status_code=404, detail="名单不存在")
+        entries = list(
+            session.execute(
+                select(RosterEntry)
+                .where(RosterEntry.roster_id == roster_id)
+                .order_by(RosterEntry.player_no)
+            ).scalars()
+        )
+        return RosterDetailOut(
+            **_roster_out(roster, len(entries)).model_dump(),
+            entries=[_roster_entry_out(entry) for entry in entries],
+        )
+
+
+@router.patch("/rosters/{roster_id}", response_model=RosterOut)
+def update_roster(
+    roster_id: int,
+    payload: RosterCreate,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> RosterOut:
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="名单名称不能为空")
+    with ctx.db.session() as session:
+        roster = session.get(Roster, roster_id)
+        if roster is None:
+            raise HTTPException(status_code=404, detail="名单不存在")
+        clash = session.execute(
+            select(Roster).where(Roster.name == name, Roster.id != roster_id)
+        ).scalar_one_or_none()
+        if clash is not None:
+            raise HTTPException(status_code=409, detail="名单名称已存在: %s" % name)
+        roster.name = name
+        roster.note = payload.note
+        session.flush()
+        count = session.execute(
+            select(func.count(RosterEntry.id)).where(RosterEntry.roster_id == roster_id)
+        ).scalar_one()
+        return _roster_out(roster, count)
+
+
+@router.delete("/rosters/{roster_id}", response_model=SimpleAck)
+def delete_roster(
+    roster_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> SimpleAck:
+    """删除名单。
+
+    **只删名单本身，不动任何场次的选手。** 名单是模板，场次的参赛者是从它
+    复制出去的一份独立数据 —— 删模板不该牵动已发生的比赛。引用了这份名单的
+    场次会被置空（``ON DELETE SET NULL``），只是"没预设名单了"而已。
+    """
+    with ctx.db.session() as session:
+        roster = session.get(Roster, roster_id)
+        if roster is None:
+            return SimpleAck(ok=True, detail="名单不存在")
+        name = roster.name
+        referenced = session.execute(
+            select(func.count(Contest.id)).where(Contest.default_roster_id == roster_id)
+        ).scalar_one()
+        session.delete(roster)
+    detail = "已删除名单 %s" % name
+    if referenced:
+        detail += "（%d 个场次仍保留各自的选手，只是不再指向这份名单）" % referenced
+    return SimpleAck(ok=True, detail=detail)
+
+
+@router.post("/rosters/{roster_id}/entries", response_model=RosterImportOut)
+def import_roster_entries(
+    roster_id: int,
+    payload: List[RosterEntryIn],
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> RosterImportOut:
+    """批量登记/更新名单条目。按 ``player_no`` 幂等 upsert。
+
+    和题目导入一样逐条容错：某一行不合法只跳过那一行并在 ``errors`` 里说明。
+    一份名单几十上百行，因为一个空格全部白填是没人能接受的。
+    """
+    if not payload:
+        return RosterImportOut()
+    if len(payload) > 5000:
+        raise HTTPException(status_code=413, detail="单次最多导入 5000 条")
+
+    result = RosterImportOut()
+    with ctx.db.session() as session:
+        roster = session.get(Roster, roster_id)
+        if roster is None:
+            raise HTTPException(status_code=404, detail="名单不存在")
+
+        existing = {
+            row.player_no: row
+            for row in session.execute(
+                select(RosterEntry).where(RosterEntry.roster_id == roster_id)
+            ).scalars()
+        }
+        seen = set()
+        for offset, item in enumerate(payload):
+            line_no = offset + 1
+            player_no = item.player_no.strip()
+            if not player_no:
+                result.skipped += 1
+                result.errors.append("第 %d 行：选手编号为空" % line_no)
+                continue
+            if len(player_no) > 64:
+                result.skipped += 1
+                result.errors.append("第 %d 行：选手编号超过 64 字符" % line_no)
+                continue
+            # 姓名字段在库里是 VARCHAR(64/32)，超了 SQLite 也不会报错，只会静默
+            # 存进去。宁可在这里逐条拒绝 —— 同一份名单重新导一次就能修好
+            too_long = _first_overlong(
+                (item.name, 64, "姓名"), (item.seat, 32, "座位"), (item.group_name, 64, "分组")
+            )
+            if too_long:
+                result.skipped += 1
+                result.errors.append("第 %d 行：%s" % (line_no, too_long))
+                continue
+            if player_no in seen:
+                result.skipped += 1
+                result.errors.append("第 %d 行：%s 在本次导入中重复" % (line_no, player_no))
+                continue
+            seen.add(player_no)
+
+            row = existing.get(player_no)
+            if row is None:
+                row = RosterEntry(roster_id=roster_id, player_no=player_no)
+                session.add(row)
+                existing[player_no] = row
+                result.created += 1
+            else:
+                result.updated += 1
+            row.name = item.name
+            row.seat = item.seat
+            row.group_name = item.group_name
+            session.flush()
+            result.entries.append(_roster_entry_out(row))
+    return result
+
+
+@router.delete("/roster-entries/{entry_id}", response_model=SimpleAck)
+def delete_roster_entry(
+    entry_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> SimpleAck:
+    with ctx.db.session() as session:
+        entry = session.get(RosterEntry, entry_id)
+        if entry is None:
+            return SimpleAck(ok=True, detail="条目不存在")
+        player_no = entry.player_no
+        session.delete(entry)
+    return SimpleAck(ok=True, detail="已从名单中移除 %s" % player_no)
+
+
+@router.post("/contests/{contest_id}/players/apply-roster", response_model=ApplyRosterOut)
+def apply_roster_to_contest(
+    contest_id: int,
+    payload: ApplyRosterIn,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> ApplyRosterOut:
+    """把名单应用到场次：名单里有而场次里没有的补上，已有的更新，默认不删人。
+
+    ``prune=True`` 时会删掉"名单里没有"的选手，但**有代码或成绩的一个都不动**，
+    并在 ``protected`` 里列出来告诉教师"这些人删不掉、也不该删"。
+
+    名单是模板，场次是从它复制出去的独立数据 —— 这个动作是**显式**的，
+    改了名单不会自动影响任何场次。
+    """
+    with ctx.db.session() as session:
+        contest = session.get(Contest, contest_id)
+        if contest is None:
+            raise HTTPException(status_code=404, detail="场次不存在")
+
+        roster_id = payload.roster_id or contest.default_roster_id
+        if roster_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail="这个场次还没指定名单，也没有传 roster_id —— 没什么可应用的",
+            )
+        roster = session.get(Roster, roster_id)
+        if roster is None:
+            raise HTTPException(status_code=404, detail="名单不存在: %s" % roster_id)
+
+        entries = list(
+            session.execute(
+                select(RosterEntry)
+                .where(RosterEntry.roster_id == roster_id)
+                .order_by(RosterEntry.player_no)
+            ).scalars()
+        )
+        report = rosters.apply_roster(session, contest_id, roster, entries, payload.prune)
+
+        session.add(
+            EventLog(
+                level="info",
+                category="roster_apply",
+                contest_id=contest_id,
+                message="应用名单「%s」：新增 %d，更新 %d，保留 %d%s"
+                % (
+                    roster.name,
+                    report.created,
+                    report.updated,
+                    report.kept,
+                    "，清理 %d" % report.pruned if report.pruned else "",
+                ),
+            )
+        )
+
+        return ApplyRosterOut(
+            roster_id=roster.id,
+            roster_name=roster.name,
+            created=report.created,
+            updated=report.updated,
+            kept=report.kept,
+            pruned=report.pruned,
+            protected=list(report.protected),
+        )
 
 
 # --------------------------------------------------------------------------- #

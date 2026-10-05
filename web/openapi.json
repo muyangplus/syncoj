@@ -212,6 +212,86 @@
         "title": "AgentRuntimeOut",
         "type": "object"
       },
+      "ApplyRosterIn": {
+        "additionalProperties": false,
+        "description": "把名单应用到场次。\n\n``prune`` 默认 **False**，而且**永远不动已经有代码或成绩的选手** ——\n名单调整是常事，把参赛者的提交一起删掉是不可逆的事故。",
+        "properties": {
+          "prune": {
+            "default": false,
+            "title": "Prune",
+            "type": "boolean"
+          },
+          "roster_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Roster Id"
+          }
+        },
+        "title": "ApplyRosterIn",
+        "type": "object"
+      },
+      "ApplyRosterOut": {
+        "additionalProperties": false,
+        "properties": {
+          "created": {
+            "default": 0,
+            "title": "Created",
+            "type": "integer"
+          },
+          "kept": {
+            "default": 0,
+            "title": "Kept",
+            "type": "integer"
+          },
+          "protected": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Protected",
+            "type": "array"
+          },
+          "pruned": {
+            "default": 0,
+            "title": "Pruned",
+            "type": "integer"
+          },
+          "roster_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Roster Id"
+          },
+          "roster_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Roster Name"
+          },
+          "updated": {
+            "default": 0,
+            "title": "Updated",
+            "type": "integer"
+          }
+        },
+        "title": "ApplyRosterOut",
+        "type": "object"
+      },
       "AssetOut": {
         "additionalProperties": false,
         "properties": {
@@ -331,6 +411,29 @@
       "ContestCreate": {
         "additionalProperties": false,
         "properties": {
+          "default_roster_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Roster Id"
+          },
+          "enrollment_mode": {
+            "anyOf": [
+              {
+                "maxLength": 24,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enrollment Mode"
+          },
           "name": {
             "maxLength": 200,
             "minLength": 1,
@@ -380,6 +483,33 @@
             "title": "Created At",
             "type": "string"
           },
+          "default_roster_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Roster Id"
+          },
+          "default_roster_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Roster Name"
+          },
+          "enrollment_mode": {
+            "default": "per_player_code",
+            "title": "Enrollment Mode",
+            "type": "string"
+          },
           "id": {
             "title": "Id",
             "type": "integer"
@@ -415,6 +545,78 @@
           "created_at"
         ],
         "title": "ContestOut",
+        "type": "object"
+      },
+      "ContestUpdate": {
+        "additionalProperties": false,
+        "description": "场次的可改字段。全部可选 —— 只改传了的。",
+        "properties": {
+          "clear_default_roster": {
+            "default": false,
+            "title": "Clear Default Roster",
+            "type": "boolean"
+          },
+          "default_roster_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Roster Id"
+          },
+          "enrollment_mode": {
+            "anyOf": [
+              {
+                "maxLength": 24,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enrollment Mode"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "maxLength": 16,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          }
+        },
+        "title": "ContestUpdate",
         "type": "object"
       },
       "DeployCreate": {
@@ -1618,6 +1820,266 @@
         "title": "ReleaseUpdate",
         "type": "object"
       },
+      "RosterCreate": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "RosterCreate",
+        "type": "object"
+      },
+      "RosterDetailOut": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/RosterEntryOut"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "entry_count": {
+            "default": 0,
+            "title": "Entry Count",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "created_at"
+        ],
+        "title": "RosterDetailOut",
+        "type": "object"
+      },
+      "RosterEntryIn": {
+        "additionalProperties": false,
+        "description": "名单条目。\n\n``player_no`` 的长度上限刻意给得**很宽**（512），真正的 64 字上限由业务层\n逐条判定。原因：pydantic 的校验是**全有或全无** —— 一条超长会让整个请求\n422，教师粘的 100 行名单全部白填，而界面上只会弹一句\n\"String should have at most 64 characters\"。\n\n批量接口的逐条错误必须由业务层报，那里才能做到\"跳过这一条，其余照常入库\"。\n这里留的宽上限只用来挡住明显荒谬的输入（比如 10MB 的字符串）。",
+        "properties": {
+          "group_name": {
+            "anyOf": [
+              {
+                "maxLength": 512,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Group Name"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 512,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "player_no": {
+            "maxLength": 512,
+            "title": "Player No",
+            "type": "string"
+          },
+          "seat": {
+            "anyOf": [
+              {
+                "maxLength": 512,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seat"
+          }
+        },
+        "required": [
+          "player_no"
+        ],
+        "title": "RosterEntryIn",
+        "type": "object"
+      },
+      "RosterEntryOut": {
+        "additionalProperties": false,
+        "properties": {
+          "group_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Group Name"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "player_no": {
+            "title": "Player No",
+            "type": "string"
+          },
+          "roster_id": {
+            "title": "Roster Id",
+            "type": "integer"
+          },
+          "seat": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seat"
+          }
+        },
+        "required": [
+          "id",
+          "roster_id",
+          "player_no"
+        ],
+        "title": "RosterEntryOut",
+        "type": "object"
+      },
+      "RosterImportOut": {
+        "additionalProperties": false,
+        "description": "名单导入结果。\n\n和题目导入一样**逐条容错**：某一行不合法只跳过那一行并在 ``errors``\n里说明，不让整批失败。一份名单几十上百行，因为一个空格全部白填\n是没人能接受的。",
+        "properties": {
+          "created": {
+            "default": 0,
+            "title": "Created",
+            "type": "integer"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/RosterEntryOut"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "skipped": {
+            "default": 0,
+            "title": "Skipped",
+            "type": "integer"
+          },
+          "updated": {
+            "default": 0,
+            "title": "Updated",
+            "type": "integer"
+          }
+        },
+        "title": "RosterImportOut",
+        "type": "object"
+      },
+      "RosterOut": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "entry_count": {
+            "default": 0,
+            "title": "Entry Count",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "created_at"
+        ],
+        "title": "RosterOut",
+        "type": "object"
+      },
       "ScanEntry": {
         "additionalProperties": false,
         "description": "一条扫描结果。**不含文件内容**，只有索引。",
@@ -2319,6 +2781,59 @@
           }
         },
         "summary": "Create Contest",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/contests/{contest_id}": {
+      "patch": {
+        "description": "改场次设置。只改传了的字段。\n\n``default_roster_id`` 有个特殊之处：``None`` 没法区分\"没传\"和\"要清空\"。\n所以清空要靠 ``clear_default_roster`` 这个显式开关 —— 否则教师一次选错\n名单就再也改不回来了。",
+        "operationId": "update_contest_api_v1_admin_contests__contest_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContestUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContestOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Contest",
         "tags": [
           "admin"
         ]
@@ -3044,6 +3559,59 @@
           }
         },
         "summary": "Import Players",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/contests/{contest_id}/players/apply-roster": {
+      "post": {
+        "description": "把名单应用到场次：名单里有而场次里没有的补上，已有的更新，默认不删人。\n\n``prune=True`` 时会删掉\"名单里没有\"的选手，但**有代码或成绩的一个都不动**，\n并在 ``protected`` 里列出来告诉教师\"这些人删不掉、也不该删\"。\n\n名单是模板，场次是从它复制出去的独立数据 —— 这个动作是**显式**的，\n改了名单不会自动影响任何场次。",
+        "operationId": "apply_roster_to_contest_api_v1_admin_contests__contest_id__players_apply_roster_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApplyRosterIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApplyRosterOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Apply Roster To Contest",
         "tags": [
           "admin"
         ]
@@ -3810,6 +4378,302 @@
           }
         },
         "summary": "Yank Release",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/roster-entries/{entry_id}": {
+      "delete": {
+        "operationId": "delete_roster_entry_api_v1_admin_roster_entries__entry_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "entry_id",
+            "required": true,
+            "schema": {
+              "title": "Entry Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Roster Entry",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/rosters": {
+      "get": {
+        "operationId": "list_rosters_api_v1_admin_rosters_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RosterOut"
+                  },
+                  "title": "Response List Rosters Api V1 Admin Rosters Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Rosters",
+        "tags": [
+          "admin"
+        ]
+      },
+      "post": {
+        "operationId": "create_roster_api_v1_admin_rosters_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RosterCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RosterOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Roster",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/rosters/{roster_id}": {
+      "delete": {
+        "description": "删除名单。\n\n**只删名单本身，不动任何场次的选手。** 名单是模板，场次的参赛者是从它\n复制出去的一份独立数据 —— 删模板不该牵动已发生的比赛。引用了这份名单的\n场次会被置空（``ON DELETE SET NULL``），只是\"没预设名单了\"而已。",
+        "operationId": "delete_roster_api_v1_admin_rosters__roster_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "roster_id",
+            "required": true,
+            "schema": {
+              "title": "Roster Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Roster",
+        "tags": [
+          "admin"
+        ]
+      },
+      "get": {
+        "operationId": "get_roster_api_v1_admin_rosters__roster_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "roster_id",
+            "required": true,
+            "schema": {
+              "title": "Roster Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RosterDetailOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Roster",
+        "tags": [
+          "admin"
+        ]
+      },
+      "patch": {
+        "operationId": "update_roster_api_v1_admin_rosters__roster_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "roster_id",
+            "required": true,
+            "schema": {
+              "title": "Roster Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RosterCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RosterOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Roster",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/rosters/{roster_id}/entries": {
+      "post": {
+        "description": "批量登记/更新名单条目。按 ``player_no`` 幂等 upsert。\n\n和题目导入一样逐条容错：某一行不合法只跳过那一行并在 ``errors`` 里说明。\n一份名单几十上百行，因为一个空格全部白填是没人能接受的。",
+        "operationId": "import_roster_entries_api_v1_admin_rosters__roster_id__entries_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "roster_id",
+            "required": true,
+            "schema": {
+              "title": "Roster Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/RosterEntryIn"
+                },
+                "title": "Payload",
+                "type": "array"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RosterImportOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Import Roster Entries",
         "tags": [
           "admin"
         ]

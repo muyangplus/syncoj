@@ -22,6 +22,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/contests/{contest_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Update Contest
+         * @description 改场次设置。只改传了的字段。
+         *
+         *     ``default_roster_id`` 有个特殊之处：``None`` 没法区分"没传"和"要清空"。
+         *     所以清空要靠 ``clear_default_roster`` 这个显式开关 —— 否则教师一次选错
+         *     名单就再也改不回来了。
+         */
+        patch: operations["update_contest_api_v1_admin_contests__contest_id__patch"];
+        trace?: never;
+    };
     "/api/v1/admin/contests/{contest_id}/agents": {
         parameters: {
             query?: never;
@@ -197,6 +221,32 @@ export interface paths {
          * @description 批量导入/更新选手。按 ``player_no`` 幂等 upsert。
          */
         post: operations["import_players_api_v1_admin_contests__contest_id__players_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/contests/{contest_id}/players/apply-roster": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Apply Roster To Contest
+         * @description 把名单应用到场次：名单里有而场次里没有的补上，已有的更新，默认不删人。
+         *
+         *     ``prune=True`` 时会删掉"名单里没有"的选手，但**有代码或成绩的一个都不动**，
+         *     并在 ``protected`` 里列出来告诉教师"这些人删不掉、也不该删"。
+         *
+         *     名单是模板，场次是从它复制出去的独立数据 —— 这个动作是**显式**的，
+         *     改了名单不会自动影响任何场次。
+         */
+        post: operations["apply_roster_to_contest_api_v1_admin_contests__contest_id__players_apply_roster_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -544,6 +594,90 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/roster-entries/{entry_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete Roster Entry */
+        delete: operations["delete_roster_entry_api_v1_admin_roster_entries__entry_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/rosters": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Rosters */
+        get: operations["list_rosters_api_v1_admin_rosters_get"];
+        put?: never;
+        /** Create Roster */
+        post: operations["create_roster_api_v1_admin_rosters_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/rosters/{roster_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Roster */
+        get: operations["get_roster_api_v1_admin_rosters__roster_id__get"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete Roster
+         * @description 删除名单。
+         *
+         *     **只删名单本身，不动任何场次的选手。** 名单是模板，场次的参赛者是从它
+         *     复制出去的一份独立数据 —— 删模板不该牵动已发生的比赛。引用了这份名单的
+         *     场次会被置空（``ON DELETE SET NULL``），只是"没预设名单了"而已。
+         */
+        delete: operations["delete_roster_api_v1_admin_rosters__roster_id__delete"];
+        options?: never;
+        head?: never;
+        /** Update Roster */
+        patch: operations["update_roster_api_v1_admin_rosters__roster_id__patch"];
+        trace?: never;
+    };
+    "/api/v1/admin/rosters/{roster_id}/entries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Import Roster Entries
+         * @description 批量登记/更新名单条目。按 ``player_no`` 幂等 upsert。
+         *
+         *     和题目导入一样逐条容错：某一行不合法只跳过那一行并在 ``errors`` 里说明。
+         *     一份名单几十上百行，因为一个空格全部白填是没人能接受的。
+         */
+        post: operations["import_roster_entries_api_v1_admin_rosters__roster_id__entries_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/agent/assets/{asset_id}": {
         parameters: {
             query?: never;
@@ -781,6 +915,51 @@ export interface components {
              */
             tick_count: number;
         };
+        /**
+         * ApplyRosterIn
+         * @description 把名单应用到场次。
+         *
+         *     ``prune`` 默认 **False**，而且**永远不动已经有代码或成绩的选手** ——
+         *     名单调整是常事，把参赛者的提交一起删掉是不可逆的事故。
+         */
+        ApplyRosterIn: {
+            /**
+             * Prune
+             * @default false
+             */
+            prune: boolean;
+            /** Roster Id */
+            roster_id?: number | null;
+        };
+        /** ApplyRosterOut */
+        ApplyRosterOut: {
+            /**
+             * Created
+             * @default 0
+             */
+            created: number;
+            /**
+             * Kept
+             * @default 0
+             */
+            kept: number;
+            /** Protected */
+            protected?: string[];
+            /**
+             * Pruned
+             * @default 0
+             */
+            pruned: number;
+            /** Roster Id */
+            roster_id?: number | null;
+            /** Roster Name */
+            roster_name?: string | null;
+            /**
+             * Updated
+             * @default 0
+             */
+            updated: number;
+        };
         /** AssetOut */
         AssetOut: {
             /** Contest Id */
@@ -839,6 +1018,10 @@ export interface components {
         };
         /** ContestCreate */
         ContestCreate: {
+            /** Default Roster Id */
+            default_roster_id?: number | null;
+            /** Enrollment Mode */
+            enrollment_mode?: string | null;
             /** Name */
             name: string;
             /** Note */
@@ -855,6 +1038,15 @@ export interface components {
         ContestOut: {
             /** Created At */
             created_at: string;
+            /** Default Roster Id */
+            default_roster_id?: number | null;
+            /** Default Roster Name */
+            default_roster_name?: string | null;
+            /**
+             * Enrollment Mode
+             * @default per_player_code
+             */
+            enrollment_mode: string;
             /** Id */
             id: number;
             /** Name */
@@ -873,6 +1065,27 @@ export interface components {
             slug: string;
             /** Status */
             status: string;
+        };
+        /**
+         * ContestUpdate
+         * @description 场次的可改字段。全部可选 —— 只改传了的。
+         */
+        ContestUpdate: {
+            /**
+             * Clear Default Roster
+             * @default false
+             */
+            clear_default_roster: boolean;
+            /** Default Roster Id */
+            default_roster_id?: number | null;
+            /** Enrollment Mode */
+            enrollment_mode?: string | null;
+            /** Name */
+            name?: string | null;
+            /** Note */
+            note?: string | null;
+            /** Status */
+            status?: string | null;
         };
         /**
          * DeployCreate
@@ -1352,6 +1565,113 @@ export interface components {
             /** Notes */
             notes?: string | null;
         };
+        /** RosterCreate */
+        RosterCreate: {
+            /** Name */
+            name: string;
+            /** Note */
+            note?: string | null;
+        };
+        /** RosterDetailOut */
+        RosterDetailOut: {
+            /** Created At */
+            created_at: string;
+            /** Entries */
+            entries?: components["schemas"]["RosterEntryOut"][];
+            /**
+             * Entry Count
+             * @default 0
+             */
+            entry_count: number;
+            /** Id */
+            id: number;
+            /** Name */
+            name: string;
+            /** Note */
+            note?: string | null;
+        };
+        /**
+         * RosterEntryIn
+         * @description 名单条目。
+         *
+         *     ``player_no`` 的长度上限刻意给得**很宽**（512），真正的 64 字上限由业务层
+         *     逐条判定。原因：pydantic 的校验是**全有或全无** —— 一条超长会让整个请求
+         *     422，教师粘的 100 行名单全部白填，而界面上只会弹一句
+         *     "String should have at most 64 characters"。
+         *
+         *     批量接口的逐条错误必须由业务层报，那里才能做到"跳过这一条，其余照常入库"。
+         *     这里留的宽上限只用来挡住明显荒谬的输入（比如 10MB 的字符串）。
+         */
+        RosterEntryIn: {
+            /** Group Name */
+            group_name?: string | null;
+            /** Name */
+            name?: string | null;
+            /** Player No */
+            player_no: string;
+            /** Seat */
+            seat?: string | null;
+        };
+        /** RosterEntryOut */
+        RosterEntryOut: {
+            /** Group Name */
+            group_name?: string | null;
+            /** Id */
+            id: number;
+            /** Name */
+            name?: string | null;
+            /** Player No */
+            player_no: string;
+            /** Roster Id */
+            roster_id: number;
+            /** Seat */
+            seat?: string | null;
+        };
+        /**
+         * RosterImportOut
+         * @description 名单导入结果。
+         *
+         *     和题目导入一样**逐条容错**：某一行不合法只跳过那一行并在 ``errors``
+         *     里说明，不让整批失败。一份名单几十上百行，因为一个空格全部白填
+         *     是没人能接受的。
+         */
+        RosterImportOut: {
+            /**
+             * Created
+             * @default 0
+             */
+            created: number;
+            /** Entries */
+            entries?: components["schemas"]["RosterEntryOut"][];
+            /** Errors */
+            errors?: string[];
+            /**
+             * Skipped
+             * @default 0
+             */
+            skipped: number;
+            /**
+             * Updated
+             * @default 0
+             */
+            updated: number;
+        };
+        /** RosterOut */
+        RosterOut: {
+            /** Created At */
+            created_at: string;
+            /**
+             * Entry Count
+             * @default 0
+             */
+            entry_count: number;
+            /** Id */
+            id: number;
+            /** Name */
+            name: string;
+            /** Note */
+            note?: string | null;
+        };
         /**
          * ScanEntry
          * @description 一条扫描结果。**不含文件内容**，只有索引。
@@ -1612,6 +1932,41 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["ContestCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContestOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_contest_api_v1_admin_contests__contest_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contest_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ContestUpdate"];
             };
         };
         responses: {
@@ -2055,6 +2410,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PlayerOut"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    apply_roster_to_contest_api_v1_admin_contests__contest_id__players_apply_roster_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contest_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ApplyRosterIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApplyRosterOut"];
                 };
             };
             /** @description Validation Error */
@@ -2622,6 +3012,222 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ReleaseOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_roster_entry_api_v1_admin_roster_entries__entry_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                entry_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_rosters_api_v1_admin_rosters_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RosterOut"][];
+                };
+            };
+        };
+    };
+    create_roster_api_v1_admin_rosters_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RosterCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RosterOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_roster_api_v1_admin_rosters__roster_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                roster_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RosterDetailOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_roster_api_v1_admin_rosters__roster_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                roster_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_roster_api_v1_admin_rosters__roster_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                roster_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RosterCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RosterOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    import_roster_entries_api_v1_admin_rosters__roster_id__entries_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                roster_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RosterEntryIn"][];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RosterImportOut"];
                 };
             };
             /** @description Validation Error */

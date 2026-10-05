@@ -22,6 +22,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '场次管理' },
       },
       {
+        path: 'rosters',
+        name: 'rosters',
+        component: () => import('@/views/RostersView.vue'),
+        meta: { title: '名单库' },
+      },
+      {
         path: 'overview',
         name: 'overview',
         component: () => import('@/views/OverviewView.vue'),

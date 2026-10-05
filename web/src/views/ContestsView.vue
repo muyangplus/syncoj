@@ -3,7 +3,10 @@ import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRouter } from 'vue-router'
 
+import type { ContestOut } from '@/api/types'
+
 import ContestCreateDialog from '@/components/ContestCreateDialog.vue'
+import ContestSettingsDialog from '@/components/ContestSettingsDialog.vue'
 import ProblemManageDialog from '@/components/ProblemManageDialog.vue'
 import { useContestStore } from '@/stores/contest'
 import { contestStatusLabel, contestStatusType, formatTime } from '@/utils/format'
@@ -14,6 +17,13 @@ const router = useRouter()
 const createVisible = ref(false)
 const problemVisible = ref(false)
 const problemContestId = ref<number | null>(null)
+const settingsVisible = ref(false)
+const settingsTarget = ref<ContestOut | null>(null)
+
+function openSettings(row: ContestOut): void {
+  settingsTarget.value = row
+  settingsVisible.value = true
+}
 
 async function refresh(): Promise<void> {
   await contest.load()
@@ -124,6 +134,33 @@ refresh()
         </template>
       </el-table-column>
 
+      <el-table-column label="注册方式" width="130">
+        <template #default="{ row }">
+          <el-tooltip
+            :content="
+              row.enrollment_mode === 'bootstrap'
+                ? '镜像统一密钥注册，机器靠短码配对认领到人'
+                : '一个选手一个注册码，逐台发放'
+            "
+          >
+            <el-tag
+              size="small"
+              effect="plain"
+              :type="row.enrollment_mode === 'bootstrap' ? 'success' : 'info'"
+            >
+              {{ row.enrollment_mode === 'bootstrap' ? '统一密钥' : '单人注册码' }}
+            </el-tag>
+          </el-tooltip>
+        </template>
+      </el-table-column>
+
+      <el-table-column label="默认名单" width="140">
+        <template #default="{ row }">
+          <span v-if="row.default_roster_name">{{ row.default_roster_name }}</span>
+          <span v-else class="muted">未指定</span>
+        </template>
+      </el-table-column>
+
       <el-table-column label="创建时间" width="160">
         <template #default="{ row }">
           <span class="cell-sub">{{ formatTime(row.created_at) }}</span>
@@ -133,19 +170,22 @@ refresh()
       <el-table-column label="下一步" min-width="180">
         <template #default="{ row }">
           <span v-if="row.player_count === 0" class="cell-sub">
-            还没导入选手 —— 切到该场次后在「选手状态」页导入
+            还没导入选手 —— 在「名单库」应用一份，或到「选手状态」页导入
           </span>
           <span v-else-if="row.online_count === 0" class="cell-sub">
-            还没有考试机上线 —— 需要为选手签发注册码并安装 Agent
+            还没有考试机上线 —— 签发注册码，或装好带统一密钥的镜像
           </span>
           <span v-else class="cell-sub">运行中</span>
         </template>
       </el-table-column>
 
-      <el-table-column label="操作" width="170" fixed="right">
+      <el-table-column label="操作" width="220" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" size="small" @click="openProblems(row.id)">
             题目
+          </el-button>
+          <el-button link type="primary" size="small" @click="openSettings(row)">
+            设置
           </el-button>
           <el-button
             link
@@ -173,6 +213,11 @@ refresh()
     </el-card>
 
     <ContestCreateDialog v-model="createVisible" :existing="contest.contests" @created="handleCreated" />
+    <ContestSettingsDialog
+      v-model="settingsVisible"
+      :contest="settingsTarget"
+      @saved="handleCreated"
+    />
     <ProblemManageDialog
       v-model="problemVisible"
       :contest-id="problemContestId"

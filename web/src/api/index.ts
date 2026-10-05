@@ -9,9 +9,12 @@ import { query, request } from './client'
 import type {
   AdminInfo,
   AgentRuntimeOut,
+  ApplyRosterIn,
+  ApplyRosterOut,
   AssetOut,
   ContestCreate,
   ContestOut,
+  ContestUpdate,
   DeployCreate,
   DeployTaskOut,
   EnrollCodeOut,
@@ -28,6 +31,11 @@ import type {
   ProblemUpsert,
   ReleaseOut,
   ReleaseUpdate,
+  RosterCreate,
+  RosterDetailOut,
+  RosterEntryIn,
+  RosterImportOut,
+  RosterOut,
   ScoreMatrixOut,
   SimpleAck,
   SourceFileOut,
@@ -61,6 +69,48 @@ export const contestApi = {
 
   create: (payload: ContestCreate) =>
     request<ContestOut>(`${ADMIN}/contests`, { method: 'POST', body: payload }),
+
+  /** 只改传了的字段。清空默认名单要用 `clear_default_roster`。 */
+  update: (contestId: number, payload: ContestUpdate) =>
+    request<ContestOut>(`${ADMIN}/contests/${contestId}`, {
+      method: 'PATCH',
+      body: payload,
+    }),
+}
+
+export const rosterApi = {
+  list: () => request<RosterOut[]>(`${ADMIN}/rosters`),
+
+  get: (rosterId: number) => request<RosterDetailOut>(`${ADMIN}/rosters/${rosterId}`),
+
+  create: (payload: RosterCreate) =>
+    request<RosterOut>(`${ADMIN}/rosters`, { method: 'POST', body: payload }),
+
+  update: (rosterId: number, payload: RosterCreate) =>
+    request<RosterOut>(`${ADMIN}/rosters/${rosterId}`, {
+      method: 'PATCH',
+      body: payload,
+    }),
+
+  remove: (rosterId: number) =>
+    request<SimpleAck>(`${ADMIN}/rosters/${rosterId}`, { method: 'DELETE' }),
+
+  /** 批量登记/更新条目。按 player_no 幂等，可以反复导。 */
+  importEntries: (rosterId: number, entries: RosterEntryIn[]) =>
+    request<RosterImportOut>(`${ADMIN}/rosters/${rosterId}/entries`, {
+      method: 'POST',
+      body: entries,
+    }),
+
+  removeEntry: (entryId: number) =>
+    request<SimpleAck>(`${ADMIN}/roster-entries/${entryId}`, { method: 'DELETE' }),
+
+  /** 把名单应用到场次：补人、更新，默认不删。 */
+  applyToContest: (contestId: number, payload: ApplyRosterIn) =>
+    request<ApplyRosterOut>(`${ADMIN}/contests/${contestId}/players/apply-roster`, {
+      method: 'POST',
+      body: payload,
+    }),
 }
 
 export const playerApi = {

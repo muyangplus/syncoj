@@ -72,6 +72,9 @@ onMounted(async () => {
         <el-menu-item index="overview" :route="{ name: 'overview' }">
           <el-icon><Monitor /></el-icon><span>选手状态</span>
         </el-menu-item>
+        <el-menu-item index="rosters" :route="{ name: 'rosters' }">
+          <el-icon><Notebook /></el-icon><span>名单库</span>
+        </el-menu-item>
         <el-menu-item index="files" :route="{ name: 'files' }">
           <el-icon><Document /></el-icon><span>代码台账</span>
         </el-menu-item>

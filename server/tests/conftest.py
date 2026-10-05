@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 import uuid
 from pathlib import Path
@@ -24,6 +25,41 @@ TMP_ROOT = REPO_ROOT / ".pytest-tmp"
 
 ADMIN_USER = "admin"
 ADMIN_PASSWORD = "correct-horse-battery"
+
+
+# --------------------------------------------------------------------------- #
+# 测试辅助（跨测试文件共用 —— 放这里而不是某个 test_*.py 里，
+# 避免测试文件之间互相 import）
+# --------------------------------------------------------------------------- #
+
+
+def sha256_of(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def agent_headers(token: str) -> dict:
+    return {"Authorization": "Bearer " + token}
+
+
+def scan_entry(path: str, data: bytes, mtime: int = 1767225500) -> dict:
+    return {"path": path, "sha256": sha256_of(data), "size": len(data), "mtime": mtime}
+
+
+def do_tick(client, token: str, entries, *, machine_id: str, **kwargs) -> dict:
+    """发一次 tick 并断言成功，返回响应体。"""
+    payload = {
+        "agent_version": "0.1.0",
+        "machine_id": machine_id,
+        "ts": 1767225600,
+        "scan_root": "/home/student/code",
+        "scan": entries,
+        "partials": [],
+        "stats": {"disk_free": 10 ** 10, "last_error": None, "queue": 0},
+    }
+    payload.update(kwargs)
+    response = client.post("/api/v1/agent/tick", json=payload, headers=agent_headers(token))
+    assert response.status_code == 200, response.text
+    return response.json()
 
 
 @pytest.fixture()

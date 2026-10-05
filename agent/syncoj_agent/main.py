@@ -64,6 +64,7 @@ def build_tick_payload(
     results,
     partials: List[dict],
     stats: Dict[str, object],
+    completed_assets: Optional[List[int]] = None,
 ):
     """构造 tick 请求体。
 
@@ -105,6 +106,9 @@ def build_tick_payload(
         # 扫描不完整时服务端会跳过删除判定，避免把漏扫误判成删除
         "scan_complete": complete,
         "partials": list(partials),
+        # 本地已确认完整的下发资源。服务端据此把下发目标标为完成 ——
+        # 由 Agent 显式上报，而不是让服务端从"partials 里没有它"去推断
+        "completed_assets": list(completed_assets or []),
         "stats": final_stats,
     }
     return payload, oversize, errors
@@ -129,6 +133,8 @@ class Agent:
         self._stop = False
         self._backoff = 0.0
         self._pending_events: List[dict] = []
+        #: 已确认完整、待上报给服务端的下发资源
+        self._completed_assets: List[int] = []
         self._credential: Optional[Credential] = None
         #: 服务端可见路径 -> 本地绝对路径。每轮扫描后重建
         self._local_paths: Dict[str, Path] = {}
@@ -264,6 +270,10 @@ class Agent:
                 "disk_free": _disk_free(self.config.state_dir),
                 "queue": len(self._pending_events),
             },
+            # 上一轮下载完成的结果在这里回报。差一轮无所谓 —— 而且服务端在收到
+            # 回报前会继续下发该作业，Agent 会走 "内容已一致" 的跳过分支并再次
+            # 上报，这恰好让"回报丢失"能自愈。
+            completed_assets=self._completed_assets,
         )
 
     # ---------------------------------------------------------------- #
@@ -336,12 +346,16 @@ class Agent:
 
             if outcome.status == "ok":
                 ok += 1
+                self._note_completed(outcome.asset_id)
                 log.info(
                     "下发完成 %s（%d 字节）",
                     outcome.dest, outcome.bytes_written,
                 )
             elif outcome.status == "skipped":
                 ok += 1
+                # 内容已一致也算完成 —— Agent 重启后正是靠这条路径把"其实早就
+                # 下好了"的事实补报给服务端，避免任务永远停在"进行中"
+                self._note_completed(outcome.asset_id)
                 log.debug("下发跳过 %s（内容已一致）", outcome.dest)
             else:
                 failed += 1
@@ -356,6 +370,11 @@ class Agent:
     # ---------------------------------------------------------------- #
     # 事件
     # ---------------------------------------------------------------- #
+
+    def _note_completed(self, asset_id: int) -> None:
+        """记录一个已确认完整的下发资源，等待下一轮 tick 上报。"""
+        if asset_id and asset_id not in self._completed_assets:
+            self._completed_assets.append(asset_id)
 
     def _emit(self, level: str, category: str, message: str, meta: Optional[dict] = None) -> None:
         if len(self._pending_events) >= MAX_PENDING_EVENTS:
@@ -410,6 +429,10 @@ class Agent:
         # 未完成下载的偏移量已在 _build_tick_payload 里从磁盘实况收集，
         # 不依赖上一轮的作业列表 —— Agent 重启后照样能续传。
         tick = self.client.tick(payload)
+
+        # tick 成功 = 本轮携带的完成项已被服务端接收，可以清空。
+        # 必须在 tick 之后、下载之前清 —— 下载新产生的完成项属于下一轮。
+        del self._completed_assets[:]
 
         remote_config = tick.get("config")
         if isinstance(remote_config, dict):

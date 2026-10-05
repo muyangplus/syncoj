@@ -229,6 +229,138 @@ def test_deleted_file_is_recorded(workdir: Path, settings: Settings, live_server
     assert "file_deleted" in [e["category"] for e in events]
 
 
+def test_agent_downloads_deployed_asset(
+    workdir: Path, settings: Settings, live_server: str, seeded: dict,
+    client: TestClient, admin_headers: dict,
+) -> None:
+    """下发链路：教师上传 → 建任务 → Agent 领取 → 下载落盘 → 回报完成。"""
+    from syncoj_agent.main import Agent
+
+    code_dir = workdir / "code"
+    code_dir.mkdir()
+
+    data = b"TESTDATA-CONTENT\n" * 3000  # ~50KB
+    asset = client.post(
+        "/api/v1/admin/contests/%d/assets" % seeded["contest"]["id"],
+        files={"file": ("testdata.zip", data, "application/octet-stream")},
+        headers=admin_headers,
+    ).json()
+    task = client.post(
+        "/api/v1/admin/contests/%d/deploys" % seeded["contest"]["id"],
+        json={
+            "asset_id": asset["id"],
+            "target_kind": "all",
+            "dest_dir": "exam",
+            "mode": "overwrite",
+        },
+        headers=admin_headers,
+    ).json()
+
+    config = build_agent_config(workdir, live_server, seeded["code"], code_dir)
+    agent = Agent(config)
+    try:
+        # 第一轮：tick 拿到 deploy_jobs 并完成下载
+        agent.cycle()
+        landed = config.deploy_root / "exam" / "testdata.zip"
+        assert landed.is_file(), "下发文件应当落到 deploy_root/exam/ 下"
+        assert landed.read_bytes() == data, "落盘内容必须与上传内容逐字节一致"
+
+        # 第二轮：回报 completed_assets
+        agent.cycle()
+    finally:
+        agent.client.close()
+
+    detail = client.get(
+        "/api/v1/admin/deploys/%d" % task["id"], headers=admin_headers
+    ).json()
+    assert detail["done"] == 1, "Agent 回报后目标应标为完成：%r" % detail
+    assert detail["status"] == "done"
+    assert detail["targets"][0]["status"] == "done"
+
+
+def test_agent_resumes_interrupted_download(
+    workdir: Path, settings: Settings, live_server: str, seeded: dict,
+    client: TestClient, admin_headers: dict,
+) -> None:
+    """断点续传的真实路径：磁盘上先放半个分片，Agent 应当只下剩余部分。
+
+    这里验证的是"分片在 de活目录里被发现 → offset 上报 → 服务端回填"这条
+    完整链路，而不是 download_asset 的内部逻辑（那个已有单元测试覆盖）。
+    """
+    from syncoj_agent.download import part_path_for
+    from syncoj_agent.main import Agent
+
+    code_dir = workdir / "code"
+    code_dir.mkdir()
+
+    data = bytes(range(256)) * 400  # 102400 字节
+    asset = client.post(
+        "/api/v1/admin/contests/%d/assets" % seeded["contest"]["id"],
+        files={"file": ("big.bin", data, "application/octet-stream")},
+        headers=admin_headers,
+    ).json()
+    client.post(
+        "/api/v1/admin/contests/%d/deploys" % seeded["contest"]["id"],
+        json={"asset_id": asset["id"], "target_kind": "all", "dest_dir": "exam"},
+        headers=admin_headers,
+    )
+
+    config = build_agent_config(workdir, live_server, seeded["code"], code_dir)
+    dest = config.deploy_root / "exam" / "big.bin"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    already = 40000
+    part_path_for(dest, asset["id"]).write_bytes(data[:already])
+
+    agent = Agent(config)
+    try:
+        agent.cycle()
+    finally:
+        agent.client.close()
+
+    assert dest.read_bytes() == data, "续传结果必须与完整内容一致"
+    assert not part_path_for(dest, asset["id"]).exists(), "完成后不该留下分片"
+
+
+def test_agent_skips_already_deployed_file(
+    workdir: Path, settings: Settings, live_server: str, seeded: dict,
+    client: TestClient, admin_headers: dict,
+) -> None:
+    """内容已一致时不重复下载 —— 否则每次下发都要把 500MB 测试点重传一遍。"""
+    from syncoj_agent.main import Agent
+
+    code_dir = workdir / "code"
+    code_dir.mkdir()
+
+    data = b"unchanged payload" * 100
+    asset = client.post(
+        "/api/v1/admin/contests/%d/assets" % seeded["contest"]["id"],
+        files={"file": ("same.zip", data, "application/octet-stream")},
+        headers=admin_headers,
+    ).json()
+    client.post(
+        "/api/v1/admin/contests/%d/deploys" % seeded["contest"]["id"],
+        json={"asset_id": asset["id"], "target_kind": "all", "dest_dir": "exam"},
+        headers=admin_headers,
+    )
+
+    config = build_agent_config(workdir, live_server, seeded["code"], code_dir)
+    # 文件已经在了，且内容正确
+    target = config.deploy_root / "exam" / "same.zip"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
+    mtime_before = target.stat().st_mtime_ns
+
+    agent = Agent(config)
+    try:
+        agent.cycle()
+    finally:
+        agent.client.close()
+
+    assert target.read_bytes() == data
+    assert target.stat().st_mtime_ns == mtime_before, "内容一致时不该重写文件"
+
+
 def test_agent_self_heals_after_credential_loss(
     workdir: Path, settings: Settings, live_server: str, seeded: dict
 ) -> None:

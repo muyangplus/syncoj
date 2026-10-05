@@ -26,6 +26,7 @@ from ..models import (
     Agent,
     Asset,
     Contest,
+    DeployStatus,
     DeployTarget,
     DeployTask,
     EnrollCode,
@@ -261,6 +262,9 @@ def tick(
         partials = {p.asset_id: int(p.bytes_done) for p in payload.partials}
         jobs = collect_deploy_jobs(session, identity.player_id, partials)
 
+        if payload.completed_assets:
+            _mark_deployments_done(session, identity.player_id, payload.completed_assets)
+
         agent = session.get(Agent, identity.agent_id)
         if agent is not None:
             agent.last_seen_at = now
@@ -294,10 +298,70 @@ def tick(
     )
 
 
+def _mark_deployments_done(
+    session, player_id: int, asset_ids: List[int]
+) -> None:
+    """把该选手的这些资源对应的下发目标标记为完成，并同步任务整体状态。"""
+    if not asset_ids:
+        return
+    targets = list(
+        session.execute(
+            select(DeployTarget)
+            .join(DeployTask, DeployTarget.task_id == DeployTask.id)
+            .where(
+                DeployTarget.player_id == player_id,
+                DeployTask.asset_id.in_(asset_ids[:200]),
+                DeployTarget.status.in_((DeployStatus.PENDING, DeployStatus.READY)),
+            )
+        ).scalars()
+    )
+    if not targets:
+        return
+
+    now = utcnow()
+    affected_tasks = set()
+    for target in targets:
+        target.status = DeployStatus.DONE
+        target.last_error = None
+        target.updated_at = now
+        affected_tasks.add(target.task_id)
+
+    session.flush()
+    for task_id in affected_tasks:
+        _refresh_task_status(session, task_id)
+
+
+def _refresh_task_status(session, task_id: int) -> None:
+    """按目标的实际状态重算任务状态。
+
+    不维护"任务状态"这个独立字段，而是每次从目标聚合 —— 两处独立维护的状态
+    迟早会不一致，典型症状是 Web 上进度条卡在 90% 永远不动。
+    """
+    task = session.get(DeployTask, task_id)
+    if task is None or task.status == DeployStatus.CANCELLED:
+        return
+
+    targets = list(
+        session.execute(
+            select(DeployTarget).where(DeployTarget.task_id == task_id)
+        ).scalars()
+    )
+    if not targets:
+        return
+
+    done = sum(1 for t in targets if t.status == DeployStatus.DONE)
+    failed = sum(1 for t in targets if t.status == DeployStatus.FAILED)
+    if done == len(targets):
+        task.status = DeployStatus.DONE
+    elif done + failed == len(targets):
+        task.status = DeployStatus.FAILED
+    else:
+        task.status = DeployStatus.PENDING
+
+
 # --------------------------------------------------------------------------- #
 # 上传
 # --------------------------------------------------------------------------- #
-
 
 @router.post("/files", response_model=UploadResult)
 def upload_file(

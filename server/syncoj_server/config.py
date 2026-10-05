@@ -63,6 +63,9 @@ class Settings:
     # ---- 上传 ----
     # 单次 multipart 请求体上限，略高于 max_file_size 以容纳 multipart 开销
     max_upload_request_bytes: int = 4 * 1024 * 1024
+    # 教师上传的待下发资产（题面、测试点包）上限。远大于选手代码上限 ——
+    # 测试点包动辄几百 MB，而源码只有几十 KB
+    max_asset_size: int = 2 * 1024 * 1024 * 1024
 
     @property
     def db_path(self) -> Path:

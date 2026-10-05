@@ -5,40 +5,12 @@
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from conftest import agent_headers, do_tick as tick, scan_entry as entry, sha256_of
 from syncoj_server.config import Settings
-
-
-def sha256_of(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
-def agent_headers(token: str) -> dict:
-    return {"Authorization": "Bearer " + token}
-
-
-def tick(client: TestClient, token: str, entries, *, machine_id: str, **kwargs) -> dict:
-    payload = {
-        "agent_version": "0.1.0",
-        "machine_id": machine_id,
-        "ts": 1767225600,
-        "scan_root": "/home/student/code",
-        "scan": entries,
-        "partials": [],
-        "stats": {"disk_free": 10 ** 10, "last_error": None, "queue": 0},
-    }
-    payload.update(kwargs)
-    response = client.post("/api/v1/agent/tick", json=payload, headers=agent_headers(token))
-    assert response.status_code == 200, response.text
-    return response.json()
-
-
-def entry(path: str, data: bytes, mtime: int = 1767225500) -> dict:
-    return {"path": path, "sha256": sha256_of(data), "size": len(data), "mtime": mtime}
 
 
 # --------------------------------------------------------------------------- #

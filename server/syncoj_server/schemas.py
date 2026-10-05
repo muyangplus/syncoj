@@ -97,6 +97,10 @@ class TickRequest(_Base):
     #: 服务端会因此**跳过删除判定** —— 否则会把"没扫到"误判成"被删了"。
     scan_complete: bool = True
     partials: List[PartialDownload] = Field(default_factory=list)
+    #: 本地已确认完整的下发资源。服务端据此把对应的 deploy_target 标为完成。
+    #: 刻意由 Agent 显式上报而不是服务端从 partials 推断 —— "分片不见了" 既可能
+    #: 是下完了，也可能是被清理了，推断会误判。
+    completed_assets: List[int] = Field(default_factory=list)
     stats: TickStats = Field(default_factory=TickStats)
 
 
@@ -255,3 +259,63 @@ class SourceFileOut(_Base):
     first_seen_at: str
     last_seen_at: str
     deleted_at: Optional[str] = None
+
+
+# --------------------------------------------------------------------------- #
+# 文件下发
+# --------------------------------------------------------------------------- #
+
+
+class AssetOut(_Base):
+    id: int
+    contest_id: int
+    sha256: str
+    size: int
+    filename: str
+    kind: str
+    created_at: str
+
+
+class DeployCreate(_Base):
+    """创建下发任务。
+
+    ``target_kind`` 取 ``all`` / ``player`` / ``group``：
+    - ``all``    全量下发，忽略 ``player_ids``
+    - ``player`` 只发给 ``player_ids`` 列出的选手
+    - ``group``  发给 ``group_name`` 等于 ``target_group`` 的选手
+    """
+
+    asset_id: int
+    target_kind: str = Field(default="all", max_length=16)
+    player_ids: List[int] = Field(default_factory=list)
+    target_group: Optional[str] = Field(default=None, max_length=64)
+    dest_dir: str = Field(default="", max_length=512)
+    mode: str = Field(default="overwrite", max_length=16)
+
+
+class DeployTargetOut(_Base):
+    player_id: int
+    player_no: str
+    status: str
+    bytes_done: int = 0
+    retry_count: int = 0
+    last_error: Optional[str] = None
+
+
+class DeployTaskOut(_Base):
+    id: int
+    contest_id: int
+    asset_id: int
+    filename: str
+    size: int
+    sha256: str
+    target_kind: str
+    dest_dir: str
+    mode: str
+    status: str
+    created_at: str
+    total: int = 0
+    done: int = 0
+    failed: int = 0
+    pending: int = 0
+    targets: List[DeployTargetOut] = Field(default_factory=list)

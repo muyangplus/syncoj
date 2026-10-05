@@ -85,9 +85,9 @@ python agent/syncoj_agent/main.py --config agent/config.example.ini --once
 |---|---|
 | M1 骨架：enroll / tick / 在线状态 / 管理后台 | ✅ 完成 |
 | M2 回收：扫描 / 上传 / 内容寻址存储 / `source/` 落盘 / 删除审计 | ✅ 完成 |
-| M3 下发：asset 管理 / deploy 编排 / Range 断点续传 | 🟡 传输层与协议已完成，教师端下发接口未做 |
+| M3 下发：资产管理 / 任务编排（全员·按人·按分组）/ Range 断点续传 / 进度聚合 | ✅ 完成 |
 | M4 成绩：结果扫描回写 / 成绩矩阵 | ⬜ 待做 |
-| M5 运维：签名自更新 / 离线包 / installer | ⬜ 待做 |
+| M5 运维：签名自更新 / 离线包 / 幂等 installer | ⬜ 待做 |
 
-测试规模：服务端 89 项、Agent 67 项，含端到端集成测试（真实 Agent 代码
-通过真实 HTTP 打到真实服务端）。
+测试规模：服务端 118 项、Agent 67 项，含端到端集成测试（真实 Agent 代码
+通过真实 HTTP 打到真实服务端，覆盖上传回收与下发下载两条链路）。

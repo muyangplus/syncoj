@@ -96,6 +96,14 @@ def test_scan_complete_flag_is_present(fixture: dict) -> None:
     assert fixture["tick"]["scan_complete"] is False, "样本中有扫描不完整的根目录"
 
 
+def test_completed_assets_field_is_present(fixture: dict) -> None:
+    """这个字段缺失会让服务端永远收不到"下载完成"的回报，下发任务卡在进行中。"""
+    assert "completed_assets" in fixture["tick"], "tick 请求体缺少 completed_assets"
+    assert fixture["tick"]["completed_assets"], "样本应当携带至少一个已完成的 asset"
+    model = TickRequest.model_validate(fixture["tick"])
+    assert model.completed_assets == [7]
+
+
 def test_event_payload_shape(fixture: dict) -> None:
     sample = {
         "level": "warning",

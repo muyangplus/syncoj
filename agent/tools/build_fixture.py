@@ -76,6 +76,7 @@ def build_fixture() -> Dict[str, Any]:
         results=_sample_results(),
         partials=[{"asset_id": 42, "bytes_done": 3145728}],
         stats={"disk_free": 10737418240, "queue": 0},
+        completed_assets=[7],
     )
 
     return {

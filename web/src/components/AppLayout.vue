@@ -33,6 +33,10 @@ function handleContestChange(value: number): void {
   contests.select(value)
 }
 
+function goContests(): void {
+  void router.push({ name: 'contests' })
+}
+
 async function handleLogout(): Promise<void> {
   await auth.logout()
   ElMessage.success('已退出登录')
@@ -62,6 +66,9 @@ onMounted(async () => {
         active-text-color="#fff"
         class="nav"
       >
+        <el-menu-item index="contests" :route="{ name: 'contests' }">
+          <el-icon><Calendar /></el-icon><span>场次管理</span>
+        </el-menu-item>
         <el-menu-item index="overview" :route="{ name: 'overview' }">
           <el-icon><Monitor /></el-icon><span>选手状态</span>
         </el-menu-item>
@@ -123,6 +130,13 @@ onMounted(async () => {
               :label="contest.name"
               :value="contest.id"
             />
+            <!-- 下拉框底部给一个出口：从任何页面都能直接去建场次，
+                 不用先想起来"场次管理"在哪 -->
+            <template #footer>
+              <el-button link type="primary" size="small" @click="goContests">
+                ＋ 新建 / 管理场次
+              </el-button>
+            </template>
           </el-select>
           <el-button
             v-else-if="contests.error"
@@ -132,6 +146,9 @@ onMounted(async () => {
             @click="contests.load().catch(() => undefined)"
           >
             场次加载失败，重试
+          </el-button>
+          <el-button v-else-if="!contests.loading" size="small" type="primary" @click="goContests">
+            新建场次
           </el-button>
 
           <el-dropdown @command="handleLogout">
@@ -149,17 +166,35 @@ onMounted(async () => {
       </el-header>
 
       <el-main class="content">
-        <!-- 没有场次时几乎所有页面都没意义，这里统一拦一次并给出下一步 -->
+        <!--
+          这里必须**始终**渲染 RouterView。
+
+          早先的写法是 `v-if="没有场次" 显示提示，v-else 渲染页面`，结果一进
+          系统就被挡在一个纯提示上 —— 连「场次管理」页都进不去，更别说创建场次。
+          首次部署时那是一个死路：唯一的出路是去敲 curl 或 /docs。
+
+          正确做法是把提示做成一条横幅，页面照常渲染；各页面自己处理"没有场次"
+          的情况（它们的列表本来就是空的）。
+        -->
         <el-alert
           v-if="!contests.loading && contests.contests.length === 0"
           type="warning"
           :closable="false"
           show-icon
           title="还没有任何场次"
-          description="请先创建一个场次并导入选手，之后各页面才会有数据。"
           style="margin-bottom: 16px"
-        />
-        <RouterView v-else />
+        >
+          <template #default>
+            <span>
+              场次是所有数据的容器。请先在
+              <el-button link type="primary" size="small" @click="goContests">
+                场次管理
+              </el-button>
+              里创建一个，再导入选手。
+            </span>
+          </template>
+        </el-alert>
+        <RouterView />
       </el-main>
     </el-container>
   </el-container>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 import { releaseApi } from '@/api'
@@ -109,6 +109,33 @@ function statusTag(release: ReleaseOut): { text: string; type: 'success' | 'info
   if (release.yanked) return { text: '已撤回', type: 'info' }
   if (release.rolled_out) return { text: '铺开中', type: 'success' }
   return { text: '未铺开', type: 'warning' }
+}
+
+// 编辑备注：上传时可能先空着，事后补上"这个版本修了什么"，
+// 出问题时回看历史才有线索
+const editVisible = ref(false)
+const editSaving = ref(false)
+const editForm = reactive({ id: 0, version: '', notes: '' })
+
+function openEdit(release: ReleaseOut): void {
+  editForm.id = release.id
+  editForm.version = release.version
+  editForm.notes = release.notes ?? ''
+  editVisible.value = true
+}
+
+async function submitEdit(): Promise<void> {
+  editSaving.value = true
+  try {
+    await releaseApi.update(editForm.id, { notes: editForm.notes.trim() || null })
+    ElMessage.success('已保存')
+    editVisible.value = false
+    await refresh()
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  } finally {
+    editSaving.value = false
+  }
 }
 </script>
 
@@ -234,7 +261,7 @@ function statusTag(release: ReleaseOut): { text: string; type: 'success' | 'info
           </template>
         </el-table-column>
 
-        <el-table-column label="操作" width="120" fixed="right">
+        <el-table-column label="操作" width="160" fixed="right">
           <template #default="{ row }">
             <el-button
               v-if="!row.rolled_out"
@@ -246,6 +273,7 @@ function statusTag(release: ReleaseOut): { text: string; type: 'success' | 'info
               铺开
             </el-button>
             <el-button v-else link type="danger" size="small" @click="yank(row)">撤回</el-button>
+            <el-button link size="small" @click="openEdit(row)">备注</el-button>
           </template>
         </el-table-column>
 
@@ -254,6 +282,23 @@ function statusTag(release: ReleaseOut): { text: string; type: 'success' | 'info
         </template>
       </el-table>
     </el-card>
+
+    <el-dialog v-model="editVisible" :title="`编辑版本 ${editForm.version} 的备注`" width="520px">
+      <el-input
+        v-model="editForm.notes"
+        type="textarea"
+        :rows="4"
+        maxlength="2000"
+        placeholder="例如：修复了扫描目录不存在时的崩溃"
+      />
+      <p class="page-hint">
+        备注只影响界面上显示什么，不参与签名或校验 —— 改它不会让已铺开的版本失效。
+      </p>
+      <template #footer>
+        <el-button @click="editVisible = false">取消</el-button>
+        <el-button type="primary" :loading="editSaving" @click="submitEdit">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 

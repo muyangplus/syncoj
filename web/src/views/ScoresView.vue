@@ -4,7 +4,7 @@ import { storeToRefs } from 'pinia'
 import { ElMessage } from 'element-plus'
 
 import { scoreApi } from '@/api'
-import type { ScoreCellOut, ScoreMatrixOut, ScoreRowOut } from '@/api/types'
+import type { JudgeRunOut, ScoreCellOut, ScoreMatrixOut, ScoreRowOut } from '@/api/types'
 import { usePolling } from '@/composables/usePolling'
 import { useContestStore } from '@/stores/contest'
 
@@ -177,6 +177,53 @@ async function rescan(): Promise<void> {
   }
 }
 
+/**
+ * 原始记录：每一格成绩是从哪个文件、用哪个解析器、为什么失败。
+ *
+ * 矩阵只告诉你"这一格是未解析"，但排查需要知道**具体读了哪个文件、为什么读不懂**。
+ * 没有这个视图的话，教师只能自己去翻 judge_result 目录猜。
+ */
+const runsVisible = ref(false)
+const runsLoading = ref(false)
+const runs = ref<JudgeRunOut[]>([])
+const runsFilter = ref<string>('')
+
+async function openRuns(status = ''): Promise<void> {
+  if (!currentId.value) return
+  runsVisible.value = true
+  runsFilter.value = status
+  await loadRuns()
+}
+
+async function loadRuns(): Promise<void> {
+  if (!currentId.value) return
+  runsLoading.value = true
+  try {
+    runs.value = await scoreApi.runs(currentId.value, runsFilter.value || undefined)
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  } finally {
+    runsLoading.value = false
+  }
+}
+
+function runStatusType(status: string): 'success' | 'danger' | 'primary' | 'info' {
+  if (status === 'ok') return 'success'
+  if (status === 'unparsed') return 'danger'
+  if (status === 'manual') return 'primary'
+  return 'info'
+}
+
+function runStatusLabel(status: string): string {
+  const map: Record<string, string> = {
+    ok: '已解析',
+    unparsed: '未解析',
+    manual: '手工录入',
+    missing: '无记录',
+  }
+  return map[status] ?? status
+}
+
 async function exportCsv(): Promise<void> {
   const data = view.value
   if (!data) return
@@ -216,6 +263,9 @@ async function exportCsv(): Promise<void> {
       </div>
       <div class="toolbar">
         <el-button size="small" :loading="rescanning" @click="rescan">立即重扫</el-button>
+        <el-button size="small" :disabled="!view?.rows.length" @click="openRuns()">
+          原始记录
+        </el-button>
         <el-button size="small" :disabled="!view?.rows.length" @click="exportCsv">
           导出 CSV
         </el-button>
@@ -360,6 +410,60 @@ async function exportCsv(): Promise<void> {
         <el-button @click="editing = false">取消</el-button>
         <el-button type="primary" :loading="submitting" @click="submitManual">保存</el-button>
       </template>
+    </el-dialog>
+
+    <el-dialog v-model="runsVisible" title="成绩原始记录" width="900px">
+      <div class="toolbar" style="margin-bottom: 12px">
+        <el-select
+          v-model="runsFilter"
+          size="small"
+          placeholder="全部"
+          clearable
+          style="width: 150px"
+          @change="loadRuns"
+        >
+          <el-option label="未解析（需要处理）" value="unparsed" />
+          <el-option label="已解析" value="ok" />
+          <el-option label="手工录入" value="manual" />
+        </el-select>
+        <span class="page-hint" style="margin: 0">
+          每一格成绩来自哪个文件、用了哪个解析器、为什么失败
+        </span>
+      </div>
+
+      <el-table :data="runs" v-loading="runsLoading" size="small" border max-height="420">
+        <el-table-column label="选手" prop="player_no" width="100" />
+        <el-table-column label="题目" prop="problem" width="90" />
+        <el-table-column label="状态" width="90">
+          <template #default="{ row }">
+            <el-tag :type="runStatusType(row.parse_status)" size="small" effect="plain">
+              {{ runStatusLabel(row.parse_status) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="得分" width="90" align="right">
+          <template #default="{ row }">
+            <span v-if="row.score === null || row.score === undefined" class="muted">—</span>
+            <span v-else>{{ row.score }}/{{ row.max_score ?? '?' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="来源文件" min-width="240">
+          <template #default="{ row }">
+            <span v-if="row.source_path" class="mono">{{ row.source_path }}</span>
+            <span v-else class="muted">—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="说明" min-width="200">
+          <template #default="{ row }">
+            <span :class="{ 'error-text': row.parse_status === 'unparsed' }">
+              {{ row.detail || '—' }}
+            </span>
+          </template>
+        </el-table-column>
+        <template #empty>
+          <div class="empty-block">没有匹配的记录</div>
+        </template>
+      </el-table>
     </el-dialog>
   </div>
 </template>

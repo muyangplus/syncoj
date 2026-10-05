@@ -199,3 +199,85 @@ def test_http_methods_used_by_frontend_are_supported() -> None:
             )
 
     assert not problems, "前后端接口不一致：\n" + "\n".join("  " + p for p in problems)
+
+
+# --------------------------------------------------------------------------- #
+# 界面覆盖：API 层声明的方法必须真的被用上
+# --------------------------------------------------------------------------- #
+#
+# 这条检查来自一次真实的翻车：前端 API 层写好了 contestApi.create 与
+# playerApi.import，却**没有任何界面调用它们**。结果是登录进去之后彻底死路 ——
+# 系统提示"还没有任何场次"，但没有创建入口，连去别的页面的机会都没有
+# （当时 AppLayout 用 v-else 把 RouterView 挡住了）。
+#
+# 单元测试、类型检查、构建全都不会发现这个问题：类型是对的、能编译、能跑，
+# 只是教师点不到。只有"API 层有方法但没人调用"这个静态事实能暴露它。
+
+FRONTEND_ROOT = REPO_ROOT / "web" / "src"
+#: store 也是界面的消费者 —— 登录、场次加载这些就发生在 store 里，
+#: 只扫 views/components 会误报它们"没人调用"。
+CONSUMER_DIRS = ("views", "components", "stores", "composables")
+
+
+def load_declared_api_methods() -> List[str]:
+    """抽出 ``api/index.ts`` 里导出的所有 ``分组.方法``。"""
+    text = _source_text()
+    methods: List[str] = []
+    group: str | None = None
+
+    for line in text.splitlines():
+        group_match = re.match(r"^export const (\w+)\s*=\s*\{", line)
+        if group_match:
+            group = group_match.group(1)
+            continue
+        if group is None:
+            continue
+        if line.startswith("}"):
+            group = None
+            continue
+        # 组内的方法：两个空格缩进 + 名字 + 冒号
+        method_match = re.match(r"^  (\w+)\s*:", line)
+        if method_match:
+            methods.append("%s.%s" % (group, method_match.group(1)))
+
+    return methods
+
+
+def load_consumer_source() -> str:
+    chunks: List[str] = []
+    for directory in CONSUMER_DIRS:
+        base = FRONTEND_ROOT / directory
+        if not base.is_dir():
+            continue
+        for path in base.rglob("*"):
+            if path.suffix in (".vue", ".ts"):
+                chunks.append(path.read_text(encoding="utf-8"))
+    return "\n".join(chunks)
+
+
+def test_some_api_methods_were_parsed() -> None:
+    """防止解析失效导致下面那条检查永远通过。"""
+    methods = load_declared_api_methods()
+    assert len(methods) >= 20, "只解析出 %d 个接口方法：%r" % (len(methods), methods)
+    assert "contestApi.create" in methods
+    assert "playerApi.import" in methods
+
+
+def test_every_api_method_is_wired_to_the_ui() -> None:
+    """每个接口方法都必须在视图/组件里被调用过。
+
+    发现未使用的方法时，正确的反应是二选一：**接上界面**，或者**从 API 层删掉**。
+    留着一个没人调用的方法，本质上就是"这个功能没做"，但它会伪装成已完成 ——
+    文件里写着、类型里有、看着像是齐的。
+    """
+    consumers = load_consumer_source()
+    orphaned = [
+        method for method in load_declared_api_methods() if method not in consumers
+    ]
+
+    assert not orphaned, (
+        "以下接口方法在 web/src/api/index.ts 里声明了，但没有任何视图或组件调用：\n"
+        + "\n".join("  %s" % m for m in orphaned)
+        + "\n\n要么把它接上界面，要么删掉声明 —— "
+        "留着一个没人调用的方法，就是一处伪装成已完成的功能缺失。"
+    )

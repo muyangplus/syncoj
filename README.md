@@ -111,9 +111,32 @@ python agent/run_agent.py --config agent/config.example.ini --once
 | M1 骨架：enroll / tick / 在线状态 / 管理后台 | ✅ 完成 |
 | M2 回收：扫描 / 上传 / 内容寻址存储 / `source/` 落盘 / 删除审计 | ✅ 完成 |
 | M3 下发：资产管理 / 任务编排（全员·按人·按分组）/ Range 断点续传 / 进度聚合 | ✅ 完成 |
-| M4 成绩：结果扫描回写 / 成绩矩阵 / 手工补录 | ✅ 完成 |
+| M4 成绩：结果扫描回写 / 成绩矩阵 / 手工补录 / 原始记录 | ✅ 完成 |
 | M5 运维：RSA 签名自更新 / 安全解包 / 自动回滚 / 幂等安装器 / 可复现打包 | ✅ 完成 |
-| 管理界面：7 个页面（选手状态 / 代码台账 / 下发 / 成绩 / 审计 / 发布 / 登录） | ✅ 完成 |
+| 管理界面：8 个页面 + 初始化闭环（建场次 / 导选手 / 批量签注册码） | ✅ 完成 |
+
+## 教师上手流程
+
+界面里就能走完，命令行也可以（便于脚本化批量部署）：
+
+```bash
+# ── 界面 ──────────────────────────────────────────────
+# 1. syncoj-server init          建库 + 建管理员
+# 2. 打开 http://<服务端>:8000    登录
+# 3. 场次管理 → 新建场次
+# 4. 选手状态 → 导入选手（可直接从 Excel 粘贴）
+# 5. 选手状态 → 批量签发注册码 → 复制或导出 CSV
+# 6. 装 Agent（见 agent/packaging/README.md），把注册码传给它
+
+# ── 命令行等价流程（批量部署时更顺手）────────────────
+syncoj-server contest create --name "2025 校内模拟赛"
+syncoj-server contest import-players --contest 2025 --file roster.csv
+syncoj-server contest enroll-codes --contest 2025 > codes.csv
+syncoj-server contest list
+```
+
+名单 CSV 的列顺序是 `选手编号,姓名,座位,分组`（只有编号必填），
+逗号或制表符分隔都认，表头与 `#` 注释行会被自动跳过。
 
 测试规模：**服务端 227 项、Agent 154 项**，含端到端集成测试（真实 Agent 代码
 通过真实 HTTP 打到真实服务端）与 **openssl 交叉验证**（手写密码学代码唯一可信的

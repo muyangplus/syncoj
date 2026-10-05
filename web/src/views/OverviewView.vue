@@ -5,6 +5,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 
 import { agentApi, playerApi } from '@/api'
 import type { AgentRuntimeOut, EnrollCodeOut, PlayerOut } from '@/api/types'
+import PlayerImportDialog from '@/components/PlayerImportDialog.vue'
 import { usePolling } from '@/composables/usePolling'
 import { useContestStore } from '@/stores/contest'
 import { formatBytes, formatSince, formatTime } from '@/utils/format'
@@ -20,9 +21,21 @@ const error = ref<string | null>(null)
 const keyword = ref('')
 const onlyOffline = ref(false)
 
+const importVisible = ref(false)
+
 /** 签发出来的注册码。只在这里展示一次，所以用对话框而不是表格列。 */
 const issuedCode = ref<EnrollCodeOut | null>(null)
 const codeDialog = ref(false)
+
+/**
+ * 批量签发：把所有还没注册过的选手一次性发出注册码。
+ *
+ * 逐个点太痛苦了 —— 一个班五十号人。这里一次发完，把结果列在一个对话框里
+ * 供教师抄写或导出。注意每个注册码只在服务端存哈希，**关掉就再也看不到**。
+ */
+const batchDialog = ref(false)
+const batchIssuing = ref(false)
+const batchCodes = ref<EnrollCodeOut[]>([])
 
 const agentByPlayer = computed(() => {
   const map = new Map<number, AgentRuntimeOut>()
@@ -105,6 +118,70 @@ async function copyCode(): Promise<void> {
     ElMessage.warning('浏览器不允许自动复制，请手工选中复制')
   }
 }
+
+async function issueForAllUnregistered(): Promise<void> {
+  const pending = players.value.filter((player) => !player.has_agent)
+  if (!pending.length) {
+    ElMessage.info('所有选手都已经注册过了')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `为 ${pending.length} 名尚未注册的选手各签发一个注册码？\n\n` +
+        '每个选手此前未使用的注册码会立即失效（已经注册过的机器不受影响）。',
+      '批量签发注册码',
+      { type: 'warning', confirmButtonText: '签发', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+
+  batchIssuing.value = true
+  batchCodes.value = []
+  try {
+    // 串行而不是并发：注册码要落库，五十个并发写 SQLite 没意义还会撞锁
+    for (const player of pending) {
+      try {
+        batchCodes.value.push(await playerApi.issueEnrollCode(player.id))
+      } catch (err) {
+        ElMessage.error(`${player.player_no} 签发失败：${(err as Error).message}`)
+      }
+    }
+    batchDialog.value = true
+    if (batchCodes.value.length) {
+      ElMessage.success(`已签发 ${batchCodes.value.length} 个注册码`)
+    }
+  } finally {
+    batchIssuing.value = false
+  }
+}
+
+async function copyBatchCodes(): Promise<void> {
+  const text = batchCodes.value
+    .map((item) => `${item.player_no}\t${item.code}`)
+    .join('\n')
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success('已复制全部（编号 + 注册码，制表符分隔）')
+  } catch {
+    ElMessage.warning('浏览器不允许自动复制，请手工选中复制')
+  }
+}
+
+function exportBatchCodes(): void {
+  const lines = ['选手编号,注册码', ...batchCodes.value.map((i) => `${i.player_no},${i.code}`)]
+  const blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = `enroll-codes-${currentId.value ?? 'contest'}.csv`
+  anchor.click()
+  URL.revokeObjectURL(url)
+}
+
+function handleImported(): void {
+  void refresh()
+}
 </script>
 
 <template>
@@ -126,6 +203,15 @@ async function copyCode(): Promise<void> {
         />
         <el-checkbox v-model="onlyOffline" size="small">只看离线</el-checkbox>
         <el-button size="small" :loading="loading" @click="refresh">刷新</el-button>
+        <el-button size="small" type="primary" @click="importVisible = true">导入选手</el-button>
+        <el-button
+          size="small"
+          :loading="batchIssuing"
+          :disabled="!players.length"
+          @click="issueForAllUnregistered"
+        >
+          批量签发注册码
+        </el-button>
       </div>
     </div>
 
@@ -241,10 +327,49 @@ async function copyCode(): Promise<void> {
 
       <template #empty>
         <div class="empty-block">
-          {{ players.length === 0 ? '本场次还没有导入选手' : '没有匹配的选手' }}
+          <template v-if="players.length === 0">
+            <p>本场次还没有导入选手</p>
+            <el-button type="primary" size="small" @click="importVisible = true">
+              导入选手
+            </el-button>
+          </template>
+          <template v-else>没有匹配的选手</template>
         </div>
       </template>
     </el-table>
+
+    <PlayerImportDialog
+      v-model="importVisible"
+      :contest-id="currentId"
+      @imported="handleImported"
+    />
+
+    <el-dialog v-model="batchDialog" title="批量签发的注册码" width="620px">
+      <el-alert
+        type="warning"
+        :closable="false"
+        show-icon
+        title="这些注册码只显示这一次"
+        description="关闭本对话框后就再也看不到了（服务端只存哈希）。请立即复制或导出保存。"
+      />
+      <el-table :data="batchCodes" size="small" border max-height="360" style="margin-top: 12px">
+        <el-table-column label="选手编号" prop="player_no" width="120">
+          <template #default="{ row }">
+            <span class="mono">{{ row.player_no }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="注册码" prop="code">
+          <template #default="{ row }">
+            <span class="mono">{{ row.code }}</span>
+          </template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <el-button @click="batchDialog = false">关闭</el-button>
+        <el-button @click="exportBatchCodes">导出 CSV</el-button>
+        <el-button type="primary" @click="copyBatchCodes">复制全部</el-button>
+      </template>
+    </el-dialog>
 
     <el-dialog v-model="codeDialog" title="注册码" width="520px">
       <template v-if="issuedCode">

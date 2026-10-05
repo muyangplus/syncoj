@@ -15,12 +15,14 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from sqlalchemy import func, select
+
 from . import __version__
 from .config import Settings
 from .context import AppContext
-from .models import Admin, Contest, ContestStatus, Player
+from .models import Admin, Contest, ContestStatus, EnrollCode, Player, utcnow
 from .paths import slugify
-from .security import hash_password
+from .security import hash_enroll_code, hash_password, new_enroll_code
 
 __all__ = ["main"]
 
@@ -155,6 +157,191 @@ def _cmd_genkey(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_contest(args: argparse.Namespace) -> int:
+    """场次与选手的命令行管理。
+
+    界面已经能做这些事，但脚本化部署（比如按名单批量建场次、从教务系统导出的
+    CSV 直接灌进来）在命令行里更顺手，也不需要先起浏览器。
+    """
+    from .models import Contest, ContestStatus, Player
+    from .paths import slugify
+
+    settings = _build_settings(args)
+    ctx = AppContext.create(settings)
+    ctx.db.create_all()
+    action = args.contest_action
+
+    if action == "list":
+        with ctx.db.session() as session:
+            contests = list(session.execute(select(Contest).order_by(Contest.id)).scalars())
+            counts = dict(
+                session.execute(
+                    select(Player.contest_id, func.count(Player.id)).group_by(Player.contest_id)
+                ).all()
+            )
+        if not contests:
+            print("还没有任何场次。用 syncoj-server contest create --name <名称> 创建。")
+            return 0
+        print("%-4s %-20s %-24s %-10s %s" % ("ID", "标识", "名称", "状态", "选手数"))
+        for contest in contests:
+            print(
+                "%-4d %-20s %-24s %-10s %d"
+                % (
+                    contest.id,
+                    contest.slug,
+                    contest.name[:24],
+                    contest.status,
+                    counts.get(contest.id, 0),
+                )
+            )
+        return 0
+
+    if action == "create":
+        slug = slugify(args.slug or args.name, fallback="contest")
+        status_value = args.status if args.status in ContestStatus.ALL else ContestStatus.DRAFT
+        with ctx.db.session() as session:
+            if session.execute(select(Contest).where(Contest.slug == slug)).scalar_one_or_none():
+                print("错误：场次标识 %s 已存在" % slug, file=sys.stderr)
+                return 1
+            contest = Contest(slug=slug, name=args.name, status=status_value, note=args.note)
+            session.add(contest)
+            session.flush()
+            print("[+] 已创建场次 #%d %s（标识 %s，状态 %s）"
+                  % (contest.id, contest.name, contest.slug, contest.status))
+        print()
+        print("下一步:")
+        print("  syncoj-server contest import-players --contest %s --file roster.csv" % slug)
+        return 0
+
+    if action == "import-players":
+        with ctx.db.session() as session:
+            contest = session.execute(
+                select(Contest).where(Contest.slug == args.contest)
+            ).scalar_one_or_none()
+            if contest is None:
+                print("错误：找不到场次 %s" % args.contest, file=sys.stderr)
+                return 1
+
+            rows = _read_roster(args.file)
+            if not rows:
+                print("错误：名单里没有可导入的选手（文件：%s）" % args.file, file=sys.stderr)
+                return 1
+
+            existing = {
+                row.player_no: row
+                for row in session.execute(
+                    select(Player).where(Player.contest_id == contest.id)
+                ).scalars()
+            }
+            created = updated = 0
+            for player_no, name, seat, group in rows:
+                row = existing.get(player_no)
+                if row is None:
+                    row = Player(contest_id=contest.id, player_no=player_no)
+                    session.add(row)
+                    created += 1
+                else:
+                    updated += 1
+                row.name = name or row.name
+                row.seat = seat or row.seat
+                row.group_name = group or row.group_name
+            session.flush()
+            print("[+] 场次 %s：新增 %d 名，更新 %d 名（共 %d）"
+                  % (contest.slug, created, updated, len(rows)))
+        return 0
+
+    if action == "enroll-codes":
+        with ctx.db.session() as session:
+            contest = session.execute(
+                select(Contest).where(Contest.slug == args.contest)
+            ).scalar_one_or_none()
+            if contest is None:
+                print("错误：找不到场次 %s" % args.contest, file=sys.stderr)
+                return 1
+
+            players = list(
+                session.execute(
+                    select(Player)
+                    .where(Player.contest_id == contest.id)
+                    .order_by(Player.player_no)
+                ).scalars()
+            )
+            if not players:
+                print("错误：该场次还没有选手", file=sys.stderr)
+                return 1
+
+            codes = []
+            now = utcnow()
+            for player in players:
+                plain = new_enroll_code(settings.enroll_code_bytes)
+                # 吊销该选手此前所有未使用的注册码，避免旧码流落在外
+                for old in session.execute(
+                    select(EnrollCode).where(
+                        EnrollCode.player_id == player.id,
+                        EnrollCode.revoked_at.is_(None),
+                    )
+                ).scalars():
+                    old.revoked_at = now
+                session.add(
+                    EnrollCode(
+                        code_hash=hash_enroll_code(plain),
+                        player_id=player.id,
+                        note="命令行签发",
+                    )
+                )
+                codes.append((player.player_no, plain))
+
+        print("选手编号,注册码")
+        for player_no, plain in codes:
+            print("%s,%s" % (player_no, plain))
+        print()
+        print("# 共 %d 个，只显示这一次；服务端只存哈希。" % len(codes), file=sys.stderr)
+        return 0
+
+    print("未知子命令: %s" % action, file=sys.stderr)
+    return 2
+
+
+def _read_roster(path: str) -> List[tuple]:
+    """读选手名单 CSV。
+
+    列顺序：``选手编号,姓名,座位,分组``，只有编号必填。
+    允许 ``#`` 开头的注释行与空行 —— 现场手写的名单经常带这些。
+    """
+    import csv
+
+    rows: List[tuple] = []
+    with open(path, "r", encoding="utf-8-sig", newline="") as handle:
+        first_line = _first_data_line(handle)
+        # 显式判定分隔符，不用 csv.Sniffer —— 它是启发式的，在两三行的小样本上
+        # 会猜错（实测会把制表符分隔的名单猜成逗号，整行被当成一个编号）。
+        # 名单通常只有几十行，猜错一次就得人工排查，不值得冒这个险。
+        delimiter = "\t" if "\t" in first_line else ("," if "," in first_line else ";")
+
+        handle.seek(0)
+        for raw in csv.reader(handle, delimiter=delimiter):
+            if not raw:
+                continue
+            first = (raw[0] or "").strip()
+            if not first or first.startswith("#"):
+                continue
+            # 跳过表头（第一行写"选手编号/player_no"之类）
+            if first.lower() in ("选手编号", "编号", "player_no", "playerno", "id"):
+                continue
+            cells = [(cell or "").strip() for cell in raw] + [""] * 4
+            rows.append((cells[0], cells[1], cells[2], cells[3]))
+    return rows
+
+
+def _first_data_line(handle) -> str:
+    """取第一行非空、非注释的内容，用于判定分隔符。"""
+    for line in handle:
+        text = line.strip()
+        if text and not text.startswith("#"):
+            return text
+    return ""
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="syncoj-server",
@@ -196,6 +383,34 @@ def build_parser() -> argparse.ArgumentParser:
     p_key.add_argument("--force", action="store_true", help="覆盖已存在的私钥")
     p_key.set_defaults(func=_cmd_genkey)
 
+    p_contest = sub.add_parser("contest", help="场次与选手管理（脚本化部署用）")
+    contest_sub = p_contest.add_subparsers(dest="contest_action", required=True)
+
+    c_list = contest_sub.add_parser("list", help="列出全部场次")
+    c_list.set_defaults(func=_cmd_contest)
+
+    c_create = contest_sub.add_parser("create", help="创建场次")
+    c_create.add_argument("--name", required=True, help="场次名称")
+    c_create.add_argument("--slug", default=None, help="场次标识（默认从名称生成）")
+    c_create.add_argument(
+        "--status", default="running", choices=["draft", "running", "frozen", "closed"]
+    )
+    c_create.add_argument("--note", default=None)
+    c_create.set_defaults(func=_cmd_contest)
+
+    c_import = contest_sub.add_parser("import-players", help="从 CSV 导入/更新选手")
+    c_import.add_argument("--contest", required=True, help="场次标识（slug）")
+    c_import.add_argument(
+        "--file", required=True, help="CSV 路径，列顺序：编号,姓名,座位,分组"
+    )
+    c_import.set_defaults(func=_cmd_contest)
+
+    c_codes = contest_sub.add_parser(
+        "enroll-codes", help="为全场选手签发注册码并打印（每个只显示一次）"
+    )
+    c_codes.add_argument("--contest", required=True, help="场次标识（slug）")
+    c_codes.set_defaults(func=_cmd_contest)
+
     return parser
 
 
@@ -203,7 +418,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
+        # 默认 WARNING：CLI 的输出是给人看的（表格、注册码），不该被
+        # "未配置签名私钥"这类例行 INFO 淹掉。要看细节加 -v。
+        level=logging.DEBUG if args.verbose else logging.WARNING,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
         stream=sys.stderr,
     )

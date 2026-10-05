@@ -16,6 +16,12 @@ const routes: RouteRecordRaw[] = [
     children: [
       { path: '', redirect: { name: 'overview' } },
       {
+        path: 'contests',
+        name: 'contests',
+        component: () => import('@/views/ContestsView.vue'),
+        meta: { title: '场次管理' },
+      },
+      {
         path: 'overview',
         name: 'overview',
         component: () => import('@/views/OverviewView.vue'),

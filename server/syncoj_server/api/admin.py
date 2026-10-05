@@ -58,6 +58,12 @@ from ..schemas import (
     ApplyRosterIn,
     ApplyRosterOut,
     AssetOut,
+    BootstrapKeyIssueIn,
+    BootstrapKeyIssuedOut,
+    BootstrapKeyOut,
+    ClaimByCodeIn,
+    ClaimMachineIn,
+    CloneAlertOut,
     ContestCreate,
     ContestOut,
     ContestUpdate,
@@ -71,6 +77,7 @@ from ..schemas import (
     LoginRequest,
     LoginResponse,
     ManualScoreIn,
+    PendingMachineOut,
     PlayerOut,
     PlayerUpsert,
     ProblemColumnOut,
@@ -95,14 +102,16 @@ from ..schemas import (
     UpgradeStatusOut,
 )
 from ..security import (
+    hash_bootstrap_key,
     hash_enroll_code,
     hash_password,
     hash_token,
+    new_bootstrap_key,
     new_enroll_code,
     new_token,
     verify_password,
 )
-from ..services import matching, rosters
+from ..services import enrollment, matching, rosters
 from ..services.deploy import validate_dest_template
 from ..services.signing import parse_version
 from ..storage import BlobTooLarge, HashMismatch
@@ -677,6 +686,323 @@ def apply_roster_to_contest(
 
 
 # --------------------------------------------------------------------------- #
+# 机器配对（统一密钥注册）
+# --------------------------------------------------------------------------- #
+#
+# 统一密钥把"发 50 个注册码"变成"镜像里放一把钥匙"，代价是服务端**不再知道
+# 哪台机器是谁**。配对就是把这个信息补回来的那一步，而它是整个流程里唯一
+# 需要人到场确认的环节 —— 所以这里的设计目标只有一个：让教师确认得又快又准。
+
+
+@router.get("/machines/pending", response_model=List[PendingMachineOut])
+def list_pending_machines(
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> List[PendingMachineOut]:
+    """待配对的机器。
+
+    按**最后心跳时间倒序**：教师站在机器前读配对码时，那台机器刚刚才心跳过，
+    它就应该在最上面。按注册时间排会让人从一堆久未上线的机器里翻找。
+    """
+    now = utcnow()
+    with ctx.db.session() as session:
+        claims = list(
+            session.execute(
+                select(MachineClaim)
+                .where(MachineClaim.revoked_at.is_(None))
+                .order_by(MachineClaim.last_seen_at.desc().nullslast(), MachineClaim.id)
+            ).scalars()
+        )
+        peers = _fingerprint_peer_counts(session)
+
+    result = []
+    for claim in claims:
+        expires_in = None
+        if claim.pair_code_expires_at is not None:
+            expires_in = int((claim.pair_code_expires_at - now).total_seconds())
+        result.append(
+            PendingMachineOut(
+                id=claim.id,
+                machine_id=claim.machine_id or "",
+                hostname=claim.hostname,
+                os_info=claim.os_info,
+                agent_version=claim.agent_version,
+                machine_uuid=claim.machine_uuid,
+                machine_fingerprint=claim.machine_fingerprint,
+                created_at=_iso(claim.created_at) or "",
+                last_seen_at=_iso(claim.last_seen_at),
+                seconds_since_seen=(
+                    (now - claim.last_seen_at).total_seconds()
+                    if claim.last_seen_at is not None
+                    else None
+                ),
+                pair_code_expires_in=expires_in,
+                fingerprint_peers=peers.get(claim.machine_fingerprint or "", 0),
+            )
+        )
+    return result
+
+
+def _fingerprint_peer_counts(session) -> Dict[str, int]:
+    """每个指纹上总共挂了几台机器（含已配对的）。
+
+    含已配对的是有意的：告警要回答的是"这份镜像是不是克隆出来的"，
+    而克隆出来的机器里，先配对好的那几台恰恰是证据。
+    """
+    counts = dict(
+        session.execute(
+            select(Agent.machine_fingerprint, func.count(Agent.id))
+            .where(Agent.machine_fingerprint.isnot(None), Agent.revoked_at.is_(None))
+            .group_by(Agent.machine_fingerprint)
+        ).all()
+    )
+    for (fingerprint, count) in session.execute(
+        select(MachineClaim.machine_fingerprint, func.count(MachineClaim.id))
+        .where(MachineClaim.machine_fingerprint.isnot(None), MachineClaim.revoked_at.is_(None))
+        .group_by(MachineClaim.machine_fingerprint)
+    ).all():
+        counts[fingerprint] = counts.get(fingerprint, 0) + int(count)
+    return {str(k): int(v) for k, v in counts.items()}
+
+
+@router.get("/machines/clone-alerts", response_model=List[CloneAlertOut])
+def list_clone_alerts(
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> List[CloneAlertOut]:
+    """疑似克隆镜像：多台机器共用同一个硬件指纹。
+
+    正常情况下每台物理机的 SMBIOS UUID 都不同。撞了指纹说明镜像是在某台机器
+    **跑过之后**才克隆的 —— 那批机器里可能已经有人的凭据被一起拷了进去，
+    配对与成绩归属都有串的风险，值得教师停下来看一眼。
+    """
+    with ctx.db.session() as session:
+        agents = list(
+            session.execute(
+                select(Agent)
+                .where(Agent.machine_fingerprint.isnot(None), Agent.revoked_at.is_(None))
+                .order_by(Agent.machine_fingerprint)
+            ).scalars()
+        )
+        claims = list(
+            session.execute(
+                select(MachineClaim)
+                .where(MachineClaim.machine_fingerprint.isnot(None), MachineClaim.revoked_at.is_(None))
+            ).scalars()
+        )
+
+    grouped: Dict[str, List[str]] = {}
+    for row in agents:
+        grouped.setdefault(row.machine_fingerprint or "", []).append(
+            row.hostname or row.machine_id or "?"
+        )
+    for row in claims:
+        grouped.setdefault(row.machine_fingerprint or "", []).append(
+            "%s（待配对）" % (row.hostname or row.machine_id or "?")
+        )
+
+    return [
+        CloneAlertOut(fingerprint=fingerprint, machine_count=len(names), hostnames=sorted(names))
+        for fingerprint, names in sorted(grouped.items())
+        if len(names) > 1
+    ]
+
+
+@router.post("/machines/claim-by-code", response_model=SimpleAck)
+def claim_machine_by_code(
+    payload: ClaimByCodeIn,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> SimpleAck:
+    """按配对码认领：机器上显示什么，教师就输什么。
+
+    遍历全部待认领机器逐个比对哈希。待认领队列通常只有个位数，
+    遍历完全可接受 —— 而按哈希直接查表需要一个"码 → 机器"的索引，
+    那意味着要存明文或者可逆的东西，不值得为这点性能换。
+    """
+    now = utcnow()
+    with ctx.db.session() as session:
+        player = session.get(Player, payload.player_id)
+        if player is None:
+            raise HTTPException(status_code=404, detail="选手不存在")
+        contest = session.get(Contest, player.contest_id)
+        if contest is None:  # pragma: no cover
+            raise HTTPException(status_code=404, detail="场次不存在")
+
+        matched = None
+        for claim in session.execute(
+            select(MachineClaim).where(MachineClaim.revoked_at.is_(None))
+        ).scalars():
+            if enrollment.claim_code_is_valid(claim, payload.pair_code, now):
+                matched = claim
+                break
+
+        if matched is None:
+            # 不区分"没这个码"和"码过期了"：对外说法一致，
+            # 免得有人拿它当预言机去猜码。
+            raise HTTPException(
+                status_code=404,
+                detail="配对码不存在或已过期。让机器重新注册一次即可刷新（重启 Agent 服务）。",
+            )
+
+        try:
+            result = enrollment.claim_machine(session, matched, player, contest, now)
+        except enrollment.BootstrapRejected as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+        player_no = result.player_no
+
+    return SimpleAck(ok=True, detail="已把 %s 配对给选手 %s" % (payload.pair_code, player_no))
+
+
+@router.post("/machines/{claim_id}/claim", response_model=SimpleAck)
+def claim_machine_by_id(
+    claim_id: int,
+    payload: ClaimMachineIn,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> SimpleAck:
+    """按机器认领（教师从列表里按主机名点选）。
+
+    给了 ``pair_code`` 就必须对得上 —— 机器名可能是重复的（克隆镜像、
+    默认 hostname），而配对码是唯一能证明"教师确实站在这台机器前面"的东西。
+    """
+    now = utcnow()
+    with ctx.db.session() as session:
+        claim = session.get(MachineClaim, claim_id)
+        if claim is None or claim.revoked_at is not None:
+            raise HTTPException(status_code=404, detail="这台机器不在待配对列表里")
+
+        if payload.pair_code:
+            if not enrollment.claim_code_is_valid(claim, payload.pair_code, now):
+                raise HTTPException(
+                    status_code=400,
+                    detail="配对码不对（或已过期）。请对着机器上的配对码重新输入。",
+                )
+
+        player = session.get(Player, payload.player_id)
+        if player is None:
+            raise HTTPException(status_code=404, detail="选手不存在")
+        contest = session.get(Contest, player.contest_id)
+        if contest is None:  # pragma: no cover
+            raise HTTPException(status_code=404, detail="场次不存在")
+
+        try:
+            result = enrollment.claim_machine(session, claim, player, contest, now)
+        except enrollment.BootstrapRejected as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+        player_no = result.player_no
+
+    return SimpleAck(ok=True, detail="已配对给选手 %s" % player_no)
+
+
+@router.delete("/machines/pending/{claim_id}", response_model=SimpleAck)
+def revoke_pending_machine(
+    claim_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> SimpleAck:
+    """把一台待配对的机器从列表里去掉（认错机器、测试机、刷注册的垃圾）。
+
+    只是吊销它的临时凭据 —— 那台机器下次心跳会拿到 401，然后按配置重新注册。
+    真正的垃圾机器应该先吊销统一密钥，否则它会一直回来。
+    """
+    with ctx.db.session() as session:
+        claim = session.get(MachineClaim, claim_id)
+        if claim is None:
+            return SimpleAck(ok=True, detail="这台机器已经不在列表里")
+        claim.revoked_at = utcnow()
+    return SimpleAck(ok=True, detail="已移除")
+
+
+# --------------------------------------------------------------------------- #
+# 统一注册密钥
+# --------------------------------------------------------------------------- #
+
+
+def _bootstrap_key_out(key: BootstrapKey) -> BootstrapKeyOut:
+    return BootstrapKeyOut(
+        id=key.id,
+        label=key.label,
+        note=key.note,
+        created_at=_iso(key.created_at) or "",
+        expires_at=_iso(key.expires_at),
+        revoked_at=_iso(key.revoked_at),
+        last_used_at=_iso(key.last_used_at),
+        use_count=int(key.use_count or 0),
+    )
+
+
+@router.get("/bootstrap-keys", response_model=List[BootstrapKeyOut])
+def list_bootstrap_keys(
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> List[BootstrapKeyOut]:
+    with ctx.db.session() as session:
+        rows = session.execute(select(BootstrapKey).order_by(BootstrapKey.id)).scalars()
+        return [_bootstrap_key_out(row) for row in rows]
+
+
+@router.post("/bootstrap-keys", response_model=BootstrapKeyIssuedOut)
+def issue_bootstrap_key(
+    payload: BootstrapKeyIssueIn,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> BootstrapKeyIssuedOut:
+    """签发一把统一密钥。**明文只返回这一次**，库里只有哈希。"""
+    raw = new_bootstrap_key(ctx.settings.bootstrap_key_bytes)
+    expires_at = (
+        utcnow() + timedelta(days=payload.expires_days) if payload.expires_days else None
+    )
+    with ctx.db.session() as session:
+        key = BootstrapKey(
+            key_hash=hash_bootstrap_key(raw),
+            label=payload.label or "",
+            note=payload.note,
+            expires_at=expires_at,
+        )
+        session.add(key)
+        session.flush()
+        session.add(
+            EventLog(
+                level="info",
+                category="bootstrap_key",
+                message="签发统一注册密钥 #%d（%s）" % (key.id, key.label or "无用途备注"),
+            )
+        )
+        return BootstrapKeyIssuedOut(**_bootstrap_key_out(key).model_dump(), key=raw)
+
+
+@router.post("/bootstrap-keys/{key_id}/revoke", response_model=BootstrapKeyOut)
+def revoke_bootstrap_key(
+    key_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> BootstrapKeyOut:
+    """吊销一把统一密钥。
+
+    **已经注册好的机器不受影响** —— 它们手里是各自的 token，不是这把密钥。
+    吊销只挡住"以后还想拿它注册"的机器。
+    """
+    with ctx.db.session() as session:
+        key = session.get(BootstrapKey, key_id)
+        if key is None:
+            raise HTTPException(status_code=404, detail="密钥不存在")
+        if key.revoked_at is None:
+            key.revoked_at = utcnow()
+            session.add(
+                EventLog(
+                    level="warning",
+                    category="bootstrap_key",
+                    message="吊销统一注册密钥 #%d（%s）" % (key.id, key.label or "无用途备注"),
+                )
+            )
+        session.flush()
+        return _bootstrap_key_out(key)
+
+
+# --------------------------------------------------------------------------- #
 # 选手
 # --------------------------------------------------------------------------- #
 
@@ -897,6 +1223,36 @@ def list_files(
         ]
 
 
+@router.get("/events", response_model=List[EventOut])
+def list_all_events(
+    limit: int = 200,
+    level: Optional[str] = None,
+    category: Optional[str] = None,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> List[EventOut]:
+    """不按场次过滤的审计事件。
+
+    有些事件**根本不属于任何场次**，而它们恰恰是最需要被看到的：
+    "有机器用统一密钥注册上来了"、"某台机器报的硬件指纹与一台**在线**机器相同"。
+    注册发生在配对之前，那台机器那时还没有场次归属 —— 如果只能按场次查，
+    这些告警会写进库然后永远没人看见。那和没记录没有区别。
+    """
+    limit = max(1, min(limit, 2000))
+    with ctx.db.session() as session:
+        stmt = (
+            select(EventLog, Player.player_no)
+            .outerjoin(Player, EventLog.player_id == Player.id)
+            .order_by(EventLog.id.desc())
+            .limit(limit)
+        )
+        if level:
+            stmt = stmt.where(EventLog.level == level)
+        if category:
+            stmt = stmt.where(EventLog.category == category)
+        return [_event_out(row, player_no) for row, player_no in session.execute(stmt)]
+
+
 @router.get("/contests/{contest_id}/events", response_model=List[EventOut])
 def list_events(
     contest_id: int,
@@ -916,26 +1272,25 @@ def list_events(
             stmt = stmt.where(EventLog.category == category)
         stmt = stmt.order_by(EventLog.id.desc()).limit(limit)
 
-        out = []
-        for row, player_no in session.execute(stmt):
-            meta = None
-            if row.meta_json:
-                try:
-                    meta = json.loads(row.meta_json)
-                except ValueError:
-                    meta = {"_raw": row.meta_json[:500]}
-            out.append(
-                EventOut(
-                    id=row.id,
-                    ts=_iso(row.ts) or "",
-                    level=row.level,
-                    category=row.category,
-                    player_no=player_no,
-                    message=row.message,
-                    meta=meta,
-                )
-            )
-        return out
+        return [_event_out(row, player_no) for row, player_no in session.execute(stmt)]
+
+
+def _event_out(row: EventLog, player_no: Optional[str]) -> EventOut:
+    meta = None
+    if row.meta_json:
+        try:
+            meta = json.loads(row.meta_json)
+        except ValueError:
+            meta = {"_raw": row.meta_json[:500]}
+    return EventOut(
+        id=row.id,
+        ts=_iso(row.ts) or "",
+        level=row.level,
+        category=row.category,
+        player_no=player_no,
+        message=row.message,
+        meta=meta,
+    )
 
 
 @router.get("/health")

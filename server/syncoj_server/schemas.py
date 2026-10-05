@@ -41,22 +41,53 @@ class _Base(BaseModel):
 
 
 class EnrollRequest(_Base):
-    enroll_code: str = Field(min_length=4, max_length=64)
+    """注册请求。
+
+    两种凭据二选一：
+
+    * ``enroll_code`` —— 每选手一个注册码（原有行为），一码一人
+    * ``bootstrap_key`` —— 镜像内置的统一密钥，注册出来的机器**没有归属**，
+      要靠短码配对认领到人
+
+    两个都传时以 ``enroll_code`` 为准：单人码是更明确的意图（"这台机器就是
+    某个具体选手"），不该被镜像里那份宽泛的密钥盖过去。
+    """
+
     machine_id: str = Field(min_length=1, max_length=128)
     hostname: Optional[str] = Field(default=None, max_length=128)
     agent_version: Optional[str] = Field(default=None, max_length=32)
     os_info: Optional[str] = Field(default=None, max_length=200)
 
+    enroll_code: Optional[str] = Field(default=None, max_length=64)
+    bootstrap_key: Optional[str] = Field(default=None, max_length=256)
+
+    #: Agent 首次运行时自己生成的 UUID。比 ``/etc/machine-id`` 更适合当身份 ——
+    #: 克隆镜像没做通用化时 machine-id 是整批相同的
+    machine_uuid: Optional[str] = Field(default=None, max_length=64)
+    #: 硬件指纹。**快照还原后仍然不变**，用来认回原来那台机器与它已认领的选手
+    machine_fingerprint: Optional[str] = Field(default=None, max_length=128)
+
 
 class EnrollResponse(_Base):
+    """注册结果。
+
+    ``claimed=False`` 表示这是一台**还没有归属**的机器（走统一密钥注册的）。
+    此时 Agent 该做的是把 ``pair_code`` 显示给人看、然后等着被认领，
+    而不是去扫代码 —— 它连准考证号都不知道，扫出来的路径没有意义。
+
+    ``player_no`` 等在未认领时为空串，客户端必须按 ``claimed`` 分支处理。
+    """
+
     token: str
     agent_id: int
-    player_no: str
+    claimed: bool = True
+    pair_code: Optional[str] = None
+    player_no: str = ""
     player_name: Optional[str] = None
-    contest_id: int
-    contest_slug: str
-    contest_name: str
-    config: Dict[str, Any]
+    contest_id: Optional[int] = None
+    contest_slug: str = ""
+    contest_name: str = ""
+    config: Dict[str, Any] = Field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------- #
@@ -89,6 +120,9 @@ class TickStats(_Base):
 class TickRequest(_Base):
     agent_version: Optional[str] = Field(default=None, max_length=32)
     machine_id: str = Field(min_length=1, max_length=128)
+    #: 主机名。每次 tick 都报 —— 待配对的机器要靠它在列表里被认出来，
+    #: 而"改名"这件事在考场上是会发生的（教师按座位重命名机器）
+    hostname: Optional[str] = Field(default=None, max_length=128)
     ts: int = Field(ge=0)
     scan_root: Optional[str] = Field(default=None, max_length=512)
     scan: List[ScanEntry] = Field(default_factory=list)
@@ -131,6 +165,14 @@ class TickResponse(_Base):
     cancel_assets: List[int] = Field(default_factory=list)
     upgrade: Optional[UpgradeInfo] = None
     config: Dict[str, Any]
+
+    #: 这台机器是否已经认领到选手。走统一密钥注册、还没配对时为 False
+    claimed: bool = True
+    #: 未认领时的配对短码。Agent 要把它显示给人看（桌面文件 + 日志）
+    pair_code: Optional[str] = None
+    #: 认领完成后回填的身份，Agent 拿到就把它存进凭据里，之后才能扫代码
+    player_no: Optional[str] = None
+    contest_slug: Optional[str] = None
 
 
 class UploadResult(_Base):
@@ -295,6 +337,81 @@ class ApplyRosterOut(_Base):
     pruned: int = 0
     #: 因为"已经有提交/成绩"而被保留下来的选手编号
     protected: List[str] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------------- #
+# 机器配对（统一密钥注册）
+# --------------------------------------------------------------------------- #
+
+
+class PendingMachineOut(_Base):
+    """一台注册上来、还没认领到人的机器。"""
+
+    id: int
+    machine_id: str
+    hostname: Optional[str] = None
+    os_info: Optional[str] = None
+    agent_version: Optional[str] = None
+    machine_uuid: Optional[str] = None
+    machine_fingerprint: Optional[str] = None
+    created_at: str
+    last_seen_at: Optional[str] = None
+    #: 距上次心跳多少秒 —— 教师靠它判断"这台机器还在不在"
+    seconds_since_seen: Optional[float] = None
+    #: 配对码还剩多少秒过期。**不返回码本身**：库里只有哈希，
+    #: 明文只在注册那一刻发给过机器，服务端自己也不该留
+    pair_code_expires_in: Optional[int] = None
+    #: 同一硬件指纹上还有几台机器。>0 说明疑似克隆镜像，界面要报警
+    fingerprint_peers: int = 0
+
+
+class ClaimMachineIn(_Base):
+    """认领一台机器。
+
+    ``pair_code`` 可以省略（教师从列表里按主机名直接认领时就省略），
+    但只要给了就必须对得上 —— 那是"我确认过这台机器就是那台"的凭据。
+    """
+
+    player_id: int
+    pair_code: Optional[str] = Field(default=None, max_length=32)
+
+
+class ClaimByCodeIn(_Base):
+    """用配对码认领：机器上显示什么，教师就输什么。"""
+
+    pair_code: str = Field(min_length=1, max_length=32)
+    player_id: int
+
+
+class CloneAlertOut(_Base):
+    """克隆镜像告警：多台机器共用同一个硬件指纹。"""
+
+    fingerprint: str
+    machine_count: int
+    hostnames: List[str] = Field(default_factory=list)
+
+
+class BootstrapKeyOut(_Base):
+    id: int
+    label: Optional[str] = None
+    note: Optional[str] = None
+    created_at: str
+    expires_at: Optional[str] = None
+    revoked_at: Optional[str] = None
+    last_used_at: Optional[str] = None
+    use_count: int = 0
+
+
+class BootstrapKeyIssueIn(_Base):
+    label: Optional[str] = Field(default=None, max_length=200)
+    note: Optional[str] = Field(default=None, max_length=500)
+    expires_days: Optional[int] = Field(default=None, ge=1, le=3650)
+
+
+class BootstrapKeyIssuedOut(BootstrapKeyOut):
+    """签发结果。``key`` 明文**只在这一刻出现**，之后库里只有哈希。"""
+
+    key: str
 
 
 class PlayerUpsert(_Base):

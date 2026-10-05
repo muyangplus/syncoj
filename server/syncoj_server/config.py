@@ -123,7 +123,22 @@ class Settings:
     # ---- 认证 ----
     admin_session_ttl_seconds: int = 12 * 3600
     enroll_code_bytes: int = 16
+    #: 统一注册密钥的字节数。比注册码长得多 —— 一把密钥对应**整间机房**，
+    #: 泄漏了等于交出"无限注册"的能力，熵必须够
+    bootstrap_key_bytes: int = 32
+    #: 配对短码长度。它只在机器与教师之间口头/目视传递，越长越难抄对；
+    #: 6 位配合"限时 + 一次性 + 管理员鉴权"已经够用
+    pair_code_length: int = 6
     token_bytes: int = 32
+
+    # ---- 注册限速 ----
+    #: 单 IP 每秒允许的注册次数。0 = 不限速。
+    #: 统一密钥把 /agent/enroll 变成"一把钥匙开整间机房"，必须有东西挡住
+    #: 无限注册与爆破。正常场景下一次注册就够，所以默认给得很紧。
+    enroll_per_ip_per_second: int = 10
+    #: 全局每秒允许的注册次数（所有 IP 合计）。挡住"从很多 IP 一起刷"。
+    #: 50 台机器开机时同时注册是真实场景，所以这里比单 IP 宽得多。
+    enroll_global_per_second: int = 50
 
     # ---- 上传 ----
     # 单次 multipart 请求体上限，略高于 max_file_size 以容纳 multipart 开销

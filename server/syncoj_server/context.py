@@ -13,6 +13,7 @@ from typing import Optional
 from .config import Settings
 from .db import Database
 from .registry import AgentRegistry
+from .services.ratelimit import RateLimiter
 from .services.signing import DerError, SigningKey, load_signing_key
 from .storage import BlobStore
 
@@ -31,6 +32,12 @@ class AppContext:
     signing_key: Optional[SigningKey] = None
     #: 加载私钥时的错误，用于在健康检查里明示而不是静默失败
     signing_key_error: Optional[str] = None
+    #: 按 IP 限速。统一密钥把 /agent/enroll 变成"一把钥匙开整间机房"，
+    #: 必须有东西挡住无限注册与爆破
+    enroll_limiter: RateLimiter = field(default_factory=lambda: RateLimiter(limit=0))
+    #: 全局注册限速 —— 挡住"从很多 IP 一起刷"。考场内网 IP 数量有限，
+    #: 全局上限才是真正的兜底
+    enroll_global_limiter: RateLimiter = field(default_factory=lambda: RateLimiter(limit=0))
 
     @classmethod
     def create(cls, settings: Settings) -> "AppContext":
@@ -40,6 +47,8 @@ class AppContext:
             db=Database(settings),
             registry=AgentRegistry(offline_after_seconds=settings.offline_after_seconds),
             blobs=BlobStore(settings.blob_root),
+            enroll_limiter=RateLimiter(limit=settings.enroll_per_ip_per_second),
+            enroll_global_limiter=RateLimiter(limit=settings.enroll_global_per_second),
         )
         context.load_signing_key()
         return context

@@ -20,9 +20,24 @@ from sqlalchemy import func, select
 from . import __version__
 from .config import Settings
 from .context import AppContext
-from .models import Admin, Contest, ContestStatus, EnrollCode, Player, utcnow
+from .models import (
+    Admin,
+    BootstrapKey,
+    Contest,
+    ContestStatus,
+    EnrollCode,
+    MachineClaim,
+    Player,
+    utcnow,
+)
 from .paths import slugify
-from .security import hash_enroll_code, hash_password, new_enroll_code
+from .security import (
+    hash_bootstrap_key,
+    hash_enroll_code,
+    hash_password,
+    new_bootstrap_key,
+    new_enroll_code,
+)
 
 __all__ = ["main"]
 
@@ -411,7 +426,175 @@ def build_parser() -> argparse.ArgumentParser:
     c_codes.add_argument("--contest", required=True, help="场次标识（slug）")
     c_codes.set_defaults(func=_cmd_contest)
 
+    p_boot = sub.add_parser(
+        "bootstrap-key",
+        help="镜像内置的统一注册密钥（整间机房一份，配合短码配对使用）",
+    )
+    boot_sub = p_boot.add_subparsers(dest="bootstrap_action", required=True)
+
+    b_issue = boot_sub.add_parser("issue", help="签发一把新密钥并打印（只显示一次）")
+    b_issue.add_argument("--label", default=None, help="用途备注，例如「2025 机房镜像」")
+    b_issue.add_argument("--note", default=None)
+    b_issue.add_argument(
+        "--expires-days", type=int, default=None, help="多少天后过期（默认不过期）"
+    )
+    b_issue.add_argument(
+        "--out",
+        default=None,
+        help="同时写入这个文件（root 只读 0600），供装机脚本直接拷进镜像",
+    )
+    b_issue.set_defaults(func=_cmd_bootstrap_key)
+
+    b_list = boot_sub.add_parser("list", help="列出全部密钥（只显示指纹，不显示明文）")
+    b_list.set_defaults(func=_cmd_bootstrap_key)
+
+    b_revoke = boot_sub.add_parser("revoke", help="吊销一把密钥（已注册的机器不受影响）")
+    b_revoke.add_argument("--id", type=int, required=True, dest="key_id")
+    b_revoke.set_defaults(func=_cmd_bootstrap_key)
+
+    b_pending = boot_sub.add_parser("pending", help="列出还没配对的机器")
+    b_pending.set_defaults(func=_cmd_bootstrap_key)
+
     return parser
+
+
+def _cmd_bootstrap_key(args: argparse.Namespace) -> int:
+    """统一注册密钥的签发、查看与吊销。
+
+    **明文只在签发时打印一次**，之后库里只有哈希 —— 和注册码同一个规矩。
+    丢了就再签一把，吊销旧的即可；已经注册好的机器不受影响（它们手里是
+    各自的 token，不是这把密钥）。
+    """
+    from datetime import timedelta
+
+    from .services.enrollment import fingerprint_duplicates
+
+    settings = _build_settings(args)
+    ctx = AppContext.create(settings)
+    ctx.db.create_all()
+    action = args.bootstrap_action
+
+    if action == "issue":
+        raw = new_bootstrap_key()
+        expires_at = (
+            utcnow() + timedelta(days=args.expires_days) if args.expires_days else None
+        )
+        with ctx.db.session() as session:
+            key = BootstrapKey(
+                key_hash=hash_bootstrap_key(raw),
+                label=args.label or "",
+                note=args.note,
+                expires_at=expires_at,
+            )
+            session.add(key)
+            session.flush()
+            key_id = key.id
+
+        if args.out:
+            target = Path(args.out).expanduser()
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                # 只给 root 读：这把钥匙能注册整间机房，不该躺在选手读得到的地方。
+                # 先建成 0600 再写内容，避免有一瞬间是宽权限。
+                target.touch(mode=0o600, exist_ok=True)
+                target.chmod(0o600)
+                target.write_text(raw + "\n", encoding="utf-8", newline="\n")
+            except OSError as exc:
+                print("错误：写入 %s 失败：%s" % (target, exc), file=sys.stderr)
+                return 1
+            print("[+] 已签发统一密钥 #%d，并写入 %s（0600）" % (key_id, target))
+        else:
+            print("[+] 已签发统一密钥 #%d" % key_id)
+        print()
+        print("  %s" % raw)
+        print()
+        print("  明文只显示这一次，库里只存哈希。装机时把它放进镜像：")
+        print("    /etc/syncoj/bootstrap.key   （0600，属主 root）")
+        print("  然后装 Agent 时带上 --bootstrap-key-file /etc/syncoj/bootstrap.key")
+        return 0
+
+    if action == "list":
+        with ctx.db.session() as session:
+            keys = list(
+                session.execute(select(BootstrapKey).order_by(BootstrapKey.id)).scalars()
+            )
+        if not keys:
+            print("还没有统一密钥。用 syncoj-server bootstrap-key issue 签发一把。")
+            return 0
+        print("%-4s %-24s %-8s %-20s %s" % ("ID", "用途", "用过", "最后使用", "状态"))
+        for key in keys:
+            state = "已吊销" if key.revoked_at else ("已过期" if _expired(key) else "有效")
+            print(
+                "%-4d %-24s %-8d %-20s %s"
+                % (
+                    key.id,
+                    (key.label or "—")[:24],
+                    key.use_count or 0,
+                    _fmt(key.last_used_at),
+                    state,
+                )
+            )
+        return 0
+
+    if action == "revoke":
+        with ctx.db.session() as session:
+            key = session.get(BootstrapKey, args.key_id)
+            if key is None:
+                print("错误：没有 #%d 这把密钥" % args.key_id, file=sys.stderr)
+                return 1
+            if key.revoked_at is not None:
+                print("这把密钥已经是吊销状态。")
+                return 0
+            key.revoked_at = utcnow()
+        print("[+] 已吊销统一密钥 #%d。已注册的机器不受影响。" % args.key_id)
+        return 0
+
+    if action == "pending":
+        with ctx.db.session() as session:
+            claims = list(
+                session.execute(
+                    select(MachineClaim)
+                    .where(MachineClaim.revoked_at.is_(None))
+                    .order_by(MachineClaim.id)
+                ).scalars()
+            )
+            alarms = fingerprint_duplicates(session)
+
+        if alarms:
+            print("⚠ 克隆镜像告警：有机器共用同一个硬件指纹")
+            for fingerprint, count in alarms:
+                print("    %s… 被 %d 台机器共用" % (fingerprint[:16], count))
+            print()
+
+        if not claims:
+            print("没有待配对的机器。")
+            return 0
+        print("%-4s %-20s %-20s %-20s %s" % ("ID", "主机名", "机器码", "首次出现", "最后心跳"))
+        for claim in claims:
+            print(
+                "%-4d %-20s %-20s %-20s %s"
+                % (
+                    claim.id,
+                    (claim.hostname or "—")[:20],
+                    (claim.machine_id or "—")[:20],
+                    _fmt(claim.created_at),
+                    _fmt(claim.last_seen_at),
+                )
+            )
+        print()
+        print("配对请到管理界面「机器配对」页：读机器桌面上的配对码，选中选手即可。")
+        return 0
+
+    print("错误：未知操作 %s" % action, file=sys.stderr)  # pragma: no cover
+    return 2
+
+
+def _expired(key) -> bool:
+    return key.expires_at is not None and key.expires_at < utcnow()
+
+
+def _fmt(value) -> str:
+    return value.strftime("%Y-%m-%d %H:%M") if value else "—"
 
 
 def main(argv: Optional[List[str]] = None) -> int:

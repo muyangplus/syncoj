@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
@@ -32,6 +33,7 @@ from ..models import (
     DeployTask,
     EnrollCode,
     EventLog,
+    MachineClaim,
     Player,
     SourceFile,
     utcnow,
@@ -51,12 +53,22 @@ from ..schemas import (
 from ..security import (
     hash_enroll_code,
     hash_token,
+    new_pair_code,
     new_token,
 )
 from ..storage import BlobTooLarge, HashMismatch, materialize
+from ..services import enrollment
 from ..services.collect import reconcile_scan, record_events
 from ..services.deploy import collect_deploy_jobs
-from .deps import AgentIdentity, get_ctx, require_agent
+from ..services.ratelimit import RateLimitExceeded
+from .deps import (
+    AgentIdentity,
+    MachineIdentity,
+    Principal,
+    get_ctx,
+    require_agent,
+    require_principal,
+)
 
 __all__ = ["router"]
 
@@ -89,19 +101,58 @@ def _agent_config(ctx: AppContext) -> Dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
+def rate_limit(ctx: AppContext, request: Request, payload: EnrollRequest) -> None:
+    """注册限速。见 ``services/ratelimit.py`` 里为什么需要它。
+
+    先查全局再查单 IP：全局超了就直接拒，不用再动每个 IP 的计数 ——
+    攻击者伪造源 IP 时，"每个 IP 一个计数器"本身就是可以被撑爆的东西。
+    """
+    client_ip = request.client.host if request.client else "unknown"
+    now = time.monotonic()
+    try:
+        ctx.enroll_global_limiter.check("global", now)
+        ctx.enroll_limiter.check(client_ip, now)
+    except RateLimitExceeded as exc:
+        log.warning(
+            "注册被限速：ip=%s machine_id=%s", client_ip, (payload.machine_id or "")[:16]
+        )
+        raise HTTPException(
+            status_code=429,
+            detail=exc.detail,
+            headers={"Retry-After": str(exc.retry_after)},
+        )
+
+
 @router.post("/enroll", response_model=EnrollResponse)
 def enroll(
     payload: EnrollRequest,
+    request: Request,
     ctx: AppContext = Depends(get_ctx),
 ) -> EnrollResponse:
-    """用注册码换长期凭据。
+    """换长期凭据。两条路，二选一。
 
-    刻意允许**重复注册**：NOI Linux 考试机常做整机快照还原，机器上的
-    ``credential.json`` 会消失。此时 Agent 用镜像内置的注册码重新 enroll，
+    **每选手注册码**（``enroll_code``）：一码一人，绑定 ``player_no + machine_id``。
+    刻意允许重复注册 —— NOI Linux 考试机常做整机快照还原，机器上的
+    ``credential.json`` 会消失，此时 Agent 用镜像内置的注册码重新 enroll，
     服务端按 ``machine_id`` 认出这是老机器，换发新凭据并作废旧凭据。
-    因此注册码不是一次性的，而是 "机器凭据种子"。
+    所以注册码不是一次性的，而是"机器凭据种子"。
+
+    **统一密钥**（``bootstrap_key``）：整间机房一份密钥，换回来的机器**没有归属**，
+    要靠短码配对认领到人。适合"镜像预装 + 批量克隆"的部署方式。
+
+    两个都传时以 ``enroll_code`` 为准 —— 单人码是更明确的意图。
     """
-    code_hash = hash_enroll_code(payload.enroll_code)
+    rate_limit(ctx, request, payload)
+
+    if payload.enroll_code:
+        return _enroll_with_code(ctx, payload)
+    if payload.bootstrap_key:
+        return _enroll_with_bootstrap(ctx, payload)
+    raise HTTPException(status_code=400, detail="必须提供 enroll_code 或 bootstrap_key")
+
+
+def _enroll_with_code(ctx: AppContext, payload: EnrollRequest) -> EnrollResponse:
+    code_hash = hash_enroll_code(payload.enroll_code or "")
     now = utcnow()
     raw_token = new_token(ctx.settings.token_bytes)
 
@@ -115,6 +166,64 @@ def enroll(
                 raise HTTPException(status_code=409, detail="注册冲突，请重试")
             log.warning("注册发生唯一约束冲突，重试一次 machine_id=%s", payload.machine_id)
     raise HTTPException(status_code=409, detail="注册冲突，请重试")  # pragma: no cover
+
+
+def _enroll_with_bootstrap(ctx: AppContext, payload: EnrollRequest) -> EnrollResponse:
+    """用统一密钥注册。见 ``services.enrollment`` 里的详细说明。"""
+    raw_token = new_token(ctx.settings.token_bytes)
+    raw_pair_code = new_pair_code(ctx.settings.pair_code_length)
+
+    with ctx.db.session() as session:
+        try:
+            outcome = enrollment.enroll_with_bootstrap_key(
+                session,
+                payload.bootstrap_key or "",
+                machine_id=payload.machine_id,
+                hostname=payload.hostname,
+                os_info=payload.os_info,
+                agent_version=payload.agent_version,
+                machine_uuid=payload.machine_uuid,
+                machine_fingerprint=payload.machine_fingerprint,
+                raw_token=raw_token,
+                raw_pair_code=raw_pair_code,
+                offline_after_seconds=ctx.settings.offline_after_seconds,
+            )
+        except enrollment.BootstrapRejected as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+        config = _agent_config(ctx)
+
+        if outcome.is_pending:
+            claim = outcome.require_claim()
+            return EnrollResponse(
+                token=raw_token,
+                agent_id=0,
+                claimed=False,
+                pair_code=raw_pair_code,
+                player_no="",
+                contest_id=None,
+                contest_slug="",
+                contest_name="",
+                config=config,
+            )
+
+        agent = outcome.require_agent()
+        player = session.get(Player, agent.player_id)
+        contest = session.get(Contest, player.contest_id) if player else None
+        if player is None or contest is None:  # pragma: no cover - 外键保证
+            raise HTTPException(status_code=409, detail="这台机器的配对记录已失效，请重新配对")
+
+        return EnrollResponse(
+            token=raw_token,
+            agent_id=agent.id,
+            claimed=True,
+            player_no=player.player_no,
+            player_name=player.name,
+            contest_id=contest.id,
+            contest_slug=contest.slug,
+            contest_name=contest.name,
+            config=config,
+        )
 
 
 def _enroll_once(
@@ -234,8 +343,12 @@ def tick(
     payload: TickRequest,
     request: Request,
     ctx: AppContext = Depends(get_ctx),
-    identity: AgentIdentity = Depends(require_agent),
+    identity: Principal = Depends(require_principal),
 ) -> TickResponse:
+    """一次心跳。已认领的机器收发文件，未认领的机器只在这里"排队等叫号"。"""
+    if isinstance(identity, MachineIdentity):
+        return _tick_pending(payload, ctx, identity)
+
     if payload.machine_id and payload.machine_id != identity.machine_id:
         # 凭据与声明的机器不符：可能是凭据被复制到了别的机器
         log.warning("machine_id 不匹配 agent=%s 声明=%s 实际=%s",
@@ -300,6 +413,43 @@ def tick(
         deploy_jobs=jobs,
         cancel_assets=[],
         upgrade=upgrade,
+        config=_agent_config(ctx),
+        claimed=True,
+        # 身份随每次 tick 一起回去：快照还原后 Agent 手上只剩 token，
+        # 准考证号和场次都是在这一刻重新知道的。让它为此专门再 enroll 一次
+        # 没必要 —— 那会多一次限速、多一条审计，还多一个可能失败的网络往返。
+        player_no=identity.player_no,
+        contest_slug=identity.contest_slug,
+    )
+
+
+def _tick_pending(
+    payload: TickRequest, ctx: AppContext, identity: MachineIdentity
+) -> TickResponse:
+    """未认领机器的心跳。
+
+    **什么都不做**，只是把 last_seen 更新一下、然后告诉它"还没认领"。
+    它扫描出来的东西一律丢弃 —— 没有准考证号，那些相对路径没法归属到任何人，
+    收下来只会污染台账。
+
+    周期固定用空闲值：它本来就没事可做。
+    """
+    now = utcnow()
+    with ctx.db.session() as session:
+        claim = session.get(MachineClaim, identity.claim_id)
+        if claim is not None:
+            claim.last_seen_at = now
+            if payload.agent_version:
+                claim.agent_version = payload.agent_version
+            # 每次 tick 都更新主机名：教师常常一边装一边按座位改机器名，
+            # 列表里显示旧名字会让人对着两台机器猜哪台是哪台
+            if payload.hostname:
+                claim.hostname = payload.hostname
+
+    return TickResponse(
+        server_time=int(now.replace(tzinfo=None).timestamp()),
+        next_tick_seconds=ctx.settings.tick_idle_seconds,
+        claimed=False,
         config=_agent_config(ctx),
     )
 

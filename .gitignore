@@ -1,0 +1,51 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.venv*/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---- Node / 前端 ----
+node_modules/
+web/dist/
+*.local
+.npm/
+
+# ---- SyncOJ 运行时数据（绝不入库） ----
+runtime/
+data/
+*.db
+*.db-wal
+*.db-shm
+blobs/
+judge_result/
+logs/
+*.part
+credential.json
+
+# 注意：source/ 是服务端运行时目录，但它同时是仓库里的 Python 包名
+# （server/syncoj_server/），所以只忽略运行时的那个，不要用裸 source/
+/source/
+/runtime/source/
+
+# ---- 离线分发包 ----
+dist-packages/
+*.tar.gz
+*.whl
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

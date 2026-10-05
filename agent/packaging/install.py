@@ -509,12 +509,47 @@ class Installer:
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.config_path.with_suffix(".ini.tmp")
         tmp.write_text(content, encoding="utf-8")
-        os.chmod(str(tmp), 0o640)
+        # 临时文件先给 0600，避免在 replace 之前有一瞬间是宽权限
+        os.chmod(str(tmp), 0o600)
         os.replace(str(tmp), str(self.config_path))
+        self._restrict_config_to_run_user()
         self.report.action("已写入 %s" % self.config_path)
 
         if self.options.enroll_code:
             self.report.note("注册码已写入配置；机器快照还原后 Agent 会用它自动重新注册")
+
+    def _restrict_config_to_run_user(self) -> None:
+        """把配置文件交给**运行 Agent 的那个用户**，别人（包括 root 之外的所有人）读不到。
+
+        这里必须 chown，不能只 chmod：安装器是 root 跑的，文件默认属主是 root，
+        `0640` 给的是 **root 组**的读权限。而 systemd 单元里写的是
+        `User=<选手登录用户>` —— 那个用户既不是 root 也不在 root 组，
+        结果是 **Agent 读不到自己的配置，装完起不来**。
+
+        `0600` 而不是 `0640`：这份文件里可能有注册码，没有任何其他账号需要读它。
+
+        由此还推出一条必须记住的性质：**`agent.ini` 对选手登录账号是可读的**。
+        所以共享密钥、长期有效的凭据这类东西，不该放在这个文件里 ——
+        学生账号能读到镜像里的每一个文件。
+        """
+        if self.report.dry_run:  # pragma: no cover - dry_run 在上面就 return 了
+            return
+        try:
+            shutil.chown(str(self.config_path), user=self.run_user)
+        except (OSError, LookupError) as exc:
+            # 用户不存在（--skip-user）或没有权限时不致命，但必须说出来：
+            # 静默跳过会让"装完起不来"变成一道需要现场排查的谜题
+            self.report.warn(
+                "无法把 %s 的属主改为 %s：%s\n"
+                "  Agent 以该用户运行，读不到配置就会启动失败。"
+                "请手工执行：chown %s %s"
+                % (self.config_path, self.run_user, exc, self.run_user, self.config_path)
+            )
+            return
+        try:
+            os.chmod(str(self.config_path), 0o600)
+        except OSError as exc:
+            self.report.warn("无法收紧 %s 的权限：%s" % (self.config_path, exc))
 
     def install_unit(self, agent_version: str) -> None:
         self.report.section("注册 systemd 单元")

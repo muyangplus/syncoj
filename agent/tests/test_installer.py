@@ -273,6 +273,80 @@ def test_rendered_config_supports_home_and_contest_slug(installer, workdir: Path
     assert resolved == [Path.home() / "mock-1" / "S001"]
 
 
+def make_installer(installer, workdir: Path, user: str, *, quiet: bool = True):
+    """造一个只为测试单个方法而存在的 Installer 实例。
+
+    不走 ``preflight()``（那会检查 root 权限、安装包是否存在），
+    只把 ``__init__`` 需要的属性凑齐。
+    """
+    options = installer.build_parser().parse_args(["--user", user])
+    options.config_dir = str(workdir / "etc")
+    options.state_dir = str(workdir / "state")
+    options.prefix = str(workdir / "opt")
+    options.unit_dir = str(workdir / "units")
+    instance = installer.Installer(options, installer.Reporter(quiet=quiet))
+    instance.config_path.parent.mkdir(parents=True, exist_ok=True)
+    return instance
+
+
+def test_config_is_handed_to_the_user_the_agent_runs_as(
+    installer, workdir: Path, monkeypatch
+) -> None:
+    """配置文件必须 chown 给 `--user` 指定的那个用户，权限收紧到 0600。
+
+    这条测试是为一个真实故障写的：安装器是 root 跑的，文件默认属主是 root，
+    `chmod 0640` 给的是 **root 组**的读权限。而 systemd 单元里写的是
+    `User=<选手登录用户>` —— 那个用户既不是 root 也不在 root 组，
+    结果是 **Agent 读不到自己的配置，装完起不来**。它报的是权限错误，
+    看起来像是"安装没做对"，很难想到是 chown 漏了。
+
+    沙箱里没法真的 chown 到别的用户，所以这里拦住的是**调用意图**。
+    """
+    calls = []
+    monkeypatch.setattr(
+        shutil, "chown",
+        lambda path, user=None, group=None: calls.append(("chown", str(path), user)),
+    )
+    monkeypatch.setattr(
+        os, "chmod", lambda path, mode: calls.append(("chmod", str(path), mode))
+    )
+
+    instance = make_installer(installer, workdir, "student")
+    instance.config_path.write_text("; x\n", encoding="utf-8")
+    instance._restrict_config_to_run_user()
+
+    target = str(instance.config_path)
+    assert ("chown", target, "student") in calls, (
+        "没有把配置 chown 给运行用户 —— Agent 会读不到配置而启动失败"
+    )
+    assert ("chmod", target, 0o600) in calls, (
+        "配置权限应当是 0600：里面可能有注册码，没有别的账号需要读它"
+    )
+    # 不能再出现 0640 —— 那正是这个 bug 的成因
+    assert ("chmod", target, 0o640) not in calls
+
+
+def test_config_chown_failure_is_reported_not_swallowed(
+    installer, workdir: Path, monkeypatch, capsys
+) -> None:
+    """chown 失败（比如 ``--skip-user`` 时用户不存在）必须**说出来**。
+
+    静默跳过会把"装完起不来"变成一道需要现场排查的谜题。
+    """
+    def boom(path, user=None, group=None):
+        raise LookupError("no such user")
+
+    monkeypatch.setattr(shutil, "chown", boom)
+
+    instance = make_installer(installer, workdir, "no-such-user", quiet=False)
+    instance.config_path.write_text("; x\n", encoding="utf-8")
+    instance._restrict_config_to_run_user()  # 不能抛
+
+    printed = capsys.readouterr().out
+    assert "no-such-user" in printed, "chown 失败被吞掉了：屏幕上连提都没提"
+    assert "chown" in printed, "应当直接给出可照抄的补救命令"
+
+
 def test_rendered_paths_are_always_posix(installer) -> None:
     """生成的配置与单元只被 Linux 读取，里面的路径必须恒为正斜杠。
 

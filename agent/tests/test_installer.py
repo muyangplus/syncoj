@@ -347,6 +347,38 @@ def test_config_chown_failure_is_reported_not_swallowed(
     assert "chown" in printed, "应当直接给出可照抄的补救命令"
 
 
+def test_generated_files_use_lf_even_when_built_on_windows(installer, workdir: Path) -> None:
+    """生成的 agent.ini 与 systemd 单元必须是 **LF**。
+
+    安装器常在 Windows 上被运行（开发机、镜像构建机），而 ``Path.write_text``
+    默认会把 ``\\n`` 翻译成当前平台的换行 —— 于是产物是 CRLF。目标机是 Linux：
+
+    * ``agent.ini`` 里每个值末尾多一个不可见的 ``\\r``（解析器宽容，问题隐蔽）
+    * systemd 单元文件里多一个 ``\\r`` 会**直接解析失败**，报的还是"格式错误"，
+      看不出是换行符
+
+    这个陷阱不会在 Linux 上暴露，所以必须由一条跑在开发机上的测试守住。
+    """
+    instance = make_installer(installer, workdir, "student")
+
+    # 注意：**不能**先把配置文件建出来 —— ``write_config`` 见到已存在的文件会
+    # 直接 skip（那是"别覆盖教师改过的配置"的保护）。上一版就是这么写的，
+    # 于是这条测试恒绿：它根本没走到写入路径。
+    assert not instance.config_path.exists()
+    instance.write_config("1.2.3")
+    data = instance.config_path.read_bytes()
+    assert data, "配置没被写出来（测试没走到写入路径）"
+    assert b"\r" not in data, "生成的 agent.ini 里有 CR —— 目标机是 Linux"
+
+    unit_file = instance.unit_path
+    unit_file.parent.mkdir(parents=True, exist_ok=True)
+    assert not unit_file.exists()
+    instance.install_unit("1.2.3")
+    unit_data = unit_file.read_bytes()
+    assert unit_data, "单元文件没被写出来（测试没走到写入路径）"
+    assert b"\r" not in unit_data, "生成的 systemd 单元里有 CR —— systemd 会解析失败"
+
+
 def test_rendered_paths_are_always_posix(installer) -> None:
     """生成的配置与单元只被 Linux 读取，里面的路径必须恒为正斜杠。
 

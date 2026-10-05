@@ -508,7 +508,10 @@ class Installer:
 
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.config_path.with_suffix(".ini.tmp")
-        tmp.write_text(content, encoding="utf-8")
+        # newline="\n" 是必须的：``write_text`` 默认会把 \n 翻译成当前平台的换行，
+        # 于是在 Windows 上生成的 agent.ini 是 CRLF。目标机是 Linux，那份配置里
+        # 每个值末尾都会多一个不可见的 \r。统一按 LF 写，产物与生成平台无关。
+        tmp.write_text(content, encoding="utf-8", newline="\n")
         # 临时文件先给 0600，避免在 replace 之前有一瞬间是宽权限
         os.chmod(str(tmp), 0o600)
         os.replace(str(tmp), str(self.config_path))
@@ -581,7 +584,8 @@ class Installer:
             self.report.plan("写入 %s" % self.unit_path)
         else:
             self.unit_path.parent.mkdir(parents=True, exist_ok=True)
-            self.unit_path.write_text(content, encoding="utf-8")
+            # 和 agent.ini 同理：systemd 单元文件里多一个 \r 会直接解析失败
+            self.unit_path.write_text(content, encoding="utf-8", newline="\n")
             self.report.action("已写入 %s" % self.unit_path)
 
             if _which("systemctl"):

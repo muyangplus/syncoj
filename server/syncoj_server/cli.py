@@ -387,6 +387,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_info = sub.add_parser("info", help="打印配置与统计")
     p_info.set_defaults(func=_cmd_info)
 
+    p_db = sub.add_parser("db", help="数据库维护")
+    db_sub = p_db.add_subparsers(dest="db_action", required=True)
+
+    d_reset = db_sub.add_parser(
+        "reset", help="删库重建（开发期用；会丢掉全部数据）"
+    )
+    d_reset.add_argument(
+        "--yes", action="store_true", help="确认执行（不给就只打印会做什么）"
+    )
+    d_reset.add_argument(
+        "--keep-admin", action="store_true", help="重建后保留原有管理员账号与口令"
+    )
+    d_reset.set_defaults(func=_cmd_db)
+
     p_key = sub.add_parser("genkey", help="生成发布签名密钥对（自更新用）")
     p_key.add_argument(
         "--out",
@@ -595,6 +609,76 @@ def _expired(key) -> bool:
 
 def _fmt(value) -> str:
     return value.strftime("%Y-%m-%d %H:%M") if value else "—"
+
+
+def _cmd_db(args: argparse.Namespace) -> int:
+    """数据库维护。
+
+    ``db reset`` 是**开发期**的逃生口：结构改动做一次性迁移太麻烦时，
+    直接删库重建。它明确会丢数据 —— 所以默认只打印计划，要真跑得加 ``--yes``。
+
+    为什么不做成"自动检测结构不一致就重建"：那会在生产环境里因为一次手误
+    把整场比赛的数据抹掉，而**删库这件事必须是有人明确按下去的**。
+    """
+    settings = _build_settings(args)
+    db_path = settings.db_path
+
+    if args.db_action != "reset":  # pragma: no cover - argparse 已限定
+        print("错误：未知的数据库操作 %s" % args.db_action, file=sys.stderr)
+        return 2
+
+    stash: List[Dict[str, object]] = []
+    if args.keep_admin and db_path.is_file():
+        # 趁库还在，把管理员账号捞出来 —— 重建之后不用再跑 init 设口令
+        try:
+            ctx = AppContext.create(settings)
+            with ctx.db.session() as session:
+                for admin in session.execute(select(Admin)).scalars():
+                    stash.append(
+                        {"username": admin.username, "password_hash": admin.password_hash}
+                    )
+            ctx.db.dispose()
+        except Exception as exc:
+            print("读取原管理员账号失败（将不会保留）：%s" % exc, file=sys.stderr)
+
+    print("将要删除：%s" % db_path)
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(str(db_path) + suffix)
+        if sidecar.exists():
+            print("           %s" % sidecar)
+    if stash:
+        print("将保留管理员账号：%s" % "、".join(str(item["username"]) for item in stash))
+
+    if not args.yes:
+        print()
+        print("这是**只打印计划**。确认要丢数据就加 --yes：")
+        print("    syncoj-server db reset --yes")
+        return 0
+
+    removed = 0
+    for target in [db_path] + [Path(str(db_path) + s) for s in ("-wal", "-shm")]:
+        if target.exists():
+            try:
+                target.unlink()
+                removed += 1
+            except OSError as exc:
+                print("删除 %s 失败：%s" % (target, exc), file=sys.stderr)
+                return 1
+
+    ctx = AppContext.create(settings)
+    ctx.db.create_all()
+    if stash:
+        with ctx.db.session() as session:
+            for item in stash:
+                session.add(
+                    Admin(username=item["username"], password_hash=item["password_hash"])
+                )
+    ctx.db.dispose()
+
+    print("[+] 已重建数据库（删除 %d 个文件）" % removed)
+    if not stash:
+        print("下一步：syncoj-server init --admin-user admin")
+    return 0
 
 
 def main(argv: Optional[List[str]] = None) -> int:

@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from . import keys
+
 __all__ = ["Settings", "default_settings"]
 
 
@@ -69,9 +71,18 @@ class Settings:
 
     # ---- 存储 ----
     data_root: Path = field(default_factory=lambda: _env_path("SYNCOJ_DATA_ROOT", "runtime/server"))
-    #: 发布签名私钥路径（环境变量 SYNCOJ_RELEASE_KEY 可覆盖）
+
+    # ---- 密钥 ----
+    #: 密钥目录（仓库里的 ``.key/``）。解析规则见 :mod:`syncoj_server.keys` ——
+    #: 那里是"私钥在哪"的唯一定义。``None`` = 没有隐式密钥目录。
+    key_dir: Optional[Path] = field(default_factory=keys.key_dir)
+    #: 发布签名私钥（PEM/DER/JSON）。
+    #:
+    #: ``SYNCOJ_RELEASE_KEY`` 最优先；否则退回 ``<key_dir>/release-key.pem``
+    #: （**只在文件真的存在时**）。两者都没有 → ``None`` → 服务端不提供任何升级，
+    #: 而没有签名的包 Agent 一律拒绝 —— 这是刻意的安全默认值。
     release_signing_key: Optional[Path] = field(
-        default_factory=lambda: _env_opt_path("SYNCOJ_RELEASE_KEY")
+        default_factory=keys.release_signing_key_path
     )
 
     # ---- 轮询节奏（下发给 Agent，Agent 不得自行决定）----
@@ -109,10 +120,10 @@ class Settings:
     judge_scan_interval: float = 10.0
 
     # ---- 自更新 ----
-    #: 发布签名私钥（PEM/DER/JSON）。**留空则服务端不提供任何升级** ——
-    #: 没有私钥就签不出包，而没有签名的包 Agent 一律拒绝，所以留空是安全的默认值。
-    release_signing_key: Optional[Path] = None
-    #: 发布包大小上限
+    #: 发布包大小上限。签名私钥见上面的 ``release_signing_key`` —— 它**只能有
+    #: 一处定义**：这个 dataclass 曾经把同一个字段声明了两遍（一次读环境变量、
+    #: 一次写死 None），后者静默覆盖前者，于是 ``SYNCOJ_RELEASE_KEY`` 完全不
+    #: 起作用，而"自更新为什么开不起来"在代码里怎么看都像是配好了。
     max_release_size: int = 256 * 1024 * 1024
 
     # ---- 管理界面 ----
@@ -122,13 +133,15 @@ class Settings:
 
     # ---- 认证 ----
     admin_session_ttl_seconds: int = 12 * 3600
-    enroll_code_bytes: int = 16
-    #: 统一注册密钥的字节数。比注册码长得多 —— 一把密钥对应**整间机房**，
+    #: 统一注册密钥的字节数。一把密钥对应**整间机房**，
     #: 泄漏了等于交出"无限注册"的能力，熵必须够
     bootstrap_key_bytes: int = 32
     #: 配对短码长度。它只在机器与教师之间口头/目视传递，越长越难抄对；
     #: 6 位配合"限时 + 一次性 + 管理员鉴权"已经够用
     pair_code_length: int = 6
+    #: 配对短码的有效期。机器装好后教师可能过一阵才走到跟前，
+    #: 太短就得回管理界面重新发，太长则墙上贴的码会被别人抄走
+    pair_code_ttl_seconds: int = 30 * 60
     token_bytes: int = 32
 
     # ---- 注册限速 ----

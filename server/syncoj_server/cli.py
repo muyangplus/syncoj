@@ -10,33 +10,32 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import secrets
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from sqlalchemy import func, select
 
 from . import __version__
+from . import keys as keypaths
 from .config import Settings
 from .context import AppContext
 from .models import (
     Admin,
+    Agent,
     BootstrapKey,
     Contest,
     ContestStatus,
-    EnrollCode,
-    MachineClaim,
     Player,
     utcnow,
 )
 from .paths import slugify
 from .security import (
     hash_bootstrap_key,
-    hash_enroll_code,
     hash_password,
     new_bootstrap_key,
-    new_enroll_code,
 )
 
 __all__ = ["main"]
@@ -79,11 +78,178 @@ def _cmd_init(args: argparse.Namespace) -> int:
     print("[+] 数据目录: %s" % settings.data_root)
     print("[+] 数据库:   %s" % settings.db_path)
     print()
+    release_state, bootstrap_state = _ensure_local_keys(ctx)
+    print()
     print("下一步:")
     print("  1. syncoj-server serve --host 0.0.0.0 --port 8000")
-    print("  2. 用 /api/v1/admin/login 登录，创建场次并导入选手")
-    print("  3. 为每位选手签发注册码 /api/v1/admin/players/{id}/enroll-code")
+    print("  2. 用 /api/v1/admin/login 登录，创建场次并导入名单（名单可复用）")
+    if bootstrap_state == "no-dir":
+        print("  3. 签发统一密钥: syncoj-server bootstrap-key issue --out /etc/syncoj/bootstrap.key")
+    else:
+        print("  3. 装机时让 Agent 读统一密钥（默认 /etc/syncoj/bootstrap.key，属主 root 0600）")
+        print("     它就在 %s，装镜像时把这个文件放进去" % _bootstrap_key_display())
+    print("  4. 机器装完 Agent 后会自动出现「配对码」，在管理界面「机器配对」页绑定选手")
+    if release_state in ("created", "exists"):
+        print("  5. 服务端已自动加载发布私钥，打包时公钥会随包带走:")
+        print("     python agent/packaging/build_bundle.py")
+    # 命令到这里就结束了，但连接池还攥着 syncoj.db。进程退出时操作系统会收拾，
+    # 所以从前没人注意 —— 直到同一个进程里连着跑 init 和 db reset：Windows 上
+    # 删不掉一个被打开的文件，于是 db reset 报"另一个程序正在使用此文件"。
+    # 短命令显式归还句柄，读起来也更清楚。
+    ctx.db.dispose()
     return 0
+
+
+def _bootstrap_key_display() -> str:
+    where = keypaths.key_dir_for_write()
+    if where is None:  # pragma: no cover - 上面已经判过
+        return "（未知）"
+    return str(where / keypaths.BOOTSTRAP_KEY_NAME)
+
+
+def _ensure_local_keys(ctx) -> "Tuple[str, str]":
+    """补齐 ``.key/`` 下的两把密钥，返回 ``(发布密钥状态, 统一密钥状态)``。
+
+    状态取值：``created`` / ``exists`` / ``no-dir`` / ``failed`` / ``skipped``，
+    上层据此决定打印哪些"下一步" —— 已经有的东西不该再叫用户去创建一次。
+
+    **只补缺，从不覆盖。** 轮换签名私钥会让所有已发布的签名失效，换统一密钥会
+    让已经装好的镜像整批作废 —— 这两件事都必须是有人明确按键的，不能由一个
+    初始化命令顺手做掉。
+    """
+    where = keypaths.key_dir_for_write()
+    if where is None:
+        print("[ ] 没有可用的密钥目录，跳过密钥生成")
+        print("    原因：既没有设 %s，当前布局也不是源码仓库。" % keypaths.KEY_DIR_ENV)
+        print("    影响：服务端不提供任何升级；装机需要手工指定统一密钥。")
+        print("    要启用：set %s=<目录> 后重跑 init" % keypaths.KEY_DIR_ENV)
+        return "no-dir", "no-dir"
+
+    keypaths.ensure_key_dir(where)
+    print("[+] 密钥目录: %s （0700）" % where)
+    return _ensure_release_key(where), _ensure_bootstrap_key(ctx, where)
+
+
+def _ensure_release_key(where: Path) -> str:
+    """发布签名密钥对：缺私钥就生成，缺公钥就从私钥重导（不重签任何东西）。"""
+    from .services.signing import DerError, generate_keypair, load_signing_key, openssl_available
+
+    private = where / keypaths.RELEASE_SIGNING_KEY_NAME
+    public = where / keypaths.RELEASE_PUBLIC_KEY_NAME
+
+    if private.is_file():
+        print("[=] 发布签名私钥已存在，未做改动: %s" % private)
+        if not public.is_file():
+            # 公钥丢了可以从私钥重新导出来 —— 它是派生品，不需要重签任何东西，
+            # 所以这一步是安全的；私钥本身一个字节都不动。
+            try:
+                _write_public_key(public, load_signing_key(private))
+            except Exception as exc:
+                print("[!] 私钥在，但从它导出公钥失败：%s" % exc, file=sys.stderr)
+                print("    自更新会保持关闭，直到公钥可读。", file=sys.stderr)
+                return "failed"
+            print("[+] 公钥缺失，已从私钥重新导出: %s" % public)
+        return "exists"
+
+    if not openssl_available():
+        print("[!] 跳过发布签名密钥：找不到 openssl")
+        print("    Debian/Ubuntu: apt install openssl，然后重跑 init")
+        print("    影响：服务端不提供升级（这是安全的默认值，不是故障）。")
+        return "skipped"
+
+    try:
+        key = generate_keypair(private)
+    except (DerError, RuntimeError, OSError, FileExistsError) as exc:
+        print("[!] 生成发布签名密钥失败：%s" % exc, file=sys.stderr)
+        print("    自更新会保持关闭。", file=sys.stderr)
+        return "failed"
+
+    _write_public_key(public, key)
+    print("[+] 已生成发布签名密钥: %s （0600）" % private)
+    print("    公钥: %s" % public)
+    return "created"
+
+
+def _write_public_key(public: Path, key) -> None:
+    """公钥不是秘密，0644 就好；但行尾必须是 LF。
+
+    同一条理由写在这里而不是只在 genkey 里：公钥要在开发机和服务器之间搬运、
+    被 sha256 比对，字节不同会让人怀疑"是不是换了密钥"。
+    """
+    public.parent.mkdir(parents=True, exist_ok=True)
+    public.write_text(
+        json.dumps(key.public_key_dict(), indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    try:
+        os.chmod(str(public), 0o644)
+    except OSError:
+        pass
+
+
+def _ensure_bootstrap_key(ctx, where: Path) -> str:
+    """统一注册密钥：文件与库里的哈希**两边都要在**才算好。
+
+    这里有个不显眼但会真出事的交叉点：密钥的明文在 ``.key/`` 里，而它的哈希在
+    数据库里。``db reset`` 只删库、不碰 ``.key/``（这是对的，密钥不是数据），
+    于是"文件还在、哈希没了"是个必然会出现的状态 —— 那时这把密钥在界面上
+    看起来好好的，实际注册会被判成"密钥无效"。所以判据不是"文件在不在"，
+    而是"文件里的这一把，库里登记了没有"。
+    """
+    from .models import BootstrapKey
+
+    path = where / keypaths.BOOTSTRAP_KEY_NAME
+
+    if not path.is_file():
+        raw = new_bootstrap_key()
+        keypaths.write_secret_text(path, raw + "\n")
+        with ctx.db.session() as session:
+            session.add(
+                BootstrapKey(
+                    key_hash=hash_bootstrap_key(raw),
+                    label="init 自动签发",
+                    note="由 syncoj-server init 生成在 %s" % where,
+                )
+            )
+        print("[+] 已生成统一注册密钥: %s （0600）" % path)
+        print("    明文只在这个文件里，库里只存哈希 —— 装镜像时带上它")
+        return "created"
+
+    raw = path.read_text(encoding="utf-8").strip()
+    if not raw:
+        print("[!] %s 是空的，未做改动" % path)
+        print("    删掉它再跑一次 init 会重新生成一把。")
+        return "failed"
+
+    digest = hash_bootstrap_key(raw)
+    with ctx.db.session() as session:
+        rows = list(
+            session.execute(select(BootstrapKey).where(BootstrapKey.key_hash == digest)).scalars()
+        )
+
+    if rows:
+        state = "已吊销" if rows[0].revoked_at else "有效"
+        print("[=] 统一注册密钥已登记（%s），未做改动: %s" % (state, path))
+        if rows[0].revoked_at:
+            # 明说一句：revoke 是有意的动作，init 不该把它悄悄撤销回来
+            print("    这把密钥已被吊销，init 不会替你恢复它。要换一把就删掉文件再跑 init。")
+            return "exists"
+        return "exists"
+
+    # 文件在、库里完全没有这个哈希：最可能是 db reset 之后。补登记，
+    # 但要让人看见 —— 如果那把密钥是刚刚被有意吊销的，这条日志就是线索。
+    with ctx.db.session() as session:
+        session.add(
+            BootstrapKey(
+                key_hash=digest,
+                label="init 补登记",
+                note="文件已存在但库里没有这个哈希（多半是 db reset 之后）",
+            )
+        )
+    print("[+] 统一注册密钥的哈希不在库里，已补登记: %s" % path)
+    print("    若这把密钥是你刚有意吊销的，请到管理界面重新吊销一次。")
+    return "created"
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:
@@ -155,9 +321,13 @@ def _cmd_genkey(args: argparse.Namespace) -> int:
 
     pub_path = Path(args.public_out) if args.public_out else out.with_suffix(".pub.json")
     pub_path.parent.mkdir(parents=True, exist_ok=True)
+    # 显式 LF：Windows 上 write_text 默认翻成 CRLF，于是"公钥文件"在两个平台上
+    # 字节不同。JSON 本身不在乎，但一台机器上的文件跟另一台上的不一样，
+    # 会让人怀疑内容真的不同 —— 排查时间就是这么烧掉的。
     pub_path.write_text(
         json.dumps(key.public_key_dict(), indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
+        newline="\n",
     )
 
     print("[+] 私钥: %s  (权限 0600，绝不外传)" % out)
@@ -263,54 +433,6 @@ def _cmd_contest(args: argparse.Namespace) -> int:
             session.flush()
             print("[+] 场次 %s：新增 %d 名，更新 %d 名（共 %d）"
                   % (contest.slug, created, updated, len(rows)))
-        return 0
-
-    if action == "enroll-codes":
-        with ctx.db.session() as session:
-            contest = session.execute(
-                select(Contest).where(Contest.slug == args.contest)
-            ).scalar_one_or_none()
-            if contest is None:
-                print("错误：找不到场次 %s" % args.contest, file=sys.stderr)
-                return 1
-
-            players = list(
-                session.execute(
-                    select(Player)
-                    .where(Player.contest_id == contest.id)
-                    .order_by(Player.player_no)
-                ).scalars()
-            )
-            if not players:
-                print("错误：该场次还没有选手", file=sys.stderr)
-                return 1
-
-            codes = []
-            now = utcnow()
-            for player in players:
-                plain = new_enroll_code(settings.enroll_code_bytes)
-                # 吊销该选手此前所有未使用的注册码，避免旧码流落在外
-                for old in session.execute(
-                    select(EnrollCode).where(
-                        EnrollCode.player_id == player.id,
-                        EnrollCode.revoked_at.is_(None),
-                    )
-                ).scalars():
-                    old.revoked_at = now
-                session.add(
-                    EnrollCode(
-                        code_hash=hash_enroll_code(plain),
-                        player_id=player.id,
-                        note="命令行签发",
-                    )
-                )
-                codes.append((player.player_no, plain))
-
-        print("选手编号,注册码")
-        for player_no, plain in codes:
-            print("%s,%s" % (player_no, plain))
-        print()
-        print("# 共 %d 个，只显示这一次；服务端只存哈希。" % len(codes), file=sys.stderr)
         return 0
 
     print("未知子命令: %s" % action, file=sys.stderr)
@@ -434,11 +556,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     c_import.set_defaults(func=_cmd_contest)
 
-    c_codes = contest_sub.add_parser(
-        "enroll-codes", help="为全场选手签发注册码并打印（每个只显示一次）"
-    )
-    c_codes.add_argument("--contest", required=True, help="场次标识（slug）")
-    c_codes.set_defaults(func=_cmd_contest)
 
     p_boot = sub.add_parser(
         "bootstrap-key",
@@ -564,35 +681,42 @@ def _cmd_bootstrap_key(args: argparse.Namespace) -> int:
         return 0
 
     if action == "pending":
+        now = utcnow()
         with ctx.db.session() as session:
-            claims = list(
+            agents = list(
                 session.execute(
-                    select(MachineClaim)
-                    .where(MachineClaim.revoked_at.is_(None))
-                    .order_by(MachineClaim.id)
+                    select(Agent)
+                    .where(Agent.roster_entry_id.is_(None), Agent.revoked_at.is_(None))
+                    .order_by(Agent.last_seen_at.desc().nullslast(), Agent.id)
                 ).scalars()
             )
-            alarms = fingerprint_duplicates(session)
+            peers = fingerprint_duplicates(session)
 
-        if alarms:
+        if peers:
             print("⚠ 克隆镜像告警：有机器共用同一个硬件指纹")
-            for fingerprint, count in alarms:
+            for fingerprint, count in peers:
                 print("    %s… 被 %d 台机器共用" % (fingerprint[:16], count))
             print()
 
-        if not claims:
+        if not agents:
             print("没有待配对的机器。")
             return 0
-        print("%-4s %-20s %-20s %-20s %s" % ("ID", "主机名", "机器码", "首次出现", "最后心跳"))
-        for claim in claims:
+        print("%-4s %-18s %-12s %-8s %s" % ("ID", "主机名", "机器编号", "配对码", "最后心跳"))
+        for agent in agents:
+            if agent.pair_code_expires_at is None:
+                code_state = "—"
+            else:
+                left = int((agent.pair_code_expires_at - now).total_seconds())
+                # 负数是"码过期了但机器还没被配对走"，直接显示过期，别印出 -320 秒。
+                code_state = "已过期" if left <= 0 else "%d 秒" % left
             print(
-                "%-4d %-20s %-20s %-20s %s"
+                "%-4d %-18s %-12s %-8s %s"
                 % (
-                    claim.id,
-                    (claim.hostname or "—")[:20],
-                    (claim.machine_id or "—")[:20],
-                    _fmt(claim.created_at),
-                    _fmt(claim.last_seen_at),
+                    agent.id,
+                    (agent.hostname or "—")[:18],
+                    (agent.machine_id or "—")[:12],
+                    code_state,
+                    _fmt(agent.last_seen_at),
                 )
             )
         print()

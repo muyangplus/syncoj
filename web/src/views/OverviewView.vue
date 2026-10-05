@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
 
-import { agentApi, authApi, playerApi, scoreApi } from '@/api'
+import { agentApi, authApi, playerApi, rosterApi, scoreApi } from '@/api'
 import type { AdminHealth } from '@/api'
 import type { AgentRuntimeOut, PlayerOut, ScoreMatrixOut } from '@/api/types'
 import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
@@ -193,6 +193,37 @@ const tableRowKey = (row: { player: PlayerOut }) => row.player.id
 // --------------------------------------------------------------------------- //
 
 const importVisible = ref(false)
+
+/** 最近一次「按默认名单补人」的回执。 */
+const rosterReceipt = ref('')
+
+/**
+ * 按当前场次的默认名单补人。
+ *
+ * 放在**空状态**里，因为这里正是教师发现"怎么一个人都没有"的地方。此前这里写的
+ * 是一句"也可以从「名单库」建一份名单，再用「应用到场次」"——那是解释，不是出路：
+ * 它把人指向另一个页面，然后就没有下一步了。
+ *
+ * `prune` 固定 false：这个按钮只补人不删人。
+ */
+const fillFromDefaultRoster = useMutation(
+  (rosterId: number) => {
+    const id = contest.currentId
+    if (id === null) throw new Error('还没有选中场次')
+    return rosterApi.applyToContest(id, { roster_id: rosterId, prune: false })
+  },
+  {
+    success: (report) => {
+      const bits: string[] = []
+      if (report.created) bits.push(`新建 ${report.created} 人`)
+      if (report.updated) bits.push(`更新 ${report.updated} 人`)
+      if (report.kept) bits.push(`保留 ${report.kept} 人`)
+      rosterReceipt.value = bits.length ? `已补人：${bits.join('、')}` : '名单与场次一致，没有改动'
+      return rosterReceipt.value
+    },
+    onDone: () => list.reload(),
+  },
+)
 
 const editOpen = ref(false)
 const editTarget = ref<PlayerOut | null>(null)
@@ -617,10 +648,26 @@ function handleCommand(
 
       <template #empty>
         <template v-if="!list.rows.value.length">
-          <p>本场次还没有导入选手</p>
-          <el-button type="primary" size="small" @click="importVisible = true">导入选手</el-button>
-          <p class="page-hint">
-            也可以从「名单库」建一份名单，再用「应用到场次」一次把人导进来。
+          <p>本场次还没有选手</p>
+          <div class="empty-actions">
+            <!--
+              有默认名单时，直接把「补人」摆在这里 —— 教师正是在这一页发现"人是空的"，
+              让他为此再跑一趟「名单库」就是多出来的那一步。
+            -->
+            <el-button
+              v-if="contest.current?.default_roster_id"
+              type="primary"
+              size="small"
+              :loading="fillFromDefaultRoster.pending.value"
+              @click="fillFromDefaultRoster.run(contest.current?.default_roster_id as number)"
+            >
+              按默认名单「{{ contest.current?.default_roster_name }}」补人
+            </el-button>
+            <el-button size="small" @click="importVisible = true">导入选手</el-button>
+          </div>
+          <p v-if="rosterReceipt" class="page-hint">{{ rosterReceipt }}</p>
+          <p v-else-if="!contest.current?.default_roster_id" class="page-hint">
+            还没有默认名单？去「名单库」建一份，再回来补人。
           </p>
         </template>
         <template v-else>本页没有匹配的选手（搜索只作用在本页）</template>
@@ -762,6 +809,13 @@ function handleCommand(
 </template>
 
 <style scoped>
+.empty-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
 .stats {
   margin-bottom: 4px;
 }

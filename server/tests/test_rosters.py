@@ -298,6 +298,51 @@ def test_apply_uses_the_contests_default_roster(
 # --------------------------------------------------------------------------- #
 
 
+def test_setting_the_default_roster_does_not_touch_players(
+    client: TestClient, admin_headers: dict
+) -> None:
+    """设/改「默认名单」只是存一个预设，**一个人都不会动**。
+
+    这是刻意选的语义（真正的动作是界面上那个「按这份名单补人」按钮）：场次里的
+    选手是从名单复制出去的独立数据，而"改一个设置"顺手创建十几条选手记录，会让
+    教师根本分不清到底是哪一步把人弄进来的。
+
+    也正因为如此，界面上必须把动作摆在旁边。此前那里只留了一句"要落到场次请到
+    「名单库」点「应用」"—— 教师照着走一遍的结论是"我配了默认名单，选手怎么还是
+    空的"，然后来问这是不是 bug。
+    """
+    roster = make_roster(client, admin_headers)
+    add_entries(client, admin_headers, roster["id"], [{"player_no": "S001", "name": "张三"}])
+    contest = client.post(
+        "/api/v1/admin/contests",
+        json={"name": "先设名单的场次", "slug": "roster-preset"},
+        headers=admin_headers,
+    ).json()
+    assert contest["player_count"] == 0
+
+    updated = client.patch(
+        "/api/v1/admin/contests/%d" % contest["id"],
+        json={"default_roster_id": roster["id"]},
+        headers=admin_headers,
+    ).json()
+    # 预设存下来了……
+    assert updated["default_roster_id"] == roster["id"]
+    # ……但选手一个都没动
+    assert updated["player_count"] == 0
+    players = client.get(
+        "/api/v1/admin/contests/%d/players" % contest["id"], headers=admin_headers
+    ).json()
+    assert players["total"] == 0
+
+    # 显式应用之后才有人 —— 那才是动作
+    apply_roster(client, admin_headers, contest, roster["id"])
+    after = client.get(
+        "/api/v1/admin/contests/%d/players" % contest["id"], headers=admin_headers
+    ).json()
+    assert after["total"] == 1
+
+
+
 def test_editing_a_roster_does_not_touch_contests(
     client: TestClient, admin_headers: dict, contest: dict
 ) -> None:

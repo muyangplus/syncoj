@@ -326,6 +326,7 @@ function clearDetail(count: number): string {
       v-model="settingsVisible"
       :contest="settingsTarget"
       @saved="refreshAll"
+      @changed="refreshAll"
     />
     <ProblemManageDialog
       v-model="problemVisible"

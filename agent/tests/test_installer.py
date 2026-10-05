@@ -201,6 +201,26 @@ def test_render_config_contains_all_settings(installer) -> None:
     assert "mode = off" in text
 
 
+def test_rendered_config_documents_every_placeholder(installer) -> None:
+    """生成出来的配置要**把可用的占位符都写清楚**。
+
+    配置文件是运维唯一会看的文档。少写一个占位符，就少一个人知道能用它 ——
+    然后大家只能用 sed 去改路径，改完还不敢确认对不对。
+
+    同时防止 ``.format()`` 里的花括号转义写错：漏一层转义会让占位符变成
+    空字符串或直接抛 KeyError。
+    """
+    text = installer.render_config(**config_args())
+
+    for token in ("{desktop}", "{home}", "{player_no}", "{contest_slug}"):
+        assert token in text, "生成的配置里没有说明 %s" % token
+
+    # 检查过的那行注释本身不该冒出多余的花括号（说明转义层级写错了）
+    for line in text.splitlines():
+        if line.strip().startswith(";"):
+            assert "{{" not in line and "}}" not in line, line
+
+
 def test_rendered_config_is_parseable(installer, workdir: Path) -> None:
     """生成出来的配置必须能被 Agent 的解析器读进去 —— 否则安装成功却起不来。
 
@@ -229,6 +249,28 @@ def test_rendered_config_is_parseable(installer, workdir: Path) -> None:
     # {player_no} 保留到注册之后才展开。
     # 用 Path 比较而不是字符串：Windows 上 Path 会把 "/" 归一化成 "\"
     assert Path(str(config.scan_roots[0]).replace("{player_no}", "S001")) == desktop / "S001"
+
+
+def test_rendered_config_supports_home_and_contest_slug(installer, workdir: Path) -> None:
+    """用 ``{home}`` / ``{contest_slug}`` 写出来的配置也必须能读进来。"""
+    from syncoj_agent.config import AgentConfig
+
+    text = installer.render_config(
+        **config_args(
+            ca_file="",
+            deploy_root="{home}",
+            scan_roots="{home}/{contest_slug}/{player_no}",
+        )
+    )
+    config_file = workdir / "agent.ini"
+    config_file.write_text(text, encoding="utf-8")
+
+    config = AgentConfig.load(config_file)
+    assert config.deploy_root == Path.home()
+    assert config.needs_credential is True
+    # 两个占位符都要能展开，而不是只展开左边那个
+    resolved = config.resolved_roots("S001", "mock-1")
+    assert resolved == [Path.home() / "mock-1" / "S001"]
 
 
 def test_rendered_paths_are_always_posix(installer) -> None:

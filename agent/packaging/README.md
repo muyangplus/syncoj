@@ -43,10 +43,13 @@ python3 install.py --bundle ./x.tar.gz --server https://x --dry-run
 
 ## 目录约定
 
+**下面是默认值，不是硬编码**（见「改路径」一节）。
+
 ```
 桌面/                               ← deploy_root = {desktop}
+├── 题面.pdf                         ← 通用资料：目标目录留空 = 直接落桌面
 └── <准考证号>/                      ← scan.roots = {desktop}/{player_no}
-    ├── p1/                        ← 服务端按 {player_no}/<题目名>/ 下发
+    ├── p1/                        ← 按题下发时目标目录填 {player_no}/<题目名>
     │   ├── 题面.pdf
     │   └── p1.cpp                 ← 选手写代码的位置
     └── p2/p2.cpp
@@ -55,15 +58,38 @@ python3 install.py --bundle ./x.tar.gz --server https://x --dry-run
 `{desktop}` 会自动探测：先读 `~/.config/user-dirs.dirs` 里的 `XDG_DESKTOP_DIR`，
 再依次试 `~/桌面`、`~/Desktop`、`~/desktop`。
 
-要改路径就改 `agent.ini`：
+### 改路径
+
+四个占位符，前两个载入配置时就展开，后两个等注册成功后展开：
+
+| 占位符 | 何时展开 | 展开成 |
+|---|---|---|
+| `{desktop}` | 立即 | 当前用户桌面（兼容「桌面」与 `Desktop`） |
+| `{home}` | 立即 | 当前用户家目录 |
+| `{player_no}` | 注册后 | 准考证号 |
+| `{contest_slug}` | 注册后 | 场次标识 |
 
 ```ini
 [agent]
-deploy_root = {desktop}          ; 或写死 /home/student/桌面
+deploy_root = {desktop}                  ; 或写死 /home/student/桌面
 
 [scan]
-roots = {desktop}/{player_no}    ; 或 /home/student/code
-prefix = none                    ; none / auto / 字面量
+; 下面几行任选其一
+roots = {desktop}/{player_no}            ; 默认：桌面/<准考证号>
+roots = {home}/我的代码                    ; 家目录下
+roots = {desktop}/{contest_slug}/{player_no}   ; 一个考点跑多场次时分开
+prefix = none                            ; none / auto / 字面量（支持上面两个注册后占位符）
+```
+
+> 展开不了的占位符会**原样保留**而不是报错 —— 配置校验发生在注册之前，
+> 把"还没注册"报成"配置错了"只会让人白折腾。注册完成后 Agent 会在启动日志里
+> 打出最终展开的扫描目录，对着它核对最快。
+
+改完路径不用重装，重启服务即可：
+
+```bash
+sudo systemctl restart syncoj-agent
+journalctl -u syncoj-agent -n 30     # 第一行就会打印实际扫描目录
 ```
 
 ## 安装后的布局

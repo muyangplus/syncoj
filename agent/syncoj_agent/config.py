@@ -19,30 +19,52 @@ from .state import detect_desktop
 
 __all__ = ["AgentConfig", "ConfigError", "DEFAULT_INI", "expand_placeholders"]
 
-#: 路径模板里支持的两个占位符。``{desktop}`` 在载入配置时就展开；
-#: ``{player_no}`` 要等注册完成才知道，由 Agent 在拿到凭据后展开。
+#: 路径模板里支持的占位符。
+#:
+#: 分两类，区别很重要：**载入配置时**能展开的（``{desktop}`` / ``{home}``）
+#: 和**注册之后**才能展开的（``{player_no}`` / ``{contest_slug}``）。
+#: 注册之前后者原样保留，等拿到凭据再展开一次。
 PLACEHOLDER_DESKTOP = "{desktop}"
+PLACEHOLDER_HOME = "{home}"
 PLACEHOLDER_PLAYER_NO = "{player_no}"
+PLACEHOLDER_CONTEST_SLUG = "{contest_slug}"
+
+#: 需要凭据才能确定的占位符
+CREDENTIAL_PLACEHOLDERS = (PLACEHOLDER_PLAYER_NO, PLACEHOLDER_CONTEST_SLUG)
 
 #: 路径前缀策略：auto = 取根目录名；none = 不加前缀；其余按字面量
 PREFIX_AUTO = "auto"
 PREFIX_NONE = "none"
 
 
-def expand_placeholders(text: str, desktop: Optional[Path] = None,
-                        player_no: Optional[str] = None) -> str:
+def expand_placeholders(
+    text: str,
+    desktop: Optional[Path] = None,
+    player_no: Optional[str] = None,
+    contest_slug: Optional[str] = None,
+    home: Optional[Path] = None,
+) -> str:
     """展开路径模板。
 
-    ``{desktop}`` 现在就能展开（靠探测）；``{player_no}`` 只有在注册之后才知道 ——
-    展开不了的时候**原样保留**，由调用方在合适的时机再展开一次。
-    保留而不是报错，是因为配置校验发生在注册之前。
+    ``{desktop}`` / ``{home}`` 现在就能展开；``{player_no}`` / ``{contest_slug}``
+    只有注册之后才知道 —— 展开不了的时候**原样保留**，由调用方在合适的时机
+    再展开一次。保留而不是报错，是因为配置校验发生在注册之前。
     """
     result = text
     if PLACEHOLDER_DESKTOP in result:
         result = result.replace(PLACEHOLDER_DESKTOP, str(desktop or detect_desktop()))
+    if PLACEHOLDER_HOME in result:
+        result = result.replace(PLACEHOLDER_HOME, str(home or Path.home()))
     if player_no and PLACEHOLDER_PLAYER_NO in result:
         result = result.replace(PLACEHOLDER_PLAYER_NO, player_no)
+    if contest_slug and PLACEHOLDER_CONTEST_SLUG in result:
+        result = result.replace(PLACEHOLDER_CONTEST_SLUG, contest_slug)
     return result
+
+
+def credential_placeholders_in(text: str) -> List[str]:
+    """挑出这段文本里"要等凭据"的占位符。"""
+    return [token for token in CREDENTIAL_PLACEHOLDERS if token in text]
 
 DEFAULT_INI = """\
 [server]
@@ -68,12 +90,17 @@ deploy_root = {desktop}
 # 要回收的代码目录，绝对路径。多个目录用换行或逗号分隔。
 #
 # 默认约定：桌面/<准考证号>/<题目名>/<题目名>.cpp
-#   {desktop}   = 当前用户的桌面（自动探测）
-#   {player_no} = 准考证号（注册成功后由 Agent 展开）
+#
+# 可用的占位符：
+#   {desktop}      当前用户的桌面（自动探测，兼容「桌面」与 Desktop 两种命名）
+#   {home}         当前用户的家目录
+#   {player_no}    准考证号（注册成功后由 Agent 展开）
+#   {contest_slug} 场次标识（注册成功后由 Agent 展开）
 #
 # 想改成别的位置直接改这一行，例如：
 #   roots = /home/student/code
-#   roots = {desktop}/我的代码
+#   roots = {home}/我的代码
+#   roots = {desktop}/比赛/{contest_slug}/{player_no}
 roots = {desktop}/{player_no}
 # 上报路径的前缀：
 #   none = 不加前缀（本机只有一个选手时推荐 —— 否则 source/ 里准考证号会出现两次）
@@ -181,12 +208,26 @@ class AgentConfig:
         """是否有路径要等注册拿到准考证号之后才能确定。"""
         return any(PLACEHOLDER_PLAYER_NO in str(root) for root in self.scan_roots)
 
-    def resolved_roots(self, player_no: str) -> List[Path]:
-        """展开 ``{player_no}`` 之后的扫描目录。
+    @property
+    def needs_credential(self) -> bool:
+        """是否有路径要等注册拿到凭据（准考证号 / 场次标识）之后才能确定。"""
+        return any(
+            credential_placeholders_in(str(root)) for root in self.scan_roots
+        )
 
-        必须在拿到凭据之后调用 —— 准考证号是注册的产物。
+    def resolved_roots(self, player_no: str, contest_slug: str = "") -> List[Path]:
+        """展开 ``{player_no}`` / ``{contest_slug}`` 之后的扫描目录。
+
+        必须在拿到凭据之后调用 —— 准考证号与场次标识都是注册的产物。
         """
-        return [Path(expand_placeholders(str(root), player_no=player_no)) for root in self.scan_roots]
+        return [
+            Path(
+                expand_placeholders(
+                    str(root), player_no=player_no, contest_slug=contest_slug
+                )
+            )
+            for root in self.scan_roots
+        ]
 
     def validate(self) -> None:
         """检查配置自洽性。**不做网络请求**，便于离线自检。"""
@@ -212,18 +253,21 @@ class AgentConfig:
             if not root.is_absolute():
                 problems.append("扫描目录必须是绝对路径: %s" % root)
                 continue
-            if PLACEHOLDER_PLAYER_NO in text:
-                # 还没注册，准考证号未知，没法检查最终目录是否存在。
+            pending = credential_placeholders_in(text)
+            if pending:
+                # 还没注册，准考证号/场次标识未知，没法检查最终目录是否存在。
                 # 但可以检查占位符**左边那一段**——它现在已经能确定了。
                 #
                 # 注意是直接取 split 的前半段（末尾带分隔符，Path 会归一化掉），
                 # 不要再取 .parent：那会跳到祖父目录，检查的是已经存在的工作区，
                 # 于是永远不报错。
-                prefix_dir = Path(text.split(PLACEHOLDER_PLAYER_NO)[0])
+                # 有多个待展开占位符时取**最靠左**的那个，剩下的都还在它右边。
+                first = min(text.index(token) for token in pending)
+                prefix_dir = Path(text[:first])
                 if str(prefix_dir) not in ("", ".") and not prefix_dir.is_dir():
                     problems.append(
                         "扫描目录的父目录不存在: %s（%s 会在注册后展开）"
-                        % (prefix_dir, PLACEHOLDER_PLAYER_NO)
+                        % (prefix_dir, "、".join(pending))
                     )
                 continue
             if not root.is_dir():
@@ -357,7 +401,10 @@ def _apply_env_overrides(config: AgentConfig) -> None:
 
     roots = os.environ.get("SYNCOJ_SCAN_ROOTS")
     if roots:
-        config.scan_roots = _split_paths(roots)
+        # 走和配置文件**同一条**模板展开路径。早先这里直接塞字符串进来，
+        # 于是 validate() 会在 str 上调 .is_absolute() 直接崩掉 ——
+        # 镜像预装时用环境变量注入恰恰是最常见的方式。
+        config.scan_roots = [Path(expand_placeholders(item)) for item in _split_paths(roots)]
 
     for env_name, attr in (("SYNCOJ_VERIFY_TLS", "verify_tls"), ("SYNCOJ_LOG_STDERR", "log_to_stderr")):
         if env_name in os.environ:

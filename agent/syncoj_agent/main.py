@@ -192,18 +192,18 @@ class Agent:
             log.info("收到停止信号，将在当前轮结束后退出")
         self._stop = True
 
-    def _resolve_roots(self, player_no: str) -> List[Tuple[str, Path]]:
+    def _resolve_roots(self, player_no: str, contest_slug: str = "") -> List[Tuple[str, Path]]:
         """确定扫描根与上报前缀。
 
         前缀策略：
           ``none``  不加前缀 —— 本机只有一个选手时路径最干净
           ``auto``  取根目录名 —— 配了多个扫描目录时用它区分同名文件
-          其他      字面量（支持 ``{player_no}``）
+          其他      字面量（支持 ``{player_no}`` / ``{contest_slug}``）
 
         **必须在拿到凭据后调用**：默认的扫描目录是 ``桌面/<准考证号>``，
         准考证号是注册的产物。注册之前那个目录叫什么名字根本无从得知。
         """
-        roots = self.config.resolved_roots(player_no)
+        roots = self.config.resolved_roots(player_no, contest_slug)
         if not roots:
             raise ConfigError("scan.roots 至少要配置一个目录")
 
@@ -217,7 +217,9 @@ class Agent:
             elif policy == PREFIX_AUTO:
                 name = root.name or "root"
             else:
-                name = expand_placeholders(policy, player_no=player_no)
+                name = expand_placeholders(
+                    policy, player_no=player_no, contest_slug=contest_slug
+                )
 
             if name:
                 if name in used:
@@ -240,10 +242,10 @@ class Agent:
 
         return named
 
-    def _ensure_roots(self, player_no: str) -> None:
+    def _ensure_roots(self, player_no: str, contest_slug: str = "") -> None:
         if self._roots_ready:
             return
-        self._roots = self._resolve_roots(player_no)
+        self._roots = self._resolve_roots(player_no, contest_slug)
         self._roots_ready = True
         log.info(
             "扫描目录: %s",
@@ -626,8 +628,8 @@ class Agent:
     def cycle(self) -> float:
         """执行一轮，返回下次执行前的等待秒数。"""
         credential = self._ensure_credential()
-        # 扫描目录里可能含 {player_no}，必须等拿到凭据之后才能确定
-        self._ensure_roots(credential.player_no)
+        # 扫描目录里可能含 {player_no} / {contest_slug}，必须等拿到凭据之后才能确定
+        self._ensure_roots(credential.player_no, credential.contest_slug)
 
         results, self._local_paths = self._scan()
         payload, oversize, errors = self._build_tick_payload(results, self._local_paths)

@@ -661,13 +661,16 @@ machine_id =
 deploy_root = {deploy_root}
 
 [scan]
-; 要回收的代码目录。{{desktop}} 与 {{player_no}} 在运行时展开：
-;   {{desktop}}   = 当前用户的桌面（自动探测）
-;   {{player_no}} = 准考证号（注册成功后才知道）
+; 要回收的代码目录。占位符在运行时展开：
+;   {{desktop}}       = 当前用户的桌面（自动探测）
+;   {{home}}          = 当前用户的家目录
+;   {{player_no}}     = 准考证号（注册成功后才知道）
+;   {{contest_slug}}  = 场次标识（注册成功后才知道）
 ; 默认约定：桌面/<准考证号>/<题目名>/<题目名>.cpp
 roots = {scan_roots}
 ; 上报路径前缀：none = 不加（本机只有一个选手时推荐，否则 source/ 里
 ; 准考证号会出现两次）；auto = 取根目录名；其他字面量直接用
+; （前缀里也能用 {{player_no}} / {{contest_slug}}）
 prefix = {scan_prefix}
 interval = 60
 max_file_size = 2097152

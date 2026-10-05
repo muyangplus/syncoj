@@ -314,6 +314,32 @@ def test_prefix_literal_can_reference_player_no(workdir: Path) -> None:
     assert roots == [("S007", root)]
 
 
+def test_prefix_literal_can_reference_contest_slug(workdir: Path) -> None:
+    """上报前缀也能用 ``{contest_slug}`` —— 一个考点跑多场次时可以靠它区分。"""
+    from syncoj_agent.main import Agent
+
+    root = workdir / "code"
+    root.mkdir()
+
+    config = AgentConfig.load(write_config(workdir))
+    config.scan_roots = [root]
+    config.scan_prefix = "{contest_slug}/{player_no}"
+
+    roots = Agent(config)._resolve_roots(player_no="S007", contest_slug="mock-1")
+    assert roots == [("mock-1/S007", root)]
+
+
+def test_scan_root_with_contest_slug_is_created(workdir: Path) -> None:
+    """含 ``{contest_slug}`` 的扫描根同样会被建出来。"""
+    from syncoj_agent.main import Agent
+
+    config = AgentConfig.load(write_config(workdir))
+    config.scan_roots = [workdir / "{contest_slug}" / "{player_no}"]
+
+    Agent(config)._resolve_roots(player_no="S001", contest_slug="mock-1")
+    assert (workdir / "mock-1" / "S001").is_dir()
+
+
 def test_scan_root_is_created_if_missing(workdir: Path) -> None:
     """扫描根不存在时创建它，而不是报错。
 
@@ -342,6 +368,98 @@ def test_templated_root_validation_skips_existence(workdir: Path) -> None:
     config.scan_roots = [workdir / "不存在" / "{player_no}"]
     with pytest.raises(ConfigError, match="父目录"):
         config.validate()
+
+
+def test_expand_placeholders_home_is_known_immediately() -> None:
+    """``{home}`` 和 ``{desktop}`` 一样，载入配置时就能展开。"""
+    from syncoj_agent.config import expand_placeholders
+
+    text = expand_placeholders("{home}/code", home=Path("/home/student"))
+    assert Path(text) == Path("/home/student/code")
+
+
+def test_expand_placeholders_contest_slug(workdir: Path) -> None:
+    from syncoj_agent.config import expand_placeholders
+
+    text = expand_placeholders(
+        "{desktop}/{contest_slug}/{player_no}",
+        desktop=Path("/d"),
+        player_no="S001",
+        contest_slug="mock-1",
+    )
+    assert Path(text) == Path("/d/mock-1/S001")
+
+    # 场次标识未知时同样原样保留
+    pending = expand_placeholders("{desktop}/{contest_slug}", desktop=Path("/d"))
+    assert pending.endswith("{contest_slug}")
+
+
+def test_resolved_roots_substitutes_contest_slug(workdir: Path) -> None:
+    config = AgentConfig.load(write_config(workdir))
+    config.scan_roots = [workdir / "{contest_slug}" / "{player_no}" / "code"]
+
+    resolved = config.resolved_roots("S042", "mock-1")
+    assert resolved == [workdir / "mock-1" / "S042" / "code"]
+    assert config.needs_credential is True
+
+
+def test_needs_credential_is_false_for_static_root(workdir: Path) -> None:
+    """全是静态路径（或用 {home}/{desktop}）时，不需要等注册就能定位目录。"""
+    config = AgentConfig.load(write_config(workdir))
+    config.scan_roots = [workdir / "code"]
+    assert config.needs_credential is False
+
+    config.scan_roots = [workdir / "{home}" / "code"]  # 已经展开成绝对路径了
+    assert config.needs_credential is False
+
+
+def test_contest_slug_root_validation_checks_leftmost_prefix(workdir: Path) -> None:
+    """两个待展开占位符时，检查**最靠左**那个左边的目录。
+
+    取最右边那个的左边，会连带检查一段本身还不存在的路径，于是"父目录不存在"
+    这种错误永远报不出来。
+    """
+    config = AgentConfig.load(write_config(workdir))
+    config.scan_roots = [workdir / "{contest_slug}" / "{player_no}"]
+    config.validate()
+
+    config.scan_roots = [workdir / "不存在" / "{contest_slug}" / "{player_no}"]
+    with pytest.raises(ConfigError, match="父目录"):
+        config.validate()
+
+
+def test_env_scan_roots_are_templated_and_are_real_paths(
+    workdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``SYNCOJ_SCAN_ROOTS`` 注入的路径也要走同一条模板展开路径。
+
+    早先这里直接塞字符串进来，于是 validate() 会在 str 上调 .is_absolute()
+    直接崩 —— 而镜像预装时用环境变量注入恰恰是最常见的方式。
+    """
+    code = workdir / "code"
+    code.mkdir()
+    monkeypatch.setenv("SYNCOJ_SCAN_ROOTS", "%s,%s/{player_no}" % (code, workdir))
+
+    config = AgentConfig.load(write_config(workdir))
+    assert all(hasattr(root, "is_absolute") for root in config.scan_roots)
+    assert all(root.is_absolute() for root in config.scan_roots)
+    assert "{desktop}" not in " ".join(str(r) for r in config.scan_roots)
+    config.validate()  # 不能抛 AttributeError
+
+
+def test_env_scan_roots_expand_desktop_and_home(
+    workdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from syncoj_agent.config import PLACEHOLDER_DESKTOP, PLACEHOLDER_HOME
+
+    monkeypatch.setenv(
+        "SYNCOJ_SCAN_ROOTS", "%s/code,%s/code2" % (PLACEHOLDER_DESKTOP, PLACEHOLDER_HOME)
+    )
+    config = AgentConfig.load(write_config(workdir))
+
+    joined = " ".join(str(root) for root in config.scan_roots)
+    assert PLACEHOLDER_DESKTOP not in joined
+    assert PLACEHOLDER_HOME not in joined
 
 
 # --------------------------------------------------------------------------- #

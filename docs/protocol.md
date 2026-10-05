@@ -118,7 +118,7 @@
       "url": "/api/v1/agent/assets/42",
       "sha256": "cd34…",
       "size": 10485760,
-      "dest": "exam/testdata.zip",
+      "dest": "题面.pdf",
       "offset": 3145728,
       "mode": "overwrite"
     }
@@ -135,6 +135,13 @@ Agent 不得自行决定节奏。
 
 **`need_upload` 是服务端的判断，不是 Agent 的。** Agent 只执行，不自行决定传什么 ——
 "谁传过什么"必须只有一个权威来源。
+
+**`dest` 是相对于 Agent 的 `deploy_root` 的相对路径**（默认 `deploy_root` 就是桌面）。
+服务端下发前已经把 `{player_no}` 展开成该选手的准考证号 —— 客户端不知道也不可能
+知道"这次下发是给谁的"。所以：
+
+- 通用资料（题面、样例、须知）的 `dest` 就是文件名本身，例如 `"题面.pdf"`
+- 按题分发的附件是 `"<准考证号>/<题目名>/<文件名>"`
 
 ---
 

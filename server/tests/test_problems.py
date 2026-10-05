@@ -428,6 +428,44 @@ def test_update_rejects_invalid_pattern(
     assert response.status_code == 400
 
 
+def test_too_many_patterns_is_rejected(
+    client: TestClient, contest: dict, admin_headers: dict
+) -> None:
+    """逐条校验挡不住"一次粘一百条进来"。
+
+    数量上限要单独卡：模式越多每次归题越慢，而且"到底哪条命中"会变得没法
+    跟教师解释清楚。上限值本身在这里硬编码成 17，是有意的 —— 常量改了
+    就该有人来看一眼这条断言。
+    """
+    from syncoj_server.services.matching import MAX_PATTERNS
+
+    assert MAX_PATTERNS == 16, "上限变了，请同步检查界面上的提示文案"
+
+    too_many = ["p%d/**" % i for i in range(MAX_PATTERNS + 1)]
+    body = add_problems(
+        client, contest, admin_headers,
+        [{"ident": "p1", "file_patterns": too_many}],
+    ).json()
+    assert body["created"] == 0
+    assert body["errors"]
+    assert list_problems(client, contest, admin_headers) == []
+
+
+def test_patterns_at_the_limit_are_accepted(
+    client: TestClient, contest: dict, admin_headers: dict
+) -> None:
+    """刚好到上限要能过 —— 边界写错一位就会变成"少配一个也不行"。"""
+    from syncoj_server.services.matching import MAX_PATTERNS
+
+    at_limit = ["p%d/**" % i for i in range(MAX_PATTERNS)]
+    body = add_problems(
+        client, contest, admin_headers,
+        [{"ident": "p1", "file_patterns": at_limit}],
+    ).json()
+    assert body["created"] == 1
+    assert len(list_problems(client, contest, admin_headers)[0]["file_patterns"]) == MAX_PATTERNS
+
+
 def test_rename_keeps_default_pattern_working(
     client: TestClient, contest: dict, admin_headers: dict, app
 ) -> None:

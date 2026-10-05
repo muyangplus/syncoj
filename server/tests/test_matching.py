@@ -164,23 +164,20 @@ def test_expand_pattern_is_idempotent_for_resolved_names() -> None:
     assert matching.expand_pattern("{ident}/{title}", "p1", "签到题") == "p1/签到题"
 
 
-def test_group_by_problem() -> None:
-    grouped = matching.group_by_problem(
-        ["p1/a.cpp", "p2/b.cpp", "loose/c.cpp"],
-        rules(("p1", ["p1/**"]), ("p2", ["p2/**"])),
-    )
-    assert grouped["p1"] == ["p1/a.cpp"]
-    assert grouped["p2"] == ["p2/b.cpp"]
-    assert grouped[""] == ["loose/c.cpp"], "未归类的放空键下，不要悄悄丢掉"
+def test_group_of_paths_matches_individually() -> None:
+    """批量归题就是逐条调 ``match_problem`` —— 没有第二套聚合逻辑。
+
+    这条测试存在的意义是**防止有人再加一个"批量匹配"的快捷函数**：
+    多一套实现就多一处能跟主路径说不到一块去的地方。
+    """
+    ruleset = rules(("p1", ["p1/**"]), ("p2", ["p2/**"]))
+    paths = ["p1/a.cpp", "p2/b.cpp", "loose/c.cpp"]
+    assert [match_problem(p, ruleset) for p in paths] == ["p1", "p2", None]
 
 
 # --------------------------------------------------------------------------- #
 # 模式校验
 # --------------------------------------------------------------------------- #
-
-
-def test_default_patterns_use_ident() -> None:
-    assert matching.default_patterns("p1") == ["p1/**"]
 
 
 def test_validate_accepts_normal_patterns() -> None:
@@ -216,16 +213,36 @@ def test_unclosed_bracket_is_literal_not_an_error() -> None:
     assert bool(matching.compile_pattern("p[1/**").match("p[1/a.cpp")) is True
 
 
-def test_normalise_patterns_falls_back_to_default() -> None:
-    assert matching.normalise_patterns(None, "p1") == ["p1/**"]
-    assert matching.normalise_patterns([], "p1") == ["p1/**"]
-    assert matching.normalise_patterns(["", "  "], "p1") == ["p1/**"]
+def test_validate_patterns_returns_the_normalised_list() -> None:
+    assert matching.validate_patterns([" p1/** ", "{ident}/src/*.cpp"]) == [
+        "p1/**",
+        "{ident}/src/*.cpp",
+    ]
 
 
-def test_normalise_patterns_enforces_limit() -> None:
-    many = ["p1/**"] * (matching.MAX_PATTERNS + 1)
+def test_validate_patterns_allows_empty() -> None:
+    """空列表是合法的 —— 含义是"用服务端的默认模式"，不是"没有模式"。"""
+    assert matching.validate_patterns([]) == []
+    assert matching.validate_patterns(None) == []
+
+
+def test_validate_patterns_enforces_the_count_limit() -> None:
+    """逐条校验挡不住"一次粘一百条进来"。
+
+    数量上限必须单独卡：模式多了每次归题都更慢，而且"到底哪条命中"
+    会变得没法跟教师解释清楚。
+    """
+    ok = ["p%d/**" % i for i in range(matching.MAX_PATTERNS)]
+    assert len(matching.validate_patterns(ok)) == matching.MAX_PATTERNS
+
     with pytest.raises(PatternError):
-        matching.normalise_patterns(many, "p1")
+        matching.validate_patterns(ok + ["p99/**"])
+
+
+def test_validate_patterns_reports_the_offending_item() -> None:
+    """一条坏模式要让整批失败 —— 存一半的模式比全不存更难查。"""
+    with pytest.raises(PatternError):
+        matching.validate_patterns(["ok/**", "../bad/**"])
 
 
 def test_compile_is_cached() -> None:

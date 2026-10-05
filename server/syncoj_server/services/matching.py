@@ -28,22 +28,21 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence
 
 __all__ = [
     "DEFAULT_PATTERN",
     "IDENT_TOKEN",
     "TITLE_TOKEN",
+    "MAX_PATTERNS",
+    "MAX_PATTERN_LENGTH",
     "PatternError",
     "ProblemRule",
-    "default_patterns",
-    "validate_pattern",
-    "normalise_patterns",
-    "expand_pattern",
     "compile_pattern",
+    "expand_pattern",
     "match_problem",
-    "group_by_problem",
-    "MAX_PATTERNS",
+    "validate_pattern",
+    "validate_patterns",
 ]
 
 log = logging.getLogger(__name__)
@@ -80,11 +79,11 @@ class ProblemRule:
 
 
 class PatternError(ValueError):
-    """模式不合法。"""
+    """模式不合法。
 
-
-def default_patterns(ident: str) -> List[str]:
-    return [DEFAULT_PATTERN.replace(IDENT_TOKEN, ident)]
+    刻意**不是** ``re.error``：调用方（API 层）只该认识这一种失败，
+    而且"模式写错了"是用户能自己改的问题，不该冒成 500。
+    """
 
 
 def expand_pattern(pattern: str, ident: str, title: Optional[str] = None) -> str:
@@ -117,24 +116,28 @@ def validate_pattern(raw: str) -> str:
         if segment == "..":
             raise PatternError("模式里不能出现 .. 段")
 
-    # 提前编译一次，把语法错误在这里暴露，而不是等到回收文件时才发现
-    compile_pattern(text, "sample/path.cpp")
+    # 提前编译一次，把语法错误在这里暴露，而不是等到回收文件时才发现。
+    # 把 re.error 包成 PatternError —— 否则 API 层接不住会变成 500，
+    # 而教师看到的应该是"这条模式不合法"。
+    try:
+        compile_pattern(text)
+    except re.error as exc:
+        raise PatternError("模式语法有误：%s" % exc)
     return text
 
 
-def normalise_patterns(raw: Optional[Iterable[str]], ident: str) -> List[str]:
-    """整理一份模式列表。空的时候回退到默认模式。"""
+def validate_patterns(raw: Optional[Iterable[str]]) -> List[str]:
+    """校验一整份模式列表，返回归一化后的形式。
+
+    空列表是合法的 —— 它的含义是"用服务端的默认模式"。数量上限在这里卡住：
+    逐条校验挡不住"粘了一百条进来"，而那会让每次归题都变慢、
+    还会让"到底哪条命中"变得没法解释。
+    """
     patterns: List[str] = []
     for item in raw or []:
-        if not isinstance(item, str):
-            continue
-        text = item.strip()
-        if text:
-            patterns.append(text)
-    if not patterns:
-        patterns = default_patterns(ident)
-    if len(patterns) > MAX_PATTERNS:
-        raise PatternError("最多只能配 %d 个模式" % MAX_PATTERNS)
+        patterns.append(validate_pattern(item))
+        if len(patterns) > MAX_PATTERNS:
+            raise PatternError("最多只能配 %d 个模式" % MAX_PATTERNS)
     return patterns
 
 
@@ -145,8 +148,11 @@ def normalise_patterns(raw: Optional[Iterable[str]], ident: str) -> List[str]:
 _PATTERN_CACHE: Dict[str, "re.Pattern[str]"] = {}
 
 
-def compile_pattern(pattern: str, sample: str = "") -> "re.Pattern[str]":
-    """把 glob 模式编译成正则。带缓存 —— 匹配是逐文件逐题目调用的。"""
+def compile_pattern(pattern: str) -> "re.Pattern[str]":
+    """把 glob 模式编译成正则。带缓存 —— 匹配是逐文件逐题目调用的。
+
+    ``pattern`` 必须是**已经展开过占位符**的最终模式。
+    """
     cached = _PATTERN_CACHE.get(pattern)
     if cached is not None:
         return cached
@@ -237,25 +243,17 @@ def match_problem(
 
     for rule in rules:
         for pattern in rule.patterns:
+            # 展开失败或编译失败都不该让整轮归题崩掉：一条坏模式最多是
+            # "这道题认领不到"，不该连累其它题目
             try:
                 expanded = expand_pattern(pattern, rule.ident, rule.title)
-                if compile_pattern(expanded).match(rel_path):
-                    return rule.ident
-            except re.error as exc:  # pragma: no cover - 校验阶段已挡住
+                compiled = compile_pattern(expanded)
+            except (re.error, TypeError, AttributeError) as exc:  # pragma: no cover
                 log.warning(
-                    "题目 %s 的模式 %r 编译失败，已跳过: %s", rule.ident, pattern, exc
+                    "题目 %s 的模式 %r 无法编译，已跳过: %s", rule.ident, pattern, exc
                 )
+                continue
+            if compiled.match(rel_path):
+                return rule.ident
     return None
-
-
-def group_by_problem(
-    rel_paths: Iterable[str],
-    rules: Sequence[ProblemRule],
-) -> Dict[str, List[str]]:
-    """把一组路径按题目分组。未归类的放在 ``""`` 键下。"""
-    grouped: Dict[str, List[str]] = {}
-    for path in rel_paths:
-        ident = match_problem(path, rules) or ""
-        grouped.setdefault(ident, []).append(path)
-    return grouped
 

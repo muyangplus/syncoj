@@ -999,7 +999,7 @@ def import_problems(
             # 先校验模式再落库。顺序反过来的话，"新建一行 → 模式不合法 → continue"
             # 会留下一条只写了一半的题目（session 退出时照样提交）
             try:
-                patterns = [matching.validate_pattern(p) for p in item.file_patterns]
+                patterns = matching.validate_patterns(item.file_patterns)
             except matching.PatternError as exc:
                 result.errors.append("%s：模式不合法（%s）" % (ident, exc))
                 continue
@@ -1109,7 +1109,7 @@ def update_problem(
 
         # 同 import：传了就整体替换。传空列表 = 回到默认模式
         try:
-            patterns = [matching.validate_pattern(p) for p in payload.file_patterns]
+            patterns = matching.validate_patterns(payload.file_patterns)
         except matching.PatternError as exc:
             raise HTTPException(status_code=400, detail="模式不合法: %s" % exc)
         row.file_patterns = json.dumps(patterns, ensure_ascii=False) if patterns else None

@@ -13,8 +13,9 @@ import contextlib
 import logging
 from typing import Optional
 
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .api import admin as admin_api
@@ -77,6 +78,53 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             "version": __version__,
             "agents_total": len(agents),
             "agents_online": sum(1 for a in agents if a.online),
+            "web_ui": _frontend_enabled(settings),
         }
 
+    _mount_frontend(app, settings)
     return app
+
+
+# --------------------------------------------------------------------------- #
+# 管理界面
+# --------------------------------------------------------------------------- #
+
+#: 这些前缀下的路径由 API 自己处理，绝不能被 SPA 兜底吞掉。
+#: 不加这道排除的话，打错一个接口路径会返回一段 HTML，排查起来很费劲。
+_API_PREFIXES = ("api/", "docs", "redoc", "openapi.json", "healthz")
+
+
+def _frontend_enabled(settings: Settings) -> bool:
+    dist = settings.web_dist
+    return bool(dist and (dist / "index.html").is_file())
+
+
+def _mount_frontend(app: FastAPI, settings: Settings) -> None:
+    """托管前端产物并做 SPA 兜底。
+
+    顺序很重要：**必须先注册 API 路由再挂兜底路由**。FastAPI 按注册顺序匹配，
+    所以 /api/* 永远轮不到兜底处理。
+
+    产物不存在时什么都不做 —— 前端没构建不该让服务端起不来，此时 /docs
+    仍然可以交互。
+    """
+    dist = settings.web_dist
+    if not _frontend_enabled(settings) or dist is None:
+        log.info("未找到前端产物，仅提供 API（/docs 可交互）")
+        return
+
+    assets = dist / "assets"
+    if assets.is_dir():
+        app.mount("/assets", StaticFiles(directory=str(assets)), name="assets")
+
+    index_file = dist / "index.html"
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def spa_fallback(full_path: str) -> FileResponse:
+        if full_path.startswith(_API_PREFIXES):
+            # 是 API 路径却没被任何路由处理 = 真的不存在，别拿 HTML 糊弄调用方
+            raise HTTPException(status_code=404, detail="Not Found")
+        # 其余一律交给前端路由（history 模式需要这样兜底）
+        return FileResponse(index_file)
+
+    log.info("管理界面已挂载: %s", dist)

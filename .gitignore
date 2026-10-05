@@ -20,6 +20,8 @@ node_modules/
 web/dist/
 *.local
 .npm/
+.npm-cache/
+web/openapi.json.tmp
 
 # ---- 本地工具链缓存 ----
 .uv-cache/

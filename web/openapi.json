@@ -1,0 +1,3623 @@
+{
+  "components": {
+    "schemas": {
+      "AdminInfo": {
+        "additionalProperties": false,
+        "properties": {
+          "is_active": {
+            "title": "Is Active",
+            "type": "boolean"
+          },
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "is_active"
+        ],
+        "title": "AdminInfo",
+        "type": "object"
+      },
+      "AgentEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "category": {
+            "maxLength": 32,
+            "title": "Category",
+            "type": "string"
+          },
+          "level": {
+            "default": "info",
+            "maxLength": 16,
+            "title": "Level",
+            "type": "string"
+          },
+          "message": {
+            "maxLength": 2000,
+            "title": "Message",
+            "type": "string"
+          },
+          "meta": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Meta"
+          }
+        },
+        "required": [
+          "category",
+          "message"
+        ],
+        "title": "AgentEvent",
+        "type": "object"
+      },
+      "AgentRuntimeOut": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_id": {
+            "title": "Agent Id",
+            "type": "integer"
+          },
+          "agent_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Version"
+          },
+          "contest_id": {
+            "title": "Contest Id",
+            "type": "integer"
+          },
+          "contest_slug": {
+            "default": "",
+            "title": "Contest Slug",
+            "type": "string"
+          },
+          "disk_free": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disk Free"
+          },
+          "file_count": {
+            "default": 0,
+            "title": "File Count",
+            "type": "integer"
+          },
+          "hostname": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hostname"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "last_seen_ip": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Seen Ip"
+          },
+          "last_tick_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Tick At"
+          },
+          "machine_id": {
+            "title": "Machine Id",
+            "type": "string"
+          },
+          "online": {
+            "title": "Online",
+            "type": "boolean"
+          },
+          "player_id": {
+            "title": "Player Id",
+            "type": "integer"
+          },
+          "player_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Player Name"
+          },
+          "player_no": {
+            "title": "Player No",
+            "type": "string"
+          },
+          "scan_root": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scan Root"
+          },
+          "seconds_since_tick": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seconds Since Tick"
+          },
+          "tick_count": {
+            "default": 0,
+            "title": "Tick Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "agent_id",
+          "player_id",
+          "contest_id",
+          "player_no",
+          "machine_id",
+          "online"
+        ],
+        "title": "AgentRuntimeOut",
+        "type": "object"
+      },
+      "AssetOut": {
+        "additionalProperties": false,
+        "properties": {
+          "contest_id": {
+            "title": "Contest Id",
+            "type": "integer"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "contest_id",
+          "sha256",
+          "size",
+          "filename",
+          "kind",
+          "created_at"
+        ],
+        "title": "AssetOut",
+        "type": "object"
+      },
+      "Body_upload_asset_api_v1_admin_contests__contest_id__assets_post": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          },
+          "kind": {
+            "default": "testdata",
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_asset_api_v1_admin_contests__contest_id__assets_post",
+        "type": "object"
+      },
+      "Body_upload_file_api_v1_agent_files_post": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "sha256",
+          "file"
+        ],
+        "title": "Body_upload_file_api_v1_agent_files_post",
+        "type": "object"
+      },
+      "Body_upload_release_api_v1_admin_releases_post": {
+        "properties": {
+          "channel": {
+            "default": "stable",
+            "title": "Channel",
+            "type": "string"
+          },
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          },
+          "notes": {
+            "default": "",
+            "title": "Notes",
+            "type": "string"
+          },
+          "version": {
+            "default": "",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_release_api_v1_admin_releases_post",
+        "type": "object"
+      },
+      "ContestCreate": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "slug": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slug"
+          },
+          "status": {
+            "default": "draft",
+            "maxLength": 16,
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "ContestCreate",
+        "type": "object"
+      },
+      "ContestOut": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "online_count": {
+            "default": 0,
+            "title": "Online Count",
+            "type": "integer"
+          },
+          "player_count": {
+            "default": 0,
+            "title": "Player Count",
+            "type": "integer"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "slug",
+          "name",
+          "status",
+          "created_at"
+        ],
+        "title": "ContestOut",
+        "type": "object"
+      },
+      "DeployCreate": {
+        "additionalProperties": false,
+        "description": "创建下发任务。\n\n``target_kind`` 取 ``all`` / ``player`` / ``group``：\n- ``all``    全量下发，忽略 ``player_ids``\n- ``player`` 只发给 ``player_ids`` 列出的选手\n- ``group``  发给 ``group_name`` 等于 ``target_group`` 的选手",
+        "properties": {
+          "asset_id": {
+            "title": "Asset Id",
+            "type": "integer"
+          },
+          "dest_dir": {
+            "default": "",
+            "maxLength": 512,
+            "title": "Dest Dir",
+            "type": "string"
+          },
+          "mode": {
+            "default": "overwrite",
+            "maxLength": 16,
+            "title": "Mode",
+            "type": "string"
+          },
+          "player_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Player Ids",
+            "type": "array"
+          },
+          "target_group": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Group"
+          },
+          "target_kind": {
+            "default": "all",
+            "maxLength": 16,
+            "title": "Target Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "asset_id"
+        ],
+        "title": "DeployCreate",
+        "type": "object"
+      },
+      "DeployJob": {
+        "additionalProperties": false,
+        "properties": {
+          "asset_id": {
+            "title": "Asset Id",
+            "type": "integer"
+          },
+          "dest": {
+            "title": "Dest",
+            "type": "string"
+          },
+          "mode": {
+            "default": "overwrite",
+            "title": "Mode",
+            "type": "string"
+          },
+          "offset": {
+            "default": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "asset_id",
+          "url",
+          "sha256",
+          "size",
+          "dest"
+        ],
+        "title": "DeployJob",
+        "type": "object"
+      },
+      "DeployTargetOut": {
+        "additionalProperties": false,
+        "properties": {
+          "bytes_done": {
+            "default": 0,
+            "title": "Bytes Done",
+            "type": "integer"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "player_id": {
+            "title": "Player Id",
+            "type": "integer"
+          },
+          "player_no": {
+            "title": "Player No",
+            "type": "string"
+          },
+          "retry_count": {
+            "default": 0,
+            "title": "Retry Count",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "player_id",
+          "player_no",
+          "status"
+        ],
+        "title": "DeployTargetOut",
+        "type": "object"
+      },
+      "DeployTaskOut": {
+        "additionalProperties": false,
+        "properties": {
+          "asset_id": {
+            "title": "Asset Id",
+            "type": "integer"
+          },
+          "contest_id": {
+            "title": "Contest Id",
+            "type": "integer"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "dest_dir": {
+            "title": "Dest Dir",
+            "type": "string"
+          },
+          "done": {
+            "default": 0,
+            "title": "Done",
+            "type": "integer"
+          },
+          "failed": {
+            "default": 0,
+            "title": "Failed",
+            "type": "integer"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "mode": {
+            "title": "Mode",
+            "type": "string"
+          },
+          "pending": {
+            "default": 0,
+            "title": "Pending",
+            "type": "integer"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "target_kind": {
+            "title": "Target Kind",
+            "type": "string"
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/DeployTargetOut"
+            },
+            "title": "Targets",
+            "type": "array"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "contest_id",
+          "asset_id",
+          "filename",
+          "size",
+          "sha256",
+          "target_kind",
+          "dest_dir",
+          "mode",
+          "status",
+          "created_at"
+        ],
+        "title": "DeployTaskOut",
+        "type": "object"
+      },
+      "EnrollCodeOut": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "player_id": {
+            "title": "Player Id",
+            "type": "integer"
+          },
+          "player_no": {
+            "title": "Player No",
+            "type": "string"
+          }
+        },
+        "required": [
+          "player_id",
+          "player_no",
+          "code"
+        ],
+        "title": "EnrollCodeOut",
+        "type": "object"
+      },
+      "EnrollRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_version": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Version"
+          },
+          "enroll_code": {
+            "maxLength": 64,
+            "minLength": 4,
+            "title": "Enroll Code",
+            "type": "string"
+          },
+          "hostname": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hostname"
+          },
+          "machine_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Machine Id",
+            "type": "string"
+          },
+          "os_info": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Os Info"
+          }
+        },
+        "required": [
+          "enroll_code",
+          "machine_id"
+        ],
+        "title": "EnrollRequest",
+        "type": "object"
+      },
+      "EnrollResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_id": {
+            "title": "Agent Id",
+            "type": "integer"
+          },
+          "config": {
+            "additionalProperties": true,
+            "title": "Config",
+            "type": "object"
+          },
+          "contest_id": {
+            "title": "Contest Id",
+            "type": "integer"
+          },
+          "contest_name": {
+            "title": "Contest Name",
+            "type": "string"
+          },
+          "contest_slug": {
+            "title": "Contest Slug",
+            "type": "string"
+          },
+          "player_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Player Name"
+          },
+          "player_no": {
+            "title": "Player No",
+            "type": "string"
+          },
+          "token": {
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "agent_id",
+          "player_no",
+          "contest_id",
+          "contest_slug",
+          "contest_name",
+          "config"
+        ],
+        "title": "EnrollResponse",
+        "type": "object"
+      },
+      "EventOut": {
+        "additionalProperties": false,
+        "properties": {
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "level": {
+            "title": "Level",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "meta": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Meta"
+          },
+          "player_no": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Player No"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "ts",
+          "level",
+          "category",
+          "message"
+        ],
+        "title": "EventOut",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "JudgeRunOut": {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "max_score": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Score"
+          },
+          "parse_status": {
+            "title": "Parse Status",
+            "type": "string"
+          },
+          "player_id": {
+            "title": "Player Id",
+            "type": "integer"
+          },
+          "player_no": {
+            "title": "Player No",
+            "type": "string"
+          },
+          "problem": {
+            "title": "Problem",
+            "type": "string"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score"
+          },
+          "source_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Path"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "player_id",
+          "player_no",
+          "problem",
+          "parse_status",
+          "updated_at"
+        ],
+        "title": "JudgeRunOut",
+        "type": "object"
+      },
+      "JudgeScanOut": {
+        "additionalProperties": false,
+        "properties": {
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "manual": {
+            "default": 0,
+            "title": "Manual",
+            "type": "integer"
+          },
+          "parsed": {
+            "default": 0,
+            "title": "Parsed",
+            "type": "integer"
+          },
+          "skipped": {
+            "default": 0,
+            "title": "Skipped",
+            "type": "integer"
+          },
+          "unchanged": {
+            "default": 0,
+            "title": "Unchanged",
+            "type": "integer"
+          },
+          "unparsed": {
+            "default": 0,
+            "title": "Unparsed",
+            "type": "integer"
+          }
+        },
+        "title": "JudgeScanOut",
+        "type": "object"
+      },
+      "LoginRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "password": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Password",
+            "type": "string"
+          },
+          "username": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "password"
+        ],
+        "title": "LoginRequest",
+        "type": "object"
+      },
+      "LoginResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "expires_at": {
+            "title": "Expires At",
+            "type": "string"
+          },
+          "token": {
+            "title": "Token",
+            "type": "string"
+          },
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "username",
+          "expires_at"
+        ],
+        "title": "LoginResponse",
+        "type": "object"
+      },
+      "ManualScoreIn": {
+        "additionalProperties": false,
+        "description": "教师手工录入 / 修正成绩。\n\n未解析的文件靠它兜底 —— 我们无法覆盖所有评测器格式，但绝不能因此让教师\n只能干瞪眼。",
+        "properties": {
+          "max_score": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Score"
+          },
+          "player_id": {
+            "title": "Player Id",
+            "type": "integer"
+          },
+          "problem": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Problem",
+            "type": "string"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          }
+        },
+        "required": [
+          "player_id",
+          "problem"
+        ],
+        "title": "ManualScoreIn",
+        "type": "object"
+      },
+      "PartialDownload": {
+        "additionalProperties": false,
+        "description": "客户端本地未完成的下载，服务端据此回填 offset。",
+        "properties": {
+          "asset_id": {
+            "title": "Asset Id",
+            "type": "integer"
+          },
+          "bytes_done": {
+            "minimum": 0.0,
+            "title": "Bytes Done",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "asset_id",
+          "bytes_done"
+        ],
+        "title": "PartialDownload",
+        "type": "object"
+      },
+      "PlayerOut": {
+        "additionalProperties": false,
+        "properties": {
+          "contest_id": {
+            "title": "Contest Id",
+            "type": "integer"
+          },
+          "file_count": {
+            "default": 0,
+            "title": "File Count",
+            "type": "integer"
+          },
+          "group_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Group Name"
+          },
+          "has_agent": {
+            "default": false,
+            "title": "Has Agent",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "last_tick_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Tick At"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "online": {
+            "default": false,
+            "title": "Online",
+            "type": "boolean"
+          },
+          "player_no": {
+            "title": "Player No",
+            "type": "string"
+          },
+          "seat": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seat"
+          }
+        },
+        "required": [
+          "id",
+          "contest_id",
+          "player_no"
+        ],
+        "title": "PlayerOut",
+        "type": "object"
+      },
+      "PlayerUpsert": {
+        "additionalProperties": false,
+        "properties": {
+          "group_name": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Group Name"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "player_no": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Player No",
+            "type": "string"
+          },
+          "seat": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seat"
+          }
+        },
+        "required": [
+          "player_no"
+        ],
+        "title": "PlayerUpsert",
+        "type": "object"
+      },
+      "ReleaseOut": {
+        "additionalProperties": false,
+        "properties": {
+          "channel": {
+            "title": "Channel",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "key_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key Id"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "published_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Published At"
+          },
+          "rolled_out": {
+            "default": false,
+            "title": "Rolled Out",
+            "type": "boolean"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          },
+          "yanked": {
+            "default": false,
+            "title": "Yanked",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "version",
+          "channel",
+          "sha256",
+          "size",
+          "created_at"
+        ],
+        "title": "ReleaseOut",
+        "type": "object"
+      },
+      "ReleaseUpdate": {
+        "additionalProperties": false,
+        "properties": {
+          "channel": {
+            "anyOf": [
+              {
+                "maxLength": 16,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Channel"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          }
+        },
+        "title": "ReleaseUpdate",
+        "type": "object"
+      },
+      "ScanEntry": {
+        "additionalProperties": false,
+        "description": "一条扫描结果。**不含文件内容**，只有索引。",
+        "properties": {
+          "mtime": {
+            "minimum": 0.0,
+            "title": "Mtime",
+            "type": "integer"
+          },
+          "path": {
+            "maxLength": 1024,
+            "title": "Path",
+            "type": "string"
+          },
+          "sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Sha256",
+            "type": "string"
+          },
+          "size": {
+            "minimum": 0.0,
+            "title": "Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path",
+          "sha256",
+          "size",
+          "mtime"
+        ],
+        "title": "ScanEntry",
+        "type": "object"
+      },
+      "ScoreCellOut": {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "max_score": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Score"
+          },
+          "parse_status": {
+            "default": "missing",
+            "title": "Parse Status",
+            "type": "string"
+          },
+          "problem": {
+            "title": "Problem",
+            "type": "string"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "problem"
+        ],
+        "title": "ScoreCellOut",
+        "type": "object"
+      },
+      "ScoreMatrixOut": {
+        "additionalProperties": false,
+        "properties": {
+          "complete": {
+            "default": true,
+            "title": "Complete",
+            "type": "boolean"
+          },
+          "contest_id": {
+            "title": "Contest Id",
+            "type": "integer"
+          },
+          "problems": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Problems",
+            "type": "array"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/ScoreRowOut"
+            },
+            "title": "Rows",
+            "type": "array"
+          },
+          "unparsed": {
+            "default": 0,
+            "title": "Unparsed",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "contest_id"
+        ],
+        "title": "ScoreMatrixOut",
+        "type": "object"
+      },
+      "ScoreRowOut": {
+        "additionalProperties": false,
+        "properties": {
+          "cells": {
+            "items": {
+              "$ref": "#/components/schemas/ScoreCellOut"
+            },
+            "title": "Cells",
+            "type": "array"
+          },
+          "player_id": {
+            "title": "Player Id",
+            "type": "integer"
+          },
+          "player_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Player Name"
+          },
+          "player_no": {
+            "title": "Player No",
+            "type": "string"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "player_id",
+          "player_no"
+        ],
+        "title": "ScoreRowOut",
+        "type": "object"
+      },
+      "SimpleAck": {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "ok": {
+            "default": true,
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "title": "SimpleAck",
+        "type": "object"
+      },
+      "SourceFileOut": {
+        "additionalProperties": false,
+        "properties": {
+          "content_stored": {
+            "title": "Content Stored",
+            "type": "boolean"
+          },
+          "deleted_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deleted At"
+          },
+          "first_seen_at": {
+            "title": "First Seen At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "last_seen_at": {
+            "title": "Last Seen At",
+            "type": "string"
+          },
+          "player_id": {
+            "title": "Player Id",
+            "type": "integer"
+          },
+          "player_no": {
+            "title": "Player No",
+            "type": "string"
+          },
+          "rel_path": {
+            "title": "Rel Path",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "player_id",
+          "player_no",
+          "rel_path",
+          "sha256",
+          "size",
+          "revision",
+          "content_stored",
+          "first_seen_at",
+          "last_seen_at"
+        ],
+        "title": "SourceFileOut",
+        "type": "object"
+      },
+      "TickRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_version": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Version"
+          },
+          "completed_assets": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Completed Assets",
+            "type": "array"
+          },
+          "machine_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Machine Id",
+            "type": "string"
+          },
+          "partials": {
+            "items": {
+              "$ref": "#/components/schemas/PartialDownload"
+            },
+            "title": "Partials",
+            "type": "array"
+          },
+          "scan": {
+            "items": {
+              "$ref": "#/components/schemas/ScanEntry"
+            },
+            "title": "Scan",
+            "type": "array"
+          },
+          "scan_complete": {
+            "default": true,
+            "title": "Scan Complete",
+            "type": "boolean"
+          },
+          "scan_root": {
+            "anyOf": [
+              {
+                "maxLength": 512,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scan Root"
+          },
+          "stats": {
+            "$ref": "#/components/schemas/TickStats"
+          },
+          "ts": {
+            "minimum": 0.0,
+            "title": "Ts",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "machine_id",
+          "ts"
+        ],
+        "title": "TickRequest",
+        "type": "object"
+      },
+      "TickResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "cancel_assets": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Cancel Assets",
+            "type": "array"
+          },
+          "config": {
+            "additionalProperties": true,
+            "title": "Config",
+            "type": "object"
+          },
+          "deploy_jobs": {
+            "items": {
+              "$ref": "#/components/schemas/DeployJob"
+            },
+            "title": "Deploy Jobs",
+            "type": "array"
+          },
+          "need_upload": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Need Upload",
+            "type": "array"
+          },
+          "next_tick_seconds": {
+            "title": "Next Tick Seconds",
+            "type": "integer"
+          },
+          "server_time": {
+            "title": "Server Time",
+            "type": "integer"
+          },
+          "upgrade": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UpgradeInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "server_time",
+          "next_tick_seconds",
+          "config"
+        ],
+        "title": "TickResponse",
+        "type": "object"
+      },
+      "TickStats": {
+        "additionalProperties": false,
+        "properties": {
+          "disk_free": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disk Free"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "queue": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Queue",
+            "type": "integer"
+          }
+        },
+        "title": "TickStats",
+        "type": "object"
+      },
+      "UpgradeInfo": {
+        "additionalProperties": false,
+        "properties": {
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          },
+          "signature": {
+            "title": "Signature",
+            "type": "string"
+          },
+          "size": {
+            "default": 0,
+            "title": "Size",
+            "type": "integer"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "url",
+          "sha256",
+          "signature"
+        ],
+        "title": "UpgradeInfo",
+        "type": "object"
+      },
+      "UpgradeStatusOut": {
+        "additionalProperties": false,
+        "description": "自更新总览。教师一眼看清\"现在会不会有机器被升级\"。",
+        "properties": {
+          "active_release": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReleaseOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "key_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key Id"
+          },
+          "releases": {
+            "items": {
+              "$ref": "#/components/schemas/ReleaseOut"
+            },
+            "title": "Releases",
+            "type": "array"
+          },
+          "signing_available": {
+            "title": "Signing Available",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "signing_available"
+        ],
+        "title": "UpgradeStatusOut",
+        "type": "object"
+      },
+      "UploadResult": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          },
+          "stored": {
+            "title": "Stored",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "sha256",
+          "revision",
+          "stored"
+        ],
+        "title": "UploadResult",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "通用编程考试与竞赛模拟的在线同步评测系统",
+    "title": "SyncOJ",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/v1/admin/contests": {
+      "get": {
+        "operationId": "list_contests_api_v1_admin_contests_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ContestOut"
+                  },
+                  "title": "Response List Contests Api V1 Admin Contests Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Contests",
+        "tags": [
+          "admin"
+        ]
+      },
+      "post": {
+        "operationId": "create_contest_api_v1_admin_contests_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContestCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContestOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Contest",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/contests/{contest_id}/agents": {
+      "get": {
+        "operationId": "list_agents_api_v1_admin_contests__contest_id__agents_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AgentRuntimeOut"
+                  },
+                  "title": "Response List Agents Api V1 Admin Contests  Contest Id  Agents Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Agents",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/contests/{contest_id}/assets": {
+      "get": {
+        "operationId": "list_assets_api_v1_admin_contests__contest_id__assets_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AssetOut"
+                  },
+                  "title": "Response List Assets Api V1 Admin Contests  Contest Id  Assets Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Assets",
+        "tags": [
+          "admin"
+        ]
+      },
+      "post": {
+        "description": "上传一个待下发文件。\n\n走与服务端回收同一套内容寻址存储：相同内容只占一份磁盘。因此\"给全场下发\n同一份 500MB 测试点\"实际只消耗 500MB，而不是 50 × 500MB。",
+        "operationId": "upload_asset_api_v1_admin_contests__contest_id__assets_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_asset_api_v1_admin_contests__contest_id__assets_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Upload Asset",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/contests/{contest_id}/deploys": {
+      "get": {
+        "operationId": "list_deploys_api_v1_admin_contests__contest_id__deploys_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_targets",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Targets",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DeployTaskOut"
+                  },
+                  "title": "Response List Deploys Api V1 Admin Contests  Contest Id  Deploys Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Deploys",
+        "tags": [
+          "admin"
+        ]
+      },
+      "post": {
+        "description": "创建下发任务。\n\n注意这里**只建任务**，不推送。Agent 会在下一次 tick 里自己领走 ——\n轮询架构下服务端没有\"推\"这个动作，这也意味着离线机器重连后会自动补上。",
+        "operationId": "create_deploy_api_v1_admin_contests__contest_id__deploys_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeployCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeployTaskOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Deploy",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/contests/{contest_id}/events": {
+      "get": {
+        "operationId": "list_events_api_v1_admin_contests__contest_id__events_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "category",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Category"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/EventOut"
+                  },
+                  "title": "Response List Events Api V1 Admin Contests  Contest Id  Events Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Events",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/contests/{contest_id}/files": {
+      "get": {
+        "operationId": "list_files_api_v1_admin_contests__contest_id__files_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "player_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Player Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_deleted",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Deleted",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 500,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SourceFileOut"
+                  },
+                  "title": "Response List Files Api V1 Admin Contests  Contest Id  Files Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Files",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/contests/{contest_id}/judge/rescan": {
+      "post": {
+        "description": "立即重扫成绩目录（忽略 mtime 缓存）。",
+        "operationId": "rescan_judge_results_api_v1_admin_contests__contest_id__judge_rescan_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JudgeScanOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rescan Judge Results",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/contests/{contest_id}/judge/runs": {
+      "get": {
+        "operationId": "list_judge_runs_api_v1_admin_contests__contest_id__judge_runs_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "parse_status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Parse Status"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/JudgeRunOut"
+                  },
+                  "title": "Response List Judge Runs Api V1 Admin Contests  Contest Id  Judge Runs Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Judge Runs",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/contests/{contest_id}/judge/score": {
+      "delete": {
+        "operationId": "clear_judge_score_api_v1_admin_contests__contest_id__judge_score_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "player_id",
+            "required": true,
+            "schema": {
+              "title": "Player Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "problem",
+            "required": true,
+            "schema": {
+              "title": "Problem",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Clear Judge Score",
+        "tags": [
+          "admin"
+        ]
+      },
+      "put": {
+        "description": "教师手工录入或修正成绩。\n\n这是\"解析器覆盖不到\"的兜底出口。手工录入的记录会标记成 ``manual``，\n后续自动扫描**不会覆盖**它 —— 教师既然亲手改了，就该由教师负责。",
+        "operationId": "set_judge_score_api_v1_admin_contests__contest_id__judge_score_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManualScoreIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JudgeRunOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Judge Score",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/contests/{contest_id}/players": {
+      "get": {
+        "operationId": "list_players_api_v1_admin_contests__contest_id__players_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PlayerOut"
+                  },
+                  "title": "Response List Players Api V1 Admin Contests  Contest Id  Players Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Players",
+        "tags": [
+          "admin"
+        ]
+      },
+      "post": {
+        "description": "批量导入/更新选手。按 ``player_no`` 幂等 upsert。",
+        "operationId": "import_players_api_v1_admin_contests__contest_id__players_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/PlayerUpsert"
+                },
+                "title": "Payload",
+                "type": "array"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PlayerOut"
+                  },
+                  "title": "Response Import Players Api V1 Admin Contests  Contest Id  Players Post",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Import Players",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/contests/{contest_id}/scores": {
+      "get": {
+        "description": "「选手 × 题目」成绩矩阵。\n\n**区分\"0 分\"和\"没有成绩\"**：``parse_status`` 为 ``missing`` 表示从未收到\n结果，``unparsed`` 表示收到了但看不懂。界面上这两者都不该显示成 0 ——\n那会让教师以为选手考砸了。",
+        "operationId": "score_matrix_api_v1_admin_contests__contest_id__scores_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScoreMatrixOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Score Matrix",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/deploys/{task_id}": {
+      "get": {
+        "operationId": "get_deploy_api_v1_admin_deploys__task_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeployTaskOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Deploy",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/deploys/{task_id}/cancel": {
+      "post": {
+        "description": "取消下发。\n\n只把**未完成**的目标置为 cancelled —— 已经收下文件的机器不回滚。要求 Agent\n删掉已下发的文件是危险动作（可能误删教师自己放的文件），不做。",
+        "operationId": "cancel_deploy_api_v1_admin_deploys__task_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Deploy",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/deploys/{task_id}/retry": {
+      "post": {
+        "description": "把失败的目标重置为待下发，让 Agent 下一轮重新领取。",
+        "operationId": "retry_deploy_api_v1_admin_deploys__task_id__retry_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Retry Deploy",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/health": {
+      "get": {
+        "operationId": "health_api_v1_admin_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Health Api V1 Admin Health Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/login": {
+      "post": {
+        "operationId": "login_api_v1_admin_login_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Login",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/logout": {
+      "post": {
+        "operationId": "logout_api_v1_admin_logout_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Logout",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/me": {
+      "get": {
+        "operationId": "me_api_v1_admin_me_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminInfo"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Me",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/players/{player_id}/enroll-code": {
+      "post": {
+        "description": "签发（或重新签发）该选手的注册码。\n\n注册码长期有效、可重复使用 —— 它是\"机器凭据种子\"，供快照还原后自愈。\n重新签发会吊销该选手此前所有未绑定的注册码。",
+        "operationId": "issue_enroll_code_api_v1_admin_players__player_id__enroll_code_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "player_id",
+            "required": true,
+            "schema": {
+              "title": "Player Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnrollCodeOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Issue Enroll Code",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/releases": {
+      "get": {
+        "operationId": "list_releases_api_v1_admin_releases_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpgradeStatusOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Releases",
+        "tags": [
+          "admin"
+        ]
+      },
+      "post": {
+        "description": "上传 Agent 升级包。\n\n**上传不等于铺开**：``published_at`` 保持为空，Agent 不会收到任何东西，\n直到教师显式调 rollout。上传一个包和把它推给 50 台机器是风险等级完全\n不同的两件事，不该合成一个动作。",
+        "operationId": "upload_release_api_v1_admin_releases_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_release_api_v1_admin_releases_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Upload Release",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/releases/{release_id}": {
+      "patch": {
+        "operationId": "update_release_api_v1_admin_releases__release_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "release_id",
+            "required": true,
+            "schema": {
+              "title": "Release Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReleaseUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Release",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/releases/{release_id}/rollout": {
+      "post": {
+        "description": "开始向 Agent 提供这个版本。\n\n同一时刻只允许一个版本处于铺开状态 —— 否则不同机器可能拿到不同版本，\n排查问题时无法判断\"这台机器到底跑的是哪个\"。",
+        "operationId": "rollout_release_api_v1_admin_releases__release_id__rollout_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "release_id",
+            "required": true,
+            "schema": {
+              "title": "Release Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rollout Release",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/releases/{release_id}/yank": {
+      "post": {
+        "description": "撤回：不再向 Agent 提供该版本。\n\n注意**撤回不能把已经升级的机器降回去** —— 那需要 Agent 侧的回滚机制\n（升级后连续启动失败会自动回滚）。撤回只是止血，防止影响面继续扩大。",
+        "operationId": "yank_release_api_v1_admin_releases__release_id__yank_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "release_id",
+            "required": true,
+            "schema": {
+              "title": "Release Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Yank Release",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/agent/assets/{asset_id}": {
+      "get": {
+        "operationId": "download_asset_api_v1_agent_assets__asset_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "asset_id",
+            "required": true,
+            "schema": {
+              "title": "Asset Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download Asset",
+        "tags": [
+          "agent"
+        ]
+      }
+    },
+    "/api/v1/agent/enroll": {
+      "post": {
+        "description": "用注册码换长期凭据。\n\n刻意允许**重复注册**：NOI Linux 考试机常做整机快照还原，机器上的\n``credential.json`` 会消失。此时 Agent 用镜像内置的注册码重新 enroll，\n服务端按 ``machine_id`` 认出这是老机器，换发新凭据并作废旧凭据。\n因此注册码不是一次性的，而是 \"机器凭据种子\"。",
+        "operationId": "enroll_api_v1_agent_enroll_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnrollRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnrollResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Enroll",
+        "tags": [
+          "agent"
+        ]
+      }
+    },
+    "/api/v1/agent/events": {
+      "post": {
+        "description": "Agent 主动上报的审计事件（权限异常、磁盘满、批量重写等）。\n\n刻意用列表批量提交：断网期间事件会堆积，逐条上报会在重连瞬间产生请求风暴。",
+        "operationId": "report_events_api_v1_agent_events_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/AgentEvent"
+                },
+                "title": "Payload",
+                "type": "array"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Report Events",
+        "tags": [
+          "agent"
+        ]
+      }
+    },
+    "/api/v1/agent/files": {
+      "post": {
+        "description": "接收一个文件内容。\n\n**旧版本保护**：若客户端送来的 ``sha256`` 与服务端台账当前记录的版本不一致，\n说明这是迟到的旧内容（断网补传、乱序重传），直接以 409 拒绝，让客户端在下一\n轮 tick 里拿到真正需要的版本。绝不覆盖更新的版本。",
+        "operationId": "upload_file_api_v1_agent_files_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_file_api_v1_agent_files_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Upload File",
+        "tags": [
+          "agent"
+        ]
+      }
+    },
+    "/api/v1/agent/me": {
+      "get": {
+        "operationId": "whoami_api_v1_agent_me_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Whoami Api V1 Agent Me Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Whoami",
+        "tags": [
+          "agent"
+        ]
+      }
+    },
+    "/api/v1/agent/releases/{release_id}": {
+      "get": {
+        "description": "下载 Agent 升级包。\n\n只提供**已铺开且未撤回**的版本 —— 上传但未 rollout 的包对 Agent 不可见，\n这样\"上传\"和\"铺开\"的风险边界在服务端也是硬的，而不是只靠 Agent 自觉。",
+        "operationId": "download_release_api_v1_agent_releases__release_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "release_id",
+            "required": true,
+            "schema": {
+              "title": "Release Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download Release",
+        "tags": [
+          "agent"
+        ]
+      }
+    },
+    "/api/v1/agent/tick": {
+      "post": {
+        "operationId": "tick_api_v1_agent_tick_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TickRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TickResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Tick",
+        "tags": [
+          "agent"
+        ]
+      }
+    },
+    "/healthz": {
+      "get": {
+        "operationId": "healthz_healthz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Healthz Healthz Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Healthz",
+        "tags": [
+          "meta"
+        ]
+      }
+    }
+  }
+}

@@ -25,6 +25,17 @@ def _env_opt_path(name: str) -> Optional[Path]:
     return Path(raw).expanduser() if raw else None
 
 
+def _guess_web_dist() -> Optional[Path]:
+    """猜一下前端产物在哪。
+
+    只在开发仓库布局下成立（``<repo>/server/syncoj_server/config.py`` →
+    ``<repo>/web/dist``）。猜不到就返回 None —— 服务端照常只提供 API，
+    不会因为前端没构建而启动失败。
+    """
+    candidate = Path(__file__).resolve().parents[2] / "web" / "dist"
+    return candidate if candidate.is_dir() else None
+
+
 def _env_int(name: str, default: int) -> int:
     raw = os.environ.get(name)
     if not raw:
@@ -74,6 +85,11 @@ class Settings:
     release_signing_key: Optional[Path] = None
     #: 发布包大小上限
     max_release_size: int = 256 * 1024 * 1024
+
+    # ---- 管理界面 ----
+    #: 前端构建产物目录（web/dist）。存在则由本进程托管，不存在就只提供 API。
+    #: 单进程托管省掉一个 Caddy/nginx —— 本机部署场景下少一个组件就少一处故障点。
+    web_dist: Optional[Path] = field(default_factory=lambda: _env_opt_path("SYNCOJ_WEB_DIST") or _guess_web_dist())
 
     # ---- 认证 ----
     admin_session_ttl_seconds: int = 12 * 3600

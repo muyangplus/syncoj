@@ -48,7 +48,10 @@ SyncOJ/
 │   ├── tools/                py38 兼容门禁、协议 fixture 生成
 │   └── tests/
 ├── scripts/check.sh          一键跑全部检查
-└── web/                      管理界面（Vue3 + Vite，**未开始**）
+└── web/                      管理界面（Vue3 + TS + Vite + Element Plus）
+    ├── src/api/              client + 从 OpenAPI 生成的类型
+    ├── src/views/            7 个页面
+    └── openapi.json          由 server/tools/dump_openapi.py 导出（纳入版本管理）
 ```
 
 ## 快速开始（开发）
@@ -61,10 +64,23 @@ pip install -e "server[dev]"
 syncoj-server init                 # 建库 + 生成管理员口令
 syncoj-server serve --host 0.0.0.0
 
-# Agent（零依赖，直接跑）
-python agent/syncoj_agent/main.py --config agent/config.example.ini --check
-python agent/syncoj_agent/main.py --config agent/config.example.ini --once
+# 管理界面（开发模式，热更新）
+cd web && npm install
+npm run dev                        # http://localhost:5173，API 自动代理到 :8000
+
+# 管理界面（构建后由服务端托管 —— 单进程部署，不需要额外的 Caddy/nginx）
+npm run build                      # 产出 web/dist
+# 服务端启动时自动探测 web/dist 并挂载；探测不到就只提供 API，/docs 仍可用
+
+# Agent（零依赖）
+python agent/run_agent.py --config agent/config.example.ini --check
+python agent/run_agent.py --config agent/config.example.ini --once
 ```
+
+> **Agent 必须通过 `run_agent.py` 启动，不能是 `syncoj_agent/main.py`。**
+> 后者使用包内相对导入，当脚本直接执行会报
+> `ImportError: attempted relative import with no known parent package`。
+> `-E` 会连 `PYTHONPATH` 一起忽略，所以只能靠启动器显式设置 `sys.path`。
 
 ## 开发约定
 
@@ -76,6 +92,11 @@ python agent/syncoj_agent/main.py --config agent/config.example.ini --once
 - **服务端的路径安全校验必须独立实现**，绝不信任 Agent 上报的路径。
   `agent/syncoj_agent/safepath.py` 是**另一份独立实现**（纵深防御），
   两者的一致性由契约测试中的 `test_path_validation_parity` 守住。
+- **前端类型绝不手写**。改完服务端模型后依次跑：
+  ```bash
+  python server/tools/dump_openapi.py && (cd web && npm run gen:types)
+  ```
+  `scripts/check.sh` 会校验 `web/openapi.json` 是否已同步，不同步直接失败。
 
 ## 跑全部检查
 
@@ -92,9 +113,9 @@ python agent/syncoj_agent/main.py --config agent/config.example.ini --once
 | M3 下发：资产管理 / 任务编排（全员·按人·按分组）/ Range 断点续传 / 进度聚合 | ✅ 完成 |
 | M4 成绩：结果扫描回写 / 成绩矩阵 / 手工补录 | ✅ 完成 |
 | M5 运维：RSA 签名自更新 / 安全解包 / 自动回滚 / 幂等安装器 / 可复现打包 | ✅ 完成 |
-| 管理界面 | ❌ **只有 API，Vue3 前端未做**（当前可用 `/docs` 交互） |
+| 管理界面：7 个页面（选手状态 / 代码台账 / 下发 / 成绩 / 审计 / 发布 / 登录） | ✅ 完成 |
 
-测试规模：**服务端 216 项、Agent 150 项**，含端到端集成测试（真实 Agent 代码
+测试规模：**服务端 227 项、Agent 154 项**，含端到端集成测试（真实 Agent 代码
 通过真实 HTTP 打到真实服务端）与 **openssl 交叉验证**（手写密码学代码唯一可信的
 证据是独立实现能互相验通）。
 

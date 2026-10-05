@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
-import { agentApi, playerApi } from '@/api'
+import { agentApi, playerApi, scoreApi } from '@/api'
 import type { AgentRuntimeOut, EnrollCodeOut, PlayerOut } from '@/api/types'
 import PlayerImportDialog from '@/components/PlayerImportDialog.vue'
 import { useContestData } from '@/composables/useContestData'
@@ -19,17 +19,56 @@ const contest = useContestStore()
  */
 const { data, loading, error, reload } = useContestData(
   async (contestId) => {
-    const [players, agents] = await Promise.all([
+    const [players, agents, matrix] = await Promise.all([
       playerApi.list(contestId),
       agentApi.list(contestId),
+      scoreApi.matrix(contestId),
     ])
-    return { players, agents }
+    return { players, agents, matrix }
   },
   { interval: 5000 },
 )
 
 const players = computed<PlayerOut[]>(() => data.value?.players ?? [])
 const agents = computed<AgentRuntimeOut[]>(() => data.value?.agents ?? [])
+
+/**
+ * 每位选手的「交题进度」。
+ *
+ * 巡检时要回答的是**"谁的座位该去看一眼"**，光看"回收了几个文件"答不了 ——
+ * 交了一堆草稿和一个都没交，文件数看起来可能一样。
+ *
+ * 只统计**清单里登记过的题目**：未登记的题目可能只是历史遗留，
+ * 拿它去质问选手是错的（和成绩页的口径保持一致）。
+ */
+const progressByPlayer = computed(() => {
+  const matrix = data.value?.matrix
+  const map = new Map<number, { submitted: number; missing: number; pending: number; total: number }>()
+  if (!matrix) return map
+
+  const declared = new Set(
+    (matrix.columns ?? []).filter((c) => c.declared).map((c) => c.ident),
+  )
+  const total = declared.size
+
+  for (const row of matrix.rows ?? []) {
+    let submitted = 0
+    let missing = 0
+    let pending = 0
+    for (const cell of row.cells ?? []) {
+      if (!declared.has(cell.problem)) continue
+      if (cell.parse_status === 'missing') {
+        // 交了没评测 vs 根本没交 —— 前者不用管，后者要去找人
+        if (cell.submitted) pending += 1
+        else missing += 1
+      } else {
+        submitted += 1
+      }
+    }
+    map.set(row.player_id, { submitted, missing, pending, total })
+  }
+  return map
+})
 
 const keyword = ref('')
 const onlyOffline = ref(false)
@@ -60,7 +99,11 @@ const rows = computed(() => {
         (player.name ?? '').toLowerCase().includes(needle)
       )
     })
-    .map((player) => ({ player, agent: agentByPlayer.value.get(player.id) ?? null }))
+    .map((player) => ({
+      player,
+      agent: agentByPlayer.value.get(player.id) ?? null,
+      progress: progressByPlayer.value.get(player.id) ?? null,
+    }))
 })
 
 const summary = computed(() => {
@@ -262,6 +305,31 @@ function handleImported(): void {
       <el-table-column label="代码文件" width="90" align="right">
         <template #default="{ row }">
           <span :class="{ muted: row.player.file_count === 0 }">{{ row.player.file_count }}</span>
+        </template>
+      </el-table-column>
+
+      <!-- 巡检要看的是"谁的座位该去看一眼"：交了几个文件答不了这个问题 -->
+      <el-table-column label="交题进度" width="150">
+        <template #default="{ row }">
+          <el-tooltip
+            v-if="row.progress"
+            :content="
+              `已出成绩 ${row.progress.submitted} 题 · ` +
+              `已交待评测 ${row.progress.pending} 题 · ` +
+              `未交 ${row.progress.missing} 题`
+            "
+          >
+            <span>
+              <el-tag v-if="row.progress.missing > 0" size="small" type="warning" effect="plain">
+                未交 {{ row.progress.missing }}
+              </el-tag>
+              <el-tag v-else size="small" type="success" effect="plain">已交齐</el-tag>
+              <span class="cell-sub mono">
+                {{ row.progress.submitted + row.progress.pending }}/{{ row.progress.total }}
+              </span>
+            </span>
+          </el-tooltip>
+          <span v-else class="muted">—</span>
         </template>
       </el-table-column>
 

@@ -881,6 +881,10 @@ def list_clone_alerts(
     正常情况下每台物理机的 SMBIOS UUID 都不同。撞了指纹说明镜像是在某台机器
     **跑过之后**才克隆的 —— 那批机器里可能已经有人的凭据被一起拷了进去，
     配对与成绩归属都有串的风险，值得教师停下来看一眼。
+
+    **但要分清"还没配对"和"已经配给了人"。** 一份镜像装遍整间机房时撞指纹是必然
+    也是正常的：一台都还没配对时，没有任何人的身份可被冒领，界面就不该指控"混进了
+    别人的凭据"。所以这里如实给出 ``bound_count``，由界面决定该报警还是该说明。
     """
     with ctx.db.session() as session:
         agents = list(
@@ -892,14 +896,23 @@ def list_clone_alerts(
         )
 
     grouped: Dict[str, List[str]] = {}
+    bound: Dict[str, int] = {}
     for agent in agents:
+        fingerprint = agent.machine_fingerprint or ""
         label = agent.hostname or agent.machine_id or "?"
         if agent.roster_entry_id is None:
             label += "（待配对）"
-        grouped.setdefault(agent.machine_fingerprint or "", []).append(label)
+        else:
+            bound[fingerprint] = bound.get(fingerprint, 0) + 1
+        grouped.setdefault(fingerprint, []).append(label)
 
     alerts = [
-        CloneAlertOut(fingerprint=fingerprint, machine_count=len(names), hostnames=sorted(names))
+        CloneAlertOut(
+            fingerprint=fingerprint,
+            machine_count=len(names),
+            bound_count=bound.get(fingerprint, 0),
+            hostnames=sorted(names),
+        )
         for fingerprint, names in sorted(grouped.items())
         if len(names) > 1
     ]

@@ -617,6 +617,30 @@ def test_clone_alert_reports_shared_fingerprints(
     assert body["items"][0]["machine_count"] == 2
     # 待配对的机器会带上这个后缀，让人一眼看出它们还没归属
     assert body["items"][0]["hostnames"] == ["pc-1（待配对）", "pc-2（待配对）"]
+    # 一台都还没配对 —— 界面上就不该说"可能混进了别人的凭据"
+    assert body["items"][0]["bound_count"] == 0
+
+
+def test_clone_alert_says_how_many_are_already_bound(
+    client: TestClient, admin_headers: dict, bootstrap_key: str
+) -> None:
+    """有人的身份挂在这个指纹上，才是真正要报警的那一刻。
+
+    ``bound_count`` 就是"严重程度"的判据：0 时快照还原认回谁都无所谓（没有身份
+    可冒领），≥1 时那条"按指纹认回原机器"的路会认错机器，而错的那一头是某个
+    学生的成绩。
+    """
+    shared = "smbios-" + "7" * 24
+    enroll_machine(client, bootstrap_key, hostname="pc-1", fingerprint=shared)
+    second = enroll_machine(client, bootstrap_key, hostname="pc-2", fingerprint=shared)
+    roster = make_roster(client, admin_headers, entries=[{"player_no": "S001", "name": "张三"}])
+    bind_by_code(client, admin_headers, second["pair_code"], roster["entries"][0]["id"])
+
+    body = client.get("/api/v1/admin/machines/clone-alerts", headers=admin_headers).json()
+    assert body["items"][0]["machine_count"] == 2
+    assert body["items"][0]["bound_count"] == 1
+    # 已经配对的那台不再带"待配对"后缀，教师能一眼看出是哪一台挂在上面
+    assert body["items"][0]["hostnames"] == ["pc-1（待配对）", "pc-2"]
 
 
 def test_no_clone_alert_for_distinct_fingerprints(

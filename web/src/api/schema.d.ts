@@ -1006,6 +1006,10 @@ export interface paths {
          *     正常情况下每台物理机的 SMBIOS UUID 都不同。撞了指纹说明镜像是在某台机器
          *     **跑过之后**才克隆的 —— 那批机器里可能已经有人的凭据被一起拷了进去，
          *     配对与成绩归属都有串的风险，值得教师停下来看一眼。
+         *
+         *     **但要分清"还没配对"和"已经配给了人"。** 一份镜像装遍整间机房时撞指纹是必然
+         *     也是正常的：一台都还没配对时，没有任何人的身份可被冒领，界面就不该指控"混进了
+         *     别人的凭据"。所以这里如实给出 ``bound_count``，由界面决定该报警还是该说明。
          */
         get: operations["list_clone_alerts_api_v1_admin_machines_clone_alerts_get"];
         put?: never;
@@ -1866,8 +1870,19 @@ export interface components {
         /**
          * CloneAlertOut
          * @description 克隆镜像告警：多台机器共用同一个硬件指纹。
+         *
+         *     **严重程度取决于有没有人已经被绑上去。** 一份镜像装遍整间机房时撞指纹是必然
+         *     的、也是正常的 —— 那时一台机器都还没配对，没有任何人的身份可以被冒领，界面
+         *     上就不该说"可能混进了别人的凭据"。真正要警告的是"某个指纹上已经挂着一个具体
+         *     的人了"：快照还原那条"按指纹认回原机器"的路径会认错机器，而错的那一头就是
+         *     某个学生的成绩。
          */
         CloneAlertOut: {
+            /**
+             * Bound Count
+             * @default 0
+             */
+            bound_count: number;
             /** Fingerprint */
             fingerprint: string;
             /** Hostnames */

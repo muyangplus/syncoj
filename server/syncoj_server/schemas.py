@@ -534,10 +534,19 @@ class SetAgentContestIn(_Base):
 
 
 class CloneAlertOut(_Base):
-    """克隆镜像告警：多台机器共用同一个硬件指纹。"""
+    """克隆镜像告警：多台机器共用同一个硬件指纹。
+
+    **严重程度取决于有没有人已经被绑上去。** 一份镜像装遍整间机房时撞指纹是必然
+    的、也是正常的 —— 那时一台机器都还没配对，没有任何人的身份可以被冒领，界面
+    上就不该说"可能混进了别人的凭据"。真正要警告的是"某个指纹上已经挂着一个具体
+    的人了"：快照还原那条"按指纹认回原机器"的路径会认错机器，而错的那一头就是
+    某个学生的成绩。
+    """
 
     fingerprint: str
     machine_count: int
+    #: 这个指纹上已经配对给人的机器数。0 = 还没有任何身份可被冒领
+    bound_count: int = 0
     hostnames: List[str] = Field(default_factory=list)
 
 

@@ -11,6 +11,15 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    watch: {
+      ignored: [
+        '**/node_modules/**',
+        '**/.git/**',
+        '**/*.tmp',
+        '**/*.tmpdir/**',
+        '**/.*.tmpdir/**',
+      ],
+    },
     // 开发时把 API 请求代理到后端。
     // 不用 CORS：生产环境前端由 FastAPI 同源托管，开发时也保持同源，
     // 这样"开发能跑、上线跨域报错"这类问题不会出现。

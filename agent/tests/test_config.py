@@ -11,7 +11,6 @@ import re
 
 import pytest
 
-from conftest import make_tree
 from syncoj_agent.config import AgentConfig, ConfigError
 from syncoj_agent.policy import DEFAULT_POLICY, merge_policy
 
@@ -22,7 +21,7 @@ verify_tls = true
 ca_file =
 
 [agent]
-enroll_code = AAAA-BBBB
+bootstrap_key_file = /etc/syncoj/bootstrap.key
 state_dir = {state_dir}
 deploy_root = {deploy_root}
 
@@ -66,7 +65,7 @@ def test_parses_explicit_config(workdir: Path) -> None:
 
     assert config.server_url == "https://10.0.0.1:8443"
     assert config.verify_tls is True
-    assert config.enroll_code == "AAAA-BBBB"
+    assert config.bootstrap_key_file == Path("/etc/syncoj/bootstrap.key")
     assert config.scan_interval == 20
     assert config.max_file_size == 4096
     assert config.log_level == "DEBUG"
@@ -79,6 +78,70 @@ def test_defaults_load_without_file() -> None:
     assert config.server_url.startswith("http")
     assert config.state_dir
     assert config.deploy_root
+
+
+# --------------------------------------------------------------------------- #
+# 每选手注册码必须是真的没了
+# --------------------------------------------------------------------------- #
+#
+# 这条链路（enroll_code）已经被"机器永久绑定名单条目"整个取代。留着任何一个
+# 残迹都不行：运维会照着配置一个不存在的功能，而且它看起来"配了也没报错" ——
+# 那比直接报错难查得多。
+
+
+def active_config_text(text: str) -> str:
+    """去掉注释之后的配置正文。
+
+    注释里**允许**提到 ``enroll_code``（"已经没有这个东西了"这句话本身就得写上
+    它才说得清），正文里绝不允许 —— 正文才是会被读进去的东西。
+    """
+    return "\n".join(
+        line
+        for line in text.splitlines()
+        if not line.lstrip().startswith((";", "#"))
+    )
+
+
+def test_enroll_code_is_gone_everywhere() -> None:
+    """字段、环境变量映射、内置模板、示例配置 —— 一处都不许剩。"""
+    import syncoj_agent.config as config_module
+
+    assert not hasattr(AgentConfig(), "enroll_code"), "enroll_code 字段还在"
+    assert "SYNCOJ_ENROLL_CODE" not in config_module._ENV_OVERRIDES
+    assert "enroll_code" not in active_config_text(config_module.DEFAULT_INI)
+
+    example = Path(__file__).resolve().parents[1] / "config.example.ini"
+    assert "enroll_code" not in active_config_text(example.read_text(encoding="utf-8"))
+
+
+def test_stale_enroll_code_key_is_ignored_not_fatal(workdir: Path) -> None:
+    """升级过来的机器，agent.ini 里很可能还留着 ``enroll_code =``。
+
+    配置解析必须**照样能起来** —— 为了一个已经不存在的键让整台机器开机失败，
+    是拿"干净"换"不能考试"。它不会被读取，也不会被当成错误。
+    """
+    state_dir = workdir / "state"
+    code_dir = workdir / "code"
+    for path in (state_dir, code_dir):
+        path.mkdir(parents=True, exist_ok=True)
+    path = workdir / "agent.ini"
+    path.write_text(
+        MINIMAL.format(
+            state_dir=state_dir.as_posix(),
+            deploy_root=(workdir / "deploy").as_posix(),
+            roots=code_dir.as_posix(),
+        ).replace(
+            "bootstrap_key_file = /etc/syncoj/bootstrap.key",
+            "enroll_code = AAAA-BBBB\nbootstrap_key_file = /etc/syncoj/bootstrap.key",
+            # 顺带确认它不会偷偷变回一个可用字段
+        ),
+        encoding="utf-8",
+    )
+
+    config = AgentConfig.load(path)
+
+    assert not hasattr(config, "enroll_code")
+    assert config.bootstrap_key_file == Path("/etc/syncoj/bootstrap.key")
 
 
 def test_missing_config_file_raises(workdir: Path) -> None:

@@ -16,17 +16,23 @@
 ----------------------
 ::
 
-    # 镜像预装（构建镜像时跑）
-    sudo python3 install.py --server https://10.0.0.1:8443 --enroll-code XXXX-...
+    # 镜像预装（构建镜像时跑）。密钥用 syncoj-server bootstrap-key issue 签发，
+    # 明文只显示一次 —— 拿到就写进镜像，别再落在别处
+    sudo python3 install.py --server https://10.0.0.1:8443 \
+        --bootstrap-key <43 字符的密钥> --user student
 
     # 离线包安装（考场无网）
-    sudo python3 install.py --bundle ./syncoj-agent-0.1.0.tar.gz --server ... --enroll-code ...
+    sudo python3 install.py --bundle ./syncoj-agent-0.1.0.tar.gz --server ... \
+        --bootstrap-key <密钥>
 
     # 在线自举（网络可达）
     sudo python3 install.py --download-url https://10.0.0.1:8443/dist/syncoj-agent-0.1.0.tar.gz ...
 
+**注册只有一条路**：镜像里那份 root 只读的统一密钥。它换来的是"一台还没有归属
+的机器"，教师再用六位配对码把它绑到名单里的**人**（见 docs/protocol.md §1）。
+
 **幂等**是硬要求：重复执行结果一致。尤其是 —— **绝不覆盖已存在的 agent.ini**。
-教师可能已经在里面改了扫描目录或注册码，安装器把它们冲掉是灾难性的。
+教师可能已经在里面改了扫描目录，安装器把它们冲掉是灾难性的。
 """
 
 from __future__ import annotations
@@ -44,6 +50,11 @@ import urllib.request
 from pathlib import Path, PurePosixPath
 from typing import Iterable, List, Optional, Tuple
 
+#: 本文件在仓库里的位置。安装器也会被拷进安装包/镜像，那时 ``parents[2]`` 不再
+#: 指向仓库 —— 所以凡是用到它的地方都要先判存在性，猜错只能退化成"没有这个默认值"，
+#: 绝不能猜出一个文件路径来。
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
 DEFAULT_PREFIX = Path("/opt/syncoj")
 DEFAULT_CONFIG_DIR = Path("/etc/syncoj")
 DEFAULT_STATE_DIR = Path("/var/lib/syncoj")
@@ -57,6 +68,14 @@ CONFIG_FILENAME = "agent.ini"
 UNIT_FILENAME = SERVICE_NAME + ".service"
 #: 统一注册密钥。**root 只读** —— 它能注册整间机房，不该躺在学生读得到的地方
 BOOTSTRAP_KEY_FILENAME = "bootstrap.key"
+#: 升级签名公钥。它不是秘密（只是信任锚），0644 即可。
+#:
+#: 安装包可以自带一份（``build_bundle.py`` 从仓库 ``.key/`` 打进去），落点固定在
+#: ``<config-dir>/`` 而不是版本目录里 —— 版本目录会被清理，把信任锚放在那儿等于
+#: 某天升级会因为"公钥不见了"而整体失效，而那时没人会想到是删旧版本删出来的。
+PUBLIC_KEY_FILENAME = "release-key.pub.json"
+#: 从源码仓库跑安装器时，密钥的默认位置（``syncoj-server init`` 生成的地方）。
+DEFAULT_BOOTSTRAP_KEY_FILE = REPO_ROOT / ".key" / BOOTSTRAP_KEY_FILENAME
 #: 装机时以 root 身份跑一次注册的单元。
 #:
 #: 为什么必须是独立单元而不是让 Agent 自己注册：Agent 以选手身份运行，
@@ -488,7 +507,7 @@ class Installer:
         self.report.section("写入配置")
 
         if self.config_path.is_file() and not self.options.force_config:
-            # 教师很可能已经改过扫描目录或注册码。覆盖它是灾难性的。
+            # 教师很可能已经改过扫描目录。覆盖它是灾难性的。
             self.report.skip("配置已存在，保持不变: %s" % self.config_path)
             self.report.note("（如需重建请加 --force-config，会覆盖现有配置）")
             return
@@ -497,7 +516,7 @@ class Installer:
             server_url=self.options.server or "https://127.0.0.1:8000",
             verify_tls=not self.options.insecure,
             ca_file=self.options.ca_file or "",
-            enroll_code=self.options.enroll_code or "",
+            bootstrap_key_file=_posix(self.config_dir / BOOTSTRAP_KEY_FILENAME),
             state_dir=self.state_dir,
             # deploy_root / scan_roots 是**字符串模板**，可能含 {desktop}/{player_no}，
             # 不能当 Path 处理（Path 会保留大括号，但改配置时容易误伤）
@@ -506,7 +525,7 @@ class Installer:
             scan_prefix=self.options.scan_prefix,
             upgrade_mode=self.options.upgrade_mode,
             install_root=self.prefix,
-            public_key=self.options.public_key or "",
+            public_key=self.install_public_key(version),
         )
 
         if self.report.dry_run:
@@ -525,8 +544,44 @@ class Installer:
         self._restrict_config_to_run_user()
         self.report.action("已写入 %s" % self.config_path)
 
-        if self.options.enroll_code:
-            self.report.note("注册码已写入配置；机器快照还原后 Agent 会用它自动重新注册")
+    def install_public_key(self, version: str) -> str:
+        """把升级公钥放到机器上，返回 ``agent.ini`` 里 ``public_key`` 该写的路径。
+
+        三种来源，优先级从高到低：
+
+        1. ``--public-key <路径>`` —— 操作员明确指定，**原样写进配置**，我们不搬动它
+           （生产上这通常是运维自己发到 ``/etc/syncoj/`` 的那份）
+        2. 安装包自带 ``release-key.pub.json`` —— 由 ``build_bundle.py`` 从仓库
+           ``.key/`` 打进去的。复制到 ``<config-dir>/`` 并把配置指向这份副本
+        3. 都没有 → 空串 → 自更新保持关闭（``--upgrade-mode`` 默认就是 off）
+
+        第 2 步为什么要**复制出**版本目录，而不是直接指向包里的那份：版本目录
+        （``releases/<版本>/``）是会被清理的，而公钥是信任锚 —— 指向它意味着某天
+        清理旧版本会顺手把签名验证整体废掉，而那时没人会想到是删旧版本删出来的。
+        """
+        if self.options.public_key:
+            return self.options.public_key
+
+        source = self.prefix / RELEASES_DIR / version / PUBLIC_KEY_FILENAME
+        if not source.is_file():
+            return ""
+
+        target = self.config_dir / PUBLIC_KEY_FILENAME
+        if self.report.dry_run:
+            self.report.plan("安装升级公钥 %s → %s" % (source, target))
+            return _posix(target)
+
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(str(source), str(target))
+            os.chmod(str(target), 0o644)
+        except OSError as exc:
+            self.report.warn("安装升级公钥失败：%s（自更新会保持关闭）" % exc)
+            return ""
+
+        self.report.action("已安装升级公钥 %s" % target)
+        self.report.note("它是信任锚，随安装包一起来的 —— 不需要手工从服务端拷")
+        return _posix(target)
 
     def _restrict_config_to_run_user(self) -> None:
         """把配置文件交给**运行 Agent 的那个用户**，别人（包括 root 之外的所有人）读不到。
@@ -536,10 +591,11 @@ class Installer:
         `User=<选手登录用户>` —— 那个用户既不是 root 也不在 root 组，
         结果是 **Agent 读不到自己的配置，装完起不来**。
 
-        `0600` 而不是 `0640`：这份文件里可能有注册码，没有任何其他账号需要读它。
+        `0600` 而不是 `0640`：这份文件里没有密钥（密钥在单独一份 root 只读的文件
+        里），但也没有任何其他账号需要读它 —— 收紧权限没有代价。
 
-        由此还推出一条必须记住的性质：**`agent.ini` 对选手登录账号是可读的**。
-        所以共享密钥、长期有效的凭据这类东西，不该放在这个文件里 ——
+        由此推出一条必须记住的性质：**`agent.ini` 对选手登录账号是可读的**。
+        所以共享密钥、长期有效的凭据这类东西，绝不该放在这个文件里 ——
         学生账号能读到镜像里的每一个文件。
         """
         if self.report.dry_run:  # pragma: no cover - dry_run 在上面就 return 了
@@ -605,18 +661,23 @@ class Installer:
     def install_enroll_unit(self, has_bootstrap_key: bool) -> None:
         """装"以 root 身份注册一次"的单元。
 
-        只有走统一密钥的部署才需要它。每选手注册码那条路上，Agent 自己就能
-        注册（注册码就在它读得到的 agent.ini 里），多一个单元只是噪音。
+        注册只有这一条路：密钥是 root 只读的，而 Agent 服务以选手身份运行、
+        读不到它。所以必须有一个 root 身份的一次性单元把凭据换回来。
+
+        没有密钥时**不留**这个单元：它会每次开机失败一次，把 journal 刷脏，
+        而真正的问题是"这台机器没有密钥，注册不了"。装密钥之后再跑一遍安装器
+        即可 —— 那时它会自己补上。
         """
         self.enroll_unit_path = self.unit_path.parent / ENROLL_UNIT_FILENAME
         self.report.section("注册单元")
 
         if not has_bootstrap_key:
-            # 不在统一密钥模式下就别留一个永远会失败的单元 ——
-            # 它会在每次开机时失败一次，把 journal 刷脏，
-            # 而真正的问题是"这台机器压根不走这条路"
+            # 没有密钥就没有注册可做。留一个永远失败的单元只会掩盖真正的问题。
             self._remove_enroll_unit()
-            self.report.skip("未使用统一密钥，不需要注册单元")
+            self.report.skip("没有统一密钥，装不出注册单元")
+            self.report.note(
+                "拿到密钥后重跑安装器：install.py --bootstrap-key <密钥> ..."
+            )
             return
 
         content = render_enroll_unit(
@@ -667,12 +728,19 @@ class Installer:
         密钥由教师在服务端签发（``syncoj-server bootstrap-key issue``），
         装机时用 ``--bootstrap-key`` 传进来。它放在这里而不是 agent.ini 里，
         原因是那个文件 chown 给了选手账号 —— 学生读得到里面的每一个字节。
-        """
-        raw = (self.options.bootstrap_key or "").strip()
-        if not raw:
-            return False
 
+        返回值是"这台机器现在有没有可用的密钥"，**不是**"这次有没有写"：
+        重复执行安装器时通常不会再传一遍密钥（那是个一眼都不该多看的秘密），
+        如果这里返回 False，``install_enroll_unit`` 就会把上一次装好的
+        开机注册单元删掉 —— 表现是"什么都没改，但下次开机不再注册了"。
+        """
         target = self.config_dir / BOOTSTRAP_KEY_FILENAME
+        raw = (self.options.bootstrap_key or "").strip()
+
+        if not raw:
+            # 没给密钥 ≠ 没有密钥：上一次装机可能已经放好了一份
+            return target.is_file()
+
         self.report.section("统一注册密钥")
 
         if self.report.dry_run:
@@ -688,6 +756,19 @@ class Installer:
         except OSError as exc:
             self.report.warn("写入 %s 失败：%s" % (target, exc))
             return False
+
+        # 明确把属主钉成 root：安装器可能以普通用户加 sudo 跑，
+        # 而这份文件必须只有 root 读得到
+        try:
+            shutil.chown(str(target), user="root", group="root")
+        except (OSError, LookupError) as exc:
+            # 用户不存在（非 Linux 上测试）不算致命，但要说出来：
+            # 静默留一份属主不对的密钥，等于把"能注册整间机房"的钥匙交出去
+            self.report.warn(
+                "无法把 %s 的属主改为 root:root：%s\n"
+                "  请手工执行：chown root:root %s && chmod 0600 %s"
+                % (target, exc, target, target)
+            )
 
         self.report.action("已写入 %s（0600，属主 root）" % target)
         self.report.note("密钥能注册整间机房，所以只给 root 读 —— 不要放进 agent.ini")
@@ -758,11 +839,13 @@ class Installer:
         # 放在写配置之前检查 —— 那之后我们就要往状态目录里写东西了。
         self.check_identity_leftovers()
 
-        key_installed = self.install_bootstrap_key()
+        # 注意这个返回值是"这台机器现在有没有可用的密钥"，不是"这次有没有写" ——
+        # 重复执行安装器时通常不会再传一遍密钥，见 install_bootstrap_key
+        has_bootstrap_key = self.install_bootstrap_key()
 
         self.write_config(version)
         self.install_unit(version)
-        self.install_enroll_unit(has_bootstrap_key=key_installed)
+        self.install_enroll_unit(has_bootstrap_key=has_bootstrap_key)
         self.start_service(restarted=True)
 
         self.report.section("完成")
@@ -795,7 +878,7 @@ def render_config(
     server_url: str,
     verify_tls: bool,
     ca_file: str,
-    enroll_code: str,
+    bootstrap_key_file: str,
     state_dir: Path,
     deploy_root: str,
     scan_roots: str,
@@ -806,11 +889,16 @@ def render_config(
 ) -> str:
     """生成 agent.ini。
 
-    由代码生成而不是 `sed` 替换模板：注册码、路径里可能含特殊字符，
+    由代码生成而不是 `sed` 替换模板：路径里可能含特殊字符，
     `sed` 会因为分隔符或转义把它们改坏，而且失败得悄无声息。
 
     ``deploy_root`` 与 ``scan_roots`` 是**字符串模板**（可能含
     ``{desktop}`` / ``{player_no}``），不能当成 Path 处理。
+
+    ``bootstrap_key_file`` 必须写进去，而且必须指向**这次实际放密钥的位置**：
+    它不再是"反正默认值就对"的东西 —— 自定义 ``--config-dir`` 时默认值
+    ``/etc/syncoj/bootstrap.key`` 会指到一个空的路径，表现是"装完起不来、
+    日志说找不到统一密钥"，而密钥明明就在旁边。
     """
     return """\
 ; SyncOJ Agent 配置（由安装器生成）
@@ -824,15 +912,25 @@ verify_tls = {verify_tls}
 ca_file = {ca_file}
 
 [agent]
-; 注册码：教师端签发，首次注册后与本机 machine_id 绑定。
-; 机器被快照还原、凭据文件丢失后，靠它自动重新注册，无需人工干预。
-enroll_code = {enroll_code}
+; 统一注册密钥文件（整间机房一份），**root 只读**。
+; 密钥的**内容**绝不写进本文件：agent.ini 的属主是选手账号，
+; 学生读得到里面的每一个字节，而那把钥匙能注册整间机房。
+; 真正干活的是 syncoj-enroll.service（以 root 身份跑一次注册）。
+bootstrap_key_file = {bootstrap_key_file}
 state_dir = {state_dir}
 machine_id =
 ; 下发文件的落地根目录。{{desktop}} 自动探测当前用户的桌面
 ; （兼容「桌面」与 Desktop 两种命名）。
 ; 最终落点：桌面/<准考证号>/<题目名>/<文件名>
 deploy_root = {deploy_root}
+
+[pairing]
+; 把本机状态写到桌面上给教师看：
+;   未配对 -> <桌面>/配对码.txt（六位配对码）
+;   已配对但没场次 -> <桌面>/等待场次.txt
+; 能干活之后这两个文件都会自动消失。桌面不可写时可以关掉它。
+show_on_desktop = true
+file_name = 配对码.txt
 
 [scan]
 ; 要回收的代码目录。占位符在运行时展开：
@@ -863,7 +961,7 @@ public_key = {public_key}
         server_url=server_url,
         verify_tls="true" if verify_tls else "false",
         ca_file=ca_file,
-        enroll_code=enroll_code,
+        bootstrap_key_file=bootstrap_key_file,
         state_dir=_posix(state_dir),
         deploy_root=deploy_root,
         scan_roots=scan_roots,
@@ -1144,13 +1242,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     config = parser.add_argument_group("配置")
     config.add_argument("--server", help="服务端地址，如 https://10.0.0.1:8443")
-    config.add_argument("--enroll-code", help="教师端签发的注册码（每选手一个那种）")
     config.add_argument(
         "--bootstrap-key",
         help=(
             "镜像统一注册密钥（syncoj-server bootstrap-key issue 签发的）。"
             "写入 <config-dir>/bootstrap.key（0600，属主 root），"
-            "并装上开机注册单元。走这条路就不需要逐台发注册码。"
+            "并装上开机注册单元。**这是唯一的注册方式** —— 已经是密钥的"
+            "机器不必再传一遍，省略它不会影响已有的密钥。"
+        ),
+    )
+    config.add_argument(
+        "--bootstrap-key-file",
+        default=None,
+        help=(
+            "从文件读统一注册密钥。不指定时，如果正从源码仓库里跑，会自动用 "
+            "<仓库>/.key/bootstrap.key（syncoj-server init 生成的位置）；"
+            "都不是就与从前一样（不写密钥）。--bootstrap-key 优先于它。"
         ),
     )
     config.add_argument(
@@ -1198,6 +1305,45 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def resolve_bootstrap_key(options: argparse.Namespace, report: Reporter) -> Optional[str]:
+    """定出这次该写进机器的统一注册密钥；没有就返回 ``None``。
+
+    优先级：``--bootstrap-key``（明文，最高）> ``--bootstrap-key-file`` >
+    ``<仓库>/.key/bootstrap.key``（存在才用）> 没有。
+
+    最后那条默认值是这次改动里唯一"行为变了"的地方，所以它有两个约束：
+    直接传明文仍然完全优先；不在源码仓库里跑（安装器被拷进镜像/安装包之后
+    ``REPO_ROOT`` 就指着别处了）时那个路径**根本不存在**，于是行为和以前一样。
+
+    读文件失败**不**当成致命错误：装机现场最常见的场景是密钥文件还没放好，
+    这时正确的结果是"装好了但没有密钥、下次补一个"，而不是整个安装中断。
+    """
+    if options.bootstrap_key:
+        return options.bootstrap_key.strip()
+
+    path: Optional[Path] = None
+    if options.bootstrap_key_file:
+        path = Path(options.bootstrap_key_file).expanduser()
+    elif DEFAULT_BOOTSTRAP_KEY_FILE.is_file():
+        path = DEFAULT_BOOTSTRAP_KEY_FILE
+        report.note("统一密钥取自仓库默认位置 %s（可用 --bootstrap-key-file 覆盖）"
+                    % path)
+
+    if path is None:
+        return None
+
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        report.warn("读取统一密钥文件失败：%s（%s）" % (path, exc))
+        return None
+
+    if not raw:
+        report.warn("统一密钥文件是空的：%s" % path)
+        return None
+    return raw
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -1206,6 +1352,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return EXIT_OK
 
     report = Reporter(dry_run=args.dry_run, quiet=args.quiet)
+    args.bootstrap_key = resolve_bootstrap_key(args, report)
     installer = Installer(args, report)
 
     try:

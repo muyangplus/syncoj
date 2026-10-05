@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import hashlib
+import io
+import zipfile
 from pathlib import Path
 from typing import List, Optional
 
@@ -410,3 +412,69 @@ def test_find_partial_sizes_ignores_foreign_files(workdir: Path) -> None:
 
 def test_find_partial_sizes_on_missing_root(workdir: Path) -> None:
     assert find_partial_sizes(workdir / "nope") == {}
+
+
+# --------------------------------------------------------------------------- #
+# 下发资产是**文件**，不是"要解开的压缩包"
+# --------------------------------------------------------------------------- #
+#
+# 题面与样例本身就是 zip，服务端只负责搬运字节；解压是选手/评测机自己的事。
+# 一旦 Agent"顺手解开"，桌面上就会多出一堆目录，而真正要下发的那个 .zip 反而
+# 不见了 —— 更糟的是解压会把 `../../` 这类成员名写到 deploy_root 外面，
+# 而服务端下发的字节并不都被信任。
+
+
+def make_zip_bytes() -> bytes:
+    """造一个"真的能被解开"的 zip，用来证明我们**没有**去解它。"""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("题面/statement.md", "# 题目\n")
+        archive.writestr("../../escape.txt", "逃出去的文件\n")
+    return buffer.getvalue()
+
+
+def test_zip_asset_is_stored_byte_for_byte(workdir: Path) -> None:
+    content = make_zip_bytes()
+    deploy_root = workdir / "deploy"
+
+    outcome = download_asset(FakeClient(content), make_job(content, dest="题面.zip"), deploy_root)
+
+    assert outcome.status == "ok", outcome.error
+    target = deploy_root / "题面.zip"
+    assert target.is_file()
+    assert target.read_bytes() == content, "字节被改动了 —— 下发必须原样搬运"
+    # 解开它就会多出这些目录；出现任何一个都说明有人在解压
+    assert not (deploy_root / "题面").exists()
+    assert list(deploy_root.rglob("*")) == [target]
+
+
+def test_dest_without_suffix_is_a_plain_file(workdir: Path) -> None:
+    """``dest`` 没有扩展名是完全正常的 —— 服务端说它是文件路径，那就是文件。"""
+    content = b"no extension here"
+    deploy_root = workdir / "deploy"
+
+    outcome = download_asset(
+        FakeClient(content), make_job(content, dest="exam/readme"), deploy_root
+    )
+
+    assert outcome.status == "ok", outcome.error
+    assert (deploy_root / "exam" / "readme").read_bytes() == content
+
+
+def test_dest_with_trailing_slash_is_rejected_loudly(workdir: Path) -> None:
+    """``dest`` 带结尾斜杠 = 服务端把它当目录了，而协议里它**永远是文件路径**。
+
+    这种情况要**响亮地失败**，不能悄悄当成同名文件写下去 —— 服务端以为在往
+    某个目录里放东西，客户端却建了个同名文件，双方对"下到哪儿了"的理解就岔开了，
+    而下一个下到同一目录的资产会因为这个同名文件而失败。
+    """
+    content = b"ambiguous"
+    deploy_root = workdir / "deploy"
+
+    outcome = download_asset(
+        FakeClient(content), make_job(content, dest="exam/题面.zip/"), deploy_root
+    )
+
+    assert outcome.status == "failed"
+    assert "不合法" in (outcome.error or "")
+    assert not (deploy_root / "exam" / "题面.zip").exists()

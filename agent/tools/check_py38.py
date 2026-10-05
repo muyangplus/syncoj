@@ -17,7 +17,8 @@
 
 用法::
 
-    python agent/tools/check_py38.py agent/
+    python agent/tools/check_py38.py agent/     # 从仓库根目录
+    python tools/check_py38.py                  # 从 agent/ 目录（默认查整个 agent/）
 
 退出码 0 表示通过，1 表示发现问题。
 """
@@ -29,6 +30,13 @@ import ast
 import sys
 from pathlib import Path
 from typing import Dict, Iterable, List, Set, Tuple
+
+#: 不给参数时的检查范围：本脚本所在的 ``agent/`` 目录。
+#:
+#: 用 ``__file__`` 推导而不是写死字符串 ``"agent"`` —— 后者只在**仓库根目录**下
+#: 跑得通，而从 ``agent/`` 里跑（最自然的位置）会得到一句"没有找到待检查的 .py
+#: 文件"，于是门禁自己成了需要排查的东西。门禁一旦让人费解，就会被绕过去。
+DEFAULT_TARGET = Path(__file__).resolve().parents[1]
 
 # --------------------------------------------------------------------------- #
 # 规则
@@ -267,9 +275,9 @@ def main(argv: List[str]) -> int:
     )
     args = parser.parse_args(argv[1:])
 
-    targets = collect_targets(args.paths or ["agent"])
+    targets = collect_targets(args.paths or [str(DEFAULT_TARGET)])
     if not targets:
-        print("没有找到待检查的 .py 文件（参数: %s）" % " ".join(args.paths or []))
+        print("没有找到待检查的 .py 文件（参数: %s）" % " ".join(args.paths or [str(DEFAULT_TARGET)]))
         return 1
 
     extra = {name.strip() for name in args.allow.split(",") if name.strip()}

@@ -2,7 +2,8 @@
 
 这些是 Agent **唯一的本地持久状态**，而且都是可再生的：
 
-* 凭据丢了 —— 用注册码重新注册（快照还原后的标准路径）
+* 凭据丢了 —— 拿 `machine_uuid` / 硬件指纹重新注册（快照还原后的标准路径）
+* 机器身份丢了 —— 重新生成一个 UUID，靠硬件指纹让服务端认回老机器
 * 哈希缓存丢了 —— 重新算一遍，只是慢一点
 * 下载分片丢了 —— 从头发，服务端不知道也不关心
 
@@ -26,12 +27,22 @@ from typing import Dict, List, Optional
 __all__ = [
     "Credential",
     "HashCache",
+    "STATE_READY",
+    "STATE_UNCLAIMED",
+    "STATE_WAITING",
     "atomic_write_text",
     "resolve_machine_id",
     "describe_os",
     "detect_desktop",
     "DESKTOP_CANDIDATES",
 ]
+
+#: 三态的名字。``claimed`` 与 ``bound`` 两个布尔量的组合在很多地方都要判断，
+#: 所以字符串只在一处产生（``Credential.state``），其余地方一律用这些常量 ——
+#: 手写字符串拼错时不会报错，只会走进一个"永远不成立"的分支。
+STATE_UNCLAIMED = "unclaimed"
+STATE_WAITING = "waiting"
+STATE_READY = "ready"
 
 log = logging.getLogger(__name__)
 
@@ -214,8 +225,9 @@ def _read_text_or_none(path: Path) -> Optional[str]:
     """读文件；**不存在返回 None，读不到返回空串**。
 
     两者的区别很重要：前者是"这里没有这个文件"，后者是"有这个文件但我没权限"。
-    统一密钥文件必须区分这两种情况 —— 权限不足是部署问题，得说出来；
-    文件不存在才说明"这台机器走的是每选手注册码那条路"。
+    统一密钥文件必须区分这两种情况 —— 权限不足是部署问题（Agent 以选手身份
+    运行，本来就读不到 root 只读的文件），得说出来；文件不存在则说明装机时
+    那一步没做，要提示去补。
     """
     try:
         with open(str(path), "r", encoding="utf-8") as handle:
@@ -253,16 +265,33 @@ class Credential:
     contest_id: int = 0
     contest_slug: str = ""
     contest_name: str = ""
-    #: 服务端分配的机器编号。**未配对时是 0** —— 那时服务端还没有为这台机器
-    #: 建 agent 行，它只是排队等着被认领
+    #: 服务端分配的机器编号。未配对时可能是 0 —— 凭据照样是可用的，
+    #: 见 ``is_usable()``
     agent_id: int = 0
     machine_id: str = ""
     server_url: str = ""
-    #: 是否已经配对到选手。False = 这台机器还在服务端的待认领列表里。
-    #: 老版本写的凭据没有这个字段，反序列化时默认为 True（那时只有已配对这一种）
+    #: 是否已经配对到**人**（名单条目）。
+    #: 老版本写的凭据没有这个字段，反序列化时默认为 True —— 那时只有"已配对"
+    #: 这一种，默认成 False 会让所有老机器升级后突然开始等配对。
     claimed: bool = True
-    #: 未配对时的短码。它要被人从这台机器上读出来，所以明文留在这里 ——
-    #: 服务端那边只有哈希，明文只在注册那一刻下发过一次
+    #: 是否已经能干活了（绑定好了，而且当前有包含本人的场次）。
+    #:
+    #: ``claimed`` 与 ``bound`` 是**两个正交的布尔量**，组合出三种状态：
+    #:
+    #: ===========  ==========  ============================
+    #: claimed      bound       含义
+    #: ===========  ==========  ============================
+    #: False        False       还没配对到人
+    #: True         False       配对好了，但没有含本人的场次
+    #: True         True        正常
+    #: ===========  ==========  ============================
+    #:
+    #: 为什么需要中间那一档：机器绑的是**人**，而"这场比赛有没有这个人"取决于
+    #: 那份名单有没有被应用到场次里。所以配对成功不等于马上能干活 ——
+    #: 分不清的话，Agent 会去扫一个用准考证号展开不出来的目录。
+    bound: bool = True
+    #: 未配对时的六位短码。它要被人从这台机器上读出来，所以明文留在这里 ——
+    #: 服务端那边只有哈希，明文只在注册/tick 响应里下发过
     pair_code: str = ""
 
     def to_json(self) -> str:
@@ -270,6 +299,7 @@ class Credential:
 
     @classmethod
     def from_dict(cls, data: dict) -> "Credential":
+        claimed = bool(data.get("claimed", True))
         return cls(
             token=str(data.get("token", "")),
             player_no=str(data.get("player_no", "")),
@@ -279,22 +309,37 @@ class Credential:
             agent_id=int(data.get("agent_id", 0) or 0),
             machine_id=str(data.get("machine_id", "")),
             server_url=str(data.get("server_url", "")),
-            claimed=bool(data.get("claimed", True)),
+            claimed=claimed,
+            # 没配对到人就不可能"已经能干活"：把这种自相矛盾的文件当成未配对，
+            # 而不是相信那个 bound=True
+            bound=bool(data.get("bound", True)) and claimed,
             pair_code=str(data.get("pair_code", "")),
         )
 
     def is_usable(self) -> bool:
         """有 token 就能用 —— 未配对的机器也有 token。
 
-        **不要**再把 ``agent_id > 0`` 当成可用的条件：未配对的机器 agent_id 就是
-        0，按老判据会被当成"没有凭据"而反复重新注册，刷限速、刷审计，
+        **不要**把 ``agent_id > 0`` 当成可用的条件：未配对的机器可能压根没有
+        agent_id，按那种判据会被当成"没有凭据"而反复重新注册，刷限速、刷审计，
         而真正的原因（还没配对）永远显示不出来。
         """
         return bool(self.token)
 
     @property
-    def needs_pairing(self) -> bool:
-        return bool(self.token) and not self.claimed
+    def state(self) -> str:
+        """三态之一：``STATE_UNCLAIMED`` / ``STATE_WAITING`` / ``STATE_READY``。
+
+        三个状态看起来都像"注册成功了"，但该做的事完全不同 —— 所以这里给出
+        一个**唯一**的判据，而不是让每个调用点各自去拼 ``claimed`` 和 ``bound``
+        （少拼一个条件就会出现"未配对的机器跑去扫描"这类错误）。
+
+        刻意**不**再提供 ``needs_pairing`` / ``waiting_for_contest`` 这类布尔
+        快捷方式：它们与本方法表达的是同一件事，多一份就会漂移 —— 判决改了一处、
+        忘了另一处，而错的那一处恰好是"要不要扫代码"。
+        """
+        if not self.claimed:
+            return STATE_UNCLAIMED
+        return STATE_READY if self.bound else STATE_WAITING
 
 
 def load_credential(path: Path) -> Optional[Credential]:

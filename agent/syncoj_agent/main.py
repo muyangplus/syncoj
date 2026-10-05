@@ -7,6 +7,10 @@
 **为什么扫描放在最前**：tick 请求体里带的就是这一轮扫描结果，扫描必须是最新的。
 **为什么上传在 tick 之后**：服务端用它自己的台账决定"要什么"，Agent 不自行判断
 该传什么 —— 判断权在服务端，Agent 只执行。这让"谁传过什么"只有一个权威来源。
+
+未配对 / 没有场次的机器走的是**另一条路**：只心跳、不扫描（见 ``_pending_tick``）。
+它没有准考证号，扫描目录里的 ``{player_no}`` 展开不出来，扫出来的相对路径也没法
+归属到任何人。这两种状态看起来都像"注册成功了"，但该做的事完全不同。
 """
 
 from __future__ import annotations
@@ -28,14 +32,18 @@ from .client import (
     AgentClient,
     AgentError,
     AuthError,
+    BootstrapKeyError,
     NetworkError,
     PayloadTooLarge,
     ProtocolError,
+    RateLimited,
     StaleUpload,
+    UnboundError,
 )
 from .config import (
     PREFIX_AUTO,
     PREFIX_NONE,
+    WAITING_FILE_NAME,
     AgentConfig,
     ConfigError,
     expand_placeholders,
@@ -45,6 +53,9 @@ from .policy import DEFAULT_POLICY, merge_policy
 from .rsa import RSAPublicKey, SignatureError
 from .scan import ScanPolicy, scan_directory
 from .state import (
+    STATE_READY,
+    STATE_UNCLAIMED,
+    STATE_WAITING,
     Credential,
     HashCache,
     atomic_write_text,
@@ -74,7 +85,13 @@ from .upgrade import (
     verify_bundle,
 )
 
-__all__ = ["Agent", "main", "build_tick_payload", "join_report_path"]
+__all__ = [
+    "Agent",
+    "main",
+    "build_tick_payload",
+    "join_report_path",
+    "state_from_payload",
+]
 
 log = logging.getLogger("syncoj.agent")
 
@@ -97,6 +114,18 @@ def join_report_path(prefix: str, rel_path: str) -> str:
     return "%s/%s" % (prefix, rel_path) if prefix else rel_path
 
 
+def state_from_payload(data: Dict[str, object]) -> str:
+    """从服务端报文里读出三态（``claimed`` × ``bound``）。
+
+    缺字段时按**能干活**处理：这个函数的用途是"发现状态变化"，不是判权限 ——
+    默认成"没配对"会让一台本来好好的机器突然停下来等一个永远不会来的配对码。
+    真正的权威判据永远在服务端的响应里。
+    """
+    if not bool(data.get("claimed", True)):
+        return STATE_UNCLAIMED
+    return STATE_READY if bool(data.get("bound", True)) else STATE_WAITING
+
+
 def build_tick_payload(
     machine_id: str,
     agent_version: str,
@@ -105,6 +134,7 @@ def build_tick_payload(
     partials: List[dict],
     stats: Dict[str, object],
     completed_assets: Optional[List[int]] = None,
+    scan_complete: bool = True,
 ):
     """构造 tick 请求体。
 
@@ -112,12 +142,17 @@ def build_tick_payload(
     返回 ``(payload, oversize, errors)`` —— 后两项只用于产出审计事件，不进请求体；
     报文体里只放统计摘要，避免随问题数量膨胀。
 
+    ``scan_complete=False`` 用于"这一轮压根没扫描"（未配对 / 没有场次）：空
+    ``scan`` 与"选手把文件全删了"在报文里长得一模一样，而只有我们自己知道
+    这一次是前者。老实说"这次没扫"，比说"扫完了，一个文件都没有"安全 ——
+    后者是一句谎话，靠服务端记得丢弃它才不致命。
+
     做成模块级函数而不是 ``Agent`` 的方法，是为了让 ``tools/build_fixture.py``
     能在无网络、无 Agent 实例的情况下生成**真实**报文样本，供服务端的契约测试
     校验。若样本是测试里手写的，它会与真实代码一起漂移，契约测试就失去了意义。
     """
     entries: List[dict] = []
-    complete = True
+    complete = scan_complete
     oversize: List[str] = []
     errors: List[str] = []
 
@@ -191,6 +226,9 @@ class Agent:
         self._roots_ready = False
         #: 服务端可见路径 -> 本地绝对路径。每轮扫描后重建
         self._local_paths: Dict[str, Path] = {}
+        #: 上一轮结束时机器处于哪一态。**状态变化**时才报审计事件 ——
+        #: 每轮都报会把事件通道刷满，而它本来是用来查异常的
+        self._last_state: Optional[str] = None
 
     # ---------------------------------------------------------------- #
     # 生命周期
@@ -284,8 +322,15 @@ class Agent:
         if stored is not None and stored.server_url in ("", self.config.base_url):
             self._credential = stored
             self.client.set_token(stored.token)
-            if stored.needs_pairing:
-                log.info("这台机器还没配对到选手（配对码 %s），等待认领", stored.pair_code)
+            if stored.state == STATE_UNCLAIMED:
+                log.info(
+                    "这台机器还没配对到人（配对码 %s），等待认领", stored.pair_code
+                )
+            elif stored.state == STATE_WAITING:
+                log.info(
+                    "已配对给 %s，但当前没有包含本人的场次，等待开赛",
+                    stored.player_no or "?",
+                )
             else:
                 log.info("使用已保存的凭据：选手 %s @ %s", stored.player_no, stored.contest_slug)
             return stored
@@ -293,51 +338,44 @@ class Agent:
         return self._enroll()
 
     def _enroll(self) -> Credential:
-        """注册。优先用每选手注册码，其次用镜像里的统一密钥。
+        """注册。**只有一条路**：读镜像里那份 root 只读的统一密钥。
 
-        顺序是有意的：单人码是**更明确的意图**（"这台机器就是某个具体选手"），
-        镜像里那份宽泛的密钥不该盖过它。两个都没有就报清楚缺什么 ——
+        没有「每选手注册码」那条路了 —— 它已经被"机器永久绑定名单条目"取代
+        （见 docs/protocol.md §1）。密钥缺失或读不出来时把下一步动作说清楚 ——
         而不是笼统地说"注册失败"。
         """
-        bootstrap_key = None
-        if not self.config.enroll_code:
-            bootstrap_key = read_bootstrap_key(self.config.bootstrap_key_file)
-            if bootstrap_key is None:
-                raise ConfigError(
-                    "没有可用的凭据。三种可能：\n"
-                    "  1. 还没跑过装机时的注册（syncoj-enroll.service）—— 先启动它\n"
-                    "  2. 本机走「每选手注册码」那条路 —— 把注册码写进 agent.ini 的 enroll_code\n"
-                    "  3. 本机走「镜像统一密钥」那条路 —— 让 root 把密钥放到 %s"
-                    % (self.config.bootstrap_key_file or "/etc/syncoj/bootstrap.key")
-                )
-            if not bootstrap_key:
-                raise ConfigError(
-                    "统一密钥文件 %s 存在但读不出来。\n"
-                    "Agent 以选手身份运行，读不到 root 只读的文件 —— 这是**设计如此**：\n"
-                    "密钥能注册整间机房，不该躺在学生读得到的地方。\n"
-                    "请交给装机时的 syncoj-enroll.service 去注册。"
-                    % self.config.bootstrap_key_file
-                )
+        key_path = self.config.bootstrap_key_file or "/etc/syncoj/bootstrap.key"
+        bootstrap_key = read_bootstrap_key(self.config.bootstrap_key_file)
+        if bootstrap_key is None:
+            raise ConfigError(
+                "找不到统一密钥文件 %s。\n"
+                "  这台机器还没有注册过，而注册只有这一条路 —— 需要镜像里那份\n"
+                "  root 只读的统一密钥（在服务端用 syncoj-server bootstrap-key issue 签发）：\n"
+                "    sudo install -m 0600 -o root -g root <密钥文件> %s\n"
+                "  装好之后重启 syncoj-enroll.service（它以 root 身份跑一次注册）。"
+                % (key_path, key_path)
+            )
+        if not bootstrap_key:
+            raise ConfigError(
+                "统一密钥文件 %s 存在但读不出来。\n"
+                "Agent 以选手身份运行，读不到 root 只读的文件 —— 这是**设计如此**：\n"
+                "密钥能注册整间机房，不该躺在学生读得到的地方。\n"
+                "请交给装机时的 syncoj-enroll.service 去注册。"
+                % key_path
+            )
 
         hostname = socket.gethostname()
-        fingerprint = resolve_machine_fingerprint()
-        log.info(
-            "正在注册（machine_id=%s，方式=%s）",
-            self.machine_id,
-            "每选手注册码" if self.config.enroll_code else "统一密钥",
-        )
+        log.info("正在注册（machine_id=%s，machine_uuid=%s）", self.machine_id, self.machine_uuid)
         data = self.client.enroll(
-            enroll_code=self.config.enroll_code or None,
             bootstrap_key=bootstrap_key,
             machine_id=self.machine_id,
             machine_uuid=self.machine_uuid,
-            machine_fingerprint=fingerprint,
+            machine_fingerprint=self.machine_fingerprint,
             hostname=hostname,
             agent_version=__version__,
             os_info=describe_os(),
         )
 
-        claimed = bool(data.get("claimed", True))
         credential = Credential(
             token=data["token"],
             agent_id=int(data.get("agent_id") or 0),
@@ -347,9 +385,13 @@ class Agent:
             contest_name=data.get("contest_name", ""),
             machine_id=self.machine_id,
             server_url=self.config.base_url,
-            claimed=claimed,
+            claimed=bool(data.get("claimed", True)),
+            bound=bool(data.get("bound", True)),
             pair_code=data.get("pair_code") or "",
         )
+        # Credential.from_dict 里做过同一件事（未配对就不可能是"能干活"），
+        # 这里直接构造对象绕过了它 —— 手工补上，免得后面各处都要再拼一次
+        credential.bound = credential.bound and credential.claimed
         save_credential(self.config.credential_path, credential)
         self.client.set_token(credential.token)
         self._credential = credential
@@ -358,28 +400,40 @@ class Agent:
         if isinstance(config, dict):
             self.policy = merge_policy(config)
 
-        if claimed:
+        reason = str(data.get("reason") or "")
+        if credential.state == STATE_READY:
             log.info(
                 "注册成功：选手 %s，场次 %s（agent_id=%d）",
                 credential.player_no, credential.contest_slug, credential.agent_id,
             )
-        else:
-            # 未配对时**不要**把凭据当失败丢掉：它是有效的，只是还没有归属。
-            # 丢掉会导致下一轮重新注册，把配对码刷成新的，教师刚读到的那个就失效了。
+        elif credential.state == STATE_UNCLAIMED:
+            # 未配对**不是失败**：这个 token 是有效的，只是还没有归属。
+            # 把它当失败丢掉会导致下一轮重新注册，而服务端每次注册都会换一个
+            # 新配对码 —— 教师刚在屏幕上读到的那个当场失效。
             log.warning(
-                "这台机器还没有配对到选手。配对码：%s\n"
+                "这台机器还没有配对到人。配对码：%s\n"
                 "请教师在管理界面「机器配对」里用这个码认领到人。",
-                credential.pair_code,
+                credential.pair_code or "（等服务端下发）",
             )
-            self._show_pair_code(credential.pair_code)
+        else:
+            log.warning("已配对给 %s，但当前场次里没有这个人：%s",
+                        credential.player_no or "?", reason or "（服务端未说明）")
+
+        # **无论哪一态**都要把桌面上的提示文件刷成对的：这次注册直接就是
+        # "能干活"时（快照还原后重注册的常见结果），上一轮留下的「配对码.txt」
+        # 必须消失 —— 否则下一个人看见会以为这台机器还没配对。
+        self._sync_notice_files(credential, reason)
         return credential
 
     # ---------------------------------------------------------------- #
-    # 配对码展示
+    # 配对码 / 等待场次：写在桌面上给教师看
     # ---------------------------------------------------------------- #
 
     def _pair_code_path(self) -> Path:
         return self.config.deploy_root / self.config.pairing_file_name
+
+    def _waiting_file_path(self) -> Path:
+        return self.config.deploy_root / WAITING_FILE_NAME
 
     def _show_pair_code(self, code: str) -> None:
         """把配对码写到桌面上，并在日志里再说一遍。
@@ -399,13 +453,47 @@ class Agent:
             "把这串码告诉老师，或让老师在管理界面「机器配对」里输入它。\n"
             "配对成功后这个文件会自动消失。\n" % code
         )
+        self._write_desktop_file(path, text, "配对码")
+
+    def _write_waiting_file(self, reason: str) -> None:
+        """写「等待场次.txt」。
+
+        为什么需要这个中间状态：机器绑的是**人**，而"这场比赛有没有这个人"
+        取决于那份名单有没有被应用到场次里。所以配对成功不等于马上能干活 ——
+        说不出来的话，客户端只能猜，猜错的后果是它去扫一个用准考证号展开不出来的
+        目录；而教师看到的是"这台机器就是不收代码"。
+        """
+        if not self.config.pairing_show_on_desktop:
+            return
+        path = self._waiting_file_path()
+        text = (
+            "SyncOJ 等待场次\n"
+            "\n"
+            "    %s\n"
+            "\n"
+            "这台机器已经配对好了，但当前场次里还没有你。\n"
+            "请告诉老师，等老师把名单应用到场次里；之后这个文件会自动消失。\n"
+            % (reason.strip() or "还没有包含你的场次")
+        )
+        self._write_desktop_file(path, text, "等待场次说明")
+
+    def _write_desktop_file(self, path: Path, text: str, label: str) -> None:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_text(path, text, mode=0o644)
-            log.info("配对码已写到 %s", path)
+            log.info("%s 已写到 %s", label, path)
         except OSError as exc:
             # 写不进去不算致命：日志里还有一份，教师可以查日志
-            log.warning("无法把配对码写到 %s：%s（日志里还有一份）", path, exc)
+            log.warning("无法把%s写到 %s：%s（日志里还有一份）", label, path, exc)
+
+    def _remove_desktop_file(self, path: Path, label: str) -> None:
+        try:
+            path.unlink()
+            log.info("已删除%s %s", label, path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            log.warning("无法删除%s %s：%s", label, path, exc)
 
     def clear_pair_code_file(self) -> None:
         """配对成功后把桌面上的那个文件删掉。
@@ -413,31 +501,106 @@ class Agent:
         留着它会让人以为还没配对 —— 下一个人走过来看见，就会去问老师，
         老师再查一遍，白折腾一轮。
         """
-        path = self._pair_code_path()
-        try:
-            path.unlink()
-            log.info("已删除配对码文件 %s", path)
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            log.warning("无法删除配对码文件 %s：%s", path, exc)
+        self._remove_desktop_file(self._pair_code_path(), "配对码文件")
 
-    def _adopt_identity(self, data: Dict[str, object]) -> None:
-        """从 tick 响应里接住"已配对"以及随之而来的身份。
+    def clear_waiting_file(self) -> None:
+        """拿到场次之后把「等待场次.txt」删掉。理由同上。"""
+        self._remove_desktop_file(self._waiting_file_path(), "等待场次文件")
+
+    def _show_state_files(self, credential: Credential, reason: str = "") -> None:
+        """按当前三态把桌面上的提示文件刷成对的。
+
+        **每一轮都重写**，而不是只在状态变化时写一次：教师可能刚开机才来看，
+        而文件只在内存里有一份时，重启一次就看不见了。无关的文件也要清掉 ——
+        「配对码.txt」和「等待场次.txt」同时躺在桌面上，谁也不知道该信哪个。
+
+        ``reason`` 是服务端给的那句话，直接写进「等待场次.txt」：**只有服务端
+        知道为什么**（"这场没有你"还是"名单还没应用"），客户端猜不出来。
+        """
+        if credential.state == STATE_UNCLAIMED:
+            self.clear_waiting_file()
+            if credential.pair_code:
+                self._show_pair_code(credential.pair_code)
+        elif credential.state == STATE_WAITING:
+            self.clear_pair_code_file()
+            self._write_waiting_file(reason)
+        else:
+            self.clear_pair_code_file()
+            self.clear_waiting_file()
+
+    def _sync_notice_files(self, credential: Credential, reason: str = "") -> None:
+        """状态**变化**时把桌面上的提示文件刷成对的，并留一条审计事件。
+
+        只在变化时做：每轮都去 unlink 是每两秒两次系统调用，而它要防的那件事
+        （桌面上留着一个已经作废的提示文件）只在状态刚变的那一瞬间才会出现。
+        """
+        if self._last_state == credential.state:
+            return
+        self._note_state(credential, reason)
+        self._show_state_files(credential, reason)
+
+    def _note_state(self, credential: Credential, reason: str = "") -> str:
+        """状态变化时留一条审计事件，返回新状态。
+
+        **只在变化时报**：这一轮的 tick 每 2~60 秒就可能来一次，每轮报一条会让
+        事件列表全是噪音，而它本来是给"出事了"用的。
+        """
+        state = credential.state
+        if state == self._last_state:
+            return state
+        previous, self._last_state = self._last_state, state
+        log.info("机器状态：%s -> %s", previous or "（启动）", state)
+        if state == STATE_UNCLAIMED:
+            self._emit(
+                "info", "pairing_required",
+                "这台机器还没有配对到人，配对码：%s" % (credential.pair_code or "?"),
+                {"pair_code": credential.pair_code},
+            )
+        elif state == STATE_WAITING:
+            message = reason.strip() or "已配对，但当前没有包含本人的场次"
+            self._emit("info", "pairing_wait", message)
+        return state
+
+    def _adopt_identity(self, data: Dict[str, object]) -> Credential:
+        """从 tick 响应里接住当前状态以及随之而来的身份。
 
         服务端把身份放在每次 tick 的响应里，而不是要求 Agent 再 enroll 一次 ——
         少一次可能失败的网络往返，也不会多刷一条注册审计。
+
+        三种状态都走这里：服务端才是权威，它说"现在还没配对"那就还没配对。
+        """
+        credential = self._credential
+        if credential is None:  # pragma: no cover - 调用方已经确保
+            return credential  # type: ignore[return-value]
+
+        credential.claimed = bool(data.get("claimed", True))
+        credential.bound = bool(data.get("bound", True)) and credential.claimed
+        credential.player_no = str(data.get("player_no") or "")
+        credential.contest_slug = str(data.get("contest_slug") or "")
+        credential.contest_id = int(data.get("contest_id") or 0)
+        credential.contest_name = str(data.get("contest_name") or "")
+        # 未配对时服务端可能每轮都带一个新码回来（旧的可能已过期），接住它
+        credential.pair_code = str(data.get("pair_code") or "")
+        save_credential(self.config.credential_path, credential)
+
+        self._note_state(credential, str(data.get("reason") or ""))
+        self._show_state_files(credential, str(data.get("reason") or ""))
+        return credential
+
+    def _mark_unbound(self, reason: str) -> None:
+        """服务端说"这台机器还没配对到人"时，把本地状态同步过去。
+
+        服务端是权威。不同步的话，我们会继续扫一个用准考证号展开不出来的目录，
+        每一轮都失败 —— 看起来像"Agent 坏了"，其实是本地状态没跟上服务端。
         """
         credential = self._credential
         if credential is None:  # pragma: no cover - 调用方已经确保
             return
-        credential.claimed = True
-        credential.player_no = str(data.get("player_no") or "")
-        credential.contest_slug = str(data.get("contest_slug") or "")
-        credential.pair_code = ""
+        credential.claimed = False
+        credential.bound = False
         save_credential(self.config.credential_path, credential)
-        self.clear_pair_code_file()
-        log.info("已配对：选手 %s @ %s", credential.player_no, credential.contest_slug)
+        self._note_state(credential, reason)
+        self._show_state_files(credential)
 
     def _forget_credential(self, reason: str) -> None:
         """凭据失效时清空本地凭据，下一轮会走重新注册。"""
@@ -446,6 +609,9 @@ class Agent:
         self.client.set_token(None)
         self._roots_ready = False
         self._roots = []
+        # 把状态记忆也清掉：重新注册之后可能直接就是另一态，
+        # 不清的话"未配对 -> 未配对"这种变化会被当成没变化，审计事件就不报了
+        self._last_state = None
         try:
             self.config.credential_path.unlink()
         except OSError:
@@ -470,7 +636,7 @@ class Agent:
 
         return results, local_paths
 
-    def _build_tick_payload(self, results, local_paths):
+    def _build_tick_payload(self, results, local_paths, scan_complete: bool = True):
         return build_tick_payload(
             machine_id=self.machine_id,
             agent_version=__version__,
@@ -490,6 +656,7 @@ class Agent:
             # 回报前会继续下发该作业，Agent 会走 "内容已一致" 的跳过分支并再次
             # 上报，这恰好让"回报丢失"能自愈。
             completed_assets=self._completed_assets,
+            scan_complete=scan_complete,
         )
 
     # ---------------------------------------------------------------- #
@@ -528,7 +695,9 @@ class Agent:
             except PayloadTooLarge as exc:
                 failed += 1
                 self._emit("warning", "upload_rejected", "服务端拒绝过大文件 %s: %s" % (rel_path, exc))
-            except AuthError:
+            except (AuthError, RateLimited):
+                # 凭据坏了要重新注册、被限速要按服务端的节奏退避 —— 两件事都
+                # 得让整轮停下来交给 run_forever，不能在这里当"这个文件失败了"
                 raise
             except (NetworkError, ProtocolError, AgentError) as exc:
                 failed += 1
@@ -738,19 +907,27 @@ class Agent:
             }
         )
 
-    def _pairing_tick(self) -> Tuple[bool, float]:
-        """还没配对到选手时的一轮：只心跳，不扫描。
+    def _pending_tick(self) -> Tuple[str, float]:
+        """还没法干活的一轮：只心跳，不扫描。返回 ``(轮末状态, 等待秒数)``。
 
-        返回 ``(是否刚被配对, 仍要等待的秒数)``。第一个值为真时调用方接着走
-        正常路径 —— 让教师配对完还要再等一个整周期才开始收代码，
-        在开考前那几分钟很刺眼。
+        覆盖两种状态 —— 未配对到人、以及配对好了但当前没有含本人的场次。
+        轮末状态变成 ``STATE_READY`` 时，调用方接着在**同一次 cycle** 里走正常
+        路径：教师刚配对完还要再等一个整周期才开始收代码，在开考前那几分钟很刺眼。
 
         扫描是**故意**跳过的：没有准考证号，``scan.roots`` 里的 ``{player_no}``
         展开不出来，扫出来的相对路径也没法归属到任何人。收上去只会污染台账，
         而服务端也会（正确地）把它丢掉 —— 与其传一堆没人要的数据，不如安静等着。
         """
-        payload, _oversize, _errors = self._build_tick_payload([], {})
-        tick = self.client.tick(payload)
+        payload, _oversize, _errors = self._build_tick_payload([], {}, scan_complete=False)
+        try:
+            tick = self.client.tick(payload)
+        except UnboundError as exc:
+            # 403：凭据**有效**，但服务端说这台机器还没配对到人（可能是刚刚被
+            # 解绑，也可能是配对还没生效）。这里最要紧的是**不要重新注册** ——
+            # 那样每轮都会换一个新配对码，教师手上那个永远对不上。
+            log.info("服务端认为这台机器还没有配对（%s），继续等待", exc.code or exc.status)
+            self._mark_unbound(exc.code or "machine_unbound")
+            return STATE_UNCLAIMED, self._clamp_wait(None)
 
         remote_config = tick.get("config")
         if isinstance(remote_config, dict):
@@ -758,23 +935,21 @@ class Agent:
 
         self._flush_events()
 
-        if bool(tick.get("claimed", True)):
-            self._adopt_identity(tick)
-            credential = self._credential
-            self._ensure_roots(
-                credential.player_no if credential else "",
-                credential.contest_slug if credential else "",
-            )
-            return True, 0.0
+        credential = self._adopt_identity(tick)
+        wait = self._clamp_wait(tick.get("next_tick_seconds"))
+        return credential.state, wait
 
-        credential = self._credential
-        if credential is not None and credential.pair_code:
-            # 每一轮都重写一遍桌面文件：教师可能刚开完机才来看，
-            # 而配对码只在内存里有一份时，重启一次就看不见了
-            self._show_pair_code(credential.pair_code)
+    def _clamp_wait(self, seconds: object) -> float:
+        """把服务端给的间隔收进 [5, 3600]。
 
-        wait = float(max(5, min(int(tick.get("next_tick_seconds") or 30), 3600)))
-        return False, wait
+        下界 5 秒是为了不让一个有 bug 的服务端把 Agent 变成压测工具；上界
+        3600 秒是为了让"服务端其实已经好了但还在按老节奏睡"不至于拖一小时。
+        """
+        try:
+            value = int(seconds)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            value = self.config.scan_interval
+        return float(max(5, min(value, 3600)))
 
     def _flush_events(self) -> None:
         if not self._pending_events:
@@ -782,7 +957,7 @@ class Agent:
         batch = self._pending_events[:]
         try:
             self.client.report_events(batch)
-        except AuthError:
+        except (AuthError, RateLimited):
             raise
         except AgentError as exc:
             log.debug("事件上报失败，继续积压：%s", exc)
@@ -798,16 +973,19 @@ class Agent:
         """执行一轮，返回下次执行前的等待秒数。"""
         credential = self._ensure_credential()
 
-        # 还没配对到选手：这台机器没有准考证号，算不出扫描目录，
-        # 扫出来的东西也没法归属到任何人。它这一轮唯一该做的就是心跳一下、
-        # 顺便问一句"认领了没有"。
-        if credential.needs_pairing:
-            paired, wait = self._pairing_tick()
-            if not paired:
+        # 未配对 / 没有场次：这台机器没有准考证号，算不出扫描目录，扫出来的东西
+        # 也没法归属到任何人。它这一轮唯一该做的就是心跳一下、顺便问一句状态变了没有。
+        if credential.state != STATE_READY:
+            state, wait = self._pending_tick()
+            if state != STATE_READY:
                 return wait
-            # 刚被配对上的话**同一次 cycle 就接着往下走**：教师配对完还要再等
-            # 一个整周期才开始收代码，在开考前那几分钟很刺眼。
+            # 刚能干活了 —— **同一次 cycle 就接着往下走**
             credential = self._credential or credential
+
+        # 从磁盘上的凭据直接起来（没走注册）时，也要在这里把桌面上的提示文件
+        # 清一次 —— 上一轮留下的「配对码.txt」不清掉，下一个人看见会以为
+        # 这台机器还没配对。
+        self._sync_notice_files(credential)
 
         # 扫描目录里可能含 {player_no} / {contest_slug}，必须等拿到凭据之后才能确定
         self._ensure_roots(credential.player_no, credential.contest_slug)
@@ -830,11 +1008,26 @@ class Agent:
 
         # 未完成下载的偏移量已在 _build_tick_payload 里从磁盘实况收集，
         # 不依赖上一轮的作业列表 —— Agent 重启后照样能续传。
-        tick = self.client.tick(payload)
+        try:
+            tick = self.client.tick(payload)
+        except UnboundError as exc:
+            # 中途被解绑了（比如教师在场次里把这个人删了）。这不是故障，
+            # 是状态变化 —— 所以不进指数退避，退回"安静等待"那条路。
+            log.warning("tick 被拒（%s），退回等待配对", exc.code or exc.status)
+            self._mark_unbound(exc.code or "machine_unbound")
+            return self._clamp_wait(None)
 
         # tick 成功 = 本轮携带的完成项已被服务端接收，可以清空。
         # 必须在 tick 之后、下载之前清 —— 下载新产生的完成项属于下一轮。
         del self._completed_assets[:]
+
+        remote_state = state_from_payload(tick)
+        if remote_state != STATE_READY:
+            # 服务端说我们已经不能干活了（被解绑 / 场次里没有这个人 / 场次结束了）。
+            # 同步状态并退回等待路径 —— 继续扫下去只会每轮都失败。
+            log.warning("服务端报告状态为 %s，退回等待", remote_state)
+            self._adopt_identity(tick)
+            return self._clamp_wait(tick.get("next_tick_seconds"))
 
         remote_config = tick.get("config")
         if isinstance(remote_config, dict):
@@ -898,8 +1091,27 @@ class Agent:
                 delay = self.cycle()
                 self._backoff = 0.0
             except AuthError as exc:
+                # 只有这一种错误该清掉凭据重新注册（401）。403 走的是
+                # UnboundError，它在上面的循环里就被消化掉了 —— 见 client.py 的注释。
                 self._forget_credential(str(exc))
                 delay = 30.0
+            except BootstrapKeyError as exc:
+                # 密钥不对是**部署问题**，重试解决不了。这里刻意不进指数退避循环
+                # 快速刷屏，而是用最长间隔慢慢重试 —— 万一运维正好在换密钥，
+                # 一个长周期后自己就好了，不需要重启 50 台机器。
+                log.error("统一密钥不可用，请更换密钥后重启：%s", exc)
+                self._emit("error", "bootstrap_key_rejected", str(exc))
+                delay = MAX_BACKOFF
+            except RateLimited as exc:
+                # 退避节奏由服务端决定：它才知道限速窗口有多长。
+                # 按自己的节奏硬撞只会把窗口一直顶开。
+                # 上界仍由本地的 MAX_BACKOFF 兜住 —— 服务端写错一个数量级
+                # （比如 86400）不该让整间机房停摆一整天。
+                if exc.retry_after > 0:
+                    delay = min(float(exc.retry_after), MAX_BACKOFF)
+                else:
+                    delay = MAX_BACKOFF
+                log.warning("被服务端限速，%.0f 秒后重试：%s", delay, exc)
             except ConfigError:
                 raise
             except NetworkError as exc:
@@ -1040,6 +1252,14 @@ def _run_provision(args, config: AgentConfig, agent: "Agent") -> int:
     """
     try:
         agent.ensure_credential()
+    except RateLimited as exc:
+        # 限速不是失败 —— 凭据没拿到，但再等一会儿就行。装机时同时开机的机器
+        # 可能正好把注册限速顶满，报"失败"会让教师以为装机装坏了。
+        print(
+            "注册被限速（%.0f 秒后可重试）：%s" % (exc.retry_after or MAX_BACKOFF, exc),
+            file=sys.stderr,
+        )
+        return 1
     except (AgentError, ConfigError) as exc:
         log.error("注册失败：%s", exc)
         print("注册失败：%s" % exc, file=sys.stderr)
@@ -1054,8 +1274,15 @@ def _run_provision(args, config: AgentConfig, agent: "Agent") -> int:
     if credential is None:
         print("注册似乎成功了，但没有读回凭据 —— 请检查状态目录权限。", file=sys.stderr)
         return 1
-    if credential.needs_pairing:
+    if credential.state == STATE_UNCLAIMED:
         print("已注册，等待配对。配对码：%s" % credential.pair_code)
+    elif credential.state == STATE_WAITING:
+        # 这是**正常的中间状态**，不是失败：配对好了，但这个场次里还没有这个人。
+        # 报成"失败"会让教师去重装 Agent，而真正该做的是把名单应用到场次里。
+        print(
+            "已配对给 %s，但当前场次里没有这个人 —— 请把名单应用到场次里。"
+            % (credential.player_no or "?")
+        )
     else:
         print("已注册：选手 %s @ %s" % (credential.player_no, credential.contest_slug))
         # 注册完就把配对码文件清掉 —— 它可能来自上一次未配对的尝试
@@ -1131,8 +1358,16 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.pair_code:
         credential = load_credential(config.credential_path)
-        if credential is None or credential.claimed:
-            print("这台机器已经配对过了（或还没有凭据）。")
+        if credential is None:
+            print("还没有凭据 —— 先让 syncoj-enroll.service 注册一次。")
+            return 1
+        if credential.state != STATE_UNCLAIMED:
+            print("这台机器已经配对过了（或不需要配对）。")
+            return 1
+        if not credential.pair_code:
+            # 未配对但手上没有码：服务端下一轮 tick 会再发一个过来。
+            # 这里如实说出来，比打印一个空行强。
+            print("还没有拿到配对码 —— 等下一轮 tick（服务端会带过来）。")
             return 1
         print(credential.pair_code)
         return 0

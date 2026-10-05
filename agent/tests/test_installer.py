@@ -176,7 +176,7 @@ def config_args(**overrides):
         server_url="https://10.0.0.1:8443",
         verify_tls=True,
         ca_file="/etc/syncoj/ca.pem",
-        enroll_code="AAAA-BBBB",
+        bootstrap_key_file="/etc/syncoj/bootstrap.key",
         state_dir=Path("/var/lib/syncoj"),
         deploy_root="{desktop}",
         scan_roots="{desktop}/{player_no}",
@@ -194,11 +194,35 @@ def test_render_config_contains_all_settings(installer) -> None:
     assert "url = https://10.0.0.1:8443" in text
     assert "verify_tls = true" in text
     assert "ca_file = /etc/syncoj/ca.pem" in text
-    assert "enroll_code = AAAA-BBBB" in text
+    assert "bootstrap_key_file = /etc/syncoj/bootstrap.key" in text
     assert "roots = {desktop}/{player_no}" in text
     assert "deploy_root = {desktop}" in text
     assert "prefix = none" in text
     assert "mode = off" in text
+
+
+def test_render_config_has_no_place_to_put_a_secret(installer) -> None:
+    """**密钥只能以路径形式进配置，绝不以内容形式。**
+
+    ``agent.ini`` 会被 chown 给选手账号 —— 学生读得到里面的每一个字节，
+    而那把钥匙能注册整间机房。最可靠的判据是"这个函数的参数里根本没有能塞进
+    密钥的地方"：只要没有这个入口，将来谁也没法顺手把它写进去。
+    """
+    import inspect
+
+    params = set(inspect.signature(installer.render_config).parameters)
+    assert "bootstrap_key_file" in params, "密钥路径必须可配"
+    assert "bootstrap_key" not in params, "render_config 不该拿到密钥内容"
+    assert "enroll_code" not in params
+
+
+def test_rendered_config_has_no_enroll_code(installer) -> None:
+    text = installer.render_config(**config_args())
+    active = "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith((";", "#"))
+    )
+    assert "enroll_code" not in active
+    assert "bootstrap_key_file = /etc/syncoj/bootstrap.key" in active
 
 
 def test_rendered_config_documents_every_placeholder(installer) -> None:
@@ -242,7 +266,7 @@ def test_rendered_config_is_parseable(installer, workdir: Path) -> None:
 
     config = AgentConfig.load(config_file)
     assert config.server_url == "https://10.0.0.1:8443"
-    assert config.enroll_code == "AAAA-BBBB"
+    assert config.bootstrap_key_file == Path("/etc/syncoj/bootstrap.key")
     assert config.upgrade_mode == "off"
     assert config.deploy_root == desktop
     assert config.scan_prefix == "none"
@@ -273,13 +297,15 @@ def test_rendered_config_supports_home_and_contest_slug(installer, workdir: Path
     assert resolved == [Path.home() / "mock-1" / "S001"]
 
 
-def make_installer(installer, workdir: Path, user: str, *, quiet: bool = True):
+def make_installer(installer, workdir: Path, user: str, *, quiet: bool = True, argv=None):
     """造一个只为测试单个方法而存在的 Installer 实例。
 
     不走 ``preflight()``（那会检查 root 权限、安装包是否存在），
     只把 ``__init__`` 需要的属性凑齐。
+
+    ``argv`` 用来补上被测方法会读到的命令行选项（比如 ``--bootstrap-key``）。
     """
-    options = installer.build_parser().parse_args(["--user", user])
+    options = installer.build_parser().parse_args(["--user", user] + list(argv or []))
     options.config_dir = str(workdir / "etc")
     options.state_dir = str(workdir / "state")
     options.prefix = str(workdir / "opt")
@@ -320,7 +346,7 @@ def test_config_is_handed_to_the_user_the_agent_runs_as(
         "没有把配置 chown 给运行用户 —— Agent 会读不到配置而启动失败"
     )
     assert ("chmod", target, 0o600) in calls, (
-        "配置权限应当是 0600：里面可能有注册码，没有别的账号需要读它"
+        "配置权限应当是 0600：它没有别的账号需要读，而收紧权限没有代价"
     )
     # 不能再出现 0640 —— 那正是这个 bug 的成因
     assert ("chmod", target, 0o640) not in calls
@@ -611,7 +637,7 @@ def test_full_install_and_idempotency(installer, workdir: Path) -> None:
     base = [
         "--bundle", str(bundle),
         "--server", "https://10.0.0.1:8443",
-        "--enroll-code", "AAAA-BBBB",
+        "--bootstrap-key", "SECRET-BOOTSTRAP-KEY",
         "--scan-root", str(code),
         "--deploy-root", str(workdir / "exam"),
         "--prefix", str(prefix),
@@ -628,6 +654,8 @@ def test_full_install_and_idempotency(installer, workdir: Path) -> None:
     assert installer.current_version(prefix) == "1.0.0"
     assert (config_dir / "agent.ini").is_file()
     assert (workdir / "units" / "syncoj-agent.service").is_file()
+    assert (config_dir / "bootstrap.key").is_file()
+    assert (workdir / "units" / "syncoj-agent-enroll.service").is_file()
 
     # 第二次执行：结果必须一致
     assert run_installer(installer, base) == 0
@@ -635,10 +663,175 @@ def test_full_install_and_idempotency(installer, workdir: Path) -> None:
 
 
 @requires_symlinks
+def test_second_install_without_the_key_keeps_the_enroll_unit(
+    installer, workdir: Path
+) -> None:
+    """**幂等性的一个真实坑。**
+
+    重复执行安装器时通常不会再传一遍密钥（那是个一眼都不该多看的秘密）。
+    如果"没传密钥"被理解成"这台机器没有密钥"，``install_enroll_unit`` 就会把
+    上一次装好的开机注册单元删掉 —— 表现是"什么都没改，但下次开机不再注册了"。
+    """
+    prefix = workdir / "opt" / "syncoj"
+    config_dir = workdir / "etc" / "syncoj"
+    units = workdir / "units"
+    code = workdir / "code"
+    code.mkdir()
+    bundle = make_bundle(workdir / "b.tar.gz")
+
+    common = [
+        "--bundle", str(bundle),
+        "--server", "https://10.0.0.1:8443",
+        "--scan-root", str(code),
+        "--prefix", str(prefix),
+        "--config-dir", str(config_dir),
+        "--state-dir", str(workdir / "state"),
+        "--unit-dir", str(units),
+        "--skip-user", "--skip-service", "--skip-python-check", "--quiet",
+    ]
+
+    assert run_installer(installer, common + ["--bootstrap-key", "SECRET"]) == 0
+    enroll_unit = units / "syncoj-agent-enroll.service"
+    key_file = config_dir / "bootstrap.key"
+    assert enroll_unit.is_file() and key_file.is_file()
+
+    # 第二次不传密钥 —— 已有的密钥和注册单元都必须原样留着
+    assert run_installer(installer, common) == 0
+    assert enroll_unit.is_file(), "第二次没传密钥就把开机注册单元删掉了"
+    assert key_file.read_text(encoding="utf-8").strip() == "SECRET"
+
+
+# --------------------------------------------------------------------------- #
+# 统一密钥的落盘规则（不走整装流程，免得被 Windows 的符号链接限制挡住）
+# --------------------------------------------------------------------------- #
+
+
+def test_bootstrap_key_lands_where_the_config_says_it_is(
+    installer, workdir: Path
+) -> None:
+    """**密钥写在哪儿，配置里必须就指到哪儿。**
+
+    自定义 ``--config-dir`` 时默认值 ``/etc/syncoj/bootstrap.key`` 会指到一个
+    空路径，表现是"装完起不来、日志说找不到统一密钥"，而密钥明明就躺在旁边
+    那个自定义目录里。所以配置里那一行必须是**这次实际写的位置**。
+    """
+    from syncoj_agent.config import AgentConfig
+
+    instance = make_installer(
+        installer,
+        workdir,
+        "syncoj",
+        argv=["--server", "https://10.0.0.1:8443", "--bootstrap-key", "SECRET-KEY"],
+    )
+    assert instance.install_bootstrap_key() is True
+    instance.write_config("1.0.0")
+
+    key_file = instance.config_dir / "bootstrap.key"
+    assert key_file.read_text(encoding="utf-8").strip() == "SECRET-KEY"
+
+    config = AgentConfig.load(instance.config_path)
+    assert config.bootstrap_key_file == key_file, (
+        "配置指向的密钥路径与实际写入位置不一致"
+    )
+
+
+def test_bootstrap_key_file_is_private(installer, workdir: Path, monkeypatch) -> None:
+    """密钥能注册整间机房，所以绝不能对选手账号可读。
+
+    Windows 上 ``chmod`` 对组/其他位基本是空操作（这里会看到 666），所以这个
+    测试**记录调用**而不是只看结果；在 Linux 上再加一条对真实权限位的断言 ——
+    目标机就是 Linux，那一行 chmod 在那里是实打实生效的。
+    """
+    chmod_calls = []
+    real_chmod = os.chmod
+
+    def spy(path, mode, *args, **kwargs):
+        chmod_calls.append((str(path), mode))
+        return real_chmod(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(installer.os, "chmod", spy)
+
+    instance = make_installer(
+        installer, workdir, "syncoj", argv=["--bootstrap-key", "SECRET-KEY"]
+    )
+    assert instance.install_bootstrap_key() is True
+
+    key_file = instance.config_dir / "bootstrap.key"
+    assert (str(key_file), 0o600) in chmod_calls, (
+        "没有把密钥文件的权限显式收紧到 0600：%r" % (chmod_calls,)
+    )
+    if os.name == "posix":
+        mode = key_file.stat().st_mode & 0o777
+        assert mode == 0o600, "密钥文件权限是 %o，不是 0600" % mode
+
+
+def test_repeated_install_without_the_key_keeps_the_enroll_unit(
+    installer, workdir: Path
+) -> None:
+    """第二次执行安装器时通常不会再传密钥 —— 它不能被当成"这台机器没有密钥"。
+
+    被误判的后果是上一次装好的开机注册单元被删掉：表现是"什么都没改，
+    但下次开机不再注册了"，而那时现场已经没有人在看安装了。
+    """
+    first = make_installer(
+        installer, workdir, "syncoj", argv=["--bootstrap-key", "SECRET-KEY"]
+    )
+    assert first.install_bootstrap_key() is True
+    first.install_enroll_unit(first.install_bootstrap_key())
+    enroll_unit = first.enroll_unit_path
+    assert enroll_unit.is_file()
+
+    # 第二次：同一台机器、同一份配置目录，但**没传** --bootstrap-key
+    second = make_installer(installer, workdir, "syncoj", argv=["--server", "https://x"])
+    assert second.install_bootstrap_key() is True, "已有的密钥没被认出来"
+    second.install_enroll_unit(second.install_bootstrap_key())
+
+    assert enroll_unit.is_file(), "第二次没传密钥就把开机注册单元删掉了"
+    assert (instance_key(first)).read_text(encoding="utf-8").strip() == "SECRET-KEY"
+
+
+def instance_key(instance) -> Path:
+    return instance.config_dir / "bootstrap.key"
+
+
+def test_no_enroll_unit_when_there_is_no_key(installer, workdir: Path) -> None:
+    """没有密钥就没有注册可做。
+
+    留一个永远失败的单元只会每次开机把 journal 刷脏，而真正的问题是
+    "这台机器没有密钥" —— 那要靠装密钥解决，不是靠重启。
+    """
+    instance = make_installer(installer, workdir, "syncoj")
+    assert instance.install_bootstrap_key() is False
+
+    instance.install_enroll_unit(False)
+
+    assert not instance.enroll_unit_path.exists()
+    assert not (instance.config_dir / "bootstrap.key").exists()
+
+
+def test_enroll_unit_is_removed_when_the_key_goes_away(installer, workdir: Path) -> None:
+    """密钥被删掉之后重跑安装器，那个永远失败的单元也该跟着走。"""
+    instance = make_installer(
+        installer, workdir, "syncoj", argv=["--bootstrap-key", "SECRET-KEY"]
+    )
+    instance.install_bootstrap_key()
+    instance.install_enroll_unit(True)
+    assert instance.enroll_unit_path.is_file()
+
+    # 有人把密钥拿走了（比如吊销之后手工删掉），再跑一次安装器
+    (instance.config_dir / "bootstrap.key").unlink()
+    later = make_installer(installer, workdir, "syncoj")
+    assert later.install_bootstrap_key() is False
+    later.install_enroll_unit(False)
+
+    assert not later.enroll_unit_path.exists()
+
+
+@requires_symlinks
 def test_existing_config_is_preserved(installer, workdir: Path) -> None:
     """**教师的手工修改绝不能被冲掉。**
 
-    现场很可能已经改过扫描目录或注册码。安装器把它们覆盖是灾难性的 ——
+    现场很可能已经改过扫描目录（或者挪过密钥路径）。安装器把它们覆盖是灾难性的 ——
     而且现场往往是在"重装一下试试"的时候才踩到。
     """
     prefix = workdir / "opt" / "syncoj"

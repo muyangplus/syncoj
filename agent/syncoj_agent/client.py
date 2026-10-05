@@ -31,9 +31,13 @@ __all__ = [
     "NetworkError",
     "ProtocolError",
     "AuthError",
+    "UnboundError",
+    "BootstrapKeyError",
+    "RateLimited",
     "StaleUpload",
     "PayloadTooLarge",
     "MultipartBody",
+    "build_enroll_payload",
 ]
 
 log = logging.getLogger(__name__)
@@ -44,22 +48,90 @@ _READ_CHUNK = 256 * 1024
 # --------------------------------------------------------------------------- #
 # 异常
 # --------------------------------------------------------------------------- #
+#
+# 服务端**所有**错误响应都是 ``{"detail": "...", "code": "...", "details": {}}``
+# 这一个形状（见 docs/protocol.md §0.1）。分支判断一律看 ``code`` ——
+# 拿 ``detail`` 做字符串比较会在改文案/翻译时静默失效，而那正是最难查的一类
+# 故障：行为变了，代码没变，日志里也看不出异常。
+#
+# 每一个异常类都带 ``status`` / ``code`` / ``details``，调用方需要细看时
+# 不必再去解析消息文本。
 
 
 class AgentError(Exception):
-    """所有 Agent 侧错误的基类。"""
+    """所有 Agent 侧错误的基类。
+
+    ``message`` 是给人看的完整句子（含上下文与状态码），``detail`` 是服务端
+    原文，两者刻意分开：日志要完整上下文，而展示给教师时只想要那一句中文。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        status: int = 0,
+        code: str = "",
+        detail: str = "",
+        details: Optional[Dict[str, object]] = None,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status = status
+        self.code = code
+        self.detail = detail
+        self.details = details or {}
 
 
 class NetworkError(AgentError):
-    """连接失败/超时/中断 —— **可重试**，退避后下一轮再试。"""
+    """连接失败/超时/中断/5xx —— **可重试**，退避后下一轮再试。"""
 
 
 class ProtocolError(AgentError):
-    """服务端返回了不符合协议的内容 —— 通常是版本不匹配，不可重试。"""
+    """服务端返回了不符合协议的内容，或一个我们不认识的 ``code``。
+
+    记日志 + 等下一轮，**不要**重新注册：认不出来的东西最可能是版本不匹配，
+    而重新注册会换掉凭据，把一个"看不懂"升级成"用不了"。
+    """
 
 
 class AuthError(AgentError):
-    """凭据失效（401/403）—— 需要走重新注册。"""
+    """凭据本身无效（401）—— 清掉本地 token，重新 ``/enroll``。"""
+
+
+class UnboundError(AgentError):
+    """403：**凭据有效，但这台机器还没配对到人**（`machine_unbound` /
+    `pairing_required`），或者服务端拒绝了这次访问。
+
+    **绝对不要重新注册。** 这是整条链路上最容易做错的一处：未配对的机器看起来
+    就像"注册失败了"，于是客户端去重试 enroll —— 而服务端每收到一次 enroll
+    就会换一个新配对码，教师刚刚在屏幕上读到的那个当场失效。表现是"配对码
+    怎么输都不对"，而日志里刷满注册记录，真正的原因一个字都看不见。
+    """
+
+
+class BootstrapKeyError(AgentError):
+    """镜像里的统一密钥不对/被吊销/已过期。
+
+    **停止重试**：再试一万次也是同样的结果，只会把日志和限速配额刷满。
+    写一条明确的日志等人来修（换密钥、重新装机）。
+    """
+
+
+class RateLimited(AgentError):
+    """429：触发限速。按 ``retry_after`` 退避，不要按自己的节奏硬撞。"""
+
+    def __init__(
+        self,
+        message: str,
+        status: int = 0,
+        code: str = "",
+        detail: str = "",
+        details: Optional[Dict[str, object]] = None,
+        retry_after: int = 0,
+    ) -> None:
+        super().__init__(
+            message, status=status, code=code, detail=detail, details=details
+        )
+        self.retry_after = retry_after
 
 
 class StaleUpload(AgentError):
@@ -69,8 +141,18 @@ class StaleUpload(AgentError):
     Agent 应当**安静丢弃**，下一轮 tick 会拿到真正需要的版本。
     """
 
-    def __init__(self, message: str, expected: str = "") -> None:
-        super().__init__(message)
+    def __init__(
+        self,
+        message: str,
+        status: int = 0,
+        code: str = "",
+        detail: str = "",
+        details: Optional[Dict[str, object]] = None,
+        expected: str = "",
+    ) -> None:
+        super().__init__(
+            message, status=status, code=code, detail=detail, details=details
+        )
         self.expected = expected
 
 
@@ -220,6 +302,9 @@ class AgentClient:
         self.timeout = timeout
         self.download_timeout = download_timeout
         self._ssl_context = _build_ssl_context(verify_tls, ca_file)
+        #: 最近一次响应里的 ``Retry-After``（秒）。429 的退避节奏由服务端决定 ——
+        #: 它才知道限速窗口有多长，客户端自己猜只会撞得更狠。
+        self.last_retry_after = 0
 
         self._control: Optional[http.client.HTTPConnection] = None
         self._transfer: Optional[http.client.HTTPConnection] = None
@@ -273,6 +358,17 @@ class AgentClient:
     def set_token(self, token: Optional[str]) -> None:
         self.token = token
 
+    def _raise(self, status: int, data: object, context: str) -> None:
+        """把错误响应转成异常并抛出。
+
+        单独一个方法是为了让 ``Retry-After`` 只在这里补一次 —— 它是**响应头**，
+        不在错误体里，所以 ``_as_error`` 看不见它。
+        """
+        error = _as_error(status, data, context)
+        if isinstance(error, RateLimited) and error.retry_after <= 0:
+            error.retry_after = self.last_retry_after
+        raise error
+
     # ---------------------------------------------------------------- #
     # 底层请求
     # ---------------------------------------------------------------- #
@@ -311,6 +407,9 @@ class AgentClient:
                 response = connection.getresponse()
                 payload = response.read()
                 status = response.status
+                self.last_retry_after = _parse_retry_after(
+                    response.getheader("Retry-After")
+                )
                 # 服务端要求关闭则让出连接，避免复用一个已死的 socket
                 if response.will_close:
                     self._drop(transfer)
@@ -347,7 +446,6 @@ class AgentClient:
 
     def enroll(
         self,
-        enroll_code: Optional[str],
         machine_id: str,
         hostname: str,
         agent_version: str,
@@ -356,11 +454,18 @@ class AgentClient:
         machine_uuid: Optional[str] = None,
         machine_fingerprint: Optional[str] = None,
     ) -> dict:
+        """用镜像里的统一密钥换回长期凭据。
+
+        **这是唯一的注册路径** —— 每选手注册码已经被"机器永久绑定名单条目"
+        取代（见 docs/protocol.md §1）。
+
+        返回的报文体有**三种状态**（``claimed`` × ``bound``），不是"成功/失败"：
+        未配对也是一次成功的注册。调用方必须按 §1 的三态分别处理。
+        """
         status, data = self.request_json(
             "POST",
             "/api/v1/agent/enroll",
             build_enroll_payload(
-                enroll_code,
                 machine_id,
                 hostname,
                 agent_version,
@@ -372,13 +477,13 @@ class AgentClient:
         )
         if status == 200 and isinstance(data, dict):
             return data
-        raise _as_error(status, data, "注册失败")
+        self._raise(status, data, "注册失败")
 
     def tick(self, payload: dict) -> dict:
         status, data = self.request_json("POST", "/api/v1/agent/tick", payload)
         if status == 200 and isinstance(data, dict):
             return data
-        raise _as_error(status, data, "tick 失败")
+        self._raise(status, data, "tick 失败")
 
     def upload_file(
         self,
@@ -408,13 +513,13 @@ class AgentClient:
         data = _decode_json(raw, status, "/api/v1/agent/files")
         if status == 200 and isinstance(data, dict):
             return data
-        raise _as_error(status, data, "上传 %s 失败" % rel_path)
+        self._raise(status, data, "上传 %s 失败" % rel_path)
 
     def report_events(self, events: Sequence[dict]) -> dict:
         status, data = self.request_json("POST", "/api/v1/agent/events", list(events))
         if status == 200:
             return data if isinstance(data, dict) else {}
-        raise _as_error(status, data, "事件上报失败")
+        self._raise(status, data, "事件上报失败")
 
     def download_to_file(self, path: str, dest: Path, max_bytes: int) -> int:
         """把 ``path`` 的内容流式下载到 ``dest``，返回写入字节数。
@@ -444,7 +549,7 @@ class AgentClient:
             payload = response.read()
             self._drop(True)
             data = _decode_json(payload, response.status, path)
-            raise _as_error(response.status, data, "下载 %s 失败" % path)
+            self._raise(response.status, data, "下载 %s 失败" % path)
 
         written = 0
         try:
@@ -507,7 +612,7 @@ class AgentClient:
             connection.close()
             self._drop(True)
             data = _decode_json(payload, response.status, "下载")
-            raise _as_error(response.status, data, "下载 asset %d 失败" % asset_id)
+            self._raise(response.status, data, "下载 asset %d 失败" % asset_id)
 
         return response.status, dict(response.getheaders()), response
 
@@ -522,7 +627,6 @@ class AgentClient:
 
 
 def build_enroll_payload(
-    enroll_code: Optional[str],
     machine_id: str,
     hostname: str,
     agent_version: str,
@@ -533,12 +637,16 @@ def build_enroll_payload(
 ) -> Dict[str, object]:
     """注册报文体。
 
-    **两个凭据都为空时不要把它们塞进去**：服务端把"字段缺失"和"字段是空串"
-    看成两件事，传空串只会让错误信息变得含糊。
+    **空值不要塞进去**：服务端把"字段缺失"和"字段是空串"看成两件事，
+    传空串只会让错误信息变得含糊。
 
     ``machine_uuid`` / ``machine_fingerprint`` 允许为空 —— 后者在虚拟机或
     SMBIOS 不可读时确实拿不到，服务端见到空值就当新机器处理（走人工配对），
     而不是拿空值去和别的机器"互相认回"。
+
+    机器身份的三个要素（见 §1）：``machine_uuid`` 是首选身份，
+    ``machine_fingerprint`` 是快照还原后的第二道依据，
+    ``machine_id`` **仅供人工辨认**，不参与身份判定。
     """
     payload: Dict[str, object] = {
         "machine_id": machine_id,
@@ -546,8 +654,6 @@ def build_enroll_payload(
         "agent_version": agent_version,
         "os_info": os_info,
     }
-    if enroll_code:
-        payload["enroll_code"] = enroll_code
     if bootstrap_key:
         payload["bootstrap_key"] = bootstrap_key
     if machine_uuid:
@@ -560,6 +666,22 @@ def build_enroll_payload(
 # --------------------------------------------------------------------------- #
 # 工具
 # --------------------------------------------------------------------------- #
+
+
+def _parse_retry_after(raw: Optional[str]) -> int:
+    """解析 ``Retry-After`` 响应头，返回秒数；解析不出来就返回 0。
+
+    只认"秒数"这一种形式。HTTP 也允许 ``Retry-After: Wed, 21 Oct 2015
+    07:28:00 GMT``（一个绝对时间），但那要引入日期解析，而它在时钟不准的
+    考试机上本来也不可靠 —— 认不出来就让调用方用自己的退避。
+    """
+    if not raw:
+        return 0
+    try:
+        seconds = int(raw.strip())
+    except ValueError:
+        return 0
+    return seconds if seconds > 0 else 0
 
 
 def _drain_quietly(response) -> None:
@@ -589,6 +711,13 @@ def _build_ssl_context(verify_tls: bool, ca_file: Optional[Path]) -> ssl.SSLCont
 
 
 def _decode_json(raw: bytes, status: int, path: str) -> object:
+    """解析响应体。**任何情况下都不抛** —— 返回 ``None`` 或一个占位 dict。
+
+    服务端在 500 上可能返回一坨纯文本（Starlette 的兜底 ``Internal Server
+    Error``），中间的代理也可能插进来一段 HTML。对错误响应来说这是常态而不是
+    异常：让 ``json.loads`` 抛出去会把一个"服务端暂时故障（可重试）"变成
+    一个"协议错误（不可重试）"，正好搞反。
+    """
     if not raw:
         return None
     try:
@@ -599,25 +728,80 @@ def _decode_json(raw: bytes, status: int, path: str) -> object:
         raise ProtocolError("%s 返回了非 JSON 内容（前 200 字节）: %r" % (path, raw[:200]))
 
 
-def _as_error(status: int, data: object, context: str) -> AgentError:
+def _error_fields(data: object) -> Tuple[str, str, Dict[str, object]]:
+    """从错误体里取出 ``(detail, code, details)``。
+
+    ``detail`` **永远是字符串**。老服务端会把结构化信息塞进 ``detail``（一个
+    dict），这里兼容一下：取里面的 ``message``，没有就整段转字符串。宁可显示得
+    笨拙一点，也不能因为对方格式不同就丢掉唯一的错误信息。
+    """
     detail = ""
+    code = ""
+    details: Dict[str, object] = {}
     if isinstance(data, dict):
         raw_detail = data.get("detail")
         if isinstance(raw_detail, dict):
             detail = str(raw_detail.get("message") or raw_detail)
+        elif isinstance(raw_detail, str):
+            detail = raw_detail
         elif raw_detail is not None:
             detail = str(raw_detail)
-    message = "%s（HTTP %d）%s" % (context, status, detail)
+        raw_code = data.get("code")
+        if isinstance(raw_code, str):
+            code = raw_code
+        raw_details = data.get("details")
+        if isinstance(raw_details, dict):
+            details = raw_details
+    return detail, code, details
 
-    if status in (401, 403):
-        return AuthError(message)
+
+def _as_error(status: int, data: object, context: str) -> AgentError:
+    """把 ``(状态码, 错误体)`` 映射成具体的异常类。
+
+    **先看状态码，再看 ``code``**：状态码是 HTTP 层的保证，任何服务端/代理都
+    不会弄错；``code`` 是本系统的约定，只在服务端真的是我们那个服务端时才有。
+    反过来（先看 code）会让一个由代理产生的 502 带着空 code 走进"不认识"分支。
+
+    唯一按 ``code`` 优先处理的是 403 内部的分流 —— 因为 403 恰好覆盖了两种
+    语义完全相反的情况（还没配对 vs 没有权限），而它们都需要"不要重新注册"。
+    """
+    detail, code, details = _error_fields(data)
+    message = "%s（HTTP %d%s）%s" % (
+        context,
+        status,
+        " " + code if code else "",
+        detail,
+    )
+    kwargs = dict(
+        status=status, code=code, detail=detail, details=details
+    )
+
+    if status == 429:
+        raw_retry = details.get("retry_after")
+        retry_after = raw_retry if isinstance(raw_retry, int) and not isinstance(raw_retry, bool) else 0
+        return RateLimited(message, retry_after=retry_after, **kwargs)
+
+    if code in ("bootstrap_key_invalid", "bootstrap_key_revoked", "bootstrap_key_expired"):
+        # 再试一万次也是同样的结果，只会把日志和限速配额刷满
+        return BootstrapKeyError(message, **kwargs)
+
+    if status == 401 or code in ("unauthorized", "token_expired"):
+        # 凭据本身坏了 —— 清掉本地 token 重新注册，这是**唯一**该重新注册的情况
+        return AuthError(message, **kwargs)
+
+    if status == 403:
+        # 凭据有效但没配对（或没权限）。绝不能重新注册，见 UnboundError
+        return UnboundError(message, **kwargs)
+
     if status == 409:
-        expected = ""
-        if isinstance(data, dict) and isinstance(data.get("detail"), dict):
-            expected = str(data["detail"].get("expected", ""))
-        return StaleUpload(message, expected=expected)
+        raw_expected = details.get("expected")
+        expected = raw_expected if isinstance(raw_expected, str) else ""
+        return StaleUpload(message, expected=expected, **kwargs)
+
     if status == 413:
-        return PayloadTooLarge(message)
+        return PayloadTooLarge(message, **kwargs)
+
     if status >= 500:
-        return NetworkError(message)  # 服务端临时故障，值得重试
-    return ProtocolError(message)
+        return NetworkError(message, **kwargs)
+
+    return ProtocolError(message, **kwargs)

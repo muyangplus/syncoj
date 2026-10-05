@@ -17,7 +17,19 @@ from typing import List, Optional
 
 from .state import detect_desktop
 
-__all__ = ["AgentConfig", "ConfigError", "DEFAULT_INI", "expand_placeholders"]
+__all__ = [
+    "AgentConfig",
+    "ConfigError",
+    "DEFAULT_INI",
+    "WAITING_FILE_NAME",
+    "expand_placeholders",
+]
+
+#: "已配对，但还没有含本人的场次"时写到桌面上的文件名。
+#:
+#: 和 ``pairing_file_name`` 不同，这个不做成配置项：它只是一句状态说明，
+#: 没有谁会在配置里折腾它；而每多一个配置键，就多一处"配错了没人发现"的地方。
+WAITING_FILE_NAME = "等待场次.txt"
 
 #: 路径模板里支持的占位符。
 #:
@@ -76,12 +88,13 @@ verify_tls = true
 ca_file =
 
 [agent]
-# 注册码。教师端签发，绑定到本机。机器快照还原后靠它自动重新注册
-enroll_code =
 # 镜像内置的统一注册密钥文件（整间机房一份）。
-# 只有 root 读得到，所以这条路径通常用不上 —— 真正干活的是装机时装的
+# **只有 root 读得到**，所以这条路径通常用不上 —— 真正干活的是装机时装的
 # syncoj-enroll.service（root 身份跑一次，把凭据写进 state_dir）。
 # 留在这里是为了：root 直接跑 Agent 时能自己注册，以及排查时能手工触发。
+#
+# 绝对不要把密钥**内容**写进这个文件：agent.ini 的属主是选手账号，
+# 学生读得到里面的每一个字节，而那把钥匙能注册整间机房。
 bootstrap_key_file = /etc/syncoj/bootstrap.key
 # 状态目录：存放凭据、哈希缓存、日志、未完成的下载
 state_dir = /var/lib/syncoj
@@ -92,10 +105,15 @@ machine_id =
 deploy_root = {desktop}
 
 [pairing]
-# 还没配对到选手时，把配对短码写到桌面上（<桌面>/配对码.txt），方便教师
-# 走过来读一眼。配对成功后这个文件会被删掉。
+# 把"本机当前状态"写到桌面上，方便教师走过来看一眼：
+#   * 还没配对到人  -> <桌面>/配对码.txt，里面是六位配对码
+#   * 已配对但没场次 -> <桌面>/等待场次.txt，里面是服务端给的原因
+# 配对成功、且拿到场次之后这两个文件都会被自动删掉。
+#
+# 关掉它的场景只有一种：桌面目录不可写、或者考点规定桌面必须干净。
+# 关掉不等于不工作 —— 日志里还有一份，只是要 journalctl 才看得到。
 show_on_desktop = true
-# 桌面上的文件名
+# 配对码文件名
 file_name = 配对码.txt
 
 [scan]
@@ -164,9 +182,9 @@ class AgentConfig:
     verify_tls: bool = True
     ca_file: Optional[Path] = None
 
-    enroll_code: str = ""
     #: 统一注册密钥文件（root 只读）。Agent 以选手身份跑时读不到它 ——
-    #: 那种情况下由 syncoj-enroll.service 以 root 身份先换好凭据
+    #: 那种情况下由 syncoj-enroll.service 以 root 身份先换好凭据。
+    #: **没有 enroll_code**：每选手注册码那条链路已被"机器永久绑定名单条目"取代。
     bootstrap_key_file: Optional[Path] = field(
         default_factory=lambda: Path("/etc/syncoj/bootstrap.key")
     )
@@ -350,7 +368,6 @@ class AgentConfig:
             server_url=(parser.get("server", "url", fallback="") or "").strip(),
             verify_tls=_as_bool(parser.get("server", "verify_tls", fallback="true"), True),
             ca_file=_opt_path(parser.get("server", "ca_file", fallback="")),
-            enroll_code=(parser.get("agent", "enroll_code", fallback="") or "").strip(),
             bootstrap_key_file=_templated_path(
                 parser.get("agent", "bootstrap_key_file", fallback="/etc/syncoj/bootstrap.key")
                 or "/etc/syncoj/bootstrap.key"
@@ -414,7 +431,6 @@ def _split_paths(raw: Optional[str]) -> List[str]:
 #: 环境变量覆盖表：env 名 -> 属性名
 _ENV_OVERRIDES = {
     "SYNCOJ_SERVER_URL": "server_url",
-    "SYNCOJ_ENROLL_CODE": "enroll_code",
     "SYNCOJ_STATE_DIR": "state_dir",
     "SYNCOJ_MACHINE_ID": "machine_id",
     "SYNCOJ_CA_FILE": "ca_file",

@@ -83,8 +83,12 @@ def build_fixture() -> Dict[str, Any]:
         "_comment": "由 agent/tools/build_fixture.py 自动生成，请勿手工编辑",
         "agent_version": __version__,
         "enroll": build_enroll_payload(
-            enroll_code="ABCD-EFGH-JKLM-NPQR",
+            # 注册只有一条路：镜像里那份 root 只读的统一密钥。
+            # 没有 enroll_code —— 它属于被取代的每选手注册码链路。
+            bootstrap_key="43 字符的统一密钥",
             machine_id="0123456789abcdef0123456789abcdef",
+            machine_uuid="3f2a1b0c4d5e6f708192a3b4c5d6e7f8",
+            machine_fingerprint="4c4c4544-0031-3010-8043-b7c04f4d4432",
             hostname="exam-pc-01",
             agent_version=__version__,
             os_info="Linux 5.4.0 Ubuntu 20.04.6 LTS",

@@ -17,7 +17,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__
+from . import __version__, errors
 from .api import admin as admin_api
 from .api import agent as agent_api
 from .config import Settings, default_settings
@@ -62,12 +62,16 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     )
     app.state.ctx = ctx
 
+    # 必须在注册路由**之前**装：异常处理器是查表用的，晚装不影响已注册的路由，
+    # 但早装能让 /docs 与 OpenAPI 也带上统一的错误响应文档
+    errors.install_error_handlers(app)
+
     app.include_router(agent_api.router)
     app.include_router(admin_api.router)
 
     @app.exception_handler(PathValidationError)
     async def _path_error(_request: Request, exc: PathValidationError) -> JSONResponse:
-        return JSONResponse(status_code=400, content={"detail": "路径不合法: %s" % exc})
+        return errors.error_response(400, "path_invalid", "路径不合法：%s" % exc)
 
     @app.get("/healthz", tags=["meta"])
     async def healthz(request: Request) -> dict:

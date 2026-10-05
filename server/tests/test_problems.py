@@ -25,9 +25,10 @@ def add_problems(client: TestClient, contest: dict, headers: dict, items: List[d
 
 
 def list_problems(client: TestClient, contest: dict, headers: dict) -> List[dict]:
-    return client.get(
+    body = client.get(
         "/api/v1/admin/contests/%d/problems" % contest["id"], headers=headers
     ).json()
+    return body["items"]
 
 
 # --------------------------------------------------------------------------- #
@@ -121,10 +122,30 @@ def test_rename_to_existing_ident_is_rejected(
 
 def test_delete_problem(client: TestClient, contest: dict, admin_headers: dict) -> None:
     problem = add_problems(client, contest, admin_headers, [{"ident": "p1"}]).json()["problems"][0]
-    assert client.delete(
+
+    missing = client.delete(
         "/api/v1/admin/problems/%d" % problem["id"], headers=admin_headers
-    ).status_code == 200
+    )
+    assert missing.status_code == 422, "删题目要打题目标识"
+
+    response = client.delete(
+        "/api/v1/admin/problems/%d?confirm=p1" % problem["id"], headers=admin_headers
+    )
+    assert response.status_code == 200, response.text
     assert list_problems(client, contest, admin_headers) == []
+
+
+def test_delete_problem_rejects_a_wrong_confirm(
+    client: TestClient, contest: dict, admin_headers: dict
+) -> None:
+    problem = add_problems(client, contest, admin_headers, [{"ident": "p1"}]).json()["problems"][0]
+
+    response = client.delete(
+        "/api/v1/admin/problems/%d?confirm=p2" % problem["id"], headers=admin_headers
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["code"] == "name_mismatch"
+    assert [p["ident"] for p in list_problems(client, contest, admin_headers)] == ["p1"]
 
 
 def test_problems_require_admin(client: TestClient, contest: dict) -> None:
@@ -283,7 +304,9 @@ def test_deleting_problem_keeps_scores(
     with app.state.ctx.db.session() as session:
         scan_contest_results(session, app.state.ctx.settings, session.get(Contest, contest["id"]), force=True)
 
-    client.delete("/api/v1/admin/problems/%d" % problem["id"], headers=admin_headers)
+    client.delete(
+        "/api/v1/admin/problems/%d?confirm=p1" % problem["id"], headers=admin_headers
+    )
 
     matrix = client.get(
         "/api/v1/admin/contests/%d/scores" % contest["id"], headers=admin_headers
@@ -503,9 +526,10 @@ def report_files(client: TestClient, enrolled: dict, paths: dict) -> None:
 
 
 def list_files(client: TestClient, contest: dict, headers: dict) -> List[dict]:
-    return client.get(
+    body = client.get(
         "/api/v1/admin/contests/%d/files" % contest["id"], headers=headers
     ).json()
+    return body["items"]
 
 
 def test_files_are_annotated_with_their_problem(

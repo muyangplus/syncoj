@@ -462,10 +462,14 @@ def test_clearing_manual_score_re_enables_auto_scan(judge_setup, client: TestCli
     )
     clear = client.delete(
         "/api/v1/admin/contests/%d/judge/score" % judge_setup["contest_id"],
-        params={"player_id": judge_setup["player_id"], "problem": "p1"},
+        params={
+            "player_id": judge_setup["player_id"],
+            "problem": "p1",
+            "confirm": judge_setup["player_no"],
+        },
         headers=admin_headers,
     )
-    assert clear.status_code == 200
+    assert clear.status_code == 200, clear.text
 
     write_result(judge_setup, judge_setup["player_no"], "p1", "r.json", '{"score": 100}')
     do_scan(judge_setup)
@@ -507,14 +511,18 @@ def test_list_judge_runs_filter_by_status(judge_setup, client: TestClient,
         "/api/v1/admin/contests/%d/judge/runs?parse_status=unparsed" % judge_setup["contest_id"],
         headers=admin_headers,
     ).json()
-    assert len(runs) == 1
-    assert runs[0]["parse_status"] == "unparsed"
+    assert runs["total"] == 1
+    assert len(runs["items"]) == 1
+    assert runs["items"][0]["parse_status"] == "unparsed"
 
     runs = client.get(
         "/api/v1/admin/contests/%d/judge/runs?parse_status=ok" % judge_setup["contest_id"],
         headers=admin_headers,
     ).json()
-    assert runs == []
+    # total 必须**跟着筛选条件走** —— 拿不过滤的总数充数会让分页器显示
+    # "共 1 条"却一条都看不到
+    assert runs["total"] == 0
+    assert runs["items"] == []
 
 
 def test_scores_require_admin(judge_setup, client: TestClient) -> None:

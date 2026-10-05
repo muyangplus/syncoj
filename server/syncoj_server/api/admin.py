@@ -21,6 +21,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Query,
     Request,
     UploadFile,
     status,
@@ -31,10 +32,11 @@ from fastapi import (
 # 它会试图把 ``ForwardRef('Response')`` 当成响应模型来建模，然后炸在
 # /openapi.json 上 —— 而 /docs 和前端类型生成都依赖那个端点。
 from fastapi.responses import FileResponse, Response, StreamingResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from ..config import Settings
 from ..context import AppContext
+from ..errors import ERROR_CODES, ApiError
 from ..models import (
     Admin,
     AdminSession,
@@ -47,11 +49,8 @@ from ..models import (
     DeployStatus,
     DeployTarget,
     DeployTask,
-    EnrollmentMode,
-    EnrollCode,
     EventLog,
     JudgeRun,
-    MachineClaim,
     Player,
     Problem,
     Roster,
@@ -61,6 +60,7 @@ from ..models import (
 )
 from ..paths import PathValidationError, safe_join, slugify, validate_relpath
 from ..schemas import (
+    GLOBAL_CONFIRM,
     AdminInfo,
     AgentRuntimeOut,
     ApplyRosterIn,
@@ -70,25 +70,29 @@ from ..schemas import (
     BootstrapKeyIssueIn,
     BootstrapKeyIssuedOut,
     BootstrapKeyOut,
-    ClaimByCodeIn,
-    ClaimMachineIn,
+    BindByCodeIn,
+    BindMachineIn,
+    BindResultOut,
     CloneAlertOut,
+    ConfirmIn,
     ContestCreate,
     ContestOut,
     ContestUpdate,
     DeployCreate,
     DeployTargetOut,
     DeployTaskOut,
-    EnrollCodeOut,
-    EnrollCodeStateOut,
     EventOut,
+    FileClearIn,
+    JudgeRunClearIn,
     JudgeRunOut,
     JudgeScanOut,
     LoginRequest,
     LoginResponse,
     ManualScoreIn,
+    Page,
     PendingMachineOut,
-    RebindAgentIn,
+    PlayerClearIn,
+    PlayerImportOut,
     PlayerOut,
     PlayerUpsert,
     ProblemColumnOut,
@@ -99,6 +103,7 @@ from ..schemas import (
     ProblemUpsert,
     ReleaseOut,
     ReleaseUpdate,
+    RebindAgentIn,
     RosterCreate,
     RosterDetailOut,
     RosterEntryIn,
@@ -108,17 +113,18 @@ from ..schemas import (
     ScoreCellOut,
     ScoreMatrixOut,
     ScoreRowOut,
+    SetAgentContestIn,
     SimpleAck,
     SourceFileOut,
     UpgradeStatusOut,
+    page_of,
+    slice_page,
 )
 from ..security import (
     hash_bootstrap_key,
-    hash_enroll_code,
     hash_password,
     hash_token,
     new_bootstrap_key,
-    new_enroll_code,
     new_token,
     verify_password,
 )
@@ -126,7 +132,7 @@ from ..services import enrollment, matching, rosters
 from ..services.deploy import validate_dest_template
 from ..services.signing import parse_version
 from ..storage import BlobTooLarge, HashMismatch
-from .deps import get_ctx
+from .deps import PageParams, get_ctx
 
 __all__ = ["router", "require_admin", "AdminIdentity"]
 
@@ -145,16 +151,40 @@ def _iso(value) -> Optional[str]:
     return value.strftime(_ISO) if value else None
 
 
+def require_confirm(actual: Optional[str], given: Optional[str], label: str) -> None:
+    """结构性数据（名单/场次/选手/机器/题目）删除前的**服务端**确认。
+
+    为什么校验放在这里而不只是前端弹窗：前端弹窗是给人看的提示，服务端校验
+    才是"没经过界面的调用也一样安全"的保证。删除是不可逆的（成绩矩阵连同代码
+    一起消失），而"是否确定？"这种弹窗在连续操作里会被手指肌肉记忆点掉 ——
+    所以确认内容不是"是否确定"，而是**把名字打一遍**。
+
+    逐字比较（只容忍首尾空格）：差一个字就是差一个字，不做大小写/别名宽容，
+    因为宽容的规则在紧张的操作现场只会让人搞不清到底输入什么才算对。
+    """
+    expected = (actual or "").strip()
+    supplied = (given or "").strip()
+    if expected and supplied == expected:
+        return
+    raise ApiError(
+        400,
+        "name_mismatch",
+        "确认不通过：要删的是%s「%s」，请把它原样输一遍再提交。" % (label, actual or ""),
+        {"expected": actual, "given": given, "label": label},
+    )
+
+
 @dataclass
 class AdminIdentity:
     id: int
     username: str
 
 
-def _unauthorized(detail: str) -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail=detail,
+def _unauthorized(detail: str, code: str = "unauthorized") -> ApiError:
+    return ApiError(
+        status.HTTP_401_UNAUTHORIZED,
+        code,
+        detail,
         headers={"WWW-Authenticate": "Bearer"},
     )
 
@@ -207,7 +237,7 @@ def login(payload: LoginRequest, ctx: AppContext = Depends(get_ctx)) -> LoginRes
         ok = verify_password(payload.password, stored)
         if admin is None or not ok or not admin.is_active:
             log.warning("管理员登录失败: %s", payload.username)
-            raise _unauthorized("用户名或口令错误")
+            raise _unauthorized("用户名或口令错误", code="bad_credentials")
 
         admin.last_login_at = now
         session.add(
@@ -263,7 +293,6 @@ def create_contest(
 ) -> ContestOut:
     status_value = payload.status if payload.status in ContestStatus.ALL else ContestStatus.DRAFT
     slug = slugify(payload.slug or payload.name, fallback="contest")
-    mode = _validate_enrollment_mode(payload.enrollment_mode)
 
     with ctx.db.session() as session:
         if session.execute(select(Contest).where(Contest.slug == slug)).scalar_one_or_none():
@@ -275,18 +304,18 @@ def create_contest(
             status=status_value,
             note=payload.note,
             default_roster_id=roster.id if roster else None,
-            enrollment_mode=mode,
         )
         session.add(contest)
         session.flush()
         return _contest_out(contest, player_count=0, online_count=0, roster=roster)
 
 
-@router.get("/contests", response_model=List[ContestOut])
+@router.get("/contests", response_model=Page[ContestOut])
 def list_contests(
+    page: PageParams = Depends(),
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
-) -> List[ContestOut]:
+) -> Page[ContestOut]:
     with ctx.db.session() as session:
         counts = dict(
             session.execute(
@@ -306,7 +335,7 @@ def list_contests(
                     roster=rosters.get(contest.default_roster_id),
                 )
             )
-        return result
+        return slice_page(result, page)
 
 
 @router.patch("/contests/{contest_id}", response_model=ContestOut)
@@ -335,9 +364,6 @@ def update_contest(
             if payload.status not in ContestStatus.ALL:
                 raise HTTPException(status_code=400, detail="未知的场次状态: %s" % payload.status)
             contest.status = payload.status
-        if payload.enrollment_mode is not None:
-            contest.enrollment_mode = _validate_enrollment_mode(payload.enrollment_mode)
-
         roster = None
         if payload.clear_default_roster:
             contest.default_roster_id = None
@@ -353,18 +379,6 @@ def update_contest(
         ).scalar_one()
         online = sum(1 for a in ctx.registry.all(contest_id) if a.online)
         return _contest_out(contest, player_count, online, roster=roster)
-
-
-def _validate_enrollment_mode(raw: Optional[str]) -> str:
-    """校验注册方式。空值按原有行为理解 —— 老场次没这个字段。"""
-    if raw is None or raw == "":
-        return EnrollmentMode.PER_PLAYER_CODE
-    if raw not in EnrollmentMode.ALL:
-        raise HTTPException(
-            status_code=400,
-            detail="未知的注册方式: %s（可选 %s）" % (raw, " / ".join(EnrollmentMode.ALL)),
-        )
-    return raw
 
 
 def _resolve_roster(session, roster_id: Optional[int]) -> Optional[Roster]:
@@ -392,7 +406,7 @@ def _contest_out(
         created_at=_iso(contest.created_at) or "",
         default_roster_id=contest.default_roster_id,
         default_roster_name=(roster.name if roster is not None else None),
-        enrollment_mode=contest.effective_enrollment_mode,
+        note=contest.note,
     )
 
 
@@ -434,11 +448,12 @@ def _roster_entry_out(entry: RosterEntry) -> RosterEntryOut:
     )
 
 
-@router.get("/rosters", response_model=List[RosterOut])
+@router.get("/rosters", response_model=Page[RosterOut])
 def list_rosters(
+    page: PageParams = Depends(),
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
-) -> List[RosterOut]:
+) -> Page[RosterOut]:
     with ctx.db.session() as session:
         counts = dict(
             session.execute(
@@ -447,8 +462,10 @@ def list_rosters(
                 )
             ).all()
         )
-        rows = session.execute(select(Roster).order_by(Roster.name)).scalars()
-        return [_roster_out(row, counts.get(row.id, 0)) for row in rows]
+        rows = list(session.execute(select(Roster).order_by(Roster.name)).scalars())
+        return slice_page(
+            [_roster_out(row, counts.get(row.id, 0)) for row in rows], page
+        )
 
 
 @router.post("/rosters", response_model=RosterOut)
@@ -523,6 +540,7 @@ def update_roster(
 @router.delete("/rosters/{roster_id}", response_model=SimpleAck)
 def delete_roster(
     roster_id: int,
+    confirm: str = Query(..., min_length=1, max_length=200, description="原样输入名单名称"),
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> SimpleAck:
@@ -536,6 +554,7 @@ def delete_roster(
         roster = session.get(Roster, roster_id)
         if roster is None:
             return SimpleAck(ok=True, detail="名单不存在")
+        require_confirm(roster.name, confirm, "名单名称")
         name = roster.name
         referenced = session.execute(
             select(func.count(Contest.id)).where(Contest.default_roster_id == roster_id)
@@ -662,9 +681,10 @@ def update_roster_entry(
         return _roster_entry_out(entry)
 
 
-@router.delete("/rosters/{roster_id}/entries", response_model=SimpleAck)
+@router.post("/rosters/{roster_id}/entries/clear", response_model=SimpleAck)
 def clear_roster_entries(
     roster_id: int,
+    payload: ConfirmIn,
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> SimpleAck:
@@ -673,6 +693,7 @@ def clear_roster_entries(
         roster = session.get(Roster, roster_id)
         if roster is None:
             raise HTTPException(status_code=404, detail="名单不存在")
+        require_confirm(roster.name, payload.confirm, "名单名称")
         removed = 0
         for entry in session.execute(
             select(RosterEntry).where(RosterEntry.roster_id == roster_id)
@@ -686,6 +707,7 @@ def clear_roster_entries(
 @router.delete("/roster-entries/{entry_id}", response_model=SimpleAck)
 def delete_roster_entry(
     entry_id: int,
+    confirm: str = Query(..., min_length=1, max_length=200, description="原样输入考号"),
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> SimpleAck:
@@ -693,6 +715,7 @@ def delete_roster_entry(
         entry = session.get(RosterEntry, entry_id)
         if entry is None:
             return SimpleAck(ok=True, detail="条目不存在")
+        require_confirm(entry.player_no, confirm, "考号")
         player_no = entry.player_no
         session.delete(entry)
     return SimpleAck(ok=True, detail="已从名单中移除 %s" % player_no)
@@ -765,19 +788,20 @@ def apply_roster_to_contest(
 
 
 # --------------------------------------------------------------------------- #
-# 机器配对（统一密钥注册）
+# 机器配对
 # --------------------------------------------------------------------------- #
 #
-# 统一密钥把"发 50 个注册码"变成"镜像里放一把钥匙"，代价是服务端**不再知道
-# 哪台机器是谁**。配对就是把这个信息补回来的那一步，而它是整个流程里唯一
-# 需要人到场确认的环节 —— 所以这里的设计目标只有一个：让教师确认得又快又准。
+# 机器绑的是**名单里的某个人**，不是某场比赛的选手 —— 所以配对是永久的，
+# 同一个学生换一场比赛不用重新配。教师在这里做的事只有一件：
+# 把"机器上显示的那串 6 位数字"对应到名单里的一个人。
 
 
-@router.get("/machines/pending", response_model=List[PendingMachineOut])
+@router.get("/machines/pending", response_model=Page[PendingMachineOut])
 def list_pending_machines(
+    page: PageParams = Depends(),
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
-) -> List[PendingMachineOut]:
+) -> Page[PendingMachineOut]:
     """待配对的机器。
 
     按**最后心跳时间倒序**：教师站在机器前读配对码时，那台机器刚刚才心跳过，
@@ -785,45 +809,53 @@ def list_pending_machines(
     """
     now = utcnow()
     with ctx.db.session() as session:
-        claims = list(
+        # 这个集合会无限增长（每次重装 Agent 都是一条新行），所以真分页
+        total = session.execute(
+            select(func.count(Agent.id)).where(
+                Agent.roster_entry_id.is_(None), Agent.revoked_at.is_(None)
+            )
+        ).scalar_one()
+        agents = list(
             session.execute(
-                select(MachineClaim)
-                .where(MachineClaim.revoked_at.is_(None))
-                .order_by(MachineClaim.last_seen_at.desc().nullslast(), MachineClaim.id)
+                select(Agent)
+                .where(Agent.roster_entry_id.is_(None), Agent.revoked_at.is_(None))
+                .order_by(Agent.last_seen_at.desc().nullslast(), Agent.id)
+                .limit(page.limit)
+                .offset(page.offset)
             ).scalars()
         )
         peers = _fingerprint_peer_counts(session)
 
     result = []
-    for claim in claims:
+    for agent in agents:
         expires_in = None
-        if claim.pair_code_expires_at is not None:
-            expires_in = int((claim.pair_code_expires_at - now).total_seconds())
+        if agent.pair_code_expires_at is not None:
+            expires_in = int((agent.pair_code_expires_at - now).total_seconds())
         result.append(
             PendingMachineOut(
-                id=claim.id,
-                machine_id=claim.machine_id or "",
-                hostname=claim.hostname,
-                os_info=claim.os_info,
-                agent_version=claim.agent_version,
-                machine_uuid=claim.machine_uuid,
-                machine_fingerprint=claim.machine_fingerprint,
-                created_at=_iso(claim.created_at) or "",
-                last_seen_at=_iso(claim.last_seen_at),
+                id=agent.id,
+                machine_id=agent.machine_id,
+                hostname=agent.hostname,
+                os_info=agent.os_info,
+                agent_version=agent.agent_version,
+                machine_uuid=agent.machine_uuid,
+                machine_fingerprint=agent.machine_fingerprint,
+                created_at=_iso(agent.enrolled_at) or "",
+                last_seen_at=_iso(agent.last_seen_at),
                 seconds_since_seen=(
-                    (now - claim.last_seen_at).total_seconds()
-                    if claim.last_seen_at is not None
+                    (now - agent.last_seen_at).total_seconds()
+                    if agent.last_seen_at is not None
                     else None
                 ),
                 pair_code_expires_in=expires_in,
-                fingerprint_peers=peers.get(claim.machine_fingerprint or "", 0),
+                fingerprint_peers=peers.get(agent.machine_fingerprint or "", 0),
             )
         )
-    return result
+    return page_of(result, total, page)
 
 
 def _fingerprint_peer_counts(session) -> Dict[str, int]:
-    """每个指纹上总共挂了几台机器（含已配对的）。
+    """每个指纹上总共挂了几台机器。
 
     含已配对的是有意的：告警要回答的是"这份镜像是不是克隆出来的"，
     而克隆出来的机器里，先配对好的那几台恰恰是证据。
@@ -835,20 +867,15 @@ def _fingerprint_peer_counts(session) -> Dict[str, int]:
             .group_by(Agent.machine_fingerprint)
         ).all()
     )
-    for (fingerprint, count) in session.execute(
-        select(MachineClaim.machine_fingerprint, func.count(MachineClaim.id))
-        .where(MachineClaim.machine_fingerprint.isnot(None), MachineClaim.revoked_at.is_(None))
-        .group_by(MachineClaim.machine_fingerprint)
-    ).all():
-        counts[fingerprint] = counts.get(fingerprint, 0) + int(count)
-    return {str(k): int(v) for k, v in counts.items()}
+    return {str(key): int(value) for key, value in counts.items()}
 
 
-@router.get("/machines/clone-alerts", response_model=List[CloneAlertOut])
+@router.get("/machines/clone-alerts", response_model=Page[CloneAlertOut])
 def list_clone_alerts(
+    page: PageParams = Depends(),
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
-) -> List[CloneAlertOut]:
+) -> Page[CloneAlertOut]:
     """疑似克隆镜像：多台机器共用同一个硬件指纹。
 
     正常情况下每台物理机的 SMBIOS UUID 都不同。撞了指纹说明镜像是在某台机器
@@ -863,140 +890,138 @@ def list_clone_alerts(
                 .order_by(Agent.machine_fingerprint)
             ).scalars()
         )
-        claims = list(
-            session.execute(
-                select(MachineClaim)
-                .where(MachineClaim.machine_fingerprint.isnot(None), MachineClaim.revoked_at.is_(None))
-            ).scalars()
-        )
 
     grouped: Dict[str, List[str]] = {}
-    for row in agents:
-        grouped.setdefault(row.machine_fingerprint or "", []).append(
-            row.hostname or row.machine_id or "?"
-        )
-    for row in claims:
-        grouped.setdefault(row.machine_fingerprint or "", []).append(
-            "%s（待配对）" % (row.hostname or row.machine_id or "?")
-        )
+    for agent in agents:
+        label = agent.hostname or agent.machine_id or "?"
+        if agent.roster_entry_id is None:
+            label += "（待配对）"
+        grouped.setdefault(agent.machine_fingerprint or "", []).append(label)
 
-    return [
+    alerts = [
         CloneAlertOut(fingerprint=fingerprint, machine_count=len(names), hostnames=sorted(names))
         for fingerprint, names in sorted(grouped.items())
         if len(names) > 1
     ]
+    return slice_page(alerts, page)
 
 
-@router.post("/machines/claim-by-code", response_model=SimpleAck)
-def claim_machine_by_code(
-    payload: ClaimByCodeIn,
+@router.post("/machines/bind-by-code", response_model=BindResultOut)
+def bind_machine_by_code(
+    payload: BindByCodeIn,
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
-) -> SimpleAck:
-    """按配对码认领：机器上显示什么，教师就输什么。
+) -> BindResultOut:
+    """按配对码配对：机器上显示什么，教师就输什么。
 
-    遍历全部待认领机器逐个比对哈希。待认领队列通常只有个位数，
-    遍历完全可接受 —— 而按哈希直接查表需要一个"码 → 机器"的索引，
-    那意味着要存明文或者可逆的东西，不值得为这点性能换。
+    这是主路径。配对码六位数字、限时、用一次即作废 —— 它**只在绑定时用**，
+    配对之后认机器靠 machine_uuid。
     """
     now = utcnow()
     with ctx.db.session() as session:
-        player = session.get(Player, payload.player_id)
-        if player is None:
-            raise HTTPException(status_code=404, detail="选手不存在")
-        contest = session.get(Contest, player.contest_id)
-        if contest is None:  # pragma: no cover
-            raise HTTPException(status_code=404, detail="场次不存在")
+        entry = session.get(RosterEntry, payload.roster_entry_id)
+        if entry is None:
+            raise HTTPException(status_code=404, detail="名单条目不存在")
 
-        matched = None
-        for claim in session.execute(
-            select(MachineClaim).where(MachineClaim.revoked_at.is_(None))
-        ).scalars():
-            if enrollment.claim_code_is_valid(claim, payload.pair_code, now):
-                matched = claim
-                break
-
-        if matched is None:
+        agent = enrollment.find_unbound_by_pair_code(session, payload.pair_code, now)
+        if agent is None:
             # 不区分"没这个码"和"码过期了"：对外说法一致，
-            # 免得有人拿它当预言机去猜码。
-            raise HTTPException(
-                status_code=404,
-                detail="配对码不存在或已过期。让机器重新注册一次即可刷新（重启 Agent 服务）。",
+            # 免得有人拿它当预言机去猜码
+            raise ApiError(
+                404,
+                "pair_code_invalid",
+                "配对码不存在或已过期。让机器重新注册一次即可刷新（重启 Agent 服务）。",
             )
-
-        try:
-            result = enrollment.claim_machine(session, matched, player, contest, now)
-        except enrollment.BootstrapRejected as exc:
-            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
-
-        player_no = result.player_no
-
-    return SimpleAck(ok=True, detail="已把 %s 配对给选手 %s" % (payload.pair_code, player_no))
+        return _do_bind(session, agent, entry, now, ctx)
 
 
-@router.post("/machines/{claim_id}/claim", response_model=SimpleAck)
-def claim_machine_by_id(
-    claim_id: int,
-    payload: ClaimMachineIn,
+@router.post("/machines/{agent_id}/bind", response_model=BindResultOut)
+def bind_machine_by_id(
+    agent_id: int,
+    payload: BindMachineIn,
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
-) -> SimpleAck:
-    """按机器认领（教师从列表里按主机名点选）。
+) -> BindResultOut:
+    """按机器配对（教师从列表里按主机名点选）。
 
     给了 ``pair_code`` 就必须对得上 —— 机器名可能是重复的（克隆镜像、
     默认 hostname），而配对码是唯一能证明"教师确实站在这台机器前面"的东西。
     """
     now = utcnow()
     with ctx.db.session() as session:
-        claim = session.get(MachineClaim, claim_id)
-        if claim is None or claim.revoked_at is not None:
+        agent = session.get(Agent, agent_id)
+        if agent is None or agent.revoked_at is not None:
             raise HTTPException(status_code=404, detail="这台机器不在待配对列表里")
 
-        if payload.pair_code:
-            if not enrollment.claim_code_is_valid(claim, payload.pair_code, now):
-                raise HTTPException(
-                    status_code=400,
-                    detail="配对码不对（或已过期）。请对着机器上的配对码重新输入。",
-                )
+        if payload.pair_code and not enrollment.pair_code_is_valid(
+            agent, payload.pair_code, now
+        ):
+            raise ApiError(
+                400,
+                "pair_code_invalid",
+                "配对码不对（或已过期）。请对着机器上的配对码重新输入。",
+            )
 
-        player = session.get(Player, payload.player_id)
-        if player is None:
-            raise HTTPException(status_code=404, detail="选手不存在")
-        contest = session.get(Contest, player.contest_id)
-        if contest is None:  # pragma: no cover
-            raise HTTPException(status_code=404, detail="场次不存在")
-
-        try:
-            result = enrollment.claim_machine(session, claim, player, contest, now)
-        except enrollment.BootstrapRejected as exc:
-            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
-
-        player_no = result.player_no
-
-    return SimpleAck(ok=True, detail="已配对给选手 %s" % player_no)
+        entry = session.get(RosterEntry, payload.roster_entry_id)
+        if entry is None:
+            raise HTTPException(status_code=404, detail="名单条目不存在")
+        return _do_bind(session, agent, entry, now, ctx)
 
 
-@router.delete("/machines/pending/{claim_id}", response_model=SimpleAck)
+def _do_bind(
+    session, agent: Agent, entry: RosterEntry, now, ctx: AppContext = None
+) -> BindResultOut:
+    try:
+        outcome = enrollment.bind_machine(session, agent, entry, now)
+    except enrollment.BootstrapRejected as exc:
+        # 把服务层的 StatusCode + Code 原样透出去：前端要拿 code 区分
+        # "这台机器已经属于别人"和"这个人已经有机器了"（两者的补救动作不同）
+        raise ApiError(exc.status_code, exc.code, exc.detail)
+
+    if ctx is not None:
+        # 配对码是一次性的：绑上了就把它从内存里忘掉，
+        # 否则哪天解绑之后服务端还会回一个早就作废的数字
+        ctx.pair_codes.forget(agent.id)
+
+    name = outcome.entry.roster.name if outcome.entry.roster else ""
+    return BindResultOut(
+        agent_id=outcome.agent.id,
+        roster_entry_id=outcome.entry.id,
+        player_no=outcome.entry.player_no,
+        roster_name=name,
+        detail="已把机器配对给 %s%s。它下一轮心跳就会去找自己该在的场次"
+        % (outcome.entry.player_no, "（%s）" % outcome.entry.name if outcome.entry.name else ""),
+    )
+
+
+@router.delete("/machines/pending/{agent_id}", response_model=SimpleAck)
 def revoke_pending_machine(
-    claim_id: int,
+    agent_id: int,
+    confirm: str = Query(..., min_length=1, max_length=200, description="原样输入主机名"),
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> SimpleAck:
     """把一台待配对的机器从列表里去掉（认错机器、测试机、刷注册的垃圾）。
 
-    只是吊销它的临时凭据 —— 那台机器下次心跳会拿到 401，然后按配置重新注册。
-    真正的垃圾机器应该先吊销统一密钥，否则它会一直回来。
+    作废它的凭据 —— 那台机器下次心跳会拿到 401，然后等下一次开机由注册单元
+    重新注册。真正的垃圾机器应该先吊销统一密钥，否则它会一直回来。
     """
     with ctx.db.session() as session:
-        claim = session.get(MachineClaim, claim_id)
-        if claim is None:
-            return SimpleAck(ok=True, detail="这台机器已经不在列表里")
-        claim.revoked_at = utcnow()
+        agent = session.get(Agent, agent_id)
+        if agent is None or agent.roster_entry_id is not None:
+            return SimpleAck(ok=True, detail="这台机器不在待配对列表里")
+        # 主机名可能是空的（Agent 读不到 hostname 时），退回 machine_id 作为标识 ——
+        # 空字符串会让"原样输入"变成一个谁都不用输入的空操作
+        require_confirm(agent.hostname or agent.machine_id, confirm, "机器名")
+        agent.revoked_at = utcnow()
+    ctx.registry.forget(agent_id)
+    ctx.pair_codes.forget(agent_id)
     return SimpleAck(ok=True, detail="已移除")
 
 
-@router.delete("/machines/pending", response_model=SimpleAck)
+@router.post("/machines/pending/clear", response_model=SimpleAck)
 def clear_pending_machines(
+    payload: ConfirmIn,
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> SimpleAck:
@@ -1005,18 +1030,22 @@ def clear_pending_machines(
     典型场景：机房做镜像时忘了通用化，50 台克隆机全冒出来了 ——
     教师修好镜像之后要把这一堆清掉重来。
 
-    **先吊销统一密钥再清**，否则那批机器下次心跳拿到 401、接着重新注册，
-    名单立刻又满一遍。返回里会提醒这一点。
+    这是**范围**删除（没有单个名字可打），所以确认内容是全局面量 ``all``。
+
+    **先吊销统一密钥再清**，否则那批机器下次心跳拿到 401、等下次开机又回来。
     """
+    require_confirm(GLOBAL_CONFIRM, payload.confirm, "清空确认")
     with ctx.db.session() as session:
         rows = list(
             session.execute(
-                select(MachineClaim).where(MachineClaim.revoked_at.is_(None))
+                select(Agent).where(
+                    Agent.roster_entry_id.is_(None), Agent.revoked_at.is_(None)
+                )
             ).scalars()
         )
         now = utcnow()
-        for claim in rows:
-            claim.revoked_at = now
+        for agent in rows:
+            agent.revoked_at = now
         if rows:
             session.add(
                 EventLog(
@@ -1025,13 +1054,20 @@ def clear_pending_machines(
                     message="清空待配对机器 %d 台" % len(rows),
                 )
             )
+        ids = [agent.id for agent in rows]
+
+    for agent_id in ids:
+        ctx.registry.forget(agent_id)
+        ctx.pair_codes.forget(agent_id)
 
     detail = "已移除 %d 台待配对机器" % len(rows)
     if rows:
-        detail += "。它们下次心跳会重新注册 —— 要挡住的话请先吊销统一密钥"
+        detail += "。它们下次开机还会回来 —— 要挡住请先吊销统一密钥"
     return SimpleAck(ok=True, detail=detail)
 
 
+# --------------------------------------------------------------------------- #
+# 统一注册密钥
 # --------------------------------------------------------------------------- #
 # 统一注册密钥
 # --------------------------------------------------------------------------- #
@@ -1050,14 +1086,17 @@ def _bootstrap_key_out(key: BootstrapKey) -> BootstrapKeyOut:
     )
 
 
-@router.get("/bootstrap-keys", response_model=List[BootstrapKeyOut])
+@router.get("/bootstrap-keys", response_model=Page[BootstrapKeyOut])
 def list_bootstrap_keys(
+    page: PageParams = Depends(),
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
-) -> List[BootstrapKeyOut]:
+) -> Page[BootstrapKeyOut]:
     with ctx.db.session() as session:
-        rows = session.execute(select(BootstrapKey).order_by(BootstrapKey.id)).scalars()
-        return [_bootstrap_key_out(row) for row in rows]
+        rows = list(
+            session.execute(select(BootstrapKey).order_by(BootstrapKey.id)).scalars()
+        )
+        return slice_page([_bootstrap_key_out(row) for row in rows], page)
 
 
 @router.post("/bootstrap-keys", response_model=BootstrapKeyIssuedOut)
@@ -1162,16 +1201,22 @@ def delete_bootstrap_key(
 # --------------------------------------------------------------------------- #
 
 
-@router.post("/contests/{contest_id}/players", response_model=List[PlayerOut])
+@router.post("/contests/{contest_id}/players", response_model=PlayerImportOut)
 def import_players(
     contest_id: int,
     payload: List[PlayerUpsert],
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
-) -> List[PlayerOut]:
-    """批量导入/更新选手。按 ``player_no`` 幂等 upsert。"""
+) -> PlayerImportOut:
+    """批量导入/更新选手。按 ``player_no`` 幂等 upsert。
+
+    **这不是集合读取，所以不用列表信封**（``docs/api-conventions.md`` §2）：
+    它返回的是"这次导入干了什么"，前端要显示的是 ``created``/``updated``。
+    顺带回传受影响的行，是因为导入之后常常紧接着"应用名单""批量配对"，
+    调用方需要那些 id，不该再查一次。
+    """
     if not payload:
-        return []
+        return PlayerImportOut()
     if len(payload) > 2000:
         raise HTTPException(status_code=413, detail="单次最多导入 2000 名选手")
 
@@ -1187,12 +1232,17 @@ def import_players(
             ).scalars()
         }
         touched: List[Player] = []
+        created = 0
+        updated = 0
         for item in payload:
             row = existing.get(item.player_no)
             if row is None:
                 row = Player(contest_id=contest_id, player_no=item.player_no)
                 session.add(row)
                 existing[item.player_no] = row
+                created += 1
+            else:
+                updated += 1
             row.name = item.name
             row.seat = item.seat
             row.group_name = item.group_name
@@ -1200,31 +1250,48 @@ def import_players(
 
         # 必须先 flush 才能拿到自增主键 —— 新插入的行在 flush 前 id 为 None
         session.flush()
-        return [
-            _player_out(row, has_agent=False, online=False, file_count=0, last_tick=None)
-            for row in touched
-        ]
+        return PlayerImportOut(
+            created=created,
+            updated=updated,
+            players=[
+                _player_out(row, has_agent=False, online=False, file_count=0, last_tick=None)
+                for row in touched
+            ],
+        )
 
 
-@router.get("/contests/{contest_id}/players", response_model=List[PlayerOut])
+@router.get("/contests/{contest_id}/players", response_model=Page[PlayerOut])
 def list_players(
     contest_id: int,
+    page: PageParams = Depends(),
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
-) -> List[PlayerOut]:
+) -> Page[PlayerOut]:
     with ctx.db.session() as session:
+        total = session.execute(
+            select(func.count(Player.id)).where(Player.contest_id == contest_id)
+        ).scalar_one()
         players = list(
             session.execute(
-                select(Player).where(Player.contest_id == contest_id).order_by(Player.player_no)
+                select(Player)
+                .where(Player.contest_id == contest_id)
+                .order_by(Player.player_no)
+                .limit(page.limit)
+                .offset(page.offset)
             ).scalars()
         )
-        agent_counts = dict(
-            session.execute(
-                select(Agent.player_id, func.count(Agent.id))
+        # 机器数是**跨场次**的：机器绑的是人（名单条目），不是这场比赛的选手记录。
+        # 所以按准考证号去数，而不是按 player_id —— 同一个人在别的场次绑的机器
+        # 也该算"他有机器"，否则每一场的列表都会显示成"未注册"。
+        machine_counts = {
+            player_no: count
+            for player_no, count in session.execute(
+                select(RosterEntry.player_no, func.count(Agent.id))
+                .join(Agent, Agent.roster_entry_id == RosterEntry.id)
                 .where(Agent.revoked_at.is_(None))
-                .group_by(Agent.player_id)
+                .group_by(RosterEntry.player_no)
             ).all()
-        )
+        }
         file_counts = dict(
             session.execute(
                 select(SourceFile.player_id, func.count(SourceFile.id))
@@ -1242,13 +1309,13 @@ def list_players(
         result.append(
             _player_out(
                 player,
-                has_agent=bool(agent_counts.get(player.id, 0)),
+                has_agent=bool(machine_counts.get(player.player_no, 0)),
                 online=bool(runtime and runtime.online),
                 file_count=file_counts.get(player.id, 0),
                 last_tick=runtime.last_tick_at if runtime else None,
             )
         )
-    return result
+    return page_of(result, total, page)
 
 
 def _player_out(
@@ -1319,10 +1386,10 @@ def update_player(
         player.group_name = payload.group_name
         session.flush()
 
-        agent_count = session.execute(
-            select(func.count(Agent.id)).where(
-                Agent.player_id == player_id, Agent.revoked_at.is_(None)
-            )
+        machine_count = session.execute(
+            select(func.count(Agent.id))
+            .join(RosterEntry, Agent.roster_entry_id == RosterEntry.id)
+            .where(RosterEntry.player_no == player.player_no, Agent.revoked_at.is_(None))
         ).scalar_one()
         file_count = session.execute(
             select(func.count(SourceFile.id)).where(
@@ -1334,7 +1401,7 @@ def update_player(
         )
         return _player_out(
             player,
-            has_agent=bool(agent_count),
+            has_agent=bool(machine_count),
             online=bool(runtime and runtime.online),
             file_count=int(file_count),
             last_tick=runtime.last_tick_at if runtime else None,
@@ -1344,19 +1411,24 @@ def update_player(
 @router.delete("/players/{player_id}", response_model=SimpleAck)
 def delete_player(
     player_id: int,
+    confirm: str = Query(..., min_length=1, max_length=200, description="原样输入考号"),
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> SimpleAck:
     """删一名选手，连同他的代码台账与成绩（外键级联）。
 
-    如果这名选手名下有机器，**先把机器一并作废**（吊销凭据）——
-    否则那台机器下次 tick 会以 401 收到"凭据无效"，然后按配置重新注册，
-    又冒出一个新选手。让它在服务端明确作废，比让它在客户端反复重试好。
+    **不动他的机器。** 机器绑的是名单里的那个人，不是这场比赛的这条选手记录 ——
+    删掉他在本场的参赛记录，不等于要作废他那台机器：同一个学生明天还有比赛，
+    机器明天照样要用。作废机器请用「作废机器」，那是另一件事、也该由人显式做。
+
+    这条在一次误删里是救命的：教师清场时删掉整场选手，如果连机器一起作废，
+    第二天的比赛就得重新配对 50 台。
     """
     with ctx.db.session() as session:
         player = session.get(Player, player_id)
         if player is None:
             return SimpleAck(ok=True, detail="选手不存在")
+        require_confirm(player.player_no, confirm, "考号")
 
         contest_id = player.contest_id
         player_no = player.player_no
@@ -1366,12 +1438,14 @@ def delete_player(
         runs = session.execute(
             select(func.count(JudgeRun.id)).where(JudgeRun.player_id == player_id)
         ).scalar_one()
-        agents = list(
-            session.execute(select(Agent).where(Agent.player_id == player_id)).scalars()
-        )
-        agent_ids = [a.id for a in agents]
-        for agent in agents:
-            agent.revoked_at = utcnow()
+        # 只统计"有多少台机器绑到这个人身上"，用于回执 —— 但一台都不动
+        bound_machines = session.execute(
+            select(func.count(Agent.id))
+            .join(RosterEntry, Agent.roster_entry_id == RosterEntry.id)
+            .where(
+                RosterEntry.player_no == player.player_no, Agent.revoked_at.is_(None)
+            )
+        ).scalar_one()
 
         session.delete(player)
         session.add(
@@ -1379,30 +1453,23 @@ def delete_player(
                 level="warning",
                 category="player_delete",
                 contest_id=contest_id,
-                message="删除选手 %s（代码 %d 条，成绩 %d 条，机器 %d 台）"
-                % (player_no, files, runs, len(agents)),
+                message="删除选手 %s（代码 %d 条，成绩 %d 条）"
+                % (player_no, files, runs),
             )
         )
 
-    for agent_id in agent_ids:
-        ctx.registry.forget(agent_id)
-
-    return SimpleAck(
-        ok=True,
-        detail="已删除选手 %s（代码 %d 条，成绩 %d 条%s）"
-        % (
-            player_no,
-            files,
-            runs,
-            "，%d 台机器已作废" % len(agents) if agents else "",
-        ),
-    )
+    detail = "已删除选手 %s（代码 %d 条，成绩 %d 条）" % (player_no, files, runs)
+    if bound_machines:
+        detail += "。他的 %d 台机器没有动 —— 那些机器绑的是人，不是这场比赛的记录" % (
+            bound_machines
+        )
+    return SimpleAck(ok=True, detail=detail)
 
 
-@router.delete("/contests/{contest_id}/players", response_model=SimpleAck)
+@router.post("/contests/{contest_id}/players/clear", response_model=SimpleAck)
 def clear_players(
     contest_id: int,
-    keep_with_submissions: bool = True,
+    payload: PlayerClearIn,
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> SimpleAck:
@@ -1412,12 +1479,16 @@ def clear_players(
     理由和名单应用里的 ``prune`` 一样 —— 顺手把参赛者的提交一起删掉是不可逆的
     事故，而且它不报错。真要连提交一起清，得显式传 ``false``（界面上的按钮
     会写明这一点）。
+
+    确认内容是**场次 slug**：这次删的不是某一个选手，而是"这场比赛的整份名单"。
     """
     with ctx.db.session() as session:
         contest = session.get(Contest, contest_id)
         if contest is None:
             raise HTTPException(status_code=404, detail="场次不存在")
+        require_confirm(contest.slug, payload.confirm, "场次标识")
 
+        keep_with_submissions = payload.keep_with_submissions
         players = list(
             session.execute(select(Player).where(Player.contest_id == contest_id)).scalars()
         )
@@ -1456,202 +1527,91 @@ def clear_players(
 # --------------------------------------------------------------------------- #
 
 
-@router.post("/players/{player_id}/enroll-code", response_model=EnrollCodeOut)
-def issue_enroll_code(
-    player_id: int,
-    ctx: AppContext = Depends(get_ctx),
-    admin: AdminIdentity = Depends(require_admin),
-) -> EnrollCodeOut:
-    """签发（或重新签发）该选手的注册码。
-
-    注册码长期有效、可重复使用 —— 它是"机器凭据种子"，供快照还原后自愈。
-
-    **重新签发只吊销没绑过机器的那些**。已经绑定的那把是那台机器"还原之后还能
-    回来"的唯一依据，顺手撤掉它的表现是"某台机器快照还原后再也连不上" ——
-    而现场几乎不可能联想到是重新签发注册码那一步干的。
-
-    真的要停用某把已绑定的码，请用「撤销」明确地撤掉它。
-    """
-    now = utcnow()
-    raw_code = new_enroll_code(ctx.settings.enroll_code_bytes)
-
-    with ctx.db.session() as session:
-        player = session.get(Player, player_id)
-        if player is None:
-            raise HTTPException(status_code=404, detail="选手不存在")
-
-        replaced = 0
-        kept_bound = 0
-        for old in session.execute(
-            select(EnrollCode).where(
-                EnrollCode.player_id == player_id,
-                EnrollCode.revoked_at.is_(None),
-            )
-        ).scalars():
-            if old.machine_id is not None:
-                # 已绑定：那是机器的自愈种子，不动它
-                kept_bound += 1
-                continue
-            old.revoked_at = now
-            replaced += 1
-
-        session.add(
-            EnrollCode(
-                code_hash=hash_enroll_code(raw_code),
-                player_id=player_id,
-                note="为选手 %s 签发" % player.player_no,
-            )
-        )
-        note = "长期有效；机器还原后可重复使用"
-        if replaced:
-            note += "（此前 %d 把未绑定的码已作废）" % replaced
-        if kept_bound:
-            note += "（保留了 %d 把已绑定的码，它们是机器还原后的自愈种子）" % kept_bound
-        return EnrollCodeOut(
-            player_id=player_id,
-            player_no=player.player_no,
-            code=raw_code,
-            expires_at=None,
-            note=note,
-        )
-
-
-@router.get("/contests/{contest_id}/enroll-codes", response_model=List[EnrollCodeStateOut])
-def list_enroll_codes(
-    contest_id: int,
-    include_revoked: bool = False,
-    ctx: AppContext = Depends(get_ctx),
-    admin: AdminIdentity = Depends(require_admin),
-) -> List[EnrollCodeStateOut]:
-    """列出本场次的注册码**状态**。
-
-    刻意不返回码本身 —— 库里只有哈希，明文只在签发那一刻出现过。
-    这个接口回答的是"谁手上还有一把能用的钥匙、谁已经用过了"，
-    而不是"那把钥匙长什么样"。
-    """
-    with ctx.db.session() as session:
-        stmt = (
-            select(EnrollCode, Player.player_no)
-            .join(Player, EnrollCode.player_id == Player.id)
-            .where(Player.contest_id == contest_id)
-            .order_by(EnrollCode.id.desc())
-        )
-        if not include_revoked:
-            stmt = stmt.where(EnrollCode.revoked_at.is_(None))
-        return [
-            _enroll_code_state(row, player_no) for row, player_no in session.execute(stmt)
-        ]
-
-
-def _enroll_code_state(row: EnrollCode, player_no: str) -> EnrollCodeStateOut:
-    return EnrollCodeStateOut(
-        id=row.id,
-        player_id=row.player_id,
-        player_no=player_no,
-        # 已绑定机器 = 这把钥匙已经用过、而且绑在某台机器上了
-        bound_machine_id=row.machine_id,
-        usable=row.revoked_at is None
-        and (row.expires_at is None or row.expires_at > utcnow()),
-        created_at=_iso(row.created_at),
-        expires_at=_iso(row.expires_at),
-        revoked_at=_iso(row.revoked_at),
-    )
-
-
-@router.delete("/enroll-codes/{code_id}", response_model=SimpleAck)
-def revoke_enroll_code(
-    code_id: int,
-    ctx: AppContext = Depends(get_ctx),
-    admin: AdminIdentity = Depends(require_admin),
-) -> SimpleAck:
-    """撤销一把注册码。
-
-    **已经用它注册过的机器不受影响** —— 那台机器手里是各自的 token。
-    撤销只挡住"还想用这把码注册/重新注册"的机器。这一点要说清楚，
-    否则教师会以为撤销会把机器踢下线而不敢动。
-    """
-    with ctx.db.session() as session:
-        code = session.get(EnrollCode, code_id)
-        if code is None:
-            return SimpleAck(ok=True, detail="注册码不存在")
-        if code.revoked_at is not None:
-            return SimpleAck(ok=True, detail="这把注册码已经是撤销状态")
-        player = session.get(Player, code.player_id)
-        code.revoked_at = utcnow()
-        session.add(
-            EventLog(
-                level="warning",
-                category="enroll_code",
-                contest_id=player.contest_id if player else None,
-                player_id=code.player_id,
-                message="撤销注册码 #%d（选手 %s 未绑定的那把）"
-                % (code.id, player.player_no if player else "?"),
-            )
-        )
-        player_no = player.player_no if player else "?"
-
-    return SimpleAck(
-        ok=True,
-        detail="已撤销 %s 的注册码；已经注册过的机器不受影响" % player_no,
-    )
-
-
-@router.delete("/contests/{contest_id}/enroll-codes", response_model=SimpleAck)
-def revoke_contest_enroll_codes(
-    contest_id: int,
-    ctx: AppContext = Depends(get_ctx),
-    admin: AdminIdentity = Depends(require_admin),
-) -> SimpleAck:
-    """撤销本场次全部**尚未绑定机器**的注册码。
-
-    只撤销未绑定的那些：已经绑了机器的码是那台机器的"还原自愈种子"，
-    撤销它等于下次快照还原后那台机器再也回不来。要停用那台机器，
-    应该去作废 Agent 凭据，而不是偷偷抽掉它的自愈路径 ——
-    后者在考场上的表现是"某台机器还原之后再也连不上"，很难查。
-    """
-    now = utcnow()
-    with ctx.db.session() as session:
-        active = list(
-            session.execute(
-                select(EnrollCode)
-                .join(Player, EnrollCode.player_id == Player.id)
-                .where(Player.contest_id == contest_id, EnrollCode.revoked_at.is_(None))
-            ).scalars()
-        )
-        # 已绑定机器的那些是"还原自愈种子"，不在这次撤销范围内
-        rows = [code for code in active if code.machine_id is None]
-        kept = len(active) - len(rows)
-        for code in rows:
-            code.revoked_at = now
-        if rows:
-            session.add(
-                EventLog(
-                    level="warning",
-                    category="enroll_code",
-                    contest_id=contest_id,
-                    message="撤销本场次 %d 把未绑定的注册码（保留 %d 把已绑定的）"
-                    % (len(rows), kept),
-                )
-            )
-
-    detail = "已撤销 %d 把未绑定的注册码" % len(rows)
-    if kept:
-        detail += "；%d 把已绑定的保留（它们是机器还原后的自愈种子）" % kept
-    return SimpleAck(ok=True, detail=detail)
-
 
 # --------------------------------------------------------------------------- #
 # 在线状态 / 文件台账 / 审计
 # --------------------------------------------------------------------------- #
 
 
-@router.get("/contests/{contest_id}/agents", response_model=List[AgentRuntimeOut])
+@router.get("/contests/{contest_id}/agents", response_model=Page[AgentRuntimeOut])
 def list_agents(
     contest_id: int,
+    page: PageParams = Depends(),
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
-) -> List[AgentRuntimeOut]:
-    return [AgentRuntimeOut(**a.to_public_dict()) for a in ctx.registry.all(contest_id)]
+) -> Page[AgentRuntimeOut]:
+    """这场比赛的机器台账 + 在线状态。
+
+    **台账来自数据库，在线状态来自内存注册表。** 两者都要，缺一不可：
+
+    * 只读注册表的话，机器在"配对完成"到"第一次心跳"之间是**看不见的** ——
+      而教师刚配对完，正是最想确认"它到底认到没有"的那一刻
+    * 只读库的话，就永远不知道谁在线
+
+    所以先按"绑的人在这场比赛的名单里"从库里捞出全部机器（这就是台账），
+    再用注册表里的心跳信息盖上在线状态。还没心跳过的机器显示为离线。
+    """
+    with ctx.db.session() as session:
+        contest = session.get(Contest, contest_id)
+        if contest is None:
+            raise HTTPException(status_code=404, detail="场次不存在")
+
+        players = {
+            row.player_no: row
+            for row in session.execute(
+                select(Player).where(Player.contest_id == contest_id)
+            ).scalars()
+        }
+        if not players:
+            return slice_page([], page)
+
+        # 机器绑的是"人"，而这个人算不算"这场比赛的人"取决于名单有没有被应用。
+        # 显式指定了别的场次的机器不在这里出现 —— 它已经明确说了自己归哪一场。
+        agents = list(
+            session.execute(
+                select(Agent)
+                .join(RosterEntry, Agent.roster_entry_id == RosterEntry.id)
+                .where(
+                    RosterEntry.player_no.in_(list(players.keys())),
+                    Agent.revoked_at.is_(None),
+                    or_(Agent.contest_id.is_(None), Agent.contest_id == contest_id),
+                )
+                .order_by(Agent.id)
+            ).scalars()
+        )
+        slug = contest.slug
+        no_by_entry = {
+            entry.id: entry.player_no
+            for entry in session.execute(
+                select(RosterEntry).where(RosterEntry.id.in_([a.roster_entry_id for a in agents]))
+            ).scalars()
+        }
+
+    items = []
+    for agent in agents:
+        player = players.get(no_by_entry.get(agent.roster_entry_id, ""))
+        if player is None:  # pragma: no cover - 上面的 join 已经保证了
+            continue
+        runtime = ctx.registry.get(agent.id)
+        if runtime is not None and runtime.contest_id == contest_id:
+            # 心跳过：在线状态、扫描目录、磁盘余量、文件数都以注册表为准
+            items.append(AgentRuntimeOut(**runtime.to_public_dict()))
+            continue
+        items.append(
+            AgentRuntimeOut(
+                agent_id=agent.id,
+                player_id=player.id,
+                contest_id=contest_id,
+                contest_slug=slug,
+                player_no=player.player_no,
+                player_name=player.name,
+                machine_id=agent.machine_id,
+                hostname=agent.hostname,
+                agent_version=agent.agent_version,
+                online=False,
+            )
+        )
+    return slice_page(items, page)
 
 
 @router.post("/agents/{agent_id}/rebind", response_model=SimpleAck)
@@ -1661,17 +1621,16 @@ def rebind_agent(
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> SimpleAck:
-    """把一台机器改派给另一位选手（换人）。
+    """把一台机器改派给名单里的另一个人（换人）。
 
     这是"换座位"最自然的做法：机器上的凭据不用动、不用重启、不用重新配对 ——
-    服务端改一下归属，Agent 下一轮 tick 就会拿到新的准考证号，
-    自己更新扫描目录。
+    服务端改一下绑定，Agent 下一轮 tick 就拿到新的准考证号、自己更新扫描目录。
 
     **为什么不做成"作废旧凭据 + 重新注册"**：那条路要机器重新走一遍注册，
     而走统一密钥的机器读不到 root 只读的密钥，只能等到下次开机由注册单元处理。
     考场上"换个人"要等到重启，这是不能接受的。
 
-    目标选手**必须还没有机器**：两台机器绑同一个人，代码会往同一个目录里写，
+    目标条目**必须还没有机器**：两台机器绑同一个人，代码会往同一个目录里写，
     而且完全静默（成绩矩阵只是看起来"这个人交了两遍"）。
     """
     with ctx.db.session() as session:
@@ -1681,70 +1640,150 @@ def rebind_agent(
         if agent.revoked_at is not None:
             raise HTTPException(status_code=409, detail="这台机器的凭据已作废，不能改派")
 
-        target = session.get(Player, payload.player_id)
-        if target is None:
-            raise HTTPException(status_code=404, detail="选手不存在")
+        entry = session.get(RosterEntry, payload.roster_entry_id)
+        if entry is None:
+            raise HTTPException(status_code=404, detail="名单条目不存在")
 
-        current = session.get(Player, agent.player_id)
-        if current is not None and current.id == target.id:
-            return SimpleAck(ok=True, detail="这台机器本来就属于 %s" % target.player_no)
+        current = session.get(RosterEntry, agent.roster_entry_id) if agent.roster_entry_id else None
+        if current is not None and current.id == entry.id:
+            return SimpleAck(ok=True, detail="这台机器本来就属于 %s" % entry.player_no)
 
         clash = session.execute(
             select(Agent).where(
-                Agent.player_id == target.id,
+                Agent.roster_entry_id == entry.id,
                 Agent.revoked_at.is_(None),
                 Agent.id != agent_id,
             )
         ).scalar_one_or_none()
         if clash is not None:
-            raise HTTPException(
-                status_code=409,
-                detail="选手 %s 已经绑定了一台机器（%s）。请先把那台作废或改派。"
-                % (target.player_no, clash.machine_id[:16]),
+            raise ApiError(
+                409,
+                "roster_entry_taken",
+                "%s 已经有一台机器了（%s）。要换机器请先作废那一台，或者用它改派。"
+                % (entry.player_no, clash.machine_id[:16]),
+                {"player_no": entry.player_no, "machine_id": clash.machine_id},
             )
 
-        # 同一台机器在同一选手名下只能有一行（唯一约束 player_id+machine_id），
-        # 所以极端情况下（这台机器以前就属于这位选手、只是被作废过）要先清掉旧行
-        stale = session.execute(
-            select(Agent).where(
-                Agent.player_id == target.id, Agent.machine_id == agent.machine_id
-            )
-        ).scalar_one_or_none()
-        if stale is not None and stale.id != agent.id:
-            session.delete(stale)
-            session.flush()
-
-        old_no = current.player_no if current else "?"
-        agent.player_id = target.id
+        old_no = current.player_no if current else "（未配对）"
+        agent.roster_entry_id = entry.id
         agent.claimed_at = utcnow()
+        # 改派之后原来那台的配对码/场次指定都该作废，让它按新身份重新解析
+        agent.pair_code_hash = None
+        agent.pair_code_expires_at = None
+        agent.contest_id = None
         session.add(
             EventLog(
                 level="warning",
                 category="agent_rebind",
-                contest_id=target.contest_id,
-                player_id=target.id,
                 message="机器改派：%s → %s（%s）"
-                % (old_no, target.player_no, agent.machine_id[:16]),
+                % (old_no, entry.player_no, agent.machine_id[:16]),
             )
         )
         session.flush()
-        new_no = target.player_no
 
-    # 内存里的在线状态也要跟着改，否则「选手状态」页会一直显示旧归属
-    runtime = ctx.registry.get(agent_id)
-    if runtime is not None:
-        runtime.player_id = payload.player_id
-        runtime.player_no = new_no
+    # 内存里的在线状态也要跟着清掉：旧的 player_id/contest 已经不作数了，
+    # 留着它会让「选手状态」页一直显示错误的归属
+    ctx.registry.forget(agent_id)
 
     return SimpleAck(
         ok=True,
-        detail="已把机器从 %s 改派给 %s。机器下一轮心跳就会切到新目录，无需重启" % (old_no, new_no),
+        detail="已把机器从 %s 改派给 %s。它下一轮心跳就会切换到新身份，无需重启"
+        % (old_no, entry.player_no),
+    )
+
+
+@router.post("/agents/{agent_id}/contest", response_model=SimpleAck)
+def set_agent_contest(
+    agent_id: int,
+    payload: SetAgentContestIn,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> SimpleAck:
+    """给一台机器显式指定（或取消指定）场次。
+
+    默认是**动态解析**：找一个"进行中、且名单含此人"的场次。只有在一个考点
+    同时跑多场比赛、同一个人两边都在时才需要指定 —— 那种情况下机器的 tick
+    响应里会明确说"需要指定场次"，而不是自己挑一个。
+
+    传 ``contest_id=null`` 就是取消指定、回到自动。
+    """
+    with ctx.db.session() as session:
+        agent = session.get(Agent, agent_id)
+        if agent is None:
+            raise HTTPException(status_code=404, detail="这台机器不在台账里")
+        if agent.roster_entry_id is None and payload.contest_id is not None:
+            raise HTTPException(
+                status_code=409, detail="这台机器还没有配对到人，先配对再指定场次"
+            )
+
+        if payload.contest_id is None:
+            agent.contest_id = None
+            detail = "已取消指定场次，改回自动匹配"
+        else:
+            contest = session.get(Contest, payload.contest_id)
+            if contest is None:
+                raise HTTPException(status_code=404, detail="场次不存在")
+            agent.contest_id = contest.id
+            detail = "已指定场次「%s」" % contest.name
+        session.flush()
+
+    # 归属变了，内存里的解析结果立刻作废 —— 下一轮 tick 会重新解析
+    ctx.registry.forget(agent_id)
+    return SimpleAck(ok=True, detail=detail)
+
+
+@router.delete("/agents/{agent_id}/bind", response_model=SimpleAck)
+def unbind_agent(
+    agent_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> SimpleAck:
+    """解除机器与人的绑定（不是作废凭据）。
+
+    解绑之后机器回到"待配对"，并在下一次心跳里重新拿到一个配对码 ——
+    这样它能被绑给别人，而不用重新注册（重新注册要读 root 只读的密钥，
+    在考场上等于要重启）。
+
+    要彻底让一台机器下线请用「作废」。
+    """
+    with ctx.db.session() as session:
+        agent = session.get(Agent, agent_id)
+        if agent is None:
+            return SimpleAck(ok=True, detail="这台机器不在台账里")
+        if agent.roster_entry_id is None:
+            return SimpleAck(ok=True, detail="这台机器本来就没配对")
+
+        entry = session.get(RosterEntry, agent.roster_entry_id)
+        player_no = entry.player_no if entry else "?"
+        agent.roster_entry_id = None
+        agent.contest_id = None
+        agent.claimed_at = None
+        # 老配对码早就作废了，让下一轮注册/心跳重新生成一个
+        agent.pair_code_hash = None
+        agent.pair_code_expires_at = None
+        session.add(
+            EventLog(
+                level="warning",
+                category="agent_unbind",
+                message="解除机器配对：%s（%s）" % (player_no, agent.machine_id[:16]),
+            )
+        )
+        session.flush()
+
+    ctx.registry.forget(agent_id)
+    # 解绑之后**必须**把缓存里的旧码忘掉：那台机器马上要重新配一次，
+    # 留着旧码会让服务端继续回一个已经不该再用的数字，教师怎么输都不对
+    ctx.pair_codes.forget(agent_id)
+    return SimpleAck(
+        ok=True,
+        detail="已解除 %s 与这台机器的绑定。它下一轮心跳会拿到新的配对码" % player_no,
     )
 
 
 @router.delete("/agents/{agent_id}", response_model=SimpleAck)
 def revoke_agent(
     agent_id: int,
+    confirm: str = Query(..., min_length=1, max_length=200, description="原样输入机器名"),
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> SimpleAck:
@@ -1752,9 +1791,8 @@ def revoke_agent(
 
     删行而不是打 ``revoked_at`` 标记，有两个具体原因：
 
-    * ``agent`` 表上有 ``(player_id, machine_id)`` 唯一约束。留着那一行，
-      同一台机器再配对给同一个人时会撞唯一约束 —— 而"作废后重新配对"
-      正是最常见的后续动作。
+    * ``agent`` 表上有机器 UUID 唯一约束。留着那一行，同一台机器重新注册时
+      会撞唯一约束 —— 而"作废后重新配对"正是最常见的后续动作。
     * 凭据是哈希存的行，删掉它就等于立刻失效；留着标记还要在每个鉴权点记得查。
 
     代价是这台机器的历史在线记录（``agent_status``）会一起级联删掉。
@@ -1764,16 +1802,16 @@ def revoke_agent(
         agent = session.get(Agent, agent_id)
         if agent is None:
             return SimpleAck(ok=True, detail="这台机器不在台账里")
-        player = session.get(Player, agent.player_id)
-        player_no = player.player_no if player else "?"
+        # 标识用机器名：教师是在列表里"指着那一行"删的，而列表上显示的就是它
+        require_confirm(agent.hostname or agent.machine_id, confirm, "机器名")
+        entry = session.get(RosterEntry, agent.roster_entry_id) if agent.roster_entry_id else None
+        player_no = entry.player_no if entry else "（未配对）"
         machine_id = agent.machine_id
-        contest_id = player.contest_id if player else None
         session.delete(agent)
         session.add(
             EventLog(
                 level="warning",
                 category="agent_revoke",
-                contest_id=contest_id,
                 message="作废机器凭据：%s @ %s" % (player_no, machine_id[:16]),
             )
         )
@@ -1786,32 +1824,47 @@ def revoke_agent(
     )
 
 
-@router.get("/contests/{contest_id}/files", response_model=List[SourceFileOut])
+@router.get("/contests/{contest_id}/files", response_model=Page[SourceFileOut])
 def list_files(
     contest_id: int,
+    page: PageParams = Depends(),
     player_id: Optional[int] = None,
     include_deleted: bool = False,
-    limit: int = 500,
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
-) -> List[SourceFileOut]:
-    limit = max(1, min(limit, 5000))
+) -> Page[SourceFileOut]:
+    """这场比赛回收上来的代码台账。
+
+    ``total`` 是**过滤后**的总条数（含 ``player_id`` 筛选），因为前端要拿它
+    显示"共 N 份"并且据此分页；拿本页条数充数会让第二页显示"共 50 份"。
+    """
     with ctx.db.session() as session:
         # 归属是**算出来的**，不是存下来的：教师改一个模式，界面上立刻跟着变，
         # 不需要重收文件，也不用担心存量数据里的旧归属变成脏数据
         rules = contest_problem_rules(session, contest_id, ctx.settings)
+
+        filters = [Player.contest_id == contest_id]
+        if player_id is not None:
+            filters.append(SourceFile.player_id == player_id)
+        if not include_deleted:
+            filters.append(SourceFile.deleted_at.is_(None))
+
+        total = session.execute(
+            select(func.count(SourceFile.id))
+            .join(Player, SourceFile.player_id == Player.id)
+            .where(*filters)
+        ).scalar_one()
+
         stmt = (
             select(SourceFile, Player.player_no)
             .join(Player, SourceFile.player_id == Player.id)
-            .where(Player.contest_id == contest_id)
+            .where(*filters)
+            .order_by(SourceFile.player_id, SourceFile.rel_path)
+            .limit(page.limit)
+            .offset(page.offset)
         )
-        if player_id is not None:
-            stmt = stmt.where(SourceFile.player_id == player_id)
-        if not include_deleted:
-            stmt = stmt.where(SourceFile.deleted_at.is_(None))
-        stmt = stmt.order_by(SourceFile.player_id, SourceFile.rel_path).limit(limit)
 
-        return [
+        items = [
             SourceFileOut(
                 id=row.id,
                 player_id=row.player_id,
@@ -1828,6 +1881,7 @@ def list_files(
             )
             for row, player_no in session.execute(stmt)
         ]
+        return page_of(items, total, page)
 
 
 @router.get("/files/{file_id}/content")
@@ -1969,23 +2023,34 @@ def _release_blob_if_unreferenced(session, ctx: AppContext, sha256: str) -> bool
         return False
 
 
-@router.delete("/contests/{contest_id}/files", response_model=SimpleAck)
+@router.post("/contests/{contest_id}/files/clear", response_model=SimpleAck)
 def clear_source_files(
     contest_id: int,
-    purge: bool = False,
+    payload: FileClearIn,
     player_id: Optional[int] = None,
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> SimpleAck:
     """清理代码台账。
 
+    这是**软删除**（打墓碑）的批量版本：行先删掉，``blobs/`` 里的内容只在
+    没有任何记录再引用它时才释放 —— 见 ``docs/api-conventions.md`` §5.2。
+
     默认 ``purge=false``：只清掉**已经消失**的墓碑记录（选手删了文件之后留下的
     那些），这不会影响任何还在的东西 —— 也是这个操作最常见的用途。
 
     ``purge=true`` 会连活的一起删，但**机器还在报的文件下一轮就会回来**，
     所以它只适合"比赛结束后归档完毕、准备清场"。界面上的按钮要写明这一点。
+
+    确认内容是**场次 slug**。
     """
+    purge = payload.purge
     with ctx.db.session() as session:
+        contest = session.get(Contest, contest_id)
+        if contest is None:
+            raise HTTPException(status_code=404, detail="场次不存在")
+        require_confirm(contest.slug, payload.confirm, "场次标识")
+
         stmt = (
             select(SourceFile)
             .join(Player, SourceFile.player_id == Player.id)
@@ -2174,14 +2239,14 @@ def _spool_chunks(spool) -> Iterator[bytes]:
             pass
 
 
-@router.get("/events", response_model=List[EventOut])
+@router.get("/events", response_model=Page[EventOut])
 def list_all_events(
-    limit: int = 200,
+    page: PageParams = Depends(),
     level: Optional[str] = None,
     category: Optional[str] = None,
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
-) -> List[EventOut]:
+) -> Page[EventOut]:
     """不按场次过滤的审计事件。
 
     有些事件**根本不属于任何场次**，而它们恰恰是最需要被看到的：
@@ -2189,45 +2254,59 @@ def list_all_events(
     注册发生在配对之前，那台机器那时还没有场次归属 —— 如果只能按场次查，
     这些告警会写进库然后永远没人看见。那和没记录没有区别。
     """
-    limit = max(1, min(limit, 2000))
     with ctx.db.session() as session:
+        filters = []
+        if level:
+            filters.append(EventLog.level == level)
+        if category:
+            filters.append(EventLog.category == category)
+
+        total = session.execute(
+            select(func.count(EventLog.id)).where(*filters)
+        ).scalar_one()
         stmt = (
             select(EventLog, Player.player_no)
             .outerjoin(Player, EventLog.player_id == Player.id)
+            .where(*filters)
             .order_by(EventLog.id.desc())
-            .limit(limit)
+            .limit(page.limit)
+            .offset(page.offset)
         )
-        if level:
-            stmt = stmt.where(EventLog.level == level)
-        if category:
-            stmt = stmt.where(EventLog.category == category)
-        return [_event_out(row, player_no) for row, player_no in session.execute(stmt)]
+        items = [_event_out(row, player_no) for row, player_no in session.execute(stmt)]
+        return page_of(items, total, page)
 
 
-@router.get("/contests/{contest_id}/events", response_model=List[EventOut])
+@router.get("/contests/{contest_id}/events", response_model=Page[EventOut])
 def list_events(
     contest_id: int,
-    limit: int = 200,
+    page: PageParams = Depends(),
     category: Optional[str] = None,
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
-) -> List[EventOut]:
-    limit = max(1, min(limit, 2000))
+) -> Page[EventOut]:
     with ctx.db.session() as session:
+        filters = [EventLog.contest_id == contest_id]
+        if category:
+            filters.append(EventLog.category == category)
+
+        total = session.execute(
+            select(func.count(EventLog.id)).where(*filters)
+        ).scalar_one()
         stmt = (
             select(EventLog, Player.player_no)
             .outerjoin(Player, EventLog.player_id == Player.id)
-            .where(EventLog.contest_id == contest_id)
+            .where(*filters)
+            .order_by(EventLog.id.desc())
+            .limit(page.limit)
+            .offset(page.offset)
         )
-        if category:
-            stmt = stmt.where(EventLog.category == category)
-        stmt = stmt.order_by(EventLog.id.desc()).limit(limit)
-
-        return [_event_out(row, player_no) for row, player_no in session.execute(stmt)]
+        items = [_event_out(row, player_no) for row, player_no in session.execute(stmt)]
+        return page_of(items, total, page)
 
 
-@router.delete("/events", response_model=SimpleAck)
+@router.post("/events/clear", response_model=SimpleAck)
 def clear_events(
+    payload: ConfirmIn,
     contest_id: Optional[int] = None,
     level: Optional[str] = None,
     older_than_days: Optional[int] = None,
@@ -2242,10 +2321,21 @@ def clear_events(
 
     ``contest_id`` 留空表示所有场次（含不属于任何场次的那批全局事件，
     比如统一密钥注册与克隆告警）。
+
+    确认内容跟着**范围**走：指定了场次就输场次 slug，全局清空则输 ``all`` ——
+    因为这次删的不是某一个对象，而是"这一片日志"，输入名字才有意义。
     """
     from datetime import timedelta
 
     with ctx.db.session() as session:
+        if contest_id is not None:
+            contest = session.get(Contest, contest_id)
+            if contest is None:
+                raise HTTPException(status_code=404, detail="场次不存在")
+            require_confirm(contest.slug, payload.confirm, "场次标识")
+        else:
+            require_confirm(GLOBAL_CONFIRM, payload.confirm, "清空确认")
+
         stmt = select(EventLog)
         if contest_id is not None:
             stmt = stmt.where(EventLog.contest_id == contest_id)
@@ -2298,7 +2388,7 @@ def _event_out(row: EventLog, player_no: Optional[str]) -> EventOut:
 @router.delete("/contests/{contest_id}", response_model=SimpleAck)
 def delete_contest(
     contest_id: int,
-    confirm_slug: str = "",
+    confirm: str = Query(..., min_length=1, max_length=200, description="原样输入场次标识"),
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> SimpleAck:
@@ -2306,7 +2396,7 @@ def delete_contest(
 
     外键全是 ``ON DELETE CASCADE``，所以删一个场次会连带删掉它的选手、
     代码台账、下发任务、成绩、资产。这是整个系统里破坏力最大的一个操作，
-    所以要求把场次标识**原样再打一遍**（``confirm_slug``）——
+    所以要求把场次标识**原样再打一遍** ——
     界面上常见的"你确定吗"点一下就过去了，代价却不可逆。
 
     返回里带上删掉了什么，让教师事后能对上账（也便于日志审阅）。
@@ -2316,11 +2406,7 @@ def delete_contest(
         if contest is None:
             return SimpleAck(ok=True, detail="场次不存在")
 
-        if confirm_slug.strip() != contest.slug:
-            raise HTTPException(
-                status_code=400,
-                detail="为确认删除，请把场次标识「%s」原样输入" % contest.slug,
-            )
+        require_confirm(contest.slug, confirm, "场次标识")
 
         counts = {
             "选手": _count(session, Player, Player.contest_id == contest_id),
@@ -2436,20 +2522,26 @@ def upload_asset(
         return _asset_out(asset)
 
 
-@router.get("/contests/{contest_id}/assets", response_model=List[AssetOut])
+@router.get("/contests/{contest_id}/assets", response_model=Page[AssetOut])
 def list_assets(
     contest_id: int,
+    page: PageParams = Depends(),
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
-) -> List[AssetOut]:
+) -> Page[AssetOut]:
     with ctx.db.session() as session:
-        rows = session.execute(
-            select(Asset).where(Asset.contest_id == contest_id).order_by(Asset.id.desc())
-        ).scalars()
-        return [_asset_out(row) for row in rows]
+        rows = list(
+            session.execute(
+                select(Asset).where(Asset.contest_id == contest_id).order_by(Asset.id.desc())
+            ).scalars()
+        )
+        pending = _pending_target_counts(session, contest_id)
+        return slice_page(
+            [_asset_out(row, pending.get(row.id, 0)) for row in rows], page
+        )
 
 
-def _asset_out(asset: Asset) -> AssetOut:
+def _asset_out(asset: Asset, pending_targets: int = 0) -> AssetOut:
     return AssetOut(
         id=asset.id,
         contest_id=asset.contest_id,
@@ -2458,7 +2550,26 @@ def _asset_out(asset: Asset) -> AssetOut:
         filename=asset.filename,
         kind=asset.kind,
         created_at=_iso(asset.created_at) or "",
+        pending_targets=int(pending_targets),
     )
+
+
+def _pending_target_counts(session, contest_id: int) -> Dict[int, int]:
+    """每个资产还有几个选手没下载完。
+
+    一次分组查询，而不是逐行去数 —— 资产列表一屏几十行，
+    N+1 会把一次列表请求变成几十次查询。
+    """
+    rows = session.execute(
+        select(DeployTask.asset_id, func.count(DeployTarget.id))
+        .join(DeployTarget, DeployTarget.task_id == DeployTask.id)
+        .where(
+            DeployTask.contest_id == contest_id,
+            DeployTarget.status.in_(ACTIVE_DEPLOY_STATUSES),
+        )
+        .group_by(DeployTask.asset_id)
+    ).all()
+    return {asset_id: int(count) for asset_id, count in rows}
 
 
 @router.patch("/assets/{asset_id}", response_model=AssetOut)
@@ -2497,13 +2608,20 @@ def rename_asset(
             raise HTTPException(status_code=404, detail="资产不存在")
         old = asset.filename
         asset.filename = name
+        # 还没落地的下发目标会按**新名字**落地，已经落地的文件不受影响。
+        # 这个数字要跟着响应回去，界面才能说清"这次改名会对谁生效" ——
+        # 算了不报出去，等于教师只能靠猜。
         pending = session.execute(
             select(func.count(DeployTarget.id))
             .join(DeployTask, DeployTarget.task_id == DeployTask.id)
-            .where(DeployTask.asset_id == asset_id, DeployTarget.status.in_(ACTIVE_DEPLOY_STATUSES))
+            .where(
+                DeployTask.asset_id == asset_id,
+                DeployTarget.status.in_(ACTIVE_DEPLOY_STATUSES),
+            )
         ).scalar_one()
         session.flush()
-        return _asset_out(asset)
+        log.info("资产改名：%s -> %s（还有 %d 个目标未完成）", old, name, pending)
+        return _asset_out(asset, pending)
 
 
 @router.delete("/assets/{asset_id}", response_model=SimpleAck)
@@ -2662,13 +2780,14 @@ def _describe_targets(payload: DeployCreate, players) -> str:
     return "指定 %d 人" % len(players)
 
 
-@router.get("/contests/{contest_id}/deploys", response_model=List[DeployTaskOut])
+@router.get("/contests/{contest_id}/deploys", response_model=Page[DeployTaskOut])
 def list_deploys(
     contest_id: int,
+    page: PageParams = Depends(),
     include_targets: bool = False,
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
-) -> List[DeployTaskOut]:
+) -> Page[DeployTaskOut]:
     with ctx.db.session() as session:
         tasks = list(
             session.execute(
@@ -2681,7 +2800,7 @@ def list_deploys(
         for task in tasks:
             asset = session.get(Asset, task.asset_id)
             out.append(_deploy_task_out(session, task, asset, include_targets=include_targets))
-        return out
+        return slice_page(out, page)
 
 
 @router.get("/deploys/{task_id}", response_model=DeployTaskOut)
@@ -2904,19 +3023,22 @@ def _validate_problem_ident(raw: str) -> str:
     return text
 
 
-@router.get("/contests/{contest_id}/problems", response_model=List[ProblemOut])
+@router.get("/contests/{contest_id}/problems", response_model=Page[ProblemOut])
 def list_problems(
     contest_id: int,
+    page: PageParams = Depends(),
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
-) -> List[ProblemOut]:
+) -> Page[ProblemOut]:
     with ctx.db.session() as session:
-        rows = session.execute(
-            select(Problem)
-            .where(Problem.contest_id == contest_id)
-            .order_by(Problem.order_index, Problem.ident)
-        ).scalars()
-        return [_problem_out(row, ctx.settings) for row in rows]
+        rows = list(
+            session.execute(
+                select(Problem)
+                .where(Problem.contest_id == contest_id)
+                .order_by(Problem.order_index, Problem.ident)
+            ).scalars()
+        )
+        return slice_page([_problem_out(row, ctx.settings) for row in rows], page)
 
 
 @router.post("/contests/{contest_id}/problems", response_model=ProblemImportOut)
@@ -3083,6 +3205,7 @@ def update_problem(
 @router.delete("/problems/{problem_id}", response_model=SimpleAck)
 def delete_problem(
     problem_id: int,
+    confirm: str = Query(..., min_length=1, max_length=200, description="原样输入题目标识"),
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> SimpleAck:
@@ -3095,14 +3218,16 @@ def delete_problem(
         row = session.get(Problem, problem_id)
         if row is None:
             return SimpleAck(ok=True, detail="没有该题目")
+        require_confirm(row.ident, confirm, "题目标识")
         ident = row.ident
         session.delete(row)
     return SimpleAck(ok=True, detail="已删除题目 %s（已有成绩记录保留）" % ident)
 
 
-@router.delete("/contests/{contest_id}/problems", response_model=SimpleAck)
+@router.post("/contests/{contest_id}/problems/clear", response_model=SimpleAck)
 def clear_problems(
     contest_id: int,
+    payload: ConfirmIn,
     idents: Optional[str] = None,
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
@@ -3114,11 +3239,14 @@ def clear_problems(
     和单条删除一样，**不动已有成绩记录** —— 它们会以「未登记」继续出现在矩阵里。
     这一点必须说清楚：教师看到"清空清单"很容易以为成绩也一起没了，
     于是不敢动，或者反过来以为清干净了结果成绩还在。
+
+    确认内容是**场次 slug**：即便只删其中几道题，范围也还是"这场比赛的题目清单"。
     """
     with ctx.db.session() as session:
         contest = session.get(Contest, contest_id)
         if contest is None:
             raise HTTPException(status_code=404, detail="场次不存在")
+        require_confirm(contest.slug, payload.confirm, "场次标识")
 
         stmt = select(Problem).where(Problem.contest_id == contest_id)
         wanted: Optional[List[str]] = None
@@ -3333,24 +3461,32 @@ def score_matrix(
     )
 
 
-@router.get("/contests/{contest_id}/judge/runs", response_model=List[JudgeRunOut])
+@router.get("/contests/{contest_id}/judge/runs", response_model=Page[JudgeRunOut])
 def list_judge_runs(
     contest_id: int,
+    page: PageParams = Depends(),
     parse_status: Optional[str] = None,
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
-) -> List[JudgeRunOut]:
+) -> Page[JudgeRunOut]:
     with ctx.db.session() as session:
+        filters = [JudgeRun.contest_id == contest_id]
+        if parse_status:
+            filters.append(JudgeRun.parse_status == parse_status)
+
+        total = session.execute(
+            select(func.count(JudgeRun.id)).where(*filters)
+        ).scalar_one()
         stmt = (
             select(JudgeRun, Player.player_no)
             .join(Player, JudgeRun.player_id == Player.id)
-            .where(JudgeRun.contest_id == contest_id)
+            .where(*filters)
+            .order_by(Player.player_no, JudgeRun.problem)
+            .limit(page.limit)
+            .offset(page.offset)
         )
-        if parse_status:
-            stmt = stmt.where(JudgeRun.parse_status == parse_status)
-        stmt = stmt.order_by(Player.player_no, JudgeRun.problem)
 
-        return [
+        items = [
             JudgeRunOut(
                 id=run.id,
                 player_id=run.player_id,
@@ -3366,6 +3502,7 @@ def list_judge_runs(
             )
             for run, player_no in session.execute(stmt)
         ]
+        return page_of(items, total, page)
 
 
 @router.post("/contests/{contest_id}/judge/rescan", response_model=JudgeScanOut)
@@ -3469,9 +3606,15 @@ def clear_judge_score(
     contest_id: int,
     player_id: int,
     problem: str,
+    confirm: str = Query(..., min_length=1, max_length=200, description="原样输入考号"),
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> SimpleAck:
+    """抹掉一条成绩记录（某个选手的某道题）。
+
+    标识用**考号**：教师是在成绩矩阵上指着那一行操作的，矩阵行首显示的就是考号；
+    题目标识已经在这个请求的 `problem` 参数里了，再要求拼一遍只会让人打错。
+    """
     with ctx.db.session() as session:
         run = session.execute(
             select(JudgeRun).where(
@@ -3482,15 +3625,16 @@ def clear_judge_score(
         ).scalar_one_or_none()
         if run is None:
             return SimpleAck(ok=True, detail="没有该记录")
+        player = session.get(Player, player_id)
+        require_confirm(player.player_no if player else None, confirm, "考号")
         session.delete(run)
     return SimpleAck(ok=True, detail="已清除")
 
 
-@router.delete("/contests/{contest_id}/judge/runs", response_model=SimpleAck)
+@router.post("/contests/{contest_id}/judge/runs/clear", response_model=SimpleAck)
 def clear_judge_runs(
     contest_id: int,
-    player_id: Optional[int] = None,
-    keep_manual: bool = True,
+    payload: JudgeRunClearIn,
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> SimpleAck:
@@ -3501,11 +3645,17 @@ def clear_judge_runs(
     这条默认值是有意的：手工录入意味着评测器给不出结果、教师看过代码之后
     亲自判的分。它是全场里最贵的那部分数据，而"重扫一遍"这种常见操作
     恰恰最容易顺手把它清掉。要连手工分一起清，得显式传 ``false``。
+
+    确认内容是**场次 slug**（可选的 ``player_id`` 只是把范围缩小到一个人，
+    范围本身仍然属于这场比赛）。
     """
+    player_id = payload.player_id
+    keep_manual = payload.keep_manual
     with ctx.db.session() as session:
         contest = session.get(Contest, contest_id)
         if contest is None:
             raise HTTPException(status_code=404, detail="场次不存在")
+        require_confirm(contest.slug, payload.confirm, "场次标识")
 
         stmt = select(JudgeRun).where(JudgeRun.contest_id == contest_id)
         if player_id is not None:
@@ -3583,9 +3733,10 @@ def upload_release(
     不同的两件事，不该合成一个动作。
     """
     if ctx.signing_key is None:
-        raise HTTPException(
-            status_code=503,
-            detail="未配置发布签名私钥，无法签发升级包：%s"
+        raise ApiError(
+            503,
+            "release_not_signed",
+            "未配置发布签名私钥，无法签发升级包：%s"
             % (ctx.signing_key_error or "请设置 SYNCOJ_RELEASE_KEY"),
         )
 

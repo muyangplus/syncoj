@@ -47,9 +47,10 @@ def apply_roster(
 
 
 def players_of(client: TestClient, headers: dict, contest: dict) -> List[dict]:
-    return client.get(
+    body = client.get(
         "/api/v1/admin/contests/%d/players" % contest["id"], headers=headers
     ).json()
+    return body["items"]
 
 
 # --------------------------------------------------------------------------- #
@@ -61,7 +62,7 @@ def test_create_and_list_rosters(client: TestClient, admin_headers: dict) -> Non
     make_roster(client, admin_headers, "高一(1)班")
     make_roster(client, admin_headers, "高一(2)班")
 
-    rows = client.get("/api/v1/admin/rosters", headers=admin_headers).json()
+    rows = client.get("/api/v1/admin/rosters", headers=admin_headers).json()["items"]
     assert [r["name"] for r in rows] == ["高一(1)班", "高一(2)班"]
     assert all(r["entry_count"] == 0 for r in rows)
 
@@ -117,7 +118,7 @@ def test_delete_entry(client: TestClient, admin_headers: dict) -> None:
     entry_id = result["entries"][0]["id"]
 
     assert client.delete(
-        "/api/v1/admin/roster-entries/%d" % entry_id, headers=admin_headers
+        "/api/v1/admin/roster-entries/%d?confirm=S001" % entry_id, headers=admin_headers
     ).status_code == 200
 
     detail = client.get("/api/v1/admin/rosters/%d" % roster["id"], headers=admin_headers).json()
@@ -239,7 +240,8 @@ def test_prune_never_deletes_a_player_with_submissions(
     assert upload.status_code == 200, upload.text
 
     # 名单里只有另一个人，S001 不在其中 —— 而且开了 prune
-    roster = make_roster(client, admin_headers)
+    # （用另一份名字不同的名单：``enrolled`` 夹具已经建了一份含 S001 的）
+    roster = make_roster(client, admin_headers, "临时调整用")
     add_entries(client, admin_headers, roster["id"], [{"player_no": "S999"}])
     report = apply_roster(client, admin_headers, contest, roster["id"], prune=True)
 
@@ -252,7 +254,7 @@ def test_prune_never_deletes_a_player_with_submissions(
     # 代码本身也要还在
     files = client.get(
         "/api/v1/admin/contests/%d/files" % contest["id"], headers=admin_headers
-    ).json()
+    ).json()["items"]
     assert [f["rel_path"] for f in files] == ["p1/p1.cpp"]
 
 
@@ -333,7 +335,10 @@ def test_deleting_a_roster_keeps_contest_players(
     ).json()
     apply_roster(client, admin_headers, contest_with_roster, roster["id"])
 
-    ack = client.delete("/api/v1/admin/rosters/%d" % roster["id"], headers=admin_headers)
+    ack = client.delete(
+        "/api/v1/admin/rosters/%d?confirm=%s" % (roster["id"], roster["name"]),
+        headers=admin_headers,
+    )
     assert ack.status_code == 200
     assert "选手" in ack.json()["detail"]
 
@@ -341,7 +346,7 @@ def test_deleting_a_roster_keeps_contest_players(
     assert [p["player_no"] for p in rows] == ["S001"], "删名单把选手也删了"
 
     # 场次不再指向这份名单
-    listed = client.get("/api/v1/admin/contests", headers=admin_headers).json()
+    listed = client.get("/api/v1/admin/contests", headers=admin_headers).json()["items"]
     target = next(c for c in listed if c["id"] == contest_with_roster["id"])
     assert target["default_roster_id"] is None
     assert target["default_roster_name"] is None
@@ -369,38 +374,46 @@ def test_one_roster_can_serve_many_contests(
 
 
 # --------------------------------------------------------------------------- #
-# 场次注册方式
+# 取消名单
 # --------------------------------------------------------------------------- #
 
 
-def test_contest_defaults_to_per_player_code(
-    client: TestClient, admin_headers: dict, contest: dict
+def test_clear_roster_entries_keeps_the_roster(
+    client: TestClient, admin_headers: dict
 ) -> None:
-    """老场次与新建场次的默认都是每选手注册码 —— 原有行为不能变。"""
-    assert contest["enrollment_mode"] == "per_player_code"
+    """清空条目 ≠ 删名单：名单名下的字段（名称、备注、被哪些场次引用）都要留下。"""
+    roster = make_roster(client, admin_headers)
+    add_entries(
+        client, admin_headers, roster["id"],
+        [{"player_no": "S001"}, {"player_no": "S002"}],
+    )
 
+    refused = client.post(
+        "/api/v1/admin/rosters/%d/entries/clear" % roster["id"],
+        json={"confirm": "认错的名字"},
+        headers=admin_headers,
+    )
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["code"] == "name_mismatch"
 
-def test_enrollment_mode_can_be_switched(
-    client: TestClient, admin_headers: dict, contest: dict
-) -> None:
-    response = client.patch(
-        "/api/v1/admin/contests/%d" % contest["id"],
-        json={"enrollment_mode": "bootstrap"},
+    response = client.post(
+        "/api/v1/admin/rosters/%d/entries/clear" % roster["id"],
+        json={"confirm": roster["name"]},
         headers=admin_headers,
     )
     assert response.status_code == 200, response.text
-    assert response.json()["enrollment_mode"] == "bootstrap"
+    assert "2 条" in response.json()["detail"]
+
+    detail = client.get(
+        "/api/v1/admin/rosters/%d" % roster["id"], headers=admin_headers
+    ).json()
+    assert detail["entries"] == []
+    assert detail["name"] == roster["name"], "清空条目不该把名单本身也删掉"
 
 
-def test_unknown_enrollment_mode_is_rejected(
-    client: TestClient, admin_headers: dict, contest: dict
-) -> None:
-    response = client.patch(
-        "/api/v1/admin/contests/%d" % contest["id"],
-        json={"enrollment_mode": "随便写的"},
-        headers=admin_headers,
-    )
-    assert response.status_code == 400
+# --------------------------------------------------------------------------- #
+# 场次设置
+# --------------------------------------------------------------------------- #
 
 
 def test_contest_can_be_updated_partially(
@@ -410,7 +423,7 @@ def test_contest_can_be_updated_partially(
     roster = make_roster(client, admin_headers)
     client.patch(
         "/api/v1/admin/contests/%d" % contest["id"],
-        json={"default_roster_id": roster["id"], "enrollment_mode": "bootstrap"},
+        json={"default_roster_id": roster["id"]},
         headers=admin_headers,
     )
 
@@ -422,7 +435,6 @@ def test_contest_can_be_updated_partially(
     body = response.json()
     assert body["name"] == "改了名字"
     assert body["default_roster_id"] == roster["id"]
-    assert body["enrollment_mode"] == "bootstrap"
     assert body["slug"] == contest["slug"], "slug 不该被 PATCH 改掉"
 
 

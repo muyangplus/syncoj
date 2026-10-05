@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from conftest import agent_headers, do_tick as tick, sha256_of
+from conftest import (
+    agent_headers,
+    bind_by_code,
+    enroll_machine,
+    do_tick as tick,
+    sha256_of,
+)
 
 
 def upload_asset(client: TestClient, contest: dict, admin_headers: dict, name: str, data: bytes):
@@ -56,7 +62,8 @@ def test_same_content_uploaded_twice_is_deduplicated(
     listed = client.get(
         "/api/v1/admin/contests/%d/assets" % contest["id"], headers=admin_headers
     ).json()
-    assert len(listed) == 1
+    assert listed["total"] == 1
+    assert len(listed["items"]) == 1
 
 
 def test_asset_requires_admin(client: TestClient, contest: dict) -> None:
@@ -65,6 +72,50 @@ def test_asset_requires_admin(client: TestClient, contest: dict) -> None:
         files={"file": ("x.zip", b"x", "application/octet-stream")},
     )
     assert response.status_code == 401
+
+
+def test_rename_asset_reports_how_many_targets_are_still_unfinished(
+    client: TestClient, contest: dict, admin_headers: dict, player: dict
+) -> None:
+    """改名会影响**还没落地**的下发：那些目标会按新名字写进选手的目录。
+
+    这个数字必须跟着响应回去。算了不报出去，教师就只能靠猜 ——
+    而猜错的方向恰好是"我以为已经发完了"，于是改完名之后
+    一部分机器的桌面上还是旧文件名。
+    """
+    asset = upload_asset(client, contest, admin_headers, "题面(1).pdf", b"statement").json()
+    assert asset["pending_targets"] == 0, "还没建下发任务时是 0"
+
+    make_deploy(client, contest, admin_headers, asset["id"], dest_dir="{player_no}")
+    listed = client.get(
+        "/api/v1/admin/contests/%d/assets" % contest["id"], headers=admin_headers
+    ).json()["items"]
+    assert listed[0]["pending_targets"] == 1, "列资产时就该看得到'还有几台没下完'"
+
+    renamed = client.patch(
+        "/api/v1/admin/assets/%d" % asset["id"],
+        json={"filename": "题面.pdf"},
+        headers=admin_headers,
+    )
+    assert renamed.status_code == 200, renamed.text
+    body = renamed.json()
+    assert body["filename"] == "题面.pdf"
+    assert body["pending_targets"] == 1, "改名回执必须说清会影响几个还没落地的目标"
+    # 内容不动：它按 sha256 存，改名只是换标签
+    assert body["sha256"] == asset["sha256"]
+
+
+def test_rename_asset_rejects_a_path(
+    client: TestClient, contest: dict, admin_headers: dict
+) -> None:
+    """文件名会变成选手桌面上的路径 —— 带斜杠的"名字"必须当场拒绝。"""
+    asset = upload_asset(client, contest, admin_headers, "ok.pdf", b"x").json()
+    response = client.patch(
+        "/api/v1/admin/assets/%d" % asset["id"],
+        json={"filename": "../../etc/passwd"},
+        headers=admin_headers,
+    )
+    assert response.status_code == 400, response.text
 
 
 # --------------------------------------------------------------------------- #
@@ -225,7 +276,8 @@ def test_empty_dest_dir_lands_on_desktop_root(client: TestClient, contest: dict,
 
 
 def test_dest_template_keeps_players_isolated(client: TestClient, contest: dict,
-                                              admin_headers: dict, enrolled: dict, app) -> None:
+                                              admin_headers: dict, enrolled: dict, app,
+                                              roster: dict, bootstrap_key: str) -> None:
     """两个选手拿到的目标路径必须不同。"""
     from sqlalchemy import select
 
@@ -241,18 +293,20 @@ def test_dest_template_keeps_players_isolated(client: TestClient, contest: dict,
     first = tick(client, enrolled["token"], [], machine_id=enrolled["machine_id"])
     assert first["deploy_jobs"][0]["dest"] == "%s/p1/p1.pdf" % enrolled["player_no"]
 
+    # 另一台机器配给另一个人。机器绑的是**人**，所以下发路径必须按各自的人展开 ——
+    # 展开成同一份就是"把 A 的题面发到 B 的目录"，而界面上看不出任何异常。
     with app.state.ctx.db.session() as session:
-        other = session.execute(select(Player).where(Player.player_no == "S002")).scalar_one()
-        code = client.post(
-            "/api/v1/admin/players/%d/enroll-code" % other.id, headers=admin_headers
-        ).json()["code"]
+        assert session.execute(
+            select(Player).where(Player.player_no == "S002")
+        ).scalar_one()
 
-    second_token = client.post(
-        "/api/v1/agent/enroll",
-        json={"enroll_code": code, "machine_id": "machine-S002"},
-    ).json()["token"]
+    second_entry = next(e for e in roster["entries"] if e["player_no"] == "S002")
+    second_machine = enroll_machine(client, bootstrap_key, hostname="exam-pc-02")
+    bind_by_code(client, admin_headers, second_machine["pair_code"], second_entry["id"])
 
-    second = tick(client, second_token, [], machine_id="machine-S002")
+    second = tick(
+        client, second_machine["token"], [], machine_id=second_machine["machine_id"]
+    )
     assert second["deploy_jobs"][0]["dest"] == "S002/p1/p1.pdf"
     assert second["deploy_jobs"][0]["dest"] != first["deploy_jobs"][0]["dest"]
 

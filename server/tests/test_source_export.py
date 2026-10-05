@@ -41,9 +41,10 @@ def report_files(client: TestClient, enrolled: dict, files: Dict[str, bytes]) ->
 
 
 def files_of(client: TestClient, headers: dict, contest: dict) -> List[Dict]:
-    return client.get(
+    body = client.get(
         "/api/v1/admin/contests/%d/files" % contest["id"], headers=headers
     ).json()
+    return body["items"]
 
 
 def add_problem(client: TestClient, headers: dict, contest: dict, ident: str) -> None:
@@ -212,7 +213,7 @@ def test_export_can_filter_by_player_and_problem(
 
     player_id = client.get(
         "/api/v1/admin/contests/%d/players" % contest["id"], headers=admin_headers
-    ).json()[0]["id"]
+    ).json()["items"][0]["id"]
     with read_export(client, admin_headers, contest, "?player_id=%d" % player_id) as archive:
         assert "代码/S001/p1/p1.cpp" in archive.namelist()
 
@@ -259,8 +260,17 @@ def test_clear_files_defaults_to_tombstones_only(client: TestClient, admin_heade
     report_files(client, enrolled, {"p1/keep.cpp": keep, "p1/gone.cpp": b"bye"})
     report_files(client, enrolled, {"p1/keep.cpp": keep})
 
-    response = client.delete(
-        "/api/v1/admin/contests/%d/files" % contest["id"], headers=admin_headers
+    missing = client.post(
+        "/api/v1/admin/contests/%d/files/clear" % contest["id"],
+        json={},
+        headers=admin_headers,
+    )
+    assert missing.status_code == 422, "清空台账要打场次标识"
+
+    response = client.post(
+        "/api/v1/admin/contests/%d/files/clear" % contest["id"],
+        json={"confirm": contest["slug"]},
+        headers=admin_headers,
     )
     assert response.status_code == 200, response.text
     assert "已清理 1 条" in response.json()["detail"]
@@ -270,11 +280,14 @@ def test_clear_files_defaults_to_tombstones_only(client: TestClient, admin_heade
 
 
 def test_purge_removes_live_records_too(client: TestClient, admin_headers: dict,
-                                        contest: dict, enrolled: dict) -> None:
+                                       contest: dict, enrolled: dict) -> None:
     report_files(client, enrolled, {"p1/a.cpp": b"a"})
-    response = client.delete(
-        "/api/v1/admin/contests/%d/files?purge=true" % contest["id"], headers=admin_headers
+    response = client.post(
+        "/api/v1/admin/contests/%d/files/clear" % contest["id"],
+        json={"confirm": contest["slug"], "purge": True},
+        headers=admin_headers,
     )
+    assert response.status_code == 200, response.text
     assert "机器还在报的文件会在下一轮重新出现" in response.json()["detail"]
     assert files_of(client, admin_headers, contest) == []
 

@@ -16,7 +16,16 @@ from typing import Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from conftest import ADMIN_PASSWORD, ADMIN_USER, agent_headers, do_tick
+from conftest import (
+    ADMIN_PASSWORD,
+    ADMIN_USER,
+    agent_headers,
+    bind_by_code,
+    do_tick,
+    enroll_machine,
+    issue_bootstrap_key,
+    make_roster,
+)
 from syncoj_server.config import Settings
 from syncoj_server.main import create_app
 from syncoj_server.models import Admin
@@ -34,6 +43,10 @@ from syncoj_agent.upgrade import (  # noqa: E402
     verify_bundle,
 )
 from syncoj_agent.rsa import RSAPublicKey  # noqa: E402
+
+#: 这台发布测试机器的 machine_id。夹具与 ``tick_upgrade`` 都要用它 ——
+#: 服务端会校验 tick 里声明的 machine_id 与凭据是否一致
+MACHINE_ID = "m-release-test"
 
 HAS_OPENSSL = openssl_available() is not None
 requires_openssl = pytest.mark.skipif(not HAS_OPENSSL, reason="需要 openssl")
@@ -88,14 +101,24 @@ def release_env(workdir: Path) -> Iterator[SimpleNamespace]:
             "/api/v1/admin/contests/%d/players" % contest["id"],
             json=[{"player_no": "S001"}],
             headers=headers,
-        ).json()[0]
-        code = client.post(
-            "/api/v1/admin/players/%d/enroll-code" % player["id"], headers=headers
-        ).json()["code"]
-        enrolled = client.post(
-            "/api/v1/agent/enroll",
-            json={"enroll_code": code, "machine_id": "m-release-test"},
-        ).json()
+        ).json()["players"][0]
+
+        # 机器绑的是**人**：建一份含 S001 的名单并把机器配上去，
+        # 否则它拿不到场次，tick 只会一直回 403
+        roster = make_roster(
+            client, headers, "发布测试班", entries=[{"player_no": "S001"}]
+        )
+        raw_key = issue_bootstrap_key(client, headers)
+        first = enroll_machine(client, raw_key, machine_id=MACHINE_ID)
+        bind_by_code(client, headers, first["pair_code"], roster["entries"][0]["id"])
+        # 再注册一次：配对之后机器才知道自己该扫哪、准考证号是多少
+        enrolled = enroll_machine(
+            client,
+            raw_key,
+            machine_id=MACHINE_ID,
+            machine_uuid=first["machine_uuid"],
+        )
+        assert enrolled["bound"] is True, enrolled
 
         yield SimpleNamespace(
             app=app,
@@ -126,7 +149,7 @@ def upload(client: TestClient, headers: dict, version: str, bundle: bytes = None
 
 
 def tick_upgrade(client: TestClient, enrolled: dict):
-    body = do_tick(client, enrolled["token"], [], machine_id="m-release-test")
+    body = do_tick(client, enrolled["token"], [], machine_id=MACHINE_ID)
     return body.get("upgrade")
 
 

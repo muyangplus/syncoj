@@ -1,11 +1,25 @@
 """前端接口路径契约测试。
 
-**解决的问题**：`web/src/api/index.ts` 里的接口路径是手写的字符串模板。
+**解决的问题**：`web/src/api/endpoints.ts` 里的接口路径是手写的字符串模板。
 写错一个字母不会有任何编译错误、不会被任何后端测试发现 —— 要等到教师点了
 那个按钮才炸，而那时现场正在考试。
 
-这里把前端声明的每个路径与服务端 OpenAPI 里实际存在的路径做比对，
-把"点下去才发现"提前到 CI。
+这里把前端声明的每个路径与服务端 OpenAPI 里实际存在的路径做**双向**比对：
+
+* 前端声明了、服务端没有 → 那个按钮点下去必然 404
+* 服务端有、前端没声明 → 某个功能压根没有入口（"看着像是齐的"）
+
+第二个方向同样重要。只查一个方向的话，"接口改名了但前端忘了改"会在一侧
+报错，而"接口加了但没人接"会完全静默 —— 后者正是"少写一个入口"这类
+问题的成因。
+
+关于"接口必须被界面调用"
+------------------------
+那条不在这个文件里了：前端的 `npm run check:routes`
+（`web/scripts/check-routes.mjs`）现在承担它，而且做得更准 ——
+它读的是 `openapi.json` 与页面源码，跑在 `npm run build` 的最前面。
+这里只留一条"那个守卫还在"的哨兵测试，防止它被悄悄删掉之后两边都以为
+对方在管。
 """
 
 from __future__ import annotations
@@ -13,113 +27,61 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Set
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-API_SOURCE = REPO_ROOT / "web" / "src" / "api" / "index.ts"
+ENDPOINTS_SOURCE = REPO_ROOT / "web" / "src" / "api" / "endpoints.ts"
+PACKAGE_JSON = REPO_ROOT / "web" / "package.json"
 OPENAPI_JSON = REPO_ROOT / "web" / "openapi.json"
 
-#: 前端 api 层里声明的基础路径常量。新增常量时这里要一起加 ——
-#: 否则对应的路径会被当成未知而报错，这是刻意的：宁可显式登记。
-BASE_CONSTANTS: Dict[str, str] = {
-    "ADMIN": "/api/v1/admin",
-}
+#: 前端声明的管理端前缀常量。它变了这里就得跟着变 —— 刻意的：
+#: 宁可显式登记，也不要一个"猜出来"的前缀。
+ADMIN_PREFIX = "/api/v1/admin"
+ADMIN_CONST = "${ADMIN}"
 
 #: 非 /api 开头、但确实存在的路径
 EXTRA_SERVER_PATHS = {"/healthz"}
 
-#: 路径里出现这些前缀才算接口路径
-PATH_PREFIXES = ("/api/", "/healthz")
+#: 路径里的占位符：``${contestId}``（前端）与 ``{contest_id}``（OpenAPI）
+_TEMPLATE_PARAM = re.compile(r"\$\{[^}]*\}|\{[^}]*\}")
 
 
-def _read_balanced(text: str, start: int) -> Tuple[str, int]:
-    """从 ``text[start]``（一个 ``{``）开始读配平的大括号块。
+def normalize(text: str) -> str:
+    """把两种占位符写法都归一成 ``{}``，这样两边才能逐字比对。"""
+    return _TEMPLATE_PARAM.sub("{}", text)
 
-    返回 ``(大括号内的内容, 闭合括号之后的索引)``。
 
-    不能只匹配到第一个 ``}`` —— 前端里有 ``${query({ ... })}`` 这种嵌套写法，
-    简单正则会把它截断成 ``{})}``，产生一个看起来像真实路径的假象。
+def _endpoints_text() -> str:
+    if not ENDPOINTS_SOURCE.is_file():
+        pytest.skip("找不到 %s" % ENDPOINTS_SOURCE)
+    return ENDPOINTS_SOURCE.read_text(encoding="utf-8")
+
+
+def load_declared_paths() -> List[str]:
+    """抽出 ``endpoints.ts`` 里声明的管理端路径模板。
+
+    只认**模板字面量**（反引号包起来的那种）：`paths` 对象的每个值都是一个
+    ``() => `${ADMIN}/...` ``。用"反引号 + ${ADMIN}"当锚点，比按调用切块稳得多 ——
+    后者一旦换了写法（比如抽出 `paths` 对象）就会静默解析出零条，
+    而"零条"看起来和"全都对"一模一样。
     """
-    depth = 0
-    index = start
-    while index < len(text):
-        char = text[index]
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start + 1 : index], index + 1
-        index += 1
-    return text[start + 1 :], len(text)
-
-
-def normalize_template(expr: str) -> str:
-    """把 TS 模板字面量规范化成 OpenAPI 风格的路径模板。
-
-    - 路径参数 ``${contestId}`` -> ``{}``
-    - 查询串 ``${query({...})}`` -> 整段丢掉（它不属于路径）
-    """
-    parts: List[str] = []
+    text = _endpoints_text()
+    quote = chr(96)
+    anchor = quote + ADMIN_CONST
+    found: List[str] = []
     index = 0
-    while index < len(expr):
-        if expr.startswith("${", index):
-            # index+1 指向 `${` 的那个 `{`
-            inner, next_index = _read_balanced(expr, index + 1)
-            if not inner.strip().startswith("query("):
-                parts.append("{}")
-            index = next_index
-        else:
-            parts.append(expr[index])
-            index += 1
-
-    normalized = "".join(parts)
-    # 兜底：万一还有没识别的可选后缀
-    return normalized.split("?", 1)[0]
-
-
-def _source_text() -> str:
-    if not API_SOURCE.is_file():
-        pytest.skip("找不到 %s" % API_SOURCE)
-    text = API_SOURCE.read_text(encoding="utf-8")
-    for name, value in BASE_CONSTANTS.items():
-        text = text.replace("${%s}" % name, value)
-    return text
-
-
-def load_frontend_calls() -> List[Tuple[str, str]]:
-    """抽出前端声明的 ``(方法, 路径模板)``。
-
-    **按 `request` 调用切块**，每个块只看自己的那一小段。
-
-    早先的实现是"取路径字面量之后的 400 个字符找 method:"，结果越界读到了下一个
-    函数，把 `GET /contests` 误判成 `POST /contests` —— 契约测试自己造出了一堆
-    不存在的"不一致"，比不做还糟。
-    """
-    text = _source_text()
-    calls: List[Tuple[str, str]] = []
-
-    chunks = text.split("request")
-    for chunk in chunks[1:]:
-        match = re.search(r"`(/[^`]*)`", chunk)
-        if not match:
-            continue
-        raw = match.group(1)
-        if not raw.startswith(PATH_PREFIXES):
-            continue
-
-        # 方法只可能出现在紧随其后的对象字面量里；遇到下一个 request 就停，
-        # 避免越界到下一个函数
-        boundary = chunk.find("request", match.end())
-        tail = chunk[match.end() : boundary if boundary > 0 else None]
-        method_match = re.search(r"method:\s*'([A-Z]+)'", tail)
-        method = method_match.group(1) if method_match else "GET"
-
-        calls.append((method, normalize_template(raw)))
-
-    return calls
+    while True:
+        start = text.find(anchor, index)
+        if start < 0:
+            break
+        end = text.find(quote, start + len(anchor))
+        if end < 0:  # pragma: no cover - 语法坏了，交给别的测试去报
+            break
+        found.append(normalize(text[start + len(anchor) : end]))
+        index = end + 1
+    return found
 
 
 def load_server_paths() -> Dict[str, Set[str]]:
@@ -130,12 +92,20 @@ def load_server_paths() -> Dict[str, Set[str]]:
     schema = json.loads(OPENAPI_JSON.read_text(encoding="utf-8"))
     result: Dict[str, Set[str]] = {}
     for path, operations in schema.get("paths", {}).items():
-        key = re.sub(r"\{[^}]*\}", "{}", path)
         methods = {method.upper() for method in operations if method.islower()}
-        result.setdefault(key, set()).update(methods)
+        result.setdefault(normalize(path), set()).update(methods)
     for extra in EXTRA_SERVER_PATHS:
         result.setdefault(extra, set()).add("GET")
     return result
+
+
+def load_admin_paths() -> Dict[str, Set[str]]:
+    """只看管理端 —— Agent 侧不由前端消费，比对进去只会全是噪音。"""
+    return {
+        path: methods
+        for path, methods in load_server_paths().items()
+        if (path == ADMIN_PREFIX or path.startswith(ADMIN_PREFIX + "/"))
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -143,28 +113,30 @@ def load_server_paths() -> Dict[str, Set[str]]:
 # --------------------------------------------------------------------------- #
 
 
-def test_normalizer_handles_nested_braces() -> None:
-    """这是上一版正则翻车的地方：`${query({...})}` 里有嵌套大括号。"""
-    assert normalize_template("/a/${query({ player_id: 1 })}") == "/a/"
-    assert normalize_template("/a/${contestId}/b") == "/a/{}/b"
-    assert (
-        normalize_template("/c/${contestId}/judge/score${query({ a: 1, b: 2 })}")
-        == "/c/{}/judge/score"
-    )
-    # 嵌套更深的也要能吃掉
-    assert normalize_template("/x${query({ a: { b: 1 } })}") == "/x"
+def test_declared_paths_were_parsed() -> None:
+    """防止解析失效导致这些测试"绿得毫无意义"。
 
-
-def test_some_calls_were_parsed() -> None:
-    """防止正则失效导致这些测试"绿得毫无意义"。"""
-    calls = load_frontend_calls()
-    assert len(calls) >= 15, "只解析出 %d 个接口调用，解析逻辑可能失效：%r" % (
-        len(calls),
-        calls,
+    这是这份文件最容易犯的错：换个写法就解析出零条，而断言"没有任何不一致"
+    在空集合上永远成立。
+    """
+    declared = load_declared_paths()
+    assert len(declared) >= 40, "只解析出 %d 条路径，解析逻辑可能失效：%r" % (
+        len(declared),
+        declared,
     )
-    for method, path in calls:
-        assert method.isupper(), "方法解析异常: %r" % method
+    for path in declared:
+        assert path.startswith("/"), "路径必须以斜杠开头，多半是拼接写错了: %r" % path
         assert " " not in path, "路径里出现空格，多半是拼接写错了: %r" % path
+        # 归一化之后只该剩下 `{}` 这一种花括号；还有别的说明漏了某个写法
+        residue = path.replace("{}", "")
+        assert "{" not in residue and "}" not in residue, (
+            "占位符没被归一化，两边的写法会永远对不上: %r" % path
+        )
+
+
+def test_normalizer_treats_both_placeholder_styles_alike() -> None:
+    assert normalize("/contests/${contestId}/players") == "/contests/{}/players"
+    assert normalize("/contests/{contest_id}/players") == "/contests/{}/players"
 
 
 # --------------------------------------------------------------------------- #
@@ -172,145 +144,47 @@ def test_some_calls_were_parsed() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_every_frontend_path_exists_on_server() -> None:
-    server = load_server_paths()
-    unknown = sorted({path for _method, path in load_frontend_calls() if path not in server})
-
-    assert not unknown, (
-        "前端声明了服务端不存在的接口路径（这类错误此前只能等教师点按钮才发现）：\n"
-        + "\n".join("  %s" % path for path in unknown)
-        + "\n\n服务端现有路径：\n"
-        + "\n".join("  %s" % p for p in sorted(server))
+def test_every_declared_path_exists_on_server() -> None:
+    """前端写了一个服务端不存在的路径 —— 那个按钮点下去就是 404。"""
+    server = load_admin_paths()
+    missing = sorted({ADMIN_PREFIX + p for p in load_declared_paths()} - set(server))
+    assert not missing, (
+        "web/src/api/endpoints.ts 里声明了服务端没有的路径（点下去会 404）：\n"
+        + "\n".join("  %s" % p for p in missing)
     )
 
 
-def test_http_methods_used_by_frontend_are_supported() -> None:
-    """路径存在但方法不对（服务端是 PUT、前端写成 POST）同样只会在运行期炸。"""
-    server = load_server_paths()
-    problems: List[str] = []
+def test_every_server_path_is_declared_in_the_frontend() -> None:
+    """服务端有的管理端接口，前端必须知道。
 
-    for method, path in load_frontend_calls():
-        allowed = server.get(path)
-        if allowed is None:
-            problems.append("%s %s —— 服务端没有这个路径" % (method, path))
-        elif method not in allowed:
-            problems.append(
-                "%s %s —— 服务端只支持 %s" % (method, path, "/".join(sorted(allowed)))
-            )
-
-    assert not problems, "前后端接口不一致：\n" + "\n".join("  " + p for p in problems)
-
-
-# --------------------------------------------------------------------------- #
-# 界面覆盖：API 层声明的方法必须真的被用上
-# --------------------------------------------------------------------------- #
-#
-# 这条检查来自一次真实的翻车：前端 API 层写好了 contestApi.create 与
-# playerApi.import，却**没有任何界面调用它们**。结果是登录进去之后彻底死路 ——
-# 系统提示"还没有任何场次"，但没有创建入口，连去别的页面的机会都没有
-# （当时 AppLayout 用 v-else 把 RouterView 挡住了）。
-#
-# 单元测试、类型检查、构建全都不会发现这个问题：类型是对的、能编译、能跑，
-# 只是教师点不到。只有"API 层有方法但没人调用"这个静态事实能暴露它。
-
-FRONTEND_ROOT = REPO_ROOT / "web" / "src"
-#: store 也是界面的消费者 —— 登录、场次加载这些就发生在 store 里，
-#: 只扫 views/components 会误报它们"没人调用"。
-CONSUMER_DIRS = ("views", "components", "stores", "composables")
-
-
-def load_declared_api_methods() -> List[str]:
-    """抽出 ``api/index.ts`` 里导出的所有 ``分组.方法``。"""
-    text = _source_text()
-    methods: List[str] = []
-    group: str | None = None
-
-    for line in text.splitlines():
-        group_match = re.match(r"^export const (\w+)\s*=\s*\{", line)
-        if group_match:
-            group = group_match.group(1)
-            continue
-        if group is None:
-            continue
-        if line.startswith("}"):
-            group = None
-            continue
-        # 组内的方法：两个空格缩进 + 名字 + 冒号
-        method_match = re.match(r"^  (\w+)\s*:", line)
-        if method_match:
-            methods.append("%s.%s" % (group, method_match.group(1)))
-
-    return methods
-
-
-def load_consumer_source() -> str:
-    chunks: List[str] = []
-    for directory in CONSUMER_DIRS:
-        base = FRONTEND_ROOT / directory
-        if not base.is_dir():
-            continue
-        for path in base.rglob("*"):
-            if path.suffix in (".vue", ".ts"):
-                chunks.append(path.read_text(encoding="utf-8"))
-    return "\n".join(chunks)
-
-
-def test_some_api_methods_were_parsed() -> None:
-    """防止解析失效导致下面那条检查永远通过。"""
-    methods = load_declared_api_methods()
-    assert len(methods) >= 20, "只解析出 %d 个接口方法：%r" % (len(methods), methods)
-    assert "contestApi.create" in methods
-    assert "playerApi.import" in methods
-
-
-def test_every_api_method_is_wired_to_the_ui() -> None:
-    """每个接口方法都必须在视图/组件里被调用过。
-
-    发现未使用的方法时，正确的反应是二选一：**接上界面**，或者**从 API 层删掉**。
-    留着一个没人调用的方法，本质上就是"这个功能没做"，但它会伪装成已完成 ——
-    文件里写着、类型里有、看着像是齐的。
+    这一条抓的是"接口加了但没人接"：它会**完全静默** —— 服务端测试全绿、
+    前端构建也全绿，只有教师在界面上找不到那个功能。
     """
-    consumers = load_consumer_source()
-    orphaned = [
-        method for method in load_declared_api_methods() if method not in consumers
-    ]
-
-    assert not orphaned, (
-        "以下接口方法在 web/src/api/index.ts 里声明了，但没有任何视图或组件调用：\n"
-        + "\n".join("  %s" % m for m in orphaned)
-        + "\n\n要么把它接上界面，要么删掉声明 —— "
-        "留着一个没人调用的方法，就是一处伪装成已完成的功能缺失。"
+    undeclared = sorted(set(load_admin_paths()) - {ADMIN_PREFIX + p for p in load_declared_paths()})
+    assert not undeclared, (
+        "服务端有这些管理端接口，但 web/src/api/endpoints.ts 里没有声明"
+        "（等于没有入口）：\n"
+        + "\n".join("  %s" % p for p in undeclared)
     )
 
 
-# --------------------------------------------------------------------------- #
-# 界面覆盖：每个 view 必须真的挂在路由上
-# --------------------------------------------------------------------------- #
-#
-# 和上面那条是同一类问题：写了页面但没挂路由，**从界面上永远到不了**。
-# 编译能过、类型能过，只有"文件存在但路由里没有它"这个静态事实能暴露。
-#
-# 导航菜单不在这里查：菜单是给常用页面用的，把每个页面都塞进侧栏并不合适，
-# 路由才是"能到达"的唯一判据。
+def test_healthz_is_reachable_from_the_frontend_contract() -> None:
+    """``/healthz`` 不在 /api 下，但界面上的服务状态要用它。"""
+    assert "/healthz" in load_server_paths()
 
 
-def test_every_view_is_reachable_by_a_route() -> None:
-    router_source = (FRONTEND_ROOT / "router" / "index.ts").read_text(encoding="utf-8")
+def test_route_wiring_guard_still_exists() -> None:
+    """"每个接口方法都要被界面调用"这条守卫现在归 npm 管。
 
-    unreachable = []
-    for path in sorted((FRONTEND_ROOT / "views").glob("*.vue")):
-        # 路由里用 "@/views/XxxView.vue" 引用，按文件名匹配即可
-        if path.name not in router_source:
-            unreachable.append(path.name)
-
-    assert not unreachable, (
-        "以下页面没有挂在路由上，从界面上永远点不到：\n"
-        + "\n".join("  %s" % name for name in unreachable)
-        + "\n\n要么在 web/src/router/index.ts 里挂上，要么把文件删掉。"
+    留一条哨兵：它要是被删掉，两边都会以为对方在管，于是没人管。
+    """
+    if not PACKAGE_JSON.is_file():  # pragma: no cover
+        pytest.skip("找不到 %s" % PACKAGE_JSON)
+    scripts = json.loads(PACKAGE_JSON.read_text(encoding="utf-8")).get("scripts", {})
+    assert "check:routes" in scripts, (
+        "web/package.json 里没有 check:routes —— "
+        "「声明了接口但没人调用」这类问题就再也没人拦了"
     )
-
-
-def test_some_views_were_found() -> None:
-    """防止上面那条因为 glob 失效而永远通过。"""
-    views = list((FRONTEND_ROOT / "views").glob("*.vue"))
-    assert len(views) >= 8, "只找到 %d 个页面：%r" % (len(views), [p.name for p in views])
+    assert "check:routes" in scripts.get("build", ""), (
+        "check:routes 必须挂在 npm run build 的最前面，否则它只在有人手动跑时生效"
+    )

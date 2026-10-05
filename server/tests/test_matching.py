@@ -232,3 +232,48 @@ def test_compile_is_cached() -> None:
     """逐文件逐题目调用，不能每次都重新编译 —— 这是热路径。"""
     first = matching.compile_pattern("cached/**")
     assert matching.compile_pattern("cached/**") is first
+
+
+# --------------------------------------------------------------------------- #
+# 与 Agent 侧 scan.prefix 的交互
+# --------------------------------------------------------------------------- #
+
+
+def test_default_pattern_does_not_match_a_prefixed_path() -> None:
+    """Agent 配了 ``scan.prefix = auto`` 时，默认模式认不出文件。
+
+    这不是 bug，是两层配置叠在一起的必然结果：前缀进了上报路径，
+    ``p1/p1.cpp`` 就变成了 ``S001/p1/p1.cpp``。
+
+    把这条**当成测试写下来**，是因为它太难自己发现 —— 代码照样收得上来、
+    文件台账里也有，只是全都标「未归类」，成绩矩阵显示「未交」。
+    看到一个安静地什么都没发生的现象，最容易怀疑到别的地方去。
+    """
+    default_rule = rules(("p1", ["{ident}/**"]))
+    assert match_problem("p1/p1.cpp", default_rule) == "p1"
+    assert match_problem("S001/p1/p1.cpp", default_rule) is None
+
+
+def test_recovers_from_a_prefixed_path_with_leading_globstar() -> None:
+    """给模式加一个前导 ``**/`` 就能重新认出来 —— 这是文档里给的补救办法。"""
+    fixed = rules(("p1", ["**/{ident}/**"]))
+    assert match_problem("S001/p1/p1.cpp", fixed) == "p1"
+    # 没加前缀的路径照样要能匹配，否则"补救"会把原本正常的情况弄坏
+    assert match_problem("p1/p1.cpp", fixed) == "p1"
+    assert match_problem("p1/a/b/c.cpp", fixed) == "p1"
+    # 但不能顺手把别的题也吞进来
+    assert match_problem("S001/p2/p2.cpp", fixed) is None
+
+
+def test_explicit_prefix_can_be_spelled_out_in_the_pattern() -> None:
+    """也可以把前缀直接写死进模式里。
+
+    两种补法：``**/{ident}/**``（不关心前缀是什么，一个考点内通用）和
+    ``S001/{ident}/**``（写死某个准考证号）。
+
+    写死的那种要留意：题目的模式是**全场次共用**的，不区分选手，所以它只在
+    "一个场次一台机器"这种简单场景下才讲得通。多个选手时请用 ``**/`` 那种。
+    """
+    rule = rules(("p1", ["S001/{ident}/**"]))
+    assert match_problem("S001/p1/p1.cpp", rule) == "p1"
+    assert match_problem("S002/p1/p1.cpp", rule) is None

@@ -383,6 +383,12 @@ class ClaimByCodeIn(_Base):
     player_id: int
 
 
+class RebindAgentIn(_Base):
+    """把一台机器改派给另一位选手。"""
+
+    player_id: int
+
+
 class CloneAlertOut(_Base):
     """克隆镜像告警：多台机器共用同一个硬件指纹。"""
 
@@ -440,6 +446,25 @@ class EnrollCodeOut(_Base):
     code: str
     expires_at: Optional[str] = None
     note: Optional[str] = None
+
+
+class EnrollCodeStateOut(_Base):
+    """一把注册码的**状态**，不含明文。
+
+    库里只有哈希，明文只在签发那一刻出现过 —— 所以这里回答的是
+    "谁手上还有一把能用的钥匙、谁已经用过了"，而不是"那把钥匙长什么样"。
+    """
+
+    id: int
+    player_id: int
+    player_no: str
+    #: 已经绑定的机器。为空表示这把码还没被用过
+    bound_machine_id: Optional[str] = None
+    #: 还能不能用来注册
+    usable: bool = True
+    created_at: Optional[str] = None
+    expires_at: Optional[str] = None
+    revoked_at: Optional[str] = None
 
 
 # --------------------------------------------------------------------------- #
@@ -565,6 +590,12 @@ class AssetOut(_Base):
     filename: str
     kind: str
     created_at: str
+
+
+class AssetRenameIn(_Base):
+    """只改显示名。内容是按 sha256 存的，改名不触碰到内容。"""
+
+    filename: str = Field(min_length=1, max_length=255)
 
 
 class DeployCreate(_Base):

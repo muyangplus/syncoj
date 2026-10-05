@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import json
 import logging
+import tempfile
+import zipfile
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from fastapi import (
     APIRouter,
@@ -23,6 +25,12 @@ from fastapi import (
     UploadFile,
     status,
 )
+# Response / StreamingResponse 必须**在模块顶层可见**：本文件开了
+# ``from __future__ import annotations``，返回标注只是个字符串，
+# FastAPI 到了生成 OpenAPI 时才去解析它。名字没导入的话，
+# 它会试图把 ``ForwardRef('Response')`` 当成响应模型来建模，然后炸在
+# /openapi.json 上 —— 而 /docs 和前端类型生成都依赖那个端点。
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from sqlalchemy import func, select
 
 from ..config import Settings
@@ -58,6 +66,7 @@ from ..schemas import (
     ApplyRosterIn,
     ApplyRosterOut,
     AssetOut,
+    AssetRenameIn,
     BootstrapKeyIssueIn,
     BootstrapKeyIssuedOut,
     BootstrapKeyOut,
@@ -71,6 +80,7 @@ from ..schemas import (
     DeployTargetOut,
     DeployTaskOut,
     EnrollCodeOut,
+    EnrollCodeStateOut,
     EventOut,
     JudgeRunOut,
     JudgeScanOut,
@@ -78,6 +88,7 @@ from ..schemas import (
     LoginResponse,
     ManualScoreIn,
     PendingMachineOut,
+    RebindAgentIn,
     PlayerOut,
     PlayerUpsert,
     ProblemColumnOut,
@@ -118,6 +129,10 @@ from ..storage import BlobTooLarge, HashMismatch
 from .deps import get_ctx
 
 __all__ = ["router", "require_admin", "AdminIdentity"]
+
+#: 「还没落地」的下发状态。改名/删除资产时要看有没有这些 ——
+#: 一旦目标已经完成，改名就只是改标签；还没完成的话，新名字会决定它落在哪
+ACTIVE_DEPLOY_STATUSES = (DeployStatus.PENDING, DeployStatus.READY)
 
 log = logging.getLogger(__name__)
 
@@ -604,6 +619,70 @@ def import_roster_entries(
     return result
 
 
+@router.patch("/roster-entries/{entry_id}", response_model=RosterEntryOut)
+def update_roster_entry(
+    entry_id: int,
+    payload: RosterEntryIn,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> RosterEntryOut:
+    """改名单里的一条。改错了编号要能修，不必删了重加。"""
+    with ctx.db.session() as session:
+        entry = session.get(RosterEntry, entry_id)
+        if entry is None:
+            raise HTTPException(status_code=404, detail="名单条目不存在")
+
+        player_no = payload.player_no.strip()
+        if not player_no:
+            raise HTTPException(status_code=400, detail="选手编号不能为空")
+        if len(player_no) > 64:
+            raise HTTPException(status_code=400, detail="选手编号超过 64 字符")
+        too_long = _first_overlong(
+            (payload.name, 64, "姓名"), (payload.seat, 32, "座位"), (payload.group_name, 64, "分组")
+        )
+        if too_long:
+            raise HTTPException(status_code=400, detail=too_long)
+
+        if player_no != entry.player_no:
+            clash = session.execute(
+                select(RosterEntry).where(
+                    RosterEntry.roster_id == entry.roster_id,
+                    RosterEntry.player_no == player_no,
+                    RosterEntry.id != entry_id,
+                )
+            ).scalar_one_or_none()
+            if clash is not None:
+                raise HTTPException(status_code=409, detail="名单里已经有 %s 了" % player_no)
+            entry.player_no = player_no
+
+        entry.name = payload.name
+        entry.seat = payload.seat
+        entry.group_name = payload.group_name
+        session.flush()
+        return _roster_entry_out(entry)
+
+
+@router.delete("/rosters/{roster_id}/entries", response_model=SimpleAck)
+def clear_roster_entries(
+    roster_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> SimpleAck:
+    """清空名单里的全部条目（保留名单本身）。"""
+    with ctx.db.session() as session:
+        roster = session.get(Roster, roster_id)
+        if roster is None:
+            raise HTTPException(status_code=404, detail="名单不存在")
+        removed = 0
+        for entry in session.execute(
+            select(RosterEntry).where(RosterEntry.roster_id == roster_id)
+        ).scalars():
+            session.delete(entry)
+            removed += 1
+        name = roster.name
+    return SimpleAck(ok=True, detail="已清空名单「%s」的 %d 条记录" % (name, removed))
+
+
 @router.delete("/roster-entries/{entry_id}", response_model=SimpleAck)
 def delete_roster_entry(
     entry_id: int,
@@ -916,6 +995,43 @@ def revoke_pending_machine(
     return SimpleAck(ok=True, detail="已移除")
 
 
+@router.delete("/machines/pending", response_model=SimpleAck)
+def clear_pending_machines(
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> SimpleAck:
+    """清空待配对列表。
+
+    典型场景：机房做镜像时忘了通用化，50 台克隆机全冒出来了 ——
+    教师修好镜像之后要把这一堆清掉重来。
+
+    **先吊销统一密钥再清**，否则那批机器下次心跳拿到 401、接着重新注册，
+    名单立刻又满一遍。返回里会提醒这一点。
+    """
+    with ctx.db.session() as session:
+        rows = list(
+            session.execute(
+                select(MachineClaim).where(MachineClaim.revoked_at.is_(None))
+            ).scalars()
+        )
+        now = utcnow()
+        for claim in rows:
+            claim.revoked_at = now
+        if rows:
+            session.add(
+                EventLog(
+                    level="warning",
+                    category="machines_clear",
+                    message="清空待配对机器 %d 台" % len(rows),
+                )
+            )
+
+    detail = "已移除 %d 台待配对机器" % len(rows)
+    if rows:
+        detail += "。它们下次心跳会重新注册 —— 要挡住的话请先吊销统一密钥"
+    return SimpleAck(ok=True, detail=detail)
+
+
 # --------------------------------------------------------------------------- #
 # 统一注册密钥
 # --------------------------------------------------------------------------- #
@@ -1000,6 +1116,45 @@ def revoke_bootstrap_key(
             )
         session.flush()
         return _bootstrap_key_out(key)
+
+
+@router.delete("/bootstrap-keys/{key_id}", response_model=SimpleAck)
+def delete_bootstrap_key(
+    key_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> SimpleAck:
+    """彻底删掉一把统一密钥（不是吊销）。
+
+    「吊销」和「删除」的区别值得说清楚，否则教师只会看到两个长得很像的按钮：
+
+    * **吊销**：留痕。``use_count`` / ``last_used_at`` 还在，能回答"这把钥匙
+      到底被用过多少次"。密钥泄漏时的第一反应应该是吊销。
+    * **删除**：抹掉记录。只在"签错了、一次都没用过"时才合适。
+
+    没被用过、也没被吊销的密钥才允许删除 —— 一把用过的钥匙不能因为记录被删
+    就当它没存在过。
+    """
+    with ctx.db.session() as session:
+        key = session.get(BootstrapKey, key_id)
+        if key is None:
+            return SimpleAck(ok=True, detail="密钥不存在")
+        if int(key.use_count or 0) > 0:
+            raise HTTPException(
+                status_code=409,
+                detail="这把密钥已经被用过 %d 次，不能删除 —— 请改用「吊销」以保留记录"
+                % int(key.use_count or 0),
+            )
+        label = key.label or "#%d" % key.id
+        session.delete(key)
+        session.add(
+            EventLog(
+                level="info",
+                category="bootstrap_key",
+                message="删除未使用的统一注册密钥 %s" % label,
+            )
+        )
+    return SimpleAck(ok=True, detail="已删除统一密钥 %s" % label)
 
 
 # --------------------------------------------------------------------------- #
@@ -1117,6 +1272,185 @@ def _player_out(
     )
 
 
+@router.patch("/players/{player_id}", response_model=PlayerOut)
+def update_player(
+    player_id: int,
+    payload: PlayerUpsert,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> PlayerOut:
+    """改一名选手。
+
+    ``player_no`` 也能改，但要连带想清楚：它出现在已回收代码的落盘路径
+    （``source/<场次>/<准考证号>/…``）与下发目标模板里。改完之后**已有文件的
+    目录名不会跟着变** —— 这是有意的：把磁盘上的目录改名会让评测器配置
+    与历史成绩一起失效。真要改名，请连同 `source/` 目录和评测器配置一起改。
+    """
+    with ctx.db.session() as session:
+        player = session.get(Player, player_id)
+        if player is None:
+            raise HTTPException(status_code=404, detail="选手不存在")
+
+        player_no = payload.player_no.strip()
+        if not player_no:
+            raise HTTPException(status_code=400, detail="选手编号不能为空")
+        if len(player_no) > 64:
+            raise HTTPException(status_code=400, detail="选手编号超过 64 字符")
+        too_long = _first_overlong(
+            (payload.name, 64, "姓名"), (payload.seat, 32, "座位"), (payload.group_name, 64, "分组")
+        )
+        if too_long:
+            raise HTTPException(status_code=400, detail=too_long)
+
+        if player_no != player.player_no:
+            clash = session.execute(
+                select(Player).where(
+                    Player.contest_id == player.contest_id,
+                    Player.player_no == player_no,
+                    Player.id != player_id,
+                )
+            ).scalar_one_or_none()
+            if clash is not None:
+                raise HTTPException(status_code=409, detail="选手编号 %s 已被占用" % player_no)
+            player.player_no = player_no
+
+        player.name = payload.name
+        player.seat = payload.seat
+        player.group_name = payload.group_name
+        session.flush()
+
+        agent_count = session.execute(
+            select(func.count(Agent.id)).where(
+                Agent.player_id == player_id, Agent.revoked_at.is_(None)
+            )
+        ).scalar_one()
+        file_count = session.execute(
+            select(func.count(SourceFile.id)).where(
+                SourceFile.player_id == player_id, SourceFile.deleted_at.is_(None)
+            )
+        ).scalar_one()
+        runtime = next(
+            (a for a in ctx.registry.all(player.contest_id) if a.player_id == player_id), None
+        )
+        return _player_out(
+            player,
+            has_agent=bool(agent_count),
+            online=bool(runtime and runtime.online),
+            file_count=int(file_count),
+            last_tick=runtime.last_tick_at if runtime else None,
+        )
+
+
+@router.delete("/players/{player_id}", response_model=SimpleAck)
+def delete_player(
+    player_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> SimpleAck:
+    """删一名选手，连同他的代码台账与成绩（外键级联）。
+
+    如果这名选手名下有机器，**先把机器一并作废**（吊销凭据）——
+    否则那台机器下次 tick 会以 401 收到"凭据无效"，然后按配置重新注册，
+    又冒出一个新选手。让它在服务端明确作废，比让它在客户端反复重试好。
+    """
+    with ctx.db.session() as session:
+        player = session.get(Player, player_id)
+        if player is None:
+            return SimpleAck(ok=True, detail="选手不存在")
+
+        contest_id = player.contest_id
+        player_no = player.player_no
+        files = session.execute(
+            select(func.count(SourceFile.id)).where(SourceFile.player_id == player_id)
+        ).scalar_one()
+        runs = session.execute(
+            select(func.count(JudgeRun.id)).where(JudgeRun.player_id == player_id)
+        ).scalar_one()
+        agents = list(
+            session.execute(select(Agent).where(Agent.player_id == player_id)).scalars()
+        )
+        agent_ids = [a.id for a in agents]
+        for agent in agents:
+            agent.revoked_at = utcnow()
+
+        session.delete(player)
+        session.add(
+            EventLog(
+                level="warning",
+                category="player_delete",
+                contest_id=contest_id,
+                message="删除选手 %s（代码 %d 条，成绩 %d 条，机器 %d 台）"
+                % (player_no, files, runs, len(agents)),
+            )
+        )
+
+    for agent_id in agent_ids:
+        ctx.registry.forget(agent_id)
+
+    return SimpleAck(
+        ok=True,
+        detail="已删除选手 %s（代码 %d 条，成绩 %d 条%s）"
+        % (
+            player_no,
+            files,
+            runs,
+            "，%d 台机器已作废" % len(agents) if agents else "",
+        ),
+    )
+
+
+@router.delete("/contests/{contest_id}/players", response_model=SimpleAck)
+def clear_players(
+    contest_id: int,
+    keep_with_submissions: bool = True,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> SimpleAck:
+    """清空场次的选手名单。
+
+    ``keep_with_submissions`` 默认 **True**：已经有代码或成绩的选手留着。
+    理由和名单应用里的 ``prune`` 一样 —— 顺手把参赛者的提交一起删掉是不可逆的
+    事故，而且它不报错。真要连提交一起清，得显式传 ``false``（界面上的按钮
+    会写明这一点）。
+    """
+    with ctx.db.session() as session:
+        contest = session.get(Contest, contest_id)
+        if contest is None:
+            raise HTTPException(status_code=404, detail="场次不存在")
+
+        players = list(
+            session.execute(select(Player).where(Player.contest_id == contest_id)).scalars()
+        )
+        protected_ids = rosters._players_with_evidence(session, contest_id)
+
+        removed = 0
+        protected = []
+        for player in players:
+            if keep_with_submissions and player.id in protected_ids:
+                protected.append(player.player_no)
+                continue
+            session.delete(player)
+            removed += 1
+
+        session.add(
+            EventLog(
+                level="warning",
+                category="players_clear",
+                contest_id=contest_id,
+                message="清空选手名单：删除 %d 名，保留 %d 名（有提交）"
+                % (removed, len(protected)),
+            )
+        )
+
+    detail = "已删除 %d 名选手" % removed
+    if protected:
+        detail += "；保留 %d 名有提交的：%s" % (
+            len(protected),
+            "、".join(protected[:10]) + ("…" if len(protected) > 10 else ""),
+        )
+    return SimpleAck(ok=True, detail=detail)
+
+
 # --------------------------------------------------------------------------- #
 # 注册码
 # --------------------------------------------------------------------------- #
@@ -1131,7 +1465,12 @@ def issue_enroll_code(
     """签发（或重新签发）该选手的注册码。
 
     注册码长期有效、可重复使用 —— 它是"机器凭据种子"，供快照还原后自愈。
-    重新签发会吊销该选手此前所有未绑定的注册码。
+
+    **重新签发只吊销没绑过机器的那些**。已经绑定的那把是那台机器"还原之后还能
+    回来"的唯一依据，顺手撤掉它的表现是"某台机器快照还原后再也连不上" ——
+    而现场几乎不可能联想到是重新签发注册码那一步干的。
+
+    真的要停用某把已绑定的码，请用「撤销」明确地撤掉它。
     """
     now = utcnow()
     raw_code = new_enroll_code(ctx.settings.enroll_code_bytes)
@@ -1141,13 +1480,20 @@ def issue_enroll_code(
         if player is None:
             raise HTTPException(status_code=404, detail="选手不存在")
 
+        replaced = 0
+        kept_bound = 0
         for old in session.execute(
             select(EnrollCode).where(
                 EnrollCode.player_id == player_id,
                 EnrollCode.revoked_at.is_(None),
             )
         ).scalars():
+            if old.machine_id is not None:
+                # 已绑定：那是机器的自愈种子，不动它
+                kept_bound += 1
+                continue
             old.revoked_at = now
+            replaced += 1
 
         session.add(
             EnrollCode(
@@ -1156,13 +1502,142 @@ def issue_enroll_code(
                 note="为选手 %s 签发" % player.player_no,
             )
         )
+        note = "长期有效；机器还原后可重复使用"
+        if replaced:
+            note += "（此前 %d 把未绑定的码已作废）" % replaced
+        if kept_bound:
+            note += "（保留了 %d 把已绑定的码，它们是机器还原后的自愈种子）" % kept_bound
         return EnrollCodeOut(
             player_id=player_id,
             player_no=player.player_no,
             code=raw_code,
             expires_at=None,
-            note="长期有效；机器还原后可重复使用",
+            note=note,
         )
+
+
+@router.get("/contests/{contest_id}/enroll-codes", response_model=List[EnrollCodeStateOut])
+def list_enroll_codes(
+    contest_id: int,
+    include_revoked: bool = False,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> List[EnrollCodeStateOut]:
+    """列出本场次的注册码**状态**。
+
+    刻意不返回码本身 —— 库里只有哈希，明文只在签发那一刻出现过。
+    这个接口回答的是"谁手上还有一把能用的钥匙、谁已经用过了"，
+    而不是"那把钥匙长什么样"。
+    """
+    with ctx.db.session() as session:
+        stmt = (
+            select(EnrollCode, Player.player_no)
+            .join(Player, EnrollCode.player_id == Player.id)
+            .where(Player.contest_id == contest_id)
+            .order_by(EnrollCode.id.desc())
+        )
+        if not include_revoked:
+            stmt = stmt.where(EnrollCode.revoked_at.is_(None))
+        return [
+            _enroll_code_state(row, player_no) for row, player_no in session.execute(stmt)
+        ]
+
+
+def _enroll_code_state(row: EnrollCode, player_no: str) -> EnrollCodeStateOut:
+    return EnrollCodeStateOut(
+        id=row.id,
+        player_id=row.player_id,
+        player_no=player_no,
+        # 已绑定机器 = 这把钥匙已经用过、而且绑在某台机器上了
+        bound_machine_id=row.machine_id,
+        usable=row.revoked_at is None
+        and (row.expires_at is None or row.expires_at > utcnow()),
+        created_at=_iso(row.created_at),
+        expires_at=_iso(row.expires_at),
+        revoked_at=_iso(row.revoked_at),
+    )
+
+
+@router.delete("/enroll-codes/{code_id}", response_model=SimpleAck)
+def revoke_enroll_code(
+    code_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> SimpleAck:
+    """撤销一把注册码。
+
+    **已经用它注册过的机器不受影响** —— 那台机器手里是各自的 token。
+    撤销只挡住"还想用这把码注册/重新注册"的机器。这一点要说清楚，
+    否则教师会以为撤销会把机器踢下线而不敢动。
+    """
+    with ctx.db.session() as session:
+        code = session.get(EnrollCode, code_id)
+        if code is None:
+            return SimpleAck(ok=True, detail="注册码不存在")
+        if code.revoked_at is not None:
+            return SimpleAck(ok=True, detail="这把注册码已经是撤销状态")
+        player = session.get(Player, code.player_id)
+        code.revoked_at = utcnow()
+        session.add(
+            EventLog(
+                level="warning",
+                category="enroll_code",
+                contest_id=player.contest_id if player else None,
+                player_id=code.player_id,
+                message="撤销注册码 #%d（选手 %s 未绑定的那把）"
+                % (code.id, player.player_no if player else "?"),
+            )
+        )
+        player_no = player.player_no if player else "?"
+
+    return SimpleAck(
+        ok=True,
+        detail="已撤销 %s 的注册码；已经注册过的机器不受影响" % player_no,
+    )
+
+
+@router.delete("/contests/{contest_id}/enroll-codes", response_model=SimpleAck)
+def revoke_contest_enroll_codes(
+    contest_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> SimpleAck:
+    """撤销本场次全部**尚未绑定机器**的注册码。
+
+    只撤销未绑定的那些：已经绑了机器的码是那台机器的"还原自愈种子"，
+    撤销它等于下次快照还原后那台机器再也回不来。要停用那台机器，
+    应该去作废 Agent 凭据，而不是偷偷抽掉它的自愈路径 ——
+    后者在考场上的表现是"某台机器还原之后再也连不上"，很难查。
+    """
+    now = utcnow()
+    with ctx.db.session() as session:
+        active = list(
+            session.execute(
+                select(EnrollCode)
+                .join(Player, EnrollCode.player_id == Player.id)
+                .where(Player.contest_id == contest_id, EnrollCode.revoked_at.is_(None))
+            ).scalars()
+        )
+        # 已绑定机器的那些是"还原自愈种子"，不在这次撤销范围内
+        rows = [code for code in active if code.machine_id is None]
+        kept = len(active) - len(rows)
+        for code in rows:
+            code.revoked_at = now
+        if rows:
+            session.add(
+                EventLog(
+                    level="warning",
+                    category="enroll_code",
+                    contest_id=contest_id,
+                    message="撤销本场次 %d 把未绑定的注册码（保留 %d 把已绑定的）"
+                    % (len(rows), kept),
+                )
+            )
+
+    detail = "已撤销 %d 把未绑定的注册码" % len(rows)
+    if kept:
+        detail += "；%d 把已绑定的保留（它们是机器还原后的自愈种子）" % kept
+    return SimpleAck(ok=True, detail=detail)
 
 
 # --------------------------------------------------------------------------- #
@@ -1177,6 +1652,138 @@ def list_agents(
     admin: AdminIdentity = Depends(require_admin),
 ) -> List[AgentRuntimeOut]:
     return [AgentRuntimeOut(**a.to_public_dict()) for a in ctx.registry.all(contest_id)]
+
+
+@router.post("/agents/{agent_id}/rebind", response_model=SimpleAck)
+def rebind_agent(
+    agent_id: int,
+    payload: RebindAgentIn,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> SimpleAck:
+    """把一台机器改派给另一位选手（换人）。
+
+    这是"换座位"最自然的做法：机器上的凭据不用动、不用重启、不用重新配对 ——
+    服务端改一下归属，Agent 下一轮 tick 就会拿到新的准考证号，
+    自己更新扫描目录。
+
+    **为什么不做成"作废旧凭据 + 重新注册"**：那条路要机器重新走一遍注册，
+    而走统一密钥的机器读不到 root 只读的密钥，只能等到下次开机由注册单元处理。
+    考场上"换个人"要等到重启，这是不能接受的。
+
+    目标选手**必须还没有机器**：两台机器绑同一个人，代码会往同一个目录里写，
+    而且完全静默（成绩矩阵只是看起来"这个人交了两遍"）。
+    """
+    with ctx.db.session() as session:
+        agent = session.get(Agent, agent_id)
+        if agent is None:
+            raise HTTPException(status_code=404, detail="这台机器不在台账里")
+        if agent.revoked_at is not None:
+            raise HTTPException(status_code=409, detail="这台机器的凭据已作废，不能改派")
+
+        target = session.get(Player, payload.player_id)
+        if target is None:
+            raise HTTPException(status_code=404, detail="选手不存在")
+
+        current = session.get(Player, agent.player_id)
+        if current is not None and current.id == target.id:
+            return SimpleAck(ok=True, detail="这台机器本来就属于 %s" % target.player_no)
+
+        clash = session.execute(
+            select(Agent).where(
+                Agent.player_id == target.id,
+                Agent.revoked_at.is_(None),
+                Agent.id != agent_id,
+            )
+        ).scalar_one_or_none()
+        if clash is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="选手 %s 已经绑定了一台机器（%s）。请先把那台作废或改派。"
+                % (target.player_no, clash.machine_id[:16]),
+            )
+
+        # 同一台机器在同一选手名下只能有一行（唯一约束 player_id+machine_id），
+        # 所以极端情况下（这台机器以前就属于这位选手、只是被作废过）要先清掉旧行
+        stale = session.execute(
+            select(Agent).where(
+                Agent.player_id == target.id, Agent.machine_id == agent.machine_id
+            )
+        ).scalar_one_or_none()
+        if stale is not None and stale.id != agent.id:
+            session.delete(stale)
+            session.flush()
+
+        old_no = current.player_no if current else "?"
+        agent.player_id = target.id
+        agent.claimed_at = utcnow()
+        session.add(
+            EventLog(
+                level="warning",
+                category="agent_rebind",
+                contest_id=target.contest_id,
+                player_id=target.id,
+                message="机器改派：%s → %s（%s）"
+                % (old_no, target.player_no, agent.machine_id[:16]),
+            )
+        )
+        session.flush()
+        new_no = target.player_no
+
+    # 内存里的在线状态也要跟着改，否则「选手状态」页会一直显示旧归属
+    runtime = ctx.registry.get(agent_id)
+    if runtime is not None:
+        runtime.player_id = payload.player_id
+        runtime.player_no = new_no
+
+    return SimpleAck(
+        ok=True,
+        detail="已把机器从 %s 改派给 %s。机器下一轮心跳就会切到新目录，无需重启" % (old_no, new_no),
+    )
+
+
+@router.delete("/agents/{agent_id}", response_model=SimpleAck)
+def revoke_agent(
+    agent_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> SimpleAck:
+    """作废一台机器的凭据（硬删）。
+
+    删行而不是打 ``revoked_at`` 标记，有两个具体原因：
+
+    * ``agent`` 表上有 ``(player_id, machine_id)`` 唯一约束。留着那一行，
+      同一台机器再配对给同一个人时会撞唯一约束 —— 而"作废后重新配对"
+      正是最常见的后续动作。
+    * 凭据是哈希存的行，删掉它就等于立刻失效；留着标记还要在每个鉴权点记得查。
+
+    代价是这台机器的历史在线记录（``agent_status``）会一起级联删掉。
+    要保留历史就别删，用「改派」。
+    """
+    with ctx.db.session() as session:
+        agent = session.get(Agent, agent_id)
+        if agent is None:
+            return SimpleAck(ok=True, detail="这台机器不在台账里")
+        player = session.get(Player, agent.player_id)
+        player_no = player.player_no if player else "?"
+        machine_id = agent.machine_id
+        contest_id = player.contest_id if player else None
+        session.delete(agent)
+        session.add(
+            EventLog(
+                level="warning",
+                category="agent_revoke",
+                contest_id=contest_id,
+                message="作废机器凭据：%s @ %s" % (player_no, machine_id[:16]),
+            )
+        )
+
+    ctx.registry.forget(agent_id)
+    return SimpleAck(
+        ok=True,
+        detail="已作废 %s 那台机器的凭据。它下次心跳会被拒，届时需要重新注册（或改用「改派」）"
+        % player_no,
+    )
 
 
 @router.get("/contests/{contest_id}/files", response_model=List[SourceFileOut])
@@ -1221,6 +1828,350 @@ def list_files(
             )
             for row, player_no in session.execute(stmt)
         ]
+
+
+@router.get("/files/{file_id}/content")
+def download_source_file(
+    file_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> Response:
+    """下载一份回收上来的代码。
+
+    "收代码"的系统收完之后教师只能去磁盘上翻 ``source/``，这是最刺眼的一处缺口 ——
+    而这个端点让"看一眼某个学生交了什么"变成一次点击。
+
+    内容走内容寻址的 blob 存储，所以这里是**按哈希取文件**，
+    不存在路径穿越的可能（``rel_path`` 只用来决定下载时显示的文件名）。
+    """
+    with ctx.db.session() as session:
+        row = session.get(SourceFile, file_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="这份文件不在台账里")
+        sha256 = row.sha256
+        rel_path = row.rel_path
+        stored = bool(row.content_stored)
+
+    if not stored or not ctx.blobs.has(sha256):
+        raise HTTPException(
+            status_code=404,
+            detail="这条台账只有索引，内容从未成功上传过（Agent 上报了它，但上传没完成）",
+        )
+
+    # 用 basename 做下载名：rel_path 里的目录结构对教师没用，反而会让浏览器
+    # 把文件名拼成一长串
+    filename = rel_path.rsplit("/", 1)[-1] or "code.txt"
+    return _blob_response(ctx, sha256, download_name=filename)
+
+
+def _blob_response(ctx: AppContext, sha256: str, download_name: str) -> Response:
+    """把 blob 作为附件流出去。
+
+    流式而不是整体读进内存：``max_file_size`` 是可配的，默认 2MB 但有人会调大，
+    而"下载一个几百 MB 的文件把服务端内存打满"是完全没必要的失败模式。
+    """
+    from urllib.parse import quote
+
+    handle = ctx.blobs.open(sha256)
+    size = ctx.blobs.path_for(sha256).stat().st_size
+
+    def chunks() -> Iterator[bytes]:
+        try:
+            while True:
+                chunk = handle.read(256 * 1024)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            handle.close()
+
+    # 用 RFC 5987 的 filename* 传中文名；filename 那个 ASCII 版本是给老浏览器兜底
+    ascii_name = download_name.encode("ascii", "replace").decode("ascii") or "code.txt"
+    disposition = "attachment; filename=\"%s\"; filename*=UTF-8''%s" % (
+        ascii_name.replace('"', "_"),
+        quote(download_name, safe=""),
+    )
+    return StreamingResponse(
+        chunks(),
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": disposition, "Content-Length": str(size)},
+    )
+
+
+@router.delete("/files/{file_id}", response_model=SimpleAck)
+def delete_source_file(
+    file_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> SimpleAck:
+    """删掉台账里的一条代码记录（连同不再被引用的内容）。
+
+    三件事必须说清楚，否则这个按钮会让人误判：
+
+    1. **不会删除选手机器上的文件。** 服务端管不到那边。
+    2. **文件还在的话，下一轮 tick 会把它重新收上来。** 这个按钮的持久用途是
+       清掉"选手已经删掉、服务端还留着墓碑记录"的那些行，以及把误收的文件
+       从归档里去掉。
+    3. 内容按哈希共享：只有**没有任何其他记录引用**这份内容时才会真删掉它。
+    """
+    with ctx.db.session() as session:
+        row = session.get(SourceFile, file_id)
+        if row is None:
+            return SimpleAck(ok=True, detail="这条记录已经不在了")
+        player = session.get(Player, row.player_id)
+        rel_path = row.rel_path
+        sha256 = row.sha256
+        was_live = row.deleted_at is None
+        player_no = player.player_no if player else "?"
+        session.delete(row)
+        session.flush()
+        freed = _release_blob_if_unreferenced(session, ctx, sha256)
+
+    detail = "已删除 %s 的台账记录 %s" % (player_no, rel_path)
+    if was_live:
+        detail += "。注意：文件若仍在选手机器上，下一轮会被重新收上来"
+    if freed:
+        detail += "；内容已从存储中清除"
+    return SimpleAck(ok=True, detail=detail)
+
+
+def _release_blob_if_unreferenced(session, ctx: AppContext, sha256: str) -> bool:
+    """没有任何记录再引用这份内容时，把它从存储里删掉。
+
+    内容寻址存储是**三处共用**的：回收上来的代码、下发的资产、发布的 Agent 包。
+    所以"还有没有人用"必须一次查全 —— 只查一处会在跨用途共享时报错删掉
+    别人还在用的内容，而表现是"某个早就归档的文件突然取不到内容"，
+    不报错、只是 404，事后极难对上原因。
+
+    **这个函数只能有一个定义。** 第一版按用途各写了一份，
+    于是同名的那个把先定义的静默覆盖掉了 —— 而 Python 不会为此发任何警告。
+    现在收成一个：以后再加内容消费者，改这一处。
+    """
+    references = (
+        (SourceFile, SourceFile.sha256),
+        (Asset, Asset.sha256),
+        (AgentRelease, AgentRelease.sha256),
+    )
+    for model, column in references:
+        left = session.execute(
+            select(func.count(model.id)).where(column == sha256)
+        ).scalar_one() or 0
+        if left:
+            return False
+
+    try:
+        ctx.blobs.path_for(sha256).unlink()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as exc:  # pragma: no cover
+        log.warning("删除 blob %s 失败：%s", sha256, exc)
+        return False
+
+
+@router.delete("/contests/{contest_id}/files", response_model=SimpleAck)
+def clear_source_files(
+    contest_id: int,
+    purge: bool = False,
+    player_id: Optional[int] = None,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> SimpleAck:
+    """清理代码台账。
+
+    默认 ``purge=false``：只清掉**已经消失**的墓碑记录（选手删了文件之后留下的
+    那些），这不会影响任何还在的东西 —— 也是这个操作最常见的用途。
+
+    ``purge=true`` 会连活的一起删，但**机器还在报的文件下一轮就会回来**，
+    所以它只适合"比赛结束后归档完毕、准备清场"。界面上的按钮要写明这一点。
+    """
+    with ctx.db.session() as session:
+        stmt = (
+            select(SourceFile)
+            .join(Player, SourceFile.player_id == Player.id)
+            .where(Player.contest_id == contest_id)
+        )
+        if player_id is not None:
+            stmt = stmt.where(SourceFile.player_id == player_id)
+        if not purge:
+            stmt = stmt.where(SourceFile.deleted_at.isnot(None))
+
+        rows = list(session.execute(stmt).scalars())
+        hashes = {row.sha256 for row in rows}
+        for row in rows:
+            session.delete(row)
+        session.flush()
+
+        freed = sum(1 for sha in hashes if _release_blob_if_unreferenced(session, ctx, sha))
+
+        session.add(
+            EventLog(
+                level="warning",
+                category="files_clear",
+                contest_id=contest_id,
+                message="清理代码台账：%d 条%s（释放 %d 份内容）"
+                % (len(rows), "（含未消失的）" if purge else "（只清已消失的）", freed),
+            )
+        )
+
+    detail = "已清理 %d 条台账记录，释放 %d 份内容" % (len(rows), freed)
+    if purge:
+        detail += "。机器还在报的文件会在下一轮重新出现"
+    return SimpleAck(ok=True, detail=detail)
+
+
+@router.get("/contests/{contest_id}/files/export")
+def export_source_files(
+    contest_id: int,
+    player_id: Optional[int] = None,
+    problem: Optional[str] = None,
+    include_deleted: bool = False,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> StreamingResponse:
+    """把回收的代码打包成一个 zip。
+
+    包里有两个东西：
+
+    * ``代码/`` —— 按 ``<准考证号>/<相对路径>`` 放，结构与 ``source/`` 一致，
+      解压出来就能直接丢给 LemonLime / Arbiter
+    * ``清单.csv`` —— 每份文件的**精确字节数与 SHA256**
+
+    清单是这个功能的一半价值：教师拿到归档之后要能核对"是不是收全了、有没有传坏"，
+    而只看文件列表做不到这一点（同名文件、大小相近的代码太常见了）。
+    """
+    with ctx.db.session() as session:
+        rules = contest_problem_rules(session, contest_id, ctx.settings)
+        stmt = (
+            select(SourceFile, Player.player_no)
+            .join(Player, SourceFile.player_id == Player.id)
+            .where(Player.contest_id == contest_id)
+        )
+        if player_id is not None:
+            stmt = stmt.where(SourceFile.player_id == player_id)
+        if not include_deleted:
+            stmt = stmt.where(SourceFile.deleted_at.is_(None))
+        stmt = stmt.order_by(Player.player_no, SourceFile.rel_path)
+
+        rows = []
+        for row, player_no in session.execute(stmt):
+            ident = matching.match_problem(row.rel_path, rules)
+            if problem and ident != problem:
+                continue
+            rows.append((row, player_no, ident))
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="没有符合条件的代码可以导出")
+
+    # 先落到临时文件再流出去：zip 需要能随机写（中央目录在末尾），
+    # 而边生成边流式输出做不到这一点。Spooled 会先放内存，
+    # 超过阈值自动落到磁盘 —— 小场次不碰盘，大场次不占内存。
+    spool = tempfile.SpooledTemporaryFile(max_size=32 * 1024 * 1024, mode="w+b")
+    try:
+        with zipfile.ZipFile(spool, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("清单.csv", _export_manifest(rows))
+            used_paths: Dict[str, int] = {}
+            for row, player_no, ident in rows:
+                if not row.content_stored or not ctx.blobs.has(row.sha256):
+                    # 内容缺失的条目仍然写进清单（教师要知道少了哪个），但不建空文件
+                    continue
+                arcname = _unique_arcname(used_paths, "代码/%s/%s" % (player_no, row.rel_path))
+                with ctx.blobs.open(row.sha256) as handle:
+                    archive.writestr(arcname, handle.read())
+        spool.seek(0)
+    except Exception:
+        spool.close()
+        raise
+
+    return StreamingResponse(
+        _spool_chunks(spool),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": _attachment_header("代码归档-%d.zip" % contest_id),
+        },
+    )
+
+
+def _export_manifest(rows) -> str:
+    """导出的清单 CSV。
+
+    带 BOM：Excel 打开中文列名才不会乱码（和成绩导出同一个理由）。
+    """
+    lines = [
+        "准考证号,题目,相对路径,字节数,sha256,修订号,首次回收,最近出现,内容完整"
+    ]
+    for row, player_no, ident in rows:
+        lines.append(
+            ",".join(
+                [
+                    _csv_cell(player_no),
+                    _csv_cell(ident or ""),
+                    _csv_cell(row.rel_path),
+                    str(int(row.size)),
+                    row.sha256,
+                    str(int(row.revision)),
+                    _iso(row.first_seen_at) or "",
+                    _iso(row.last_seen_at) or "",
+                    "是" if row.content_stored else "否（只有索引）",
+                ]
+            )
+        )
+    return "\ufeff" + "\r\n".join(lines) + "\r\n"
+
+
+def _csv_cell(value: str) -> str:
+    """CSV 单元格转义。路径里出现逗号是完全可能的。"""
+    text = str(value)
+    if any(ch in text for ch in ',"\r\n'):
+        return '"%s"' % text.replace('"', '""')
+    return text
+
+
+def _unique_arcname(used: Dict[str, int], candidate: str) -> str:
+    """zip 里同名条目要避开。
+
+    什么情况下会重名：同一份 ``rel_path`` 在同一个选手名下只会有一条台账记录
+    （以玩家+路径为唯一），但**导出全部选手**时，两个选手的 ``rel_path`` 相同
+    是完全正常的 —— 所以外层套了准考证号目录。这里再兜一层是为了万一
+    （比如台账里出现过大小写不同的路径），宁可多一个后缀，也不要覆盖丢文件。
+    """
+    if candidate not in used:
+        used[candidate] = 1
+        return candidate
+    used[candidate] += 1
+    stem, _, suffix = candidate.rpartition(".")
+    if stem:
+        return "%s(%d).%s" % (stem, used[candidate], suffix)
+    return "%s(%d)" % (candidate, used[candidate])
+
+
+def _attachment_header(filename: str) -> str:
+    from urllib.parse import quote
+
+    ascii_name = filename.encode("ascii", "replace").decode("ascii")
+    return "attachment; filename=\"%s\"; filename*=UTF-8''%s" % (
+        ascii_name.replace('"', "_"),
+        quote(filename, safe=""),
+    )
+
+
+def _spool_chunks(spool) -> Iterator[bytes]:
+    """把临时文件分块吐出去，结束后关掉。
+
+    关闭放在生成器的 finally 里：客户端中途断开时生成器会被 GC，
+    finally 仍然会跑 —— 否则每个中断的下载都会漏一个临时文件。
+    """
+    try:
+        while True:
+            chunk = spool.read(256 * 1024)
+            if not chunk:
+                break
+            yield chunk
+    finally:
+        try:
+            spool.close()
+        except OSError:  # pragma: no cover
+            pass
 
 
 @router.get("/events", response_model=List[EventOut])
@@ -1275,6 +2226,57 @@ def list_events(
         return [_event_out(row, player_no) for row, player_no in session.execute(stmt)]
 
 
+@router.delete("/events", response_model=SimpleAck)
+def clear_events(
+    contest_id: Optional[int] = None,
+    level: Optional[str] = None,
+    older_than_days: Optional[int] = None,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> SimpleAck:
+    """清空审计日志。
+
+    ``older_than_days`` 是**推荐用法**：日志的价值在于事后回看，
+    一把全清掉很容易把"三天前那台机器为什么掉线"的唯一线索抹掉。
+    界面上的默认值就填一个天数，而不是"全部"。
+
+    ``contest_id`` 留空表示所有场次（含不属于任何场次的那批全局事件，
+    比如统一密钥注册与克隆告警）。
+    """
+    from datetime import timedelta
+
+    with ctx.db.session() as session:
+        stmt = select(EventLog)
+        if contest_id is not None:
+            stmt = stmt.where(EventLog.contest_id == contest_id)
+        if level:
+            stmt = stmt.where(EventLog.level == level)
+        if older_than_days is not None:
+            cutoff = utcnow() - timedelta(days=max(0, older_than_days))
+            stmt = stmt.where(EventLog.ts < cutoff)
+
+        rows = list(session.execute(stmt).scalars())
+        for row in rows:
+            session.delete(row)
+        if rows:
+            # 记一条"谁清的"—— 否则日志被清这件事本身没有痕迹
+            session.add(
+                EventLog(
+                    level="warning",
+                    category="events_clear",
+                    message="清理审计日志 %d 条（场次=%s，级别=%s，早于 %s 天）"
+                    % (
+                        len(rows),
+                        contest_id if contest_id is not None else "全部",
+                        level or "全部",
+                        older_than_days if older_than_days is not None else "不限",
+                    ),
+                )
+            )
+
+    return SimpleAck(ok=True, detail="已清理 %d 条审计日志" % len(rows))
+
+
 def _event_out(row: EventLog, player_no: Optional[str]) -> EventOut:
     meta = None
     if row.meta_json:
@@ -1290,6 +2292,79 @@ def _event_out(row: EventLog, player_no: Optional[str]) -> EventOut:
         player_no=player_no,
         message=row.message,
         meta=meta,
+    )
+
+
+@router.delete("/contests/{contest_id}", response_model=SimpleAck)
+def delete_contest(
+    contest_id: int,
+    confirm_slug: str = "",
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> SimpleAck:
+    """删除场次**连同它的一切**。
+
+    外键全是 ``ON DELETE CASCADE``，所以删一个场次会连带删掉它的选手、
+    代码台账、下发任务、成绩、资产。这是整个系统里破坏力最大的一个操作，
+    所以要求把场次标识**原样再打一遍**（``confirm_slug``）——
+    界面上常见的"你确定吗"点一下就过去了，代价却不可逆。
+
+    返回里带上删掉了什么，让教师事后能对上账（也便于日志审阅）。
+    """
+    with ctx.db.session() as session:
+        contest = session.get(Contest, contest_id)
+        if contest is None:
+            return SimpleAck(ok=True, detail="场次不存在")
+
+        if confirm_slug.strip() != contest.slug:
+            raise HTTPException(
+                status_code=400,
+                detail="为确认删除，请把场次标识「%s」原样输入" % contest.slug,
+            )
+
+        counts = {
+            "选手": _count(session, Player, Player.contest_id == contest_id),
+            "代码文件": _count(
+                session,
+                SourceFile,
+                SourceFile.player_id.in_(
+                    select(Player.id).where(Player.contest_id == contest_id)
+                ),
+            ),
+            "评测记录": _count(session, JudgeRun, JudgeRun.contest_id == contest_id),
+            "下发任务": _count(session, DeployTask, DeployTask.contest_id == contest_id),
+            "资产": _count(session, Asset, Asset.contest_id == contest_id),
+        }
+        slug = contest.slug
+        name = contest.name
+        session.delete(contest)
+        session.add(
+            EventLog(
+                level="warning",
+                category="contest_delete",
+                message="删除场次「%s」（%s）：%s"
+                % (
+                    name,
+                    slug,
+                    "、".join("%s %d" % (k, v) for k, v in counts.items() if v),
+                ),
+            )
+        )
+
+    # 内存里的在线状态也要跟着清，否则顶栏会继续显示一台已经不存在的场次的机器
+    for runtime in list(ctx.registry.all(contest_id)):
+        ctx.registry.forget(runtime.agent_id)
+
+    return SimpleAck(
+        ok=True,
+        detail="已删除场次「%s」：%s"
+        % (name, "、".join("%s %d" % (k, v) for k, v in counts.items() if v) or "没有关联数据"),
+    )
+
+
+def _count(session, model, *conditions) -> int:
+    return int(
+        session.execute(select(func.count(model.id)).where(*conditions)).scalar_one() or 0
     )
 
 
@@ -1383,6 +2458,83 @@ def _asset_out(asset: Asset) -> AssetOut:
         filename=asset.filename,
         kind=asset.kind,
         created_at=_iso(asset.created_at) or "",
+    )
+
+
+@router.patch("/assets/{asset_id}", response_model=AssetOut)
+def rename_asset(
+    asset_id: int,
+    payload: AssetRenameIn,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> AssetOut:
+    """给资产改个显示名。
+
+    上传时文件名打错了（`题面(1).pdf`、`样例 最终版.zip`）在考场上是常态，
+    而这个名字会变成学生桌面上的文件名 —— 改它比重新上传省事。
+
+    **内容不改**：资产是按 sha256 存的内容寻址对象，改名只是换标签，
+    已经下发给选手的文件不受影响（它们早就落地了），但**未完成**的下发任务
+    会按新名字落地 —— 这一点要说清楚，否则教师会以为改名能修正已经发出去的文件。
+    """
+    name = payload.filename.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="文件名不能为空")
+    if len(name) > 255:
+        raise HTTPException(status_code=400, detail="文件名超过 255 字符")
+    # 文件名会参与 Agent 侧的落地路径，这里按路径段的规则校验一遍：
+    # 不允许斜杠、.. 、控制字符，避免"改个名把文件写到别的地方去"
+    try:
+        validate_relpath(name, max_length=255)
+    except PathValidationError as exc:
+        raise HTTPException(status_code=400, detail="文件名不合法: %s" % exc)
+    if name in (".", ".."):
+        raise HTTPException(status_code=400, detail="文件名不合法")
+
+    with ctx.db.session() as session:
+        asset = session.get(Asset, asset_id)
+        if asset is None:
+            raise HTTPException(status_code=404, detail="资产不存在")
+        old = asset.filename
+        asset.filename = name
+        pending = session.execute(
+            select(func.count(DeployTarget.id))
+            .join(DeployTask, DeployTarget.task_id == DeployTask.id)
+            .where(DeployTask.asset_id == asset_id, DeployTarget.status.in_(ACTIVE_DEPLOY_STATUSES))
+        ).scalar_one()
+        session.flush()
+        return _asset_out(asset)
+
+
+@router.delete("/assets/{asset_id}", response_model=SimpleAck)
+def delete_asset(
+    asset_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> SimpleAck:
+    """删掉一个下发用的资产（题面、样例、测试点包…）。
+
+    会连带删掉引用它的下发任务与逐选手进度（外键级联）。**已经落到选手机器上的
+    文件不会被撤回** —— 客户端那边的文件不归服务端管，删了这个动作只影响
+    "以后还能不能发"。界面上要把这句说清楚，否则教师会以为删了就能收回题面。
+
+    内容本身（blob）是内容寻址的：如果还有别的资产或代码文件引用同一份内容，
+    它不会被删。
+    """
+    with ctx.db.session() as session:
+        asset = session.get(Asset, asset_id)
+        if asset is None:
+            return SimpleAck(ok=True, detail="资产不存在")
+        filename = asset.filename
+        tasks = session.execute(
+            select(func.count(DeployTask.id)).where(DeployTask.asset_id == asset_id)
+        ).scalar_one()
+        session.delete(asset)
+
+    return SimpleAck(
+        ok=True,
+        detail="已删除资源「%s」%s。已经落到选手机器上的文件不会撤回"
+        % (filename, "（含 %d 个下发任务）" % tasks if tasks else ""),
     )
 
 
@@ -1682,6 +2834,51 @@ def _derive_task_status(task: DeployTask, counts: Dict[str, int]) -> str:
     return DeployStatus.PENDING
 
 
+@router.delete("/deploys/{task_id}", response_model=SimpleAck)
+def delete_deploy(
+    task_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> SimpleAck:
+    """删掉一条下发记录。
+
+    **不会撤回已经落地的文件** —— 客户端那边的文件不归服务端管。
+    它做的是"把这条任务从列表里去掉"，包括还没完成的那些（等于放弃它）：
+    删掉之后 Agent 下一轮 tick 不会再领到这个作业。
+
+    还没完成的作业被删时要提醒一句：教师很可能以为"删除 = 取消下发"，
+    而实际上那台机器上的半份文件会留在硬盘上（``.part`` 分片）。
+    真要停止下发应该用「取消」，它会保留记录、只是不再派发。
+    """
+    with ctx.db.session() as session:
+        task = session.get(DeployTask, task_id)
+        if task is None:
+            return SimpleAck(ok=True, detail="下发记录不存在")
+        asset = session.get(Asset, task.asset_id)
+        filename = asset.filename if asset else "?"
+        counts: Dict[str, int] = {}
+        for target in session.execute(
+            select(DeployTarget).where(DeployTarget.task_id == task_id)
+        ).scalars():
+            counts[target.status] = counts.get(target.status, 0) + 1
+        unfinished = counts.get(DeployStatus.PENDING, 0) + counts.get(DeployStatus.READY, 0)
+        contest_id = task.contest_id
+        session.delete(task)
+        session.add(
+            EventLog(
+                level="info",
+                category="deploy_delete",
+                contest_id=contest_id,
+                message="删除下发记录「%s」（未完成 %d 台）" % (filename, unfinished),
+            )
+        )
+
+    detail = "已删除下发记录「%s」" % filename
+    if unfinished:
+        detail += "。有 %d 台还没下完，它们不会再收到这个作业，但已经落地的部分文件会留在机器上" % unfinished
+    return SimpleAck(ok=True, detail=detail)
+
+
 # --------------------------------------------------------------------------- #
 # 题目
 # --------------------------------------------------------------------------- #
@@ -1901,6 +3098,54 @@ def delete_problem(
         ident = row.ident
         session.delete(row)
     return SimpleAck(ok=True, detail="已删除题目 %s（已有成绩记录保留）" % ident)
+
+
+@router.delete("/contests/{contest_id}/problems", response_model=SimpleAck)
+def clear_problems(
+    contest_id: int,
+    idents: Optional[str] = None,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> SimpleAck:
+    """批量删除题目登记。
+
+    ``idents`` 是逗号分隔的题目标识；**留空表示清空整份清单**。
+
+    和单条删除一样，**不动已有成绩记录** —— 它们会以「未登记」继续出现在矩阵里。
+    这一点必须说清楚：教师看到"清空清单"很容易以为成绩也一起没了，
+    于是不敢动，或者反过来以为清干净了结果成绩还在。
+    """
+    with ctx.db.session() as session:
+        contest = session.get(Contest, contest_id)
+        if contest is None:
+            raise HTTPException(status_code=404, detail="场次不存在")
+
+        stmt = select(Problem).where(Problem.contest_id == contest_id)
+        wanted: Optional[List[str]] = None
+        if idents is not None and idents.strip():
+            wanted = [item.strip() for item in idents.split(",") if item.strip()]
+            stmt = stmt.where(Problem.ident.in_(wanted))
+
+        rows = list(session.execute(stmt).scalars())
+        removed = [row.ident for row in rows]
+        for row in rows:
+            session.delete(row)
+
+        if removed:
+            session.add(
+                EventLog(
+                    level="warning",
+                    category="problem_clear",
+                    contest_id=contest_id,
+                    message="删除题目登记 %d 条：%s"
+                    % (len(removed), "、".join(removed[:20])),
+                )
+            )
+
+    detail = "已删除 %d 道题的登记" % len(removed)
+    if removed:
+        detail += "（已有成绩记录保留，会以「未登记」显示在矩阵里）"
+    return SimpleAck(ok=True, detail=detail)
 
 
 def _problem_out(row: Problem, settings: Settings) -> ProblemOut:
@@ -2241,6 +3486,56 @@ def clear_judge_score(
     return SimpleAck(ok=True, detail="已清除")
 
 
+@router.delete("/contests/{contest_id}/judge/runs", response_model=SimpleAck)
+def clear_judge_runs(
+    contest_id: int,
+    player_id: Optional[int] = None,
+    keep_manual: bool = True,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> SimpleAck:
+    """清空评测成绩。
+
+    ``keep_manual`` 默认 **True**：**教师手工录入的成绩不会被清掉**。
+
+    这条默认值是有意的：手工录入意味着评测器给不出结果、教师看过代码之后
+    亲自判的分。它是全场里最贵的那部分数据，而"重扫一遍"这种常见操作
+    恰恰最容易顺手把它清掉。要连手工分一起清，得显式传 ``false``。
+    """
+    with ctx.db.session() as session:
+        contest = session.get(Contest, contest_id)
+        if contest is None:
+            raise HTTPException(status_code=404, detail="场次不存在")
+
+        stmt = select(JudgeRun).where(JudgeRun.contest_id == contest_id)
+        if player_id is not None:
+            stmt = stmt.where(JudgeRun.player_id == player_id)
+
+        rows = list(session.execute(stmt).scalars())
+        removed = 0
+        kept = 0
+        for run in rows:
+            if keep_manual and run.parse_status == "manual":
+                kept += 1
+                continue
+            session.delete(run)
+            removed += 1
+
+        session.add(
+            EventLog(
+                level="warning",
+                category="scores_clear",
+                contest_id=contest_id,
+                message="清空成绩：删除 %d 条，保留手工录入 %d 条" % (removed, kept),
+            )
+        )
+
+    detail = "已清除 %d 条成绩记录" % removed
+    if kept:
+        detail += "；保留 %d 条手工录入（要一起清就关掉「保留手工分」）" % kept
+    return SimpleAck(ok=True, detail=detail)
+
+
 # --------------------------------------------------------------------------- #
 # Agent 发布与自更新
 # --------------------------------------------------------------------------- #
@@ -2458,6 +3753,42 @@ def _release_out(row: AgentRelease) -> ReleaseOut:
         created_at=_iso(row.created_at) or "",
         published_at=_iso(row.published_at),
     )
+
+
+@router.delete("/releases/{release_id}", response_model=SimpleAck)
+def delete_release(
+    release_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> SimpleAck:
+    """删掉一条发布记录。
+
+    **正在铺开的版本要先下架**再删：已经升级上去的 Agent 拿不到旧包也没关系
+    （它们在本地已经有一份），但服务端这边"哪些机器该升到这个版本"的账
+    会随着记录一起消失，出问题时就没有对照物了。
+
+    发布包本身存在 blob 存储里且是内容寻址的，所以这条删除只针对记录；
+    没有别的记录引用同一份内容时才会顺手清掉内容。
+    """
+    with ctx.db.session() as session:
+        row = session.get(AgentRelease, release_id)
+        if row is None:
+            return SimpleAck(ok=True, detail="版本不存在")
+        if row.published_at is not None and row.yanked_at is None:
+            raise HTTPException(
+                status_code=409,
+                detail="版本 %s 正在铺开，请先「下架」再删除" % row.version,
+            )
+        version = row.version
+        sha256 = row.sha256
+        session.delete(row)
+        session.flush()
+        freed = _release_blob_if_unreferenced(session, ctx, sha256)
+
+    detail = "已删除版本 %s" % version
+    if freed:
+        detail += "；发布包内容已从存储中清除"
+    return SimpleAck(ok=True, detail=detail)
 
 
 def _b64(raw: bytes) -> str:

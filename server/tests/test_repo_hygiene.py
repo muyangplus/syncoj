@@ -180,3 +180,47 @@ def test_generated_openapi_json_uses_lf() -> None:
         "web/openapi.json 里有 CR；请重新运行 "
         "python server/tools/dump_openapi.py（它会写 LF）"
     )
+
+
+#: 会被**逐字节**比对的生成物 → 它们的行尾必须在 .gitattributes 里钉死。
+PINNED_TO_LF = ("web/openapi.json", "web/src/api/schema.d.ts")
+
+
+def test_generated_artifacts_are_pinned_to_lf() -> None:
+    """光靠"写文件时显式 LF"是不够的 —— 检出时也会被改写。
+
+    上面那条检查看的是**当前工作区**里的文件，所以在开发机上它是绿的（文件是
+    脚本刚写的）；但在 ``core.autocrlf=true`` 的 Windows 上做一次全新 checkout，
+    git 会按 ``* text=auto`` 把它们写成 CRLF，于是：
+
+    * ``dump_openapi.py --check`` 永远说"不是最新"（它比的是原始字节）
+    * ``test_generated_openapi_json_uses_lf`` 变红
+
+    而这两条信息都指向"有人改了代码没重新生成"，指不到真正的原因（行尾符）——
+    照着提示去重新生成一遍，一切照旧。所以声明本身也要守住。
+
+    这条只读 .gitattributes、不读文件内容，所以它在任何平台上结论一致。
+    """
+    text = (REPO_ROOT / ".gitattributes").read_text(encoding="utf-8")
+    rules = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = stripped.split()
+        rules[parts[0]] = parts[1:]
+
+    missing = [name for name in PINNED_TO_LF if "eol=lf" not in rules.get(name, [])]
+    assert not missing, (
+        "这些生成物没有在 .gitattributes 里钉死 LF，新 checkout 的机器上会变成 CRLF，"
+        "于是「生成物是否最新」的检查会误报：%r" % missing
+    )
+
+
+def test_pin_check_actually_catches_a_missing_pin() -> None:
+    """自证：把规则读歪（比如把 eol=lf 写成 eol=crlf）必须能被认出来。"""
+    rules = {"web/openapi.json": ["text", "eol=crlf"]}
+
+    missing = [name for name in PINNED_TO_LF if "eol=lf" not in rules.get(name, [])]
+
+    assert "web/openapi.json" in missing

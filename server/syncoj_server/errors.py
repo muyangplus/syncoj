@@ -44,15 +44,25 @@ log = logging.getLogger("syncoj")
 
 #: 状态码 → 兜底错误码。只在调用方**没有**给 ``code`` 时用。
 #:
-#: 这种兜底码（``http_409``）本身没有信息量，它的作用是让 ``code`` 字段**永远
-#: 存在**：前端可以无条件地写 ``error.code``，而不用先判断字段在不在。
-#: 真正需要分支的地方请在抛错时显式给出下面那些具名码。
+#: 这种兜底码本身没有信息量，它的作用是让 ``code`` 字段**永远存在**：前端可以
+#: 无条件地写 ``error.code``，而不用先判断字段在不在。真正需要分支的地方请在
+#: 抛错时显式给出下面那些具名码。
+#:
+#: 两条要守住的规矩（都有测试）：
+#:
+#: 1. **这里列到的每个码都必须在** :data:`ERROR_CODES` **里**。否则前端拿到的
+#:    是一个它在文档里永远查不到的码 —— 而"兜底"恰恰是最常被走到的那条路
+#:    （400 是最常见的错误状态，如果它没登记，那最常见的情况就是没文档的）
+#: 2. **服务端真的会返回的状态码都得在这里**。漏一个（曾经漏了 410）的后果
+#:    不是"没有码"，而是所有这类响应都拿到下面那个 ``"error"`` 兜底 ——
+#:    一个既没写进文档、也没有任何含义的码，前端的分支和日志的 grep 全都白做。
 CODE_BY_STATUS = {
     400: "bad_request",
     401: "unauthorized",
     403: "forbidden",
     404: "not_found",
     409: "conflict",
+    410: "gone",
     413: "payload_too_large",
     422: "validation_error",
     429: "rate_limited",
@@ -64,22 +74,25 @@ CODE_BY_STATUS = {
 #:
 #: 前端目前只对少数几个做分支（见 web/src/api/client.ts），其余一律直接展示
 #: ``detail``。所以这里的原则是"够用就好"：不为了对称给每个接口都编一个码。
+#:
+#: 还有一条同样重要的反面规矩：**不许登记服务端根本拋不出来的码**。这里曾经躺着
+#: 一批这样的码（``contest_frozen``、``roster_in_use``、``last_admin`` 之类），
+#: 它们描述的是"设计时觉得以后可能会有"的场景 —— 而实际对应的校验要么不存在、
+#: 要么当初就选了另一种更宽容的做法。死码的害处不在于占地方，而在于它会被当成
+#: 契约：前端照着它写分支、文档照着它写章节，于是所有人都以为有那么一条保护在。
+#: 现在由 ``tests/test_errors.py::test_没有登记不出来的码`` 守着这件事。
 ERROR_CODES = {
     # 认证 / 鉴权
     "unauthorized": "未登录或会话已过期",
     "forbidden": "没有权限执行这个操作",
-    "admin_required": "需要管理员身份",
-    "token_expired": "登录已过期，请重新登录",
     "bad_credentials": "用户名或密码不对",
     # 机器注册与配对
     "pairing_required": "这台机器还没有配对到名单里的任何人",
-    "machine_unbound": "这台机器还没有配对",
     "machine_revoked": "这台机器已被作废",
     "bootstrap_key_invalid": "统一密钥无效",
     "bootstrap_key_revoked": "统一密钥已被吊销",
     "bootstrap_key_expired": "统一密钥已过期",
     "pair_code_invalid": "配对码不对，或者已经过期了",
-    "pair_code_expired": "配对码已过期，请让机器重新注册一次",
     "machine_already_bound": "这台机器已经配对给别人了",
     "machine_mismatch": "凭据与这台机器对不上（凭据可能被复制到了别的机器）",
     "stale_upload": "这份内容已经过期，服务端手上是更新的版本",
@@ -89,7 +102,9 @@ ERROR_CODES = {
     "contest_missing": "给这台机器指定的场次已经被删掉了",
     "contest_player_missing": "指定场次的选手名单里没有这个人，需要先把名单应用到场次",
     # 通用资源
+    "bad_request": "提交的内容不合法",
     "not_found": "找不到这个对象",
+    "gone": "这个对象已经没了（可能已被撤回，或者内容已被清理）",
     "conflict": "与当前状态冲突",
     "validation_error": "请求内容不合法",
     "rate_limited": "操作太频繁，请稍后再试",
@@ -99,12 +114,7 @@ ERROR_CODES = {
     # 业务
     "name_mismatch": "两次输入的确认名称不一致",
     "path_invalid": "路径不合法",
-    "contest_not_running": "场次不在进行中",
-    "contest_frozen": "场次已封榜",
     "release_not_signed": "服务端没有配置发布签名私钥，无法提供升级",
-    "asset_in_use": "这个资产还有机器在用，不能删",
-    "roster_in_use": "这份名单还被场次引用着",
-    "last_admin": "至少要留一个管理员",
 }
 
 

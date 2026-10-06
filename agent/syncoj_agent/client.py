@@ -98,8 +98,9 @@ class AuthError(AgentError):
 
 
 class UnboundError(AgentError):
-    """403：**凭据有效，但这台机器还没配对到人**（`machine_unbound` /
-    `pairing_required`），或者服务端拒绝了这次访问。
+    """403：**凭据有效，但这台机器现在干不了活**（``pairing_required`` /
+    ``no_active_contest`` / ``ambiguous_contest`` / ``contest_missing`` /
+    ``contest_player_missing``），或者服务端拒绝了这次访问。
 
     **绝对不要重新注册。** 这是整条链路上最容易做错的一处：未配对的机器看起来
     就像"注册失败了"，于是客户端去重试 enroll —— 而服务端每收到一次 enroll

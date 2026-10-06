@@ -80,8 +80,29 @@ string，不塞进请求体 —— 否则分页链接、收藏、刷新就都没
 
 - 业务错误优先抛 `ApiError(409, "roster_entry_taken", "…")`，而不是 `HTTPException`
 - 仍然在抛的 `HTTPException` 由 handler 兼容：`detail` 压成字符串，
-  `code` 从状态码推导（`http_409` 这种兜底码没有信息量，但保证字段存在）
-- 未登记的 `code` 会被测试拦下（`test_api_conventions.py`），避免悄悄引入新约定
+  `code` 从状态码**推导**（见下面的 `CODE_BY_STATUS`）
+- 需要别人分支判断的地方**显式给码**，其余一律用兜底码
+
+### 码表怎么维护
+
+`ERROR_CODES` 是唯一的码清单，`CODE_BY_STATUS` 是"没显式给码时按状态码推"的兜底表。
+四条规矩由 `server/tests/test_errors.py` 静态守住（都是 AST 扫描，不是正则）：
+
+| 规矩 | 违反了会怎样 |
+|---|---|
+| 源码里发出的每个码都登记在 `ERROR_CODES` 里 | 码只给一半时 `ApiError` 抛 `ValueError`，接口变成 500 |
+| `ERROR_CODES` 里的每个码源码里真的会发 | 死码**被当成契约**：前端照着写分支、文档照着写章节 |
+| `CODE_BY_STATUS` 的每个取值都登记在 `ERROR_CODES` 里 | 兜底码没文档 —— 而 400 恰是最常见的错误状态 |
+| 每个用得到的状态码都在 `CODE_BY_STATUS` 里 | 落到 `.get(status, "error")`，客户端拿到毫无含义的 `error` |
+
+最后一条不是假想：它当场抓出过 **410**。`/releases` 的"该版本已撤回"和"内容缺失"
+三处都在用它，于是这类响应带的是 `code: "error"` —— 既不在文档里，也没法 grep。
+
+> 反面规矩同样重要：**不许登记服务端根本发不出来的码**。这里曾经躺着 8 个
+> （`contest_frozen`、`roster_in_use`、`last_admin`、`machine_unbound` …），
+> 它们描述的是"设计时觉得以后会有"的场景，而对应的校验要么压根不存在，
+> 要么当初就选了更宽容的做法（删名单是被允许的，只是把引用它的场次置空）。
+> 要加新码，请**连同产生它的那条分支一起加**。
 
 ### 422 校验错误
 

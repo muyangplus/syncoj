@@ -926,7 +926,10 @@ class Agent:
             # 解绑，也可能是配对还没生效）。这里最要紧的是**不要重新注册** ——
             # 那样每轮都会换一个新配对码，教师手上那个永远对不上。
             log.info("服务端认为这台机器还没有配对（%s），继续等待", exc.code or exc.status)
-            self._mark_unbound(exc.code or "machine_unbound")
+            # 兜底用的是服务端真正会发的那个码（``pairing_required``），
+            # 而不是另编一个服务端从来不发的名字 —— 两边的码表要能对上，
+            # 否则日志里出现的码在服务端代码里 grep 不到。
+            self._mark_unbound(exc.code or "pairing_required")
             return STATE_UNCLAIMED, self._clamp_wait(None)
 
         remote_config = tick.get("config")
@@ -1014,7 +1017,7 @@ class Agent:
             # 中途被解绑了（比如教师在场次里把这个人删了）。这不是故障，
             # 是状态变化 —— 所以不进指数退避，退回"安静等待"那条路。
             log.warning("tick 被拒（%s），退回等待配对", exc.code or exc.status)
-            self._mark_unbound(exc.code or "machine_unbound")
+            self._mark_unbound(exc.code or "pairing_required")
             return self._clamp_wait(None)
 
         # tick 成功 = 本轮携带的完成项已被服务端接收，可以清空。

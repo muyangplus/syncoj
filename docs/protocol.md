@@ -42,11 +42,14 @@ Agent 只应对下面这几个 `code` 做分支，其余一律"记日志 + 等�
 | `pairing_required` | 还没配对 → **不要重新注册**，显示配对码，等下一轮 tick |
 | `no_active_contest` / `ambiguous_contest` / `contest_missing` / `contest_player_missing` | 配对好了但还干不了活 → 写「等待场次.txt」，等下一轮 tick |
 | `bootstrap_key_invalid` / `bootstrap_key_revoked` / `bootstrap_key_expired` | 镜像里的密钥不对 → 停止重试，写明确日志等人来修 |
-| `pair_code_invalid` / `pair_code_expired` | 配对码过期是**服务端**的事，Agent 什么也不做 |
 | `rate_limited` | 按 `Retry-After` 退避 |
 | `internal_error` | 指数退避 |
 
 其他 `code` 一律"记日志 + 等下一轮"。
+
+> **`pair_code_invalid` 不在这张表里，因为 Agent 收不到它。** 配对码是教师在管理
+> 界面里输的，所以"码不对/过期"是发给**浏览器**的响应。机器那侧只管把码显示在
+> 桌面上、等对方输对 —— 它甚至不知道有人正在试。
 
 > **Agent 不需要记住这张表也能做对。** 真正要守住的分界线只有一条：**401 才清
 > 凭据重新注册，403 一律只更新状态**。`code` 是用来把"卡在哪一档"写进日志和事件

@@ -29,7 +29,7 @@
     sudo python3 install.py --download-url https://10.0.0.1:8443/dist/syncoj-agent-0.1.0.tar.gz ...
 
 **注册只有一条路**：镜像里那份 root 只读的统一密钥。它换来的是"一台还没有归属
-的机器"，教师再用六位配对码把它绑到名单里的**人**（见 docs/protocol.md §1）。
+的机器"，教师再用六位配对码把它绑到名单里的**人**（见 docs/reference/protocol.md §1）。
 
 **幂等**是硬要求：重复执行结果一致。尤其是 —— **绝不覆盖已存在的 agent.ini**。
 教师可能已经在里面改了扫描目录，安装器把它们冲掉是灾难性的。

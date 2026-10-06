@@ -194,7 +194,7 @@ def test_close_is_idempotent_and_safe_without_reads(workdir: Path) -> None:
 def test_enroll_payload_fields() -> None:
     """注册只有一条路：镜像里那份统一密钥。
 
-    机器身份的**三个要素**都在报文体里（见 docs/protocol.md §1）：
+    机器身份的**三个要素**都在报文体里（见 docs/reference/protocol.md §1）：
     ``machine_uuid`` 是首选身份，``machine_fingerprint`` 是快照还原后的第二道，
     ``machine_id`` 仅供人工辨认。没有 enroll_code —— 那条链路已经删掉了。
     """
@@ -240,7 +240,7 @@ def test_enroll_payload_omits_missing_values() -> None:
 # 错误体：{detail, code, details}
 # --------------------------------------------------------------------------- #
 #
-# 服务端**所有**错误响应都是这一个形状（docs/protocol.md §0.1）。要分支判断就
+# 服务端**所有**错误响应都是这一个形状（docs/reference/protocol.md §0.1）。要分支判断就
 # 看 ``code`` —— 拿 ``detail`` 做字符串比较会在改文案时静默失效。
 
 

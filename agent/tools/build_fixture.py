@@ -75,7 +75,13 @@ def build_fixture() -> Dict[str, Any]:
         scan_root="/home/student/code, /home/student/backup",
         results=_sample_results(),
         partials=[{"asset_id": 42, "bytes_done": 3145728}],
-        stats={"disk_free": 10737418240, "queue": 0},
+        # scan_missing：本轮"扫描根不存在"的那几条绝对路径。样本里放一条，
+        # 服务端那份 TickStats 才有一个真实取值可校验（"目录没建"只能靠报文学到）。
+        stats={
+            "disk_free": 10737418240,
+            "queue": 0,
+            "scan_missing": ["/home/student/notyet"],
+        },
         completed_assets=[7],
     )
 

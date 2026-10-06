@@ -493,13 +493,16 @@ def detect_desktop(home: Optional[Path] = None) -> Path:
     return home_dir / "桌面"
 
 
-def _desktop_from_xdg_config(home_dir: Path) -> Optional[Path]:
-    """读 ``~/.config/user-dirs.dirs``。
+def declared_xdg_desktop(home_dir: Optional[Path] = None) -> Optional[Path]:
+    """``~/.config/user-dirs.dirs`` 里**声明**的桌面目录；没声明返回 ``None``。
 
-    文件里是 shell 变量形式：``XDG_DESKTOP_DIR="$HOME/桌面"``。
-    这里只做最小的解析，不引入任何依赖。
+    与 :func:`detect_desktop` 的区别只在"要求目录存在吗"：探测要能真的写文件，
+    所以声明的路径不在就跳过；而"配置里的下发落点与 GNOME 显示的桌面是不是同一个"
+    这件事要的是**声明值**本身 —— 声明的目录不存在（家目录不对、桌面被删了）
+    同样值得警告。
     """
-    config_file = home_dir / ".config" / "user-dirs.dirs"
+    home = Path(home_dir) if home_dir else Path.home()
+    config_file = home / ".config" / "user-dirs.dirs"
     try:
         with open(config_file, "r", encoding="utf-8") as handle:
             content = handle.read()
@@ -515,10 +518,16 @@ def _desktop_from_xdg_config(home_dir: Path) -> Optional[Path]:
         if not value:
             continue
         # 文件里写的是 $HOME/... 这种 shell 展开形式
-        value = value.replace("$HOME", str(home_dir)).replace("${HOME}", str(home_dir))
-        candidate = Path(value).expanduser()
-        if candidate.is_dir():
-            return candidate
+        value = value.replace("$HOME", str(home)).replace("${HOME}", str(home))
+        return Path(value).expanduser()
+    return None
+
+
+def _desktop_from_xdg_config(home_dir: Path) -> Optional[Path]:
+    """读 ``~/.config/user-dirs.dirs``，**只在声明的目录真的存在时**认它。"""
+    candidate = declared_xdg_desktop(home_dir)
+    if candidate is not None and candidate.is_dir():
+        return candidate
     return None
 
 

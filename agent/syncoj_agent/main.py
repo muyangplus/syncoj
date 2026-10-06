@@ -60,6 +60,7 @@ from .state import (
     Credential,
     HashCache,
     atomic_write_text,
+    declared_xdg_desktop,
     describe_os,
     load_credential,
     read_bootstrap_key,
@@ -136,6 +137,13 @@ ENROLL_UNIT_NAME = "syncoj-agent-enroll.service"
 #: 等注册凭据的轮询间隔（秒）。一分钟足够及时，也不会刷日志。
 REGISTRATION_POLL_SECONDS = 60.0
 
+#: 每轮 tick 最多上报几个"当前不存在的扫描根"。
+#:
+#: 为什么要上限：这是给管理端"后台提示"用的，不是台账 —— 一个配错的
+#: ``scan.roots`` 可能一次列几十条，全塞进每轮报文只会把它撑肥。超出的部分
+#: 在本地日志里说明（运维要查全量在那儿查）。
+SCAN_MISSING_MAX = 5
+
 
 def _run_uninstall_command(argv, stdin_bytes):
     """真正执行 ``sudo -n <self_uninstall.sh>``：令牌**只走 stdin**。
@@ -177,6 +185,24 @@ def state_from_payload(data: Dict[str, object]) -> str:
     if not bool(data.get("claimed", True)):
         return STATE_UNCLAIMED
     return STATE_READY if bool(data.get("bound", True)) else STATE_WAITING
+
+
+def _scan_missing_for_payload(raw) -> List[str]:
+    """把"不存在的扫描根"整理成上报用的列表：去重、按路径排序、上限 ``SCAN_MISSING_MAX``。
+
+    **只在这一处加工**：`build_tick_payload` 是报文体的唯一出口（``tools/build_fixture.py``
+    也用它生成样本），所以排序/截断/日志都落在这里，别在调用方再拼一份 ——
+    两份必然漂，而报文里的字段漂了最难查。
+    """
+    items = sorted({str(item) for item in (raw or []) if str(item)})
+    if len(items) > SCAN_MISSING_MAX:
+        log.info(
+            "当前有 %d 个扫描根不存在，报文里只报前 %d 个，完整列表：%s",
+            len(items),
+            SCAN_MISSING_MAX,
+            "、".join(items),
+        )
+    return items[:SCAN_MISSING_MAX]
 
 
 def build_tick_payload(
@@ -224,6 +250,10 @@ def build_tick_payload(
         "disk_free": stats.get("disk_free"),
         "last_error": stats.get("last_error") or (errors[0] if errors else None),
         "queue": int(stats.get("queue", 0)),  # type: ignore[arg-type]
+        # 当前不存在的扫描根（绝对路径）。**每轮都报**：服务端拿它做"后台提示"
+        # （"这台机器的桌面目录还没有"），而"消失"这件事只有在每轮报文里才看得出来。
+        # 排序稳定（服务端与日志才好对账），最多 SCAN_MISSING_MAX 条。
+        "scan_missing": _scan_missing_for_payload(stats.get("scan_missing")),
     }
 
     payload = {
@@ -304,6 +334,13 @@ class Agent:
         self._run_uninstall = _run_uninstall_command
         #: "还没注册凭据、在等注册单元"这条日志只说一次（别的每轮轮询不刷屏）
         self._registration_logged = False
+        #: 上一轮"用不了的扫描根"（路径 -> 原因）。日志只在状态变化时说一次 ——
+        #: 开考前那个目录**本来就不该存在**，每轮刷一条会把真正的问题埋掉。
+        self._scan_missing_prev: Dict[str, str] = {}
+        #: 已经记过"碰目录 mtime 失败"的目录（每个目录只说一次，debug 级）
+        self._refresh_nudge_failed: set = set()
+        #: 桌面一致性核对只说一次
+        self._desktop_checked = False
 
     # ---------------------------------------------------------------- #
     # 生命周期
@@ -324,6 +361,11 @@ class Agent:
 
         **必须在拿到凭据后调用**：默认的扫描目录是 ``桌面/<准考证号>``，
         准考证号是注册的产物。注册之前那个目录叫什么名字根本无从得知。
+
+        **刻意不创建缺失的根**：选手的考号目录由他自己保存文件时产生，我们不代他
+        建 —— 现场表现是"老师打开桌面就多出一堆空文件夹"，而且那还掩盖了"这台机器
+        根本没在收文件"这件事。缺失的根由 :meth:`_missing_scan_roots` 逐轮识别、
+        上报到 ``stats.scan_missing``，扫描时跳过它（当作"这个根现在没有文件"）。
         """
         roots = self.config.resolved_roots(player_no, contest_slug)
         if not roots:
@@ -353,16 +395,45 @@ class Agent:
                 used[name] = root
             named.append((name, root))
 
-        # 扫描根不存在时**创建它**，而不是报错。
-        # 它是选手的工作目录，此刻选手可能还没建 —— 提前建好反而省事；
-        # 报错则会在开考前刷一屏"目录不存在"，掩盖真正的问题。
-        for _name, root in named:
-            try:
-                root.mkdir(parents=True, exist_ok=True)
-            except OSError as exc:
-                log.warning("无法创建扫描目录 %s: %s", root, exc)
-
         return named
+
+    def _root_problem(self, root: Path) -> Optional[str]:
+        """这个扫描根为什么用不了；能用就返回 ``None``。
+
+        "不存在"与"被一个同名文件占着"都给一句人话 —— 后者尤其要说清：
+        教师看着配置没错，而现场表现是"一个文件都收不上来"。
+        """
+        if root.is_dir():
+            return None
+        if root.exists():
+            return "不是一个目录（被同名文件占着）"
+        return "目录不存在"
+
+    def _missing_scan_roots(self) -> Dict[str, str]:
+        """当前用不了的扫描根：``绝对路径 -> 原因``。
+
+        **每轮重算**，不吃 ``_roots_ready`` 缓存 —— 根会出现（选手开始保存文件）
+        也可能消失，缓存了就等于永远不更新。顺便按"状态变化"记一次日志：
+        缺失时记一次，后来出现了再记一次"已出现"，中间不刷。
+        """
+        missing: Dict[str, str] = {}
+        for _name, root in self._roots:
+            problem = self._root_problem(root)
+            if problem is not None:
+                missing[str(root)] = problem
+
+        appeared = [path for path in self._scan_missing_prev if path not in missing]
+        newly_missing = [path for path in missing if path not in self._scan_missing_prev]
+        for path in sorted(newly_missing):
+            log.warning(
+                "扫描根不可用（%s），本轮跳过它（选手保存文件后会自动出现）：%s",
+                missing[path],
+                path,
+            )
+        for path in sorted(appeared):
+            log.info("扫描根已出现，开始扫描：%s", path)
+        self._scan_missing_prev = dict(missing)
+        return missing
 
     def _ensure_roots(self, player_no: str, contest_slug: str = "") -> None:
         if self._roots_ready:
@@ -430,7 +501,7 @@ class Agent:
         """注册。**只有一条路**：读镜像里那份 root 只读的统一密钥。
 
         没有「每选手注册码」那条路了 —— 它已经被"机器永久绑定名单条目"取代
-        （见 docs/protocol.md §1）。密钥缺失或读不出来时把下一步动作说清楚 ——
+        （见 docs/reference/protocol.md §1）。密钥缺失或读不出来时把下一步动作说清楚 ——
         而不是笼统地说"注册失败"。
         """
         key_path = self.config.bootstrap_key_file or "/etc/syncoj/bootstrap.key"
@@ -726,19 +797,28 @@ class Agent:
     # ---------------------------------------------------------------- #
 
     def _scan(self):
-        """扫描全部根目录，返回 ``(扫描结果列表, 本地路径索引)``。"""
+        """扫描全部根目录，返回 ``(扫描结果列表, 本地路径索引, 有没有根没扫成)``。
+
+        **用不了的根直接跳过**（不创建、不报错、不进 ``last_error``）：它现在就是
+        "没有文件"，不是故障。哪几个根用不了由 :meth:`_missing_scan_roots` 单独
+        识别并上报，扫描这里只负责别去碰它。
+        """
         scan_policy = ScanPolicy.from_mapping(self.policy)
         max_files = int(self.policy.get("max_files", 5000))  # type: ignore[arg-type]
         results = []
         local_paths: Dict[str, Path] = {}
+        skipped = 0
 
         for name, root in self._roots:
+            if self._root_problem(root) is not None:
+                skipped += 1
+                continue
             outcome = scan_directory(root, scan_policy, self.cache, max_files=max_files)
             results.append((name, outcome))
             for entry in outcome.entries:
                 local_paths[join_report_path(name, entry.path)] = root / entry.path
 
-        return results, local_paths
+        return results, local_paths, skipped
 
     def _build_tick_payload(self, results, local_paths, scan_complete: bool = True):
         return build_tick_payload(
@@ -758,6 +838,9 @@ class Agent:
                 # 上一次失败的摘要（比如按管理端授权卸载失败的原因）。**绝不含
                 # 令牌** —— 令牌是一次 root 删除的凭据，不进任何上报字段。
                 "last_error": self._last_error,
+                # 哪几个扫描根现在用不了（绝对路径）。**每轮都报** —— 服务端拿它
+                # 做后台提示，而"根出现了"这件事只有每轮报文里才看得出来。
+                "scan_missing": sorted(self._missing_scan_roots()),
             },
             # 上一轮下载完成的结果在这里回报。差一轮无所谓 —— 而且服务端在收到
             # 回报前会继续下发该作业，Agent 会走 "内容已一致" 的跳过分支并再次
@@ -845,6 +928,9 @@ class Agent:
                     "下发完成 %s（%d 字节）",
                     outcome.dest, outcome.bytes_written,
                 )
+                # 只有**确实写进去**才碰目录 mtime（跳过/失败都不碰）：
+                # 目的是让文件管理器立刻显示出新文件，而不是替它做轮询
+                self._nudge_after_write(outcome.dest)
             elif outcome.status == "skipped":
                 ok += 1
                 # 内容已一致也算完成 —— Agent 重启后正是靠这条路径把"其实早就
@@ -862,9 +948,44 @@ class Agent:
         return ok, failed
 
     # ---------------------------------------------------------------- #
-    # 事件
+    # 桌面刷新（best-effort）
     # ---------------------------------------------------------------- #
 
+    def _nudge_desktop_refresh(self, directory: Path) -> None:
+        """碰一下目录的 mtime，让文件管理器注意到"这里刚多了东西"。
+
+        现场报的是"下发完了但桌面上不刷新，要进文件夹里才看得到"。落盘本身是对的
+        （``.syncoj-part`` + 同目录 ``os.replace``），缺的是**通知桌面** ——
+        文件管理器（GNOME Files / Nautilus 等）监听目录变更事件，而"目录 mtime 变了"
+        是最常见、最不挑实现的触发条件。
+
+        **纯 best-effort**：失败只记一次 debug（每个目录一次），绝不向上抛 ——
+        文件已经落盘了，刷新不了只是"要多点一下刷新"，不能因此把下发判成失败。
+        """
+        try:
+            os.utime(str(directory), None)
+        except OSError as exc:
+            key = str(directory)
+            if key not in self._refresh_nudge_failed:
+                self._refresh_nudge_failed.add(key)
+                log.debug("碰目录 mtime 失败（不影响下发，只是桌面可能要手动刷新）：%s: %s", directory, exc)
+
+    def _nudge_after_write(self, dest: str) -> None:
+        """一次下发**确实写成功之后**才调用：碰该刷新的目录。
+
+        分开两个目录是有原因的：文件落在 ``deploy_root`` 根上时，要刷新的是桌面
+        自己；落在子目录里时，桌面上那张图标没变（子目录早就在），要刷新的是那个
+        子目录 —— 但**子目录可能是这一次才建出来的**，那时桌面上会多出一个文件夹，
+        所以桌面根也要碰一下。两条都只是 ``utime``，代价可以忽略。
+        """
+        parent = (self.config.deploy_root / dest).parent
+        self._nudge_desktop_refresh(parent)
+        if parent != self.config.deploy_root:
+            self._nudge_desktop_refresh(self.config.deploy_root)
+
+    # ---------------------------------------------------------------- #
+    # 事件
+    # ---------------------------------------------------------------- #
     def _note_completed(self, asset_id: int) -> None:
         """记录一个已确认完整的下发资源，等待下一轮 tick 上报。"""
         if asset_id and asset_id not in self._completed_assets:
@@ -1231,8 +1352,16 @@ class Agent:
         # 扫描目录里可能含 {player_no} / {contest_slug}，必须等拿到凭据之后才能确定
         self._ensure_roots(credential.player_no, credential.contest_slug)
 
-        results, self._local_paths = self._scan()
-        payload, oversize, errors = self._build_tick_payload(results, self._local_paths)
+        results, self._local_paths, skipped_roots = self._scan()
+        payload, oversize, errors = self._build_tick_payload(
+            results,
+            self._local_paths,
+            # 有根没扫成（不存在/不是目录）时**不能说"扫完了"**：服务端拿
+            # scan_complete 决定要不要做删除判定，而"这个根现在没有"与"这些文件
+            # 被删了"在报文里长得一模一样。缺失的根另有 stats.scan_missing 明说，
+            # 所以这里保守一点只是少一次删除判定，不会丢信息。
+            scan_complete=(skipped_roots == 0),
+        )
 
         if oversize:
             self._emit(
@@ -1343,6 +1472,38 @@ class Agent:
     # 常驻
     # ---------------------------------------------------------------- #
 
+    def _check_desktop_consistency(self) -> None:
+        """核一遍"配置里的下发落点"与 XDG 声明的桌面是不是同一个目录（只说一次）。
+
+        现场第二种"看不到文件"的原因：落点没错、文件也在，只是**不在 GNOME 显示的
+        那个桌面上**（桌面被挪到别处了，或者配置写的是 ``{home}/Desktop`` 而实际是
+        「桌面」）。:func:`detect_desktop` 已经优先读 ``XDG_DESKTOP_DIR``，但
+        ``agent.ini`` 里的 ``deploy_root`` 是教师/安装器写死的值，两者可能不一致。
+
+        这里**只警告、不改配置**：那份文件是教师的，Agent 悄悄改它会让"配置文件里
+        写的是什么"失去意义。警告里要给出"去哪儿看"，否则教师只会以为下发坏了。
+        """
+        if self._desktop_checked:
+            return
+        self._desktop_checked = True
+        try:
+            declared = declared_xdg_desktop()
+        except Exception:  # pragma: no cover - 解析不该抛，真抛了也不值当影响启动
+            return
+        if declared is None:
+            return
+        configured = Path(self.config.deploy_root)
+        if configured == declared:
+            return
+        log.warning(
+            "下发落点（%s）与系统声明的桌面（%s，来自 ~/.config/user-dirs.dirs）"
+            "不一致 —— 文件可能不会出现在桌面上，去 %s 看。"
+            "要改落点请改 agent.ini 的 deploy_root 后重启服务。",
+            configured,
+            declared,
+            configured,
+        )
+
     def run_forever(self) -> int:
         log.info(
             "SyncOJ Agent %s 启动（machine_id=%s，自更新 %s）",
@@ -1361,6 +1522,9 @@ class Agent:
             log.exception("启动守卫执行失败，继续正常运行")
 
         sweep_stale_parts(self.config.deploy_root)
+        # 桌面刷新问题的第二个成因（落点不在真正的桌面上）在这里核一遍 ——
+        # 启动时说一次就够，不占每轮的报文，也不改任何配置
+        self._check_desktop_consistency()
 
         while not self._stop:
             if self._restart_requested:

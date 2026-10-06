@@ -716,7 +716,7 @@ def test_403_pairing_required_behaves_like_machine_unbound(
 def test_unknown_403_code_still_does_not_re_enroll(agent_config: AgentConfig) -> None:
     """403 里出现不认识的 code 时，保守做法仍是"不要重新注册"。
 
-    §0.2 是照状态码定性的：403 = 凭据有效。把凭据扔掉去换一个新的，是这里
+    docs/reference/protocol.md §0.2 是照状态码定性的：403 = 凭据有效。把凭据扔掉去换一个新的，是这里
     唯一会造成实际损失的"猜错"（配对码失效），所以宁可什么都不做。
     """
     server = FakeServer()

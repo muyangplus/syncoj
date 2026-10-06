@@ -393,22 +393,28 @@ def test_prefix_literal_can_reference_contest_slug(workdir: Path) -> None:
     assert roots == [("mock-1/S007", root)]
 
 
-def test_scan_root_with_contest_slug_is_created(workdir: Path) -> None:
-    """含 ``{contest_slug}`` 的扫描根同样会被建出来。"""
+def test_scan_root_with_contest_slug_is_not_created(workdir: Path) -> None:
+    """含 ``{contest_slug}`` 的扫描根**不会**被代建 —— 选手保存文件时才产生它。
+
+    现场表现：老师打开桌面就多出一堆空文件夹。而且"我们替他建了"还会掩盖
+    "这台机器根本没在收文件"这件事。
+    """
     from syncoj_agent.main import Agent
 
     config = AgentConfig.load(write_config(workdir))
     config.scan_roots = [workdir / "{contest_slug}" / "{player_no}"]
 
-    Agent(config)._resolve_roots(player_no="S001", contest_slug="mock-1")
-    assert (workdir / "mock-1" / "S001").is_dir()
+    roots = Agent(config)._resolve_roots(player_no="S001", contest_slug="mock-1")
+    assert roots == [("", workdir / "mock-1" / "S001")]
+    assert not (workdir / "mock-1").exists(), "扫描根被代建了"
 
 
-def test_scan_root_is_created_if_missing(workdir: Path) -> None:
-    """扫描根不存在时创建它，而不是报错。
+def test_scan_root_is_not_created_if_missing(workdir: Path) -> None:
+    """扫描根不存在时**不创建、也不报错**：这一轮当作"它还没有文件"。
 
-    它是选手的工作目录，开考前可能还没建；报错会在开考前刷一屏"目录不存在"，
-    把真正的问题淹掉。
+    "缺失"通过 ``stats.scan_missing`` 上报给服务端（见
+    ``test_registration_contract`` 之外的那组扫描根用例），而不是靠"替选手建出
+    一个空目录"来掩盖。
     """
     from syncoj_agent.main import Agent
 
@@ -419,8 +425,9 @@ def test_scan_root_is_created_if_missing(workdir: Path) -> None:
     config.scan_roots = [missing]
     config.scan_prefix = "none"
 
-    Agent(config)._resolve_roots(player_no="S001")
-    assert missing.is_dir()
+    roots = Agent(config)._resolve_roots(player_no="S001")
+    assert roots == [("", missing)], "配置好的根仍然要在，只是不去碰它"
+    assert not missing.exists(), "扫描根被创建了"
 
 
 def test_templated_root_validation_skips_existence(workdir: Path) -> None:

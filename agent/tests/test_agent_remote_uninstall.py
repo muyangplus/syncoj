@@ -326,7 +326,7 @@ def test_cycle_收到令牌就执行并返回零(tmp_path: Path, monkeypatch) ->
     monkeypatch.setattr(agent, "_ensure_credential", lambda: credential)
     monkeypatch.setattr(agent, "_sync_notice_files", lambda cred: None)
     monkeypatch.setattr(agent, "_ensure_roots", lambda *a, **k: None)
-    monkeypatch.setattr(agent, "_scan", lambda: ([], {}))
+    monkeypatch.setattr(agent, "_scan", lambda: ([], {}, 0))
     monkeypatch.setattr(
         agent, "_build_tick_payload", lambda *a, **k: ({}, [], [])
     )

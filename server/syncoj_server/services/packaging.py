@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -37,9 +38,10 @@ import tarfile
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .. import keys
+from .install_policy import POLICY_JSON_NAME
 
 __all__ = [
     "BUILD_TIMEOUT_SECONDS",
@@ -72,6 +74,7 @@ VERSION_ATTR = "__version__"
 BOOTSTRAP_KEY_NAME = "bootstrap.key"
 
 #: 附带的密钥在包内的权限位。**不能**跟着其它成员走 0644。
+#: 策略文件（``install_policy.json``）不是秘密，仍然走 0644。
 BOOTSTRAP_KEY_MODE = 0o600
 
 #: 构建超时。这个包只有几百 KB，正常一两秒；给到 2 分钟是因为目标机可能同时在
@@ -226,6 +229,7 @@ def build_agent_bundle(
     *,
     server_url: Optional[str] = None,
     bootstrap_key: Optional[str] = None,
+    install_policy: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, int, str]:
     """把仓库里的 Agent 源码打成 ``destination``，返回 ``(版本, 字节数, sha256)``。
 
@@ -235,6 +239,10 @@ def build_agent_bundle(
     ``bootstrap_key`` 给定时，它的明文会被写进包内 ``bootstrap.key``（根目录、
     0600）。**服务端只存密钥的哈希、拿不到明文**，所以这里接的是"构建那一刻
     现场签发的那把新密钥"，不是"从库里挑一把" —— 那条路根本走不通。
+
+    ``install_policy`` 会被写成包内 ``install_policy.json``（根目录）：离线装机
+    时机器就读它。传进来的必须是 ``services/install_policy.build_install_policy``
+    的产物 —— 台账与升级清单用的是同一个 helper，三处因此不会各自漂。
 
     明文只经过这个函数的局部变量和那个临时 tar 成员：不落库、不进日志、
     不进任何响应，见 ``api/admin.py`` 的 ``build_release``。
@@ -301,10 +309,15 @@ def build_agent_bundle(
             log=log,
         )
 
-    if bootstrap_key:
+    if bootstrap_key or install_policy is not None:
         # 公钥/地址由构建脚本按同一套规矩打进去（顺序、mtime=0、uid/gid=0）；
-        # 密钥是**服务端**才知道的东西，只能在包打好之后补进去。
-        _inject_bootstrap_key(destination, bootstrap_key)
+        # 密钥与策略是**服务端**才知道的东西，只能在包打好之后补进去。
+        # 两者一起补：分两次"解开重打"没有意义，还多一次丢掉可复现性的机会。
+        _inject_bundle_members(
+            destination,
+            bootstrap_key=bootstrap_key,
+            install_policy=install_policy,
+        )
 
     digest = hashlib.sha256()
     size = 0
@@ -318,23 +331,34 @@ def build_agent_bundle(
     return version, size, digest.hexdigest()
 
 
-def _inject_bootstrap_key(bundle_path: Path, bootstrap_key: str) -> None:
-    """把明文密钥作为**根目录**下的 ``bootstrap.key``（0600）补进已经打好的包。
+def _inject_bundle_members(
+    bundle_path: Path,
+    *,
+    bootstrap_key: Optional[str] = None,
+    install_policy: Optional[Dict[str, Any]] = None,
+) -> None:
+    """把服务端才知道的成员补进已经打好的包（根目录下的密钥与安装策略）。
 
-    为什么不改 ``build_bundle.py``：那个脚本属 ``agent/``，它得同时服务
-    "人手跑一条命令打包"这条路径，而密钥是服务端构建时才签出来的；把它做成命令行
-    参数，明文就会出现在进程参数表里（任何同机进程都能看到 ``ps``），比写在
-    临时文件里更糟。
+    为什么要补而不是让 ``build_bundle.py`` 打进去：那个脚本属 ``agent/``，它得同时
+    服务"人手跑一条命令打包"这条路径，而密钥是服务端构建时才签出来的、策略是发布
+    记录上那一份。把它做成命令行参数，密钥明文就会出现在进程参数表里（任何同机
+    进程都能看到 ``ps``），比写在临时文件里更糟。
 
     为什么是"解开重打"而不是"往 tar.gz 后面追加"：gzip 是流式压缩，
-    追加的字节根本不会被解压出来。所以走"先解开 → 补一个成员 → 按同一套
+    追加的字节根本不会被解压出来。所以走"先解开 → 补成员 → 按同一套
     可复现规矩重打一份"。
 
     重打时**顺序固定成路径排序**、成员一律 ``mtime=0``/``uid=gid=0``，
-    并用 ``GzipFile(filename="", mtime=0)`` —— 可复现性不能因为多带了一个密钥
+    并用 ``GzipFile(filename="", mtime=0)`` —— 可复现性不能因为多带了一两个成员
     就丢掉，否则同一次发版打两遍会得到两个 sha256，而签名签的正是那个值。
     """
-    payload = (bootstrap_key.strip() + "\n").encode("utf-8")
+    payloads: Dict[str, bytes] = {}
+    if bootstrap_key:
+        payloads[BOOTSTRAP_KEY_NAME] = (bootstrap_key.strip() + "\n").encode("utf-8")
+    if install_policy is not None:
+        payloads[POLICY_JSON_NAME] = (
+            json.dumps(install_policy, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8")
 
     with tempfile.TemporaryDirectory(prefix="bundle-") as tmp:
         staging = Path(tmp)
@@ -343,10 +367,11 @@ def _inject_bootstrap_key(bundle_path: Path, bootstrap_key: str) -> None:
             _extract_safely(archive, extracted)
 
         names = _relative_files(extracted)
-        (extracted / BOOTSTRAP_KEY_NAME).write_bytes(payload)
+        for name, payload in payloads.items():
+            (extracted / name).write_bytes(payload)
 
         _write_reproducible_tar(
-            bundle_path, extracted, names + [BOOTSTRAP_KEY_NAME]
+            bundle_path, extracted, sorted(names + list(payloads))
         )
 
 

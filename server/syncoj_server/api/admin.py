@@ -141,7 +141,16 @@ from ..security import (
     new_token,
     verify_password,
 )
-from ..services import discovery, enrollment, matching, packaging, rosters, uninstall, zipcrypto
+from ..services import (
+    discovery,
+    enrollment,
+    install_policy,
+    matching,
+    packaging,
+    rosters,
+    uninstall,
+    zipcrypto,
+)
 from ..services.deploy import validate_dest_template
 from ..services.signing import parse_version
 from ..storage import BlobTooLarge, HashMismatch
@@ -4757,6 +4766,17 @@ def _release_out(
             # 密钥记录被删了（允许删"签错了、没被用过"的那种），版本记录还在。
             # 报 ``#id`` 而不是空字符串：界面上要能回答"这个包附带过密钥吗"。
             label = "#%d" % key_id
+    # 策略按同一份 helper 展开：界面上要显示"这一版发出去的是什么"，而库里
+    # 只存教师改过的那些键（``config_policy`` 因此被补成完整映射）。
+    #
+    # ``has_bundled_key`` 用 ``bootstrap_key_id``：迁移之前建的记录没有策略列，
+    # 但"这个包夹带过密钥"记在这一列上 —— 不给它，老记录会显示成"不覆盖"。
+    policy = install_policy.build_install_policy(
+        bootstrap_key_policy=row.bootstrap_key_policy,
+        config_policy=install_policy.load_config_policy(row.config_policy_json),
+        upgrade_mode=row.upgrade_mode,
+        has_bundled_key=row.bootstrap_key_id is not None,
+    )
     return ReleaseOut(
         id=row.id,
         version=row.version,
@@ -4771,6 +4791,9 @@ def _release_out(
         bootstrap_key_id=key_id,
         bootstrap_key_label=label,
         bootstrap_key_revoked=revoked,
+        bootstrap_key_policy=policy["bootstrap_key_policy"],
+        config_policy=policy["config_policy"],
+        upgrade_mode=policy["upgrade_mode"],
     )
 
 
@@ -4800,6 +4823,7 @@ def _store_release(
     admin: AdminIdentity,
     source: str,
     bootstrap_key_id: Optional[int] = None,
+    policy: Optional[install_policy.ResolvedPolicy] = None,
 ) -> ReleaseOut:
     """把一份升级包**收进库并签发**，返回发布记录。
 
@@ -4811,6 +4835,10 @@ def _store_release(
     ``bootstrap_key_id`` 只在"构建时附带密钥"那条路上有值（上传的包是别人打好的，
     服务端不知道里面有没有密钥，所以上传一律不写这一列）。**这里只收 id，
     收不到明文** —— 调用方在构建前一刻现场签发的那把密钥，明文只在它手里待了一次。
+
+    ``policy`` 同理只在构建那条路上有值：服务端不知道上传进来的包裹里写了什么策略，
+    所以上传一律只留默认值（不改配置、密钥不动、按默认模式升级）。**不猜** ——
+    猜错的表现是机器按一套没人指定过的策略去改 ``agent.ini``。
     """
     _require_signing_key(ctx)
     try:
@@ -4845,6 +4873,14 @@ def _store_release(
             # 界面必须还看得见它、还能吊销它。
             if bootstrap_key_id is not None:
                 existing.bootstrap_key_id = bootstrap_key_id
+            # 策略同理：上传那条路没有策略（``policy is None``），不该把上一版
+            # 构建出来的策略抹成默认值 —— 那个包还在外面，机器会照着它行动。
+            if policy is not None:
+                existing.bootstrap_key_policy = policy.bootstrap_key_policy
+                existing.config_policy_json = install_policy.dump_config_policy(
+                    policy.config_policy
+                )
+                existing.upgrade_mode = policy.upgrade_mode
             session.flush()
             row = existing
         else:
@@ -4856,6 +4892,11 @@ def _store_release(
                 size=size,
                 notes=notes or None,
                 bootstrap_key_id=bootstrap_key_id,
+                bootstrap_key_policy=policy.bootstrap_key_policy if policy else None,
+                config_policy_json=(
+                    install_policy.dump_config_policy(policy.config_policy) if policy else None
+                ),
+                upgrade_mode=policy.upgrade_mode if policy else None,
             )
             session.add(row)
             session.flush()
@@ -4883,6 +4924,11 @@ def _store_release(
                         "source": source,
                         "version": version,
                         "bootstrap_key_id": bootstrap_key_id,
+                        # 策略要能事后回答："这批机器当初是被按什么规则升级的"。
+                        # 它不含任何秘密，所以直接写进审计，与密钥 id 的待遇不同。
+                        "install_policy": (
+                            policy.install_policy if policy else None
+                        ),
                     },
                     ensure_ascii=False,
                 ),
@@ -4930,6 +4976,10 @@ def release_source(
         public_key=probe.public_key,
         public_url=probe.public_url,
         reason=probe.reason,
+        config_policy_keys=list(install_policy.CONFIG_POLICY_KEYS),
+        # 默认值按"没夹带密钥"算 —— 它只是给界面看的起点（全部"不改"）；
+        # 真正要不要覆盖由每一版自己的 bootstrap_key_id 决定。
+        config_policy_defaults=install_policy.config_policy_payload({}),
     )
 
 
@@ -4996,6 +5046,22 @@ def build_release(
             {"source_version": probe.version, "given": version},
         )
 
+    # 三条安装策略在这里**先校验再动手**：非法就当场 400，而不是打出一个包之后
+    # 才在半路发现问题（那时临时文件、可能还有一把刚签发的密钥都已经产生了）。
+    # 校验放在版本号之后：先说清"你这个版本号不对"，比先说"upgrade_mode 拼错了"
+    # 更贴近提交者眼前那件要改的事。
+    try:
+        policy = install_policy.resolve_policy(
+            include_bootstrap_key=payload.include_bootstrap_key,
+            bootstrap_key_policy=payload.bootstrap_key_policy,
+            config_policy=payload.config_policy,
+            upgrade_mode=payload.upgrade_mode,
+        )
+    except install_policy.UpgradePolicyError as exc:
+        # 400 而不是 422：请求体本身完全合法（字段名、类型都对），不合格的是**取值**
+        # —— 与"路径不合法""改不了的正文"同一类。
+        raise ApiError(400, "bad_request", exc.detail)
+
     # 打到一个临时文件，再和"上传"走同一条入库路径。临时目录用 blob 库的
     # ``.tmp``：同一个文件系统，最后那次 rename 才是原子的（跨分区会退化成拷贝）。
     # 它只会被 ``sweep_tmp`` 按 ``*.part`` 清理，我们这个目录不在其列。
@@ -5048,8 +5114,15 @@ def build_release(
         # 把服务端地址一起写进包：装 50 台时这是唯一还要人手输的一项。算不出来
         # （没人从局域网打开过界面、也没配 public_url）时不写，机器那边还有
         # 局域网发现兜着 —— 但**绝不退化成 127.0.0.1**，那会让 50 台机器各自找自己。
+        #
+        # 三条策略也一起写进包内 ``install_policy.json``：离线装机时机器读的是它，
+        # 而不是台账（那时它可能连不上服务端）。传的是同一个 helper 的产物 ——
+        # 台账与升级清单里那三条因此与包里逐字相同。
         built_version, size, sha256 = packaging.build_agent_bundle(
-            tmp_path, server_url=probe.public_url, bootstrap_key=raw_key
+            tmp_path,
+            server_url=probe.public_url,
+            bootstrap_key=raw_key,
+            install_policy=policy.install_policy,
         )
         if built_version != version:  # pragma: no cover - 上面刚比对过，双保险
             raise ApiError(409, "version_mismatch", "构建出的版本是 %s" % built_version)
@@ -5064,6 +5137,7 @@ def build_release(
                 admin=admin,
                 source="built",
                 bootstrap_key_id=bootstrap_key_id,
+                policy=policy,
             )
     except packaging.BuildError as exc:
         # 原文只进日志：它可能带着一大堆路径和栈

@@ -152,6 +152,24 @@ def build_agent_config(
     return config
 
 
+def provision(config) -> None:
+    """跑一次**注册** —— 等价于 root 的 ``syncoj-agent-enroll.service``（``--provision``）。
+
+    **服务本体永不自己注册**：它以选手身份运行，读不到 root 只读的统一密钥。
+    真机上"服务自己去注册"的表现是：``PermissionError`` → 抛异常 → 退出 1 →
+    被 systemd 反复重启，5 次后撞上 StartLimit 罢手，而**注册单元从来没被跑过**，
+    于是机器永远不出现。所以 e2e 也必须按真机的顺序走：先跑注册那一趟，再让
+    服务跑轮次。
+    """
+    from syncoj_agent.main import Agent
+
+    agent = Agent(config)
+    try:
+        agent.ensure_credential(allow_enroll=True)
+    finally:
+        agent.client.close()
+
+
 def start_agent(
     workdir: Path,
     base_url: str,
@@ -163,11 +181,9 @@ def start_agent(
 ):
     """建一个**已经配对完成**的 Agent，返回 ``(config, agent)``。
 
-    配对必须分两步走，因为配对码是机器自己注册时才生成的：
+    配对必须分两步走，因为配对码是**注册那一趟**才生成的：
 
-    1. 先让它跑一轮 —— 这一轮它会用统一密钥注册、拿到配对码，然后收到 403
-       并安静地把码存下来（这正是它该做的：不要去重新注册，那会把教师手上
-       刚读到的码换掉）
+    1. 先跑一次注册（``provision``，= root 的注册单元）—— 这一趟拿回凭据与配对码
     2. 教师在管理界面上读码、配对
     3. 后面每一轮 cycle 就都能干活了
 
@@ -178,11 +194,12 @@ def start_agent(
     from syncoj_agent.state import STATE_READY, load_credential
 
     config = build_agent_config(workdir, base_url, seeded, code_dir, **kwargs)
+    provision(config)
+    # 服务实例在凭据之后创建：真机上注册单元也总是先跑完，服务才起来
     agent = Agent(config)
-    agent.cycle()
 
     credential = load_credential(config.credential_path)
-    assert credential is not None, "第一轮就该拿到凭据"
+    assert credential is not None, "注册那一趟就该拿到凭据"
     assert credential.state != STATE_READY, "还没配对，不该是 READY"
     assert credential.pair_code, "未配对时服务端必须下发配对码"
 
@@ -494,10 +511,14 @@ def test_agent_self_heals_after_credential_loss(
     age_agent(app, machine_uuid)
     shutil.rmtree(config.state_dir, ignore_errors=True)
 
+    # 再开机：**root 的注册单元会再跑一次**（真机上由 systemd 拉起），服务才拿到
+    # 凭据 —— 服务自己不会去注册，这正是它该有的样子
+    provision(config)
+
     second = Agent(config)
     try:
         second.cycle()
-        assert second._credential is not None, "应当自动重新注册"
+        assert second._credential is not None, "注册单元跑完就该重新拿到凭据"
         assert second.machine_id == machine_id, (
             "machine_id 必须稳定，否则服务端会把同一台机器当成新机器"
         )
@@ -645,7 +666,10 @@ def test_bootstrap_enrollment_end_to_end(
     config.bootstrap_key_file = key_file
     config.deploy_root = desktop
 
-    # 2. 机器首次开机：注册，拿到一个"没有归属"的凭据 + 配对码
+    # 2. 机器首次开机：**root 的注册单元**先注册（= --provision），拿到一个
+    #    "没有归属"的凭据 + 配对码；随后服务跑它的轮次（配对码由它写上桌面）
+    provision(config)
+
     agent = Agent(config)
     try:
         delay = agent.cycle()
@@ -749,6 +773,9 @@ def test_bootstrap_restore_keeps_pairing_end_to_end(
     config.bootstrap_key_file = key_file
     config.deploy_root = desktop
 
+    # 首次开机：注册单元先注册，然后服务跑轮次
+    provision(config)
+
     agent = Agent(config)
     machine_uuid = None
     try:
@@ -773,6 +800,9 @@ def test_bootstrap_restore_keeps_pairing_end_to_end(
     config.credential_path.unlink()
     (config.state_dir / "machine_uuid").unlink()
 
+    # 再开机：注册单元再跑一次（凭据与 UUID 都没了，靠硬件指纹认回原来那台机器）
+    provision(config)
+
     restored = Agent(config)
     try:
         restored.cycle()
@@ -788,6 +818,58 @@ def test_bootstrap_restore_keeps_pairing_end_to_end(
     pending = client.get("/api/v1/admin/machines/pending", headers=admin_headers).json()
     assert pending["items"] == [], "还原不该产生新的待配对机器"
     assert pending["total"] == 0
+
+
+def test_service_never_enrolls_by_itself(
+    workdir: Path, settings: Settings, live_server: str, seeded: dict,
+    client: TestClient, admin_headers: dict,
+) -> None:
+    """真机事故的回归守卫：没有凭据时，**服务本体不注册、也不退出**，只等注册单元。
+
+    真机上的表现是：服务自己去读 root 只读的统一密钥 → PermissionError → 抛异常
+    → 退出 1 → 被 systemd 重启 5 次后判成「反复起不来」，而**注册单元从来没被跑过**，
+    于是机器永远不出现。所以这里正面钉住两件事：
+
+    * 手上没有凭据时，服务**不许**自己去注册（哪怕密钥文件就在旁边、还能读）；
+    * 它也不许抛异常退出 —— ``cycle()`` 返回的是「过一会儿再看一眼」的间隔。
+
+    随后注册单元跑完（``provision``），服务必须**立刻**接住凭据。
+    """
+    from syncoj_agent.main import REGISTRATION_POLL_SECONDS, Agent
+    from syncoj_agent.state import load_credential
+
+    code_dir = workdir / "code"
+    code_dir.mkdir()
+    (code_dir / "main.cpp").write_text("int main(){}", encoding="utf-8")
+
+    config = build_agent_config(workdir, live_server, seeded, code_dir)
+
+    agent = Agent(config)
+    try:
+        # 密钥文件就在那里、而且可读 —— 即便如此，服务也不许拿它去注册：
+        # 真机上它读不到，而「能读到就顺手用一下」会让这条路径在两种机器上行为不同
+        assert config.bootstrap_key_file is not None
+        assert config.bootstrap_key_file.is_file(), "这条用例要的是「密钥在、但不许用」"
+
+        assert agent.ensure_credential() is None, "服务本体不该注册"
+        assert not config.credential_path.exists(), "服务本体不许自己注册"
+
+        # 不抛异常、不退出：返回的是「过一会儿再看一眼」的间隔
+        assert agent.cycle() == REGISTRATION_POLL_SECONDS
+        assert not config.credential_path.exists(), "等一轮不该等出凭据来"
+    finally:
+        agent.client.close()
+
+    # 注册单元跑完 → 凭据出现 → 服务立刻能干活
+    provision(config)
+    credential = load_credential(config.credential_path)
+    assert credential is not None and credential.pair_code
+
+    second = Agent(config)
+    try:
+        assert second.ensure_credential() is not None, "凭据一出现就该接住"
+    finally:
+        second.client.close()
 
 
 def test_prefix_none_avoids_duplicated_player_no(

@@ -2,7 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
-import { releaseApi, bootstrapKeyApi } from '@/api'
+import { CONFIG_POLICY_CHOICES, UPGRADE_MODE_CHOICES, releaseApi, bootstrapKeyApi } from '@/api'
 import type {
   BootstrapKeyOut,
   ReleaseOut,
@@ -80,11 +80,59 @@ const buildNotes = ref('')
  * 能注册进这台服务端的通行证。警示文案写死在模板里，别抄成"建议"。
  */
 const includeBootstrapKey = ref(false)
+/**
+ * 包内那把密钥要不要覆盖机器上已有的那一把。
+ *
+ * **默认 `replace`**：包内那把是权威。真机事故就是这条默认值的由来 —— 机器上
+ * 躺着一把已吊销的旧钥，安装器按"已有一份就不动"跳过，那把新钥永远用不上，
+ * 机器永远注册不上。教师仍可手动改回 `keep`（那台机器手工配过，别动它）。
+ */
+const bootstrapKeyPolicy = ref<'keep' | 'replace'>('replace')
+
+/** 逐键策略。默认全部"不改" —— 升级包不该顺手改掉考场机器的配置。 */
+const configPolicy = reactive<Record<string, 'keep' | 'default' | 'force'>>({})
+
+/** 自更新模式。默认 `apply`：发出去就是为了让它生效。 */
+const upgradeMode = ref<'apply' | 'stage' | 'off'>('apply')
+
+/** 高级选项那一块折叠着 —— 三条策略都有默认值，多数发版不需要动它们。 */
+const advancedActive = ref<string[]>([])
+
+/**
+ * 逐键策略的**分组视图**。
+ *
+ * 键名与默认值都从服务端来（`/releases/source`）：前端自己抄一份清单，漂的那天
+ * 教师配了一条服务端不认识的键，表现是"策略没生效"，而界面上看不出哪里不对。
+ */
+const configPolicyGroups = computed(() => {
+  const groups: { section: string; keys: { key: string; name: string }[] }[] = []
+  for (const key of source.value?.config_policy_keys ?? []) {
+    const [section, name] = key.split('.')
+    let group = groups.find((item) => item.section === section)
+    if (!group) {
+      group = { section, keys: [] }
+      groups.push(group)
+    }
+    group.keys.push({ key, name })
+  }
+  return groups
+})
+
+/** 把所有逐键策略恢复成"不改"，并把其它选项恢复成默认值。 */
+function resetPolicies(): void {
+  for (const key of source.value?.config_policy_keys ?? []) {
+    configPolicy[key] = 'keep'
+  }
+  bootstrapKeyPolicy.value = 'replace'
+  upgradeMode.value = 'apply'
+  includeBootstrapKey.value = false
+}
 
 async function loadSource(): Promise<void> {
   try {
     source.value = await releaseApi.source()
     if (!buildVersion.value) buildVersion.value = source.value.version ?? ''
+    resetPolicies()
   } catch {
     source.value = null
   }
@@ -136,6 +184,31 @@ async function copyText(value: string | undefined, what: string): Promise<void> 
 }
 
 /**
+ * 这些键是**机器自己的事实**（它连哪个服务端、以谁的身份跑、装在哪、信任哪把钥）。
+ *
+ * 逐键策略默认全"不改"本来就是对的，这里只是把它在界面上标出来：把一台机器改去
+ * 连别的服务端、或者换掉它的运行账号，是**重装那台机器**该做的事，而不是发一次版
+ * 顺手带过去的副作用。列表只影响提示，不影响能不能改 —— 真需要时教师仍然能改。
+ */
+const MACHINE_FACT_KEYS = [
+  'server.url',
+  'agent.run_user',
+  'agent.state_dir',
+  'agent.machine_id',
+  'upgrade.install_root',
+  'upgrade.public_key',
+]
+
+/**
+ * 版本历史那一行里"改了几个配置键"。
+ *
+ * 只数**偏离默认**的：界面拿到的是补全过的完整映射，直接数条数会永远显示 20。
+ */
+function configTouchCount(release: ReleaseOut): number {
+  return Object.values(release.config_policy ?? {}).filter((value) => value !== 'keep').length
+}
+
+/**
  * 给空机器的安装命令。
  *
  * 一台什么都没有的机器上只有 shell，所以起头那一下必须是 curl —— 而机器该去哪个
@@ -161,6 +234,15 @@ const build = useMutation(
       buildNotes.value.trim(),
       'stable',
       includeBootstrapKey.value,
+      {
+        // 没勾"附带密钥"时这一项无从谈起，只能是 keep —— 服务端也会拒 replace
+        bootstrap_key_policy: includeBootstrapKey.value ? bootstrapKeyPolicy.value : 'keep',
+        // 只把**偏离默认**的那些键发过去：留一堆 keep 只会让回执与审计难以阅读
+        config_policy: Object.fromEntries(
+          Object.entries(configPolicy).filter(([, value]) => value !== 'keep'),
+        ),
+        upgrade_mode: upgradeMode.value,
+      },
     ),
   {
     success: (release) =>
@@ -169,7 +251,7 @@ const build = useMutation(
         : `已构建并签发 ${release.version}（未铺开，Agent 还看不到）`,
     onDone: async (release) => {
       buildNotes.value = ''
-      includeBootstrapKey.value = false
+      resetPolicies()
       await refresh()
       // 回执里的那一句"等于通行证"不能只写在页面上：发完版的人多半已经滚走了。
       // 但服务端**不返回明文**（库里只有哈希），能说的就是"哪一把、什么后果"。
@@ -470,6 +552,71 @@ const editSave = useMutation(
           附带统一注册密钥
         </el-checkbox>
       </div>
+
+      <!--
+        高级选项：三条随包带下去的策略。收进折叠区是因为它们都有默认值，多数发版
+        不需要动 —— 而摊在卡片上会让"构建并签发"这颗按钮被一堆选项挤到看不见。
+      -->
+      <el-collapse v-model="advancedActive" class="advanced">
+        <el-collapse-item name="policy">
+          <template #title>高级选项（安装策略）</template>
+
+          <!--
+            覆盖机器上已有的注册密钥。只在勾了"附带"时出现：包里没有那把钥匙时
+            这个选择无从谈起。默认 replace —— 包内那把是权威（真机事故的修复）。
+          -->
+          <div v-if="includeBootstrapKey" class="policy-row">
+            <span class="policy-label">覆盖机器上已有的注册密钥</span>
+            <el-radio-group v-model="bootstrapKeyPolicy" :disabled="!canBuild">
+              <el-radio value="replace">覆盖</el-radio>
+              <el-radio value="keep">保留机器上那把</el-radio>
+            </el-radio-group>
+            <div class="cell-sub policy-note">
+              覆盖会替换那台机器上的统一注册密钥；安装器会先把旧那把备份下来，备份路径写在装机回执里。
+            </div>
+          </div>
+
+          <div class="policy-row">
+            <span class="policy-label">升级模式</span>
+            <el-radio-group v-model="upgradeMode" :disabled="!canBuild">
+              <el-radio v-for="item in UPGRADE_MODE_CHOICES" :key="item.value" :value="item.value">
+                {{ item.label }}
+              </el-radio>
+            </el-radio-group>
+            <div class="cell-sub policy-note">
+              机器下载完这个版本之后怎么处理它。
+            </div>
+          </div>
+
+          <!--
+            逐键更新 agent.ini。默认全部"不改"：升级包不该顺手改掉考场机器的配置。
+          -->
+          <div class="policy-row">
+            <span class="policy-label">更新机器上的 agent.ini</span>
+            <div v-for="group in configPolicyGroups" :key="group.section" class="policy-group">
+              <div class="policy-section mono">{{ group.section }}</div>
+              <div v-for="item in group.keys" :key="item.key" class="policy-key">
+                <span class="mono policy-key-name">{{ item.name }}</span>
+                <el-radio-group v-model="configPolicy[item.key]" :disabled="!canBuild" size="small">
+                  <el-radio-button
+                    v-for="choice in CONFIG_POLICY_CHOICES"
+                    :key="choice.value"
+                    :value="choice.value"
+                  >
+                    {{ choice.label }}
+                  </el-radio-button>
+                </el-radio-group>
+                <el-tooltip
+                  v-if="MACHINE_FACT_KEYS.includes(item.key)"
+                  content="这是那台机器自己的事实。要改它请重装那台机器，不要随发版带过去。"
+                >
+                  <span class="cell-sub">建议不改</span>
+                </el-tooltip>
+              </div>
+            </div>
+          </div>
+        </el-collapse-item>
+      </el-collapse>
     </el-card>
 
     <el-card v-else-if="signingReady && source && !source.available" shadow="never" class="section">
@@ -576,6 +723,22 @@ const editSave = useMutation(
               {{ row.bootstrap_key_label || `#${row.bootstrap_key_id}` }}
               {{ row.bootstrap_key_revoked ? '（已吊销）' : '（有效）' }}
             </el-tag>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="安装策略" min-width="180">
+          <template #default="{ row }">
+            <!--
+              这一版发出去时带的是什么策略。事后问"这批机器为什么被升成 apply 了"
+              只能靠翻审计，不如就在这一行里看得见。
+            -->
+            <el-tag size="small" effect="plain">{{ row.upgrade_mode }}</el-tag>
+            <span v-if="row.bootstrap_key_policy === 'replace'" class="cell-sub">
+              · 覆盖注册密钥
+            </span>
+            <span v-if="configTouchCount(row)" class="cell-sub">
+              · {{ configTouchCount(row) }} 个配置键
+            </span>
           </template>
         </el-table-column>
 
@@ -748,6 +911,49 @@ const editSave = useMutation(
 */
 .key-option {
   margin-top: 12px;
+}
+
+/* 高级选项：折叠区放在"附带密钥"下面，与上面那块留一点呼吸 */
+.advanced {
+  margin-top: 4px;
+}
+
+.policy-row {
+  margin-bottom: 14px;
+}
+
+.policy-label {
+  display: block;
+  font-size: 13px;
+  color: #606266;
+  margin-bottom: 4px;
+}
+
+/* 后果说明贴着控件走：它是给人读的那一句，不该和标签(h3)混在一起 */
+.policy-note {
+  margin-top: 2px;
+}
+
+.policy-group {
+  margin-top: 8px;
+}
+
+.policy-section {
+  font-size: 12px;
+  color: #909399;
+  margin-bottom: 2px;
+}
+
+.policy-key {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 2px;
+}
+
+.policy-key-name {
+  width: 150px;
+  font-size: 12px;
 }
 
 .key-warning {

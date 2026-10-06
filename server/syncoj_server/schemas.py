@@ -225,6 +225,12 @@ class UpgradeInfo(_Base):
     signature: str
     size: int = 0
     notes: Optional[str] = None
+    #: 随这个版本带下去的三条安装策略。与装机台账、包内 ``install_policy.json``
+    #: **是同一份真相**（都出自 ``services/install_policy.build_install_policy``）。
+    #: 机器升级时按它们切换配置与密钥 —— 升级与装机不该有两套规则。
+    bootstrap_key_policy: str = "keep"
+    config_policy: Dict[str, str] = Field(default_factory=dict)
+    upgrade_mode: str = "apply"
 
 
 class TickResponse(_Base):
@@ -1049,6 +1055,13 @@ class ReleaseOut(_Base):
     #: 那把密钥已经吊销了。**吊销不会动版本记录**，所以这一位是界面判断"还要不要
     #: 显示吊销按钮"的唯一依据。
     bootstrap_key_revoked: bool = False
+    #: 这一版随包带下去的三条安装策略（见 ``services/install_policy.py``）。
+    #: 界面要能显示"这一版发出去的是什么"，否则事后问"这批机器为什么升成 apply 了"
+    #: 只能靠翻审计。
+    bootstrap_key_policy: str = "keep"
+    #: 逐键策略的**完整映射**（每个可配键都有值，没提到的按不改）。
+    config_policy: Dict[str, str] = Field(default_factory=dict)
+    upgrade_mode: str = "apply"
 
 
 class ReleaseUpdate(_Base):
@@ -1079,6 +1092,13 @@ class InstallLedgerOut(_Base):
     installer: str
     #: 那条"一条 curl 就能起头"的自举脚本。空机器上只有 shell 时用它。
     bootstrap: str
+    #: 随这个包带下去的安装策略。空机器装机器时就要按它行动，所以它必须在这里 ——
+    #: 机器不会去翻发布记录，而且装机入口刻意不鉴权，不能只给发布列表里的那份。
+    #: 与包内 ``install_policy.json``、升级清单里那三条**是同一份真相**
+    #: （都出自 ``services/install_policy.py`` 的同一个 helper）。
+    bootstrap_key_policy: str = "keep"
+    config_policy: Dict[str, str] = Field(default_factory=dict)
+    upgrade_mode: str = "apply"
 
 
 class ReleaseSourceOut(_Base):
@@ -1090,6 +1110,11 @@ class ReleaseSourceOut(_Base):
     ``public_url`` 是会被内嵌进包里的服务端地址。装 50 台机器时机器就靠它找
     服务端，所以它要在这里露出来：教师需要知道这个包"能不能自己找到服务器"，
     而不是装完 50 台之后才发现每台都得手填一次。
+
+    ``config_policy_keys`` / ``config_policy_defaults`` 是逐键策略的**规范清单**
+    与默认值，由服务端给而不是前端自己抄一份：界面要能列出"可以逐键覆盖哪些键"，
+    而抄一份清单的后果是两边漂 —— 漂的那一天教师配了一条**服务端不认识**的键，
+    表现是"策略没生效"（甚至报错），而界面上看不出哪里不对。
     """
 
     available: bool
@@ -1098,6 +1123,8 @@ class ReleaseSourceOut(_Base):
     public_key: Optional[str] = None
     public_url: Optional[str] = None
     reason: Optional[str] = None
+    config_policy_keys: List[str] = Field(default_factory=list)
+    config_policy_defaults: Dict[str, str] = Field(default_factory=dict)
 
 
 class ReleaseBuildIn(_Base):
@@ -1119,6 +1146,24 @@ class ReleaseBuildIn(_Base):
     notes: Optional[str] = Field(default=None, max_length=2000)
     #: 在构建那一刻现场签发一把统一注册密钥、塞进包里。库里照旧只存哈希。
     include_bootstrap_key: bool = False
+    #: 机器上已有的注册密钥要不要被包内那把覆盖（``keep`` / ``replace``）。
+    #:
+    #: ``None`` = **跟着"附带密钥"走**：勾了就默认 ``replace`` —— 包内那把是权威，
+    #: 现场被"旧的已吊销密钥挡住新的"坑过一次，那台机器因此永远注册不上。
+    #: 没勾附带时这一项无从谈起，只能是 ``keep``。
+    #:
+    #: 显式给 ``keep`` 与"没给"是两件事，必须分清：否则教师没法在附带密钥的同时
+    #: 保住机器上那把手改过的旧钥。
+    bootstrap_key_policy: Optional[str] = Field(default=None, max_length=16)
+    #: ``agent.ini`` 逐键三态：``keep`` 不改 / ``default`` 只更新没人动过的 /
+    #: ``force`` 强制覆盖。没提到的键一律 ``keep``。
+    #:
+    #: 键名是 ``<段>.<键>``（如 ``scan.roots``），取值只能是那三态之一；两条都由
+    #: 服务端的规范清单校验（``services/install_policy.py``），非法一律 400 ——
+    #: 静默丢弃会让教师以为策略生效了。
+    config_policy: Optional[Dict[str, str]] = Field(default=None)
+    #: 自更新模式：``apply`` / ``stage`` / ``off``。默认 ``apply``。
+    upgrade_mode: Optional[str] = Field(default=None, max_length=16)
 
 
 class UpgradeStatusOut(_Base):

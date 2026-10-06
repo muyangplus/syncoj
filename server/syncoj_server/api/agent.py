@@ -55,7 +55,7 @@ from ..schemas import (
 )
 from ..security import hash_token, new_pair_code, new_token
 from ..storage import BlobTooLarge, HashMismatch, materialize
-from ..services import enrollment, packaging, uninstall
+from ..services import enrollment, install_policy, packaging, uninstall
 from ..services.collect import reconcile_scan, record_events
 from ..services.deploy import collect_deploy_jobs
 from ..services.ratelimit import RateLimitExceeded
@@ -562,6 +562,10 @@ def _pending_upgrade(session, ctx: AppContext) -> Optional[UpgradeInfo]:
 
     三个条件同时满足才下发：配置了签名私钥、有已铺开的版本、该版本未被撤回。
     缺任何一个都返回 None —— 宁可不下发，也不下发一个 Agent 必然拒收的包。
+
+    随包带下去的三条安装策略与装机台账、包内 ``install_policy.json`` 逐字相同
+    （同一个 helper）：机器升级时按同一套规则切换配置与密钥，不该因为"这次是升级
+    而不是装机"就换一套。
     """
     if ctx.signing_key is None:
         return None
@@ -583,6 +587,14 @@ def _pending_upgrade(session, ctx: AppContext) -> Optional[UpgradeInfo]:
         signature=row.signature,
         size=int(row.size),
         notes=row.notes,
+        **install_policy.build_install_policy(
+            bootstrap_key_policy=row.bootstrap_key_policy,
+            config_policy=install_policy.load_config_policy(row.config_policy_json),
+            upgrade_mode=row.upgrade_mode,
+            # 与台账那一处同一个理由：老记录没有策略列，但"夹带过密钥"这件事
+            # 记在 bootstrap_key_id 上，不能用常量默认值把它盖掉
+            has_bundled_key=row.bootstrap_key_id is not None,
+        )
     )
 
 
@@ -662,6 +674,14 @@ def install_ledger(ctx: AppContext = Depends(get_ctx)) -> InstallLedgerOut:
             bundle=INSTALL_BUNDLE_PATH,
             installer=INSTALL_INSTALLER_PATH,
             bootstrap=INSTALL_BOOTSTRAP_PATH,
+            **install_policy.build_install_policy(
+                bootstrap_key_policy=row.bootstrap_key_policy,
+                config_policy=install_policy.load_config_policy(row.config_policy_json),
+                upgrade_mode=row.upgrade_mode,
+                # 迁移之前建的记录没有策略列，可它确实夹带过密钥 —— 判据用
+                # bootstrap_key_id，否则那批记录会被当成"教师选了不覆盖"
+                has_bundled_key=row.bootstrap_key_id is not None,
+            )
         )
 
 

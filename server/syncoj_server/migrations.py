@@ -441,6 +441,24 @@ def _migration_007_release_public_key(engine: Engine) -> None:
     _add_column(engine, "agent", "release_public_key_at", "DATETIME")
 
 
+def _migration_008_release_install_policy(engine: Engine) -> None:
+    """给发布记录加随包带下去的三条安装策略（``agent_release`` 的三个新列）。
+
+    用途见 ``services/install_policy.py``：装机与升级时机器按它们行动，而台账与
+    升级清单要在**不读包**的情况下把它们报出来。
+
+    三列全是 ``ADD COLUMN`` + 可空，**不回填**：老记录的实际行为就是"不改配置、
+    密钥不动、按默认模式升级"，而读的那一侧（``build_install_policy``）会按默认值
+    补 —— 回填一份默认值只是把同一件事写两遍，将来默认值变了还得解释"库里那批
+    旧值算不算历史事实"。
+    """
+    if "agent_release" not in _tables(engine):
+        return
+    _add_column(engine, "agent_release", "bootstrap_key_policy", "VARCHAR(16)")
+    _add_column(engine, "agent_release", "config_policy_json", "TEXT")
+    _add_column(engine, "agent_release", "upgrade_mode", "VARCHAR(16)")
+
+
 MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
     (1, "统一密钥注册 + 名单库所需的结构", _migration_001_enrollment),
     (2, "机器永久绑定名单条目；去掉注册码链路", _migration_002_roster_binding),
@@ -460,6 +478,11 @@ MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
         7,
         "机器记录最近一次报告有发布公钥的时刻",
         _migration_007_release_public_key,
+    ),
+    (
+        8,
+        "发布记录记住随包带走的三条安装策略",
+        _migration_008_release_install_policy,
     ),
 ]
 

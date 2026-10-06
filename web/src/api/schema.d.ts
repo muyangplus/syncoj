@@ -2740,8 +2740,17 @@ export interface components {
         InstallLedgerOut: {
             /** Bootstrap */
             bootstrap: string;
+            /**
+             * Bootstrap Key Policy
+             * @default keep
+             */
+            bootstrap_key_policy: string;
             /** Bundle */
             bundle: string;
+            /** Config Policy */
+            config_policy?: {
+                [key: string]: string;
+            };
             /** Installer */
             installer: string;
             /** Key Id */
@@ -2754,6 +2763,11 @@ export interface components {
             signature?: string | null;
             /** Size */
             size: number;
+            /**
+             * Upgrade Mode
+             * @default apply
+             */
+            upgrade_mode: string;
             /** Version */
             version: string;
         };
@@ -3489,11 +3503,17 @@ export interface components {
          *     也就拿到了那把密钥**。只有"局域网里确定没有外人"时才该打开它，而且发完就该吊销。
          */
         ReleaseBuildIn: {
+            /** Bootstrap Key Policy */
+            bootstrap_key_policy?: string | null;
             /**
              * Channel
              * @default stable
              */
             channel: string;
+            /** Config Policy */
+            config_policy?: {
+                [key: string]: string;
+            } | null;
             /**
              * Include Bootstrap Key
              * @default false
@@ -3501,6 +3521,8 @@ export interface components {
             include_bootstrap_key: boolean;
             /** Notes */
             notes?: string | null;
+            /** Upgrade Mode */
+            upgrade_mode?: string | null;
             /** Version */
             version: string;
         };
@@ -3511,12 +3533,21 @@ export interface components {
             /** Bootstrap Key Label */
             bootstrap_key_label?: string | null;
             /**
+             * Bootstrap Key Policy
+             * @default keep
+             */
+            bootstrap_key_policy: string;
+            /**
              * Bootstrap Key Revoked
              * @default false
              */
             bootstrap_key_revoked: boolean;
             /** Channel */
             channel: string;
+            /** Config Policy */
+            config_policy?: {
+                [key: string]: string;
+            };
             /** Created At */
             created_at: string;
             /** Id */
@@ -3536,6 +3567,11 @@ export interface components {
             sha256: string;
             /** Size */
             size: number;
+            /**
+             * Upgrade Mode
+             * @default apply
+             */
+            upgrade_mode: string;
             /** Version */
             version: string;
             /**
@@ -3554,12 +3590,23 @@ export interface components {
          *     ``public_url`` 是会被内嵌进包里的服务端地址。装 50 台机器时机器就靠它找
          *     服务端，所以它要在这里露出来：教师需要知道这个包"能不能自己找到服务器"，
          *     而不是装完 50 台之后才发现每台都得手填一次。
+         *
+         *     ``config_policy_keys`` / ``config_policy_defaults`` 是逐键策略的**规范清单**
+         *     与默认值，由服务端给而不是前端自己抄一份：界面要能列出"可以逐键覆盖哪些键"，
+         *     而抄一份清单的后果是两边漂 —— 漂的那一天教师配了一条**服务端不认识**的键，
+         *     表现是"策略没生效"（甚至报错），而界面上看不出哪里不对。
          */
         ReleaseSourceOut: {
             /** Agent Root */
             agent_root?: string | null;
             /** Available */
             available: boolean;
+            /** Config Policy Defaults */
+            config_policy_defaults?: {
+                [key: string]: string;
+            };
+            /** Config Policy Keys */
+            config_policy_keys?: string[];
             /** Public Key */
             public_key?: string | null;
             /** Public Url */
@@ -3888,6 +3935,15 @@ export interface components {
         };
         /** UpgradeInfo */
         UpgradeInfo: {
+            /**
+             * Bootstrap Key Policy
+             * @default keep
+             */
+            bootstrap_key_policy: string;
+            /** Config Policy */
+            config_policy?: {
+                [key: string]: string;
+            };
             /** Notes */
             notes?: string | null;
             /** Sha256 */
@@ -3899,6 +3955,11 @@ export interface components {
              * @default 0
              */
             size: number;
+            /**
+             * Upgrade Mode
+             * @default apply
+             */
+            upgrade_mode: string;
             /** Url */
             url: string;
             /** Version */

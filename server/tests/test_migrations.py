@@ -144,7 +144,14 @@ MIGRATION_ADDED_COLUMNS = {
     "agent_status": set(),
     #: ``bootstrap_key_id``：发布记录记住"这个包附带的是哪把统一注册密钥"（迁移 006）。
     #: 老结构里没有它 —— 那一轮的发布记录本来就不带密钥，升上来一律是 NULL。
-    "agent_release": {"bootstrap_key_id"},
+    "agent_release": {
+        "bootstrap_key_id",
+        #: 随包带下去的三条安装策略（迁移 008）。老记录没有它们，而它们的实际行为
+        #: 就是"不改配置、密钥不动、按默认模式升级" —— 读的那一侧按默认值补。
+        "bootstrap_key_policy",
+        "config_policy_json",
+        "upgrade_mode",
+    },
 }
 
 #: 老结构里有、模型里已经不要的列 —— 迁移负责**删掉**（只能靠重建表）。

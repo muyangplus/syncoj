@@ -641,3 +641,20 @@ class AgentRelease(Base, TimestampMixin):
     published_at = Column(DateTime, nullable=True)
     #: 非空 = 已撤回，不再下发
     yanked_at = Column(DateTime, nullable=True)
+
+    # ---- 随包带下去的安装策略（三条，见 services/install_policy.py）----
+    #
+    # 存在发布记录上而不是只留在包内：装机台账与升级清单都要**在不读包**的情况下
+    # 报出策略（台账要鉴权之外的免登录访问、升级清单只是一次 tick 的响应）。
+    # 三处共用同一个 helper 生成，所以它们不会各自漂。
+    #
+    # 三列都可空，但读的时候一律按默认值补（``build_install_policy``）：迁移之前
+    # 建的记录没有这些值，而它们的实际行为就是"不改配置、密钥不动、按默认模式升级"。
+    #: 机器上已有的注册密钥要不要被包内那把覆盖（``keep`` / ``replace``）
+    bootstrap_key_policy = Column(String(16), nullable=True)
+    #: ``agent.ini`` 逐键三态，形如 ``{"scan.roots": "force"}``。空 = 全不改。
+    #: 存 JSON 文本而不是单列拆开：键集合以后还会长，一列一个键的写法每加一个键
+    #: 都要来改一次表结构。
+    config_policy_json = Column(Text, nullable=True)
+    #: 自更新模式（``apply`` / ``stage`` / ``off``）
+    upgrade_mode = Column(String(16), nullable=True)

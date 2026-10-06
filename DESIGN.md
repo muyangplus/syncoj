@@ -17,7 +17,7 @@
 | 数据库 | SQLite WAL，内存态优先 + 批量落库 | |
 | 场次 | 多场次隔离（`contest_id`）；机器绑的是**人**，场次动态解析 | 见 §4.6 |
 | 防篡改 | 完整性校验 + 审计日志，不干预选手 | |
-| 自更新 | **RSA-2048 + PKCS#1 v1.5 (SHA-256)** 签名校验，**默认关闭**，教师端显式铺开 | 见 §6.1 为何不是 Ed25519 |
+| 自更新 | **RSA-2048 + PKCS#1 v1.5 (SHA-256)** 签名校验；`upgrade.mode` **默认 `apply`**（下载→验签→切换→自动重启），可在发布时的「高级选项」里改成 `stage`/`off`；**服务端仍要显式铺开**（机器只拿铺开的版本） | 见 §6.1 为何不是 Ed25519、§7.2 安装策略 |
 | 后台账号 | 单管理员 | |
 | 装机 | 镜像预装 / 离线包 / 在线自举，同一份幂等逻辑 | |
 | 网络 | 考场同一内网，双向可达 | Ansible 留作以后赛前批量装机的备选，v1 不用 |
@@ -184,24 +184,77 @@ bootstrap.key ──换凭据──▶   桌面「配对码.txt」 ──读码/
 
 ### 3.5 systemd unit
 
+两个单元，分工不能混（混了下场见 §4.6 的真机事故）：注册是 **root 的一次性单元**，
+服务本体以**运行账号**跑、只读凭据。
+
 ```ini
+# syncoj-agent.service —— 常驻，以运行账号跑
+[Unit]
+StartLimitIntervalSec=300
+StartLimitBurst=5              # 必须在 [Unit]：写在 [Service] 会被当未知键忽略
+
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 -E -s /opt/syncoj/agent/main.py
-Restart=always
+ExecStart=/usr/bin/python3 -E -s /opt/syncoj/current/run_agent.py --config /etc/syncoj/agent.ini
+StandardOutput=null            # 静默：不往终端/日志设备写任何东西
+StandardError=journal
+Restart=on-failure             # 自卸载成功时 Agent 以 exit 0 退出，always 会把它拉回来
 RestartSec=5
-User=syncoj
-NoNewPrivileges=yes
+User=<运行账号>                 # 默认 = 跑安装的那个账号；刻意不写 Group=（交给 NSS）
 PrivateTmp=yes
+PrivateDevices=yes
 ProtectSystem=strict
-ReadWritePaths=/var/lib/syncoj /home/student/exam
-ReadOnlyPaths=/home/student/code
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_INET AF_INET6
 MemoryMax=200M
 CPUQuota=25%
 IOSchedulingClass=idle
-StandardOutput=null          # 静默：不往终端/日志设备写任何东西
-StandardError=journal
+ReadWritePaths=-%h -/opt/syncoj -/var/lib/syncoj \
+               -/etc/syncoj -/etc/systemd/system -/etc/sudoers.d -/usr/local/lib/syncoj
+
+[Install]
+WantedBy=multi-user.target
 ```
+
+```ini
+# syncoj-agent-enroll.service —— oneshot，以 root 跑一次（注册），带有限重试
+[Service]
+Type=oneshot
+RemainAfterExit=no
+User=root
+ExecStart=/bin/sh -c '...(最多 3 次，每次失败打一句可操作的收尾话)...'
+TimeoutStartSec=…              # 几次尝试加网络超时可能超过默认 90s，别让 systemd 中途杀掉
+ProtectSystem=strict
+ReadWritePaths=-/var/lib/syncoj
+```
+
+几条看着奇怪的地方，各有原因：
+
+* **`Restart=on-failure` 而不是 `always`**：远程卸载成功时 Agent 以 exit 0 正常退出，
+  `always` 会立刻把它重新拉起来 —— 而那时 `/opt/syncoj`、`/etc/syncoj` 都已经删了，
+  拉起来只会刷一堆"找不到文件"，现场看起来像"卸载失败"。崩溃仍然自愈；
+  "反复起不来"的上限交给 `StartLimit*`（真机上见到过重启到 249 次）。
+* **刻意不写 `Group=`**：systemd 按 NSS 解析该账号的主组。写死 `Group=<账号名>`
+  会在"主组与账号名不同"的机器上撞 `217/GROUP`。
+* **刻意不要 `NoNewPrivileges=yes`**：它会让 setuid 的 sudo 无法提权，
+  `sudo -n <自卸载脚本>` 必然失败（`effective uid is not 0`），管理端授权的远程卸载
+  整条链就是死的。服务以普通账号运行，而**那个账号本人在这台机器上同样能执行任何
+  setuid 程序**，所以这一条对"防选手"没有增量价值。其余加固一条都没少。
+* **`ReadWritePaths=` 里每一条都带 `-`**：路径不存在时 systemd 跳过它，而不是让单元
+  在设沙箱时报 `226/NAMESPACE` 起不来 —— 真机上就炸过一次（单元里写了一条
+  `/home/student/code`，而那台机器根本没有那个目录）。前三条是服务自己要写的地方
+  （家目录、安装根、状态目录）；后四条只服务于"以 root 执行远程卸载"（§7.4）：
+  它们是 root:0755/0644，运行账号在 DAC 上写不进去，所以**放开 mount 层面的写权限
+  不构成提权**，唯一用得上的是验过令牌的那个 root 脚本。
+* **刻意不列 `deploy_root` / `scan.roots` 的具体值**：它们是可选配置、真机上可能
+  不存在，而默认值都在 `%h` 之下（已经被覆盖）。多列一条就多一个 226 的机会。
+* **注册单元刻意不用 `Restart=`**：oneshot 的重启策略在各版本 systemd 上行为不一致；
+  "试几次"由 ExecStart 里的 shell 循环自己数，顺便把手工恢复的命令打进日志。
 
 ### 3.6 Python 3.8 兼容清单（代码评审硬规则）
 
@@ -306,6 +359,21 @@ Agent 侧路径模板支持 `{desktop}` / `{home}`（载入即展开）与 `{pla
 装机（root 一次性）        机器首次开机              教师
 bootstrap.key  ──换凭据──▶  桌面「配对码.txt」 ──读码/输入──▶ 绑到名单里的**人**
 ```
+
+**换凭据这件事由谁做，是这套东西最容易搞反的一处**（真机上已经反过一次：机器永远
+不出现）。两个单元分工写死：
+
+| | 谁 | 干什么 |
+|---|---|---|
+| `syncoj-agent-enroll.service` | **root**（oneshot，装机时 enable 并立刻跑一次） | 读密钥、换凭据、写进状态目录并交给运行账号 |
+| `syncoj-agent.service` | 运行账号（= 跑安装的那个账号） | 只读凭据干活；**没有凭据就等**，绝不自己去读密钥 |
+
+理由就在上面第 1 条：密钥是 root 只读的，而服务以选手身份跑**读不到它**。让服务
+"顺手试一下"必然 `PermissionError` → 抛异常 → 退出 1 → 被 systemd 反复重启，5 次后
+撞上 `StartLimit` 罢手，而注册单元从来没被跑过。所以服务在拿到凭据之前只做一件事：
+**安静地等**（每 `REGISTRATION_POLL_SECONDS` 看一眼凭据是否出现），并把"下一步该看
+哪个单元"写进日志。**服务不自己注册这条不能松** —— 它同时也是"选手账号拿不到注册
+密钥"的保证。
 
 代价是服务端**不知道这台机器是谁**，所以要有一个把身份补回来的动作 —— 配对，
 也就是整条链路上唯一需要人到场确认的环节。
@@ -903,6 +971,48 @@ sha256 前 12 位、以及操作人。`EventLog` 没有管理员外键（它记�
 > `.gitignore` 与根 `.gitignore`），而不是只靠其中一个 —— 私钥的安全不该挂在
 > 一个可以被删掉的文件上。生产部署请把密钥放到只有服务端账号读得到的地方，
 > 并用 `SYNCOJ_RELEASE_KEY` / `SYNCOJ_KEY_DIR` 指过去。
+
+#### 7.2.1 安装策略：随包带下去的三条
+
+"发一次版"不只是换程序，还要决定**机器上已有的东西要不要跟着改**。这些决定收在
+构建卡片的**高级选项**里，随包（以及装机台账、升级清单）带下去，字段名冻结为：
+
+| 字段 | 取值 | 默认 | 管什么 |
+|---|---|---|---|
+| `bootstrap_key_policy` | `keep` / `replace` | **随包内有没有密钥**：带 → `replace`，不带 → 忽略 | 机器上已有的**统一注册密钥**要不要被包内那把覆盖 |
+| `config_policy` | `{"<section>.<key>": "keep"｜"default"｜"force"}` | 全部 `keep` | 机器上 `agent.ini` 的**逐键**更新策略 |
+| `upgrade_mode` | `apply` / `stage` / `off` | `apply` | 机器拿到新版本后：自动切换重启 / 只下载验签 / 不动 |
+
+几条定下来的理由：
+
+* **`bootstrap_key_policy` 默认 `replace`（勾了"附带密钥"时）**：这次真机就是被
+  "机器上躺着一把已吊销的旧钥、包内的新钥用不上"坑到，机器永远注册不上。替换是
+  不可逆的，所以安装器**先把旧的那把备份**（`bootstrap.key.replaced-<时间戳>`，
+  0600 root）并在回执里写明备份路径与旧钥指纹；显式 `--bootstrap-key` 永远最优先。
+  没勾"附带密钥"时这条策略没有意义 —— 包内根本没有钥匙可换。
+* **`config_policy` 默认全部 `keep`**：`agent.ini` 里的扫描根、下发根、服务端地址
+  都是**现场数据**，默认不动是唯一安全的起点；要放开就逐键放开。
+  三态的语义是：
+  * `keep` —— 一个字节都不动（连缺失的键也不补）；
+  * `default` —— **只更新"没人动过"的键**：机器上缺这个键，或它的值等于安装器
+    **上次写下的值**（快照 `agent.ini.syncoj-default`，0600、不含秘密）→ 写成新值；
+    否则保留。快照缺失（老机器）按"人可能改过"处理 → 保留；
+  * `force` —— 无条件写成新值。
+  状态与凭据文件（`credential.json` / `machine_uuid` / `machine_id` / 缓存）
+  **永不在作用域内**，也不给它们留策略位。
+* **`upgrade_mode` 默认 `apply`** 是用户拍板的："机器上正在跑的进程默认自动更新、
+  切换新版本、自动重启"。但有一个必须的例外：**镜像/包里没有发布公钥时降级成
+  `off` 并明确说出来** —— 没有信任锚的机器根本验不了包，若还按 `apply` 走，
+  `validate()` 会直接报错、服务起不来，表现是整批机器失联。显式写 `apply` 却没有
+  公钥仍然是**硬错误**（那是配置错误，不是默认值问题）。
+* **优先级**：显式 CLI 参数 > 服务端台账 > 包内 `install_policy.json` > 模板默认。
+  "台账 > 包内"是因为在线装机时台账是服务端此刻的真相，而包可能是几天前打的。
+
+**已知边界（不是缺陷，是划界）**：这三条策略**只在装机时生效**。自升级（运行账号跑
+的那条路）只换程序，**不改 `agent.ini`、也不动注册密钥** —— 注册密钥是 root 只读，
+运行账号无论如何改不了；"升级过程中改自己的配置再重启"也是一类新的、影响面很大的
+语义。要改配置或换密钥，就**重跑安装器**（它有 root），或者将来做一个专用的 root
+单元。这条写在这里是为了让它是"划的界"，而不是某天被当成 bug 去"修"。
 
 ### 7.3 机器怎么知道服务端在哪
 

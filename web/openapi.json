@@ -3111,13 +3111,18 @@
       },
       "ReleaseBuildIn": {
         "additionalProperties": false,
-        "description": "「发布当前版本」的请求体。\n\n``version`` **必填**：界面会预填源码里的 ``__version__``，但服务端不接受\n\"猜一个默认值\"。让发版这件事必须经过一次显式确认，是为了在\"改了代码忘了改\n版本号\"时撞上\"这个版本已经存在\"，而不是静默覆盖掉上一版 —— 后者更糟，\n因为已经升级过的机器会因为\"版本不高于当前\"拒绝升级，而界面上一切正常。",
+        "description": "「发布当前版本」的请求体。\n\n``version`` **必填**：界面会预填源码里的 ``__version__``，但服务端不接受\n\"猜一个默认值\"。让发版这件事必须经过一次显式确认，是为了在\"改了代码忘了改\n版本号\"时撞上\"这个版本已经存在\"，而不是静默覆盖掉上一版 —— 后者更糟，\n因为已经升级过的机器会因为\"版本不高于当前\"拒绝升级，而界面上一切正常。\n\n``include_bootstrap_key`` **默认关**，因为打开它的后果是\"这个包从此等于一张\n能注册进这台服务端的通行证\"。装机入口（``/api/v1/agent/install/*``）刻意不鉴权\n—— 空机器上没有任何凭据可用 —— 于是**任何能打开装机页的人都能把这个包下载下来，\n也就拿到了那把密钥**。只有\"局域网里确定没有外人\"时才该打开它，而且发完就该吊销。",
         "properties": {
           "channel": {
             "default": "stable",
             "maxLength": 16,
             "title": "Channel",
             "type": "string"
+          },
+          "include_bootstrap_key": {
+            "default": false,
+            "title": "Include Bootstrap Key",
+            "type": "boolean"
           },
           "notes": {
             "anyOf": [
@@ -3147,6 +3152,33 @@
       "ReleaseOut": {
         "additionalProperties": false,
         "properties": {
+          "bootstrap_key_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bootstrap Key Id"
+          },
+          "bootstrap_key_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bootstrap Key Label"
+          },
+          "bootstrap_key_revoked": {
+            "default": false,
+            "title": "Bootstrap Key Revoked",
+            "type": "boolean"
+          },
           "channel": {
             "title": "Channel",
             "type": "string"

@@ -3349,6 +3349,11 @@ export interface components {
          *     "猜一个默认值"。让发版这件事必须经过一次显式确认，是为了在"改了代码忘了改
          *     版本号"时撞上"这个版本已经存在"，而不是静默覆盖掉上一版 —— 后者更糟，
          *     因为已经升级过的机器会因为"版本不高于当前"拒绝升级，而界面上一切正常。
+         *
+         *     ``include_bootstrap_key`` **默认关**，因为打开它的后果是"这个包从此等于一张
+         *     能注册进这台服务端的通行证"。装机入口（``/api/v1/agent/install/*``）刻意不鉴权
+         *     —— 空机器上没有任何凭据可用 —— 于是**任何能打开装机页的人都能把这个包下载下来，
+         *     也就拿到了那把密钥**。只有"局域网里确定没有外人"时才该打开它，而且发完就该吊销。
          */
         ReleaseBuildIn: {
             /**
@@ -3356,6 +3361,11 @@ export interface components {
              * @default stable
              */
             channel: string;
+            /**
+             * Include Bootstrap Key
+             * @default false
+             */
+            include_bootstrap_key: boolean;
             /** Notes */
             notes?: string | null;
             /** Version */
@@ -3363,6 +3373,15 @@ export interface components {
         };
         /** ReleaseOut */
         ReleaseOut: {
+            /** Bootstrap Key Id */
+            bootstrap_key_id?: number | null;
+            /** Bootstrap Key Label */
+            bootstrap_key_label?: string | null;
+            /**
+             * Bootstrap Key Revoked
+             * @default false
+             */
+            bootstrap_key_revoked: boolean;
             /** Channel */
             channel: string;
             /** Created At */

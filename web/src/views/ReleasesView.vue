@@ -2,8 +2,13 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
-import { releaseApi } from '@/api'
-import type { ReleaseOut, ReleaseSourceOut, UpgradeStatusOut } from '@/api/types'
+import { releaseApi, bootstrapKeyApi } from '@/api'
+import type {
+  BootstrapKeyOut,
+  ReleaseOut,
+  ReleaseSourceOut,
+  UpgradeStatusOut,
+} from '@/api/types'
 import { useMutation } from '@/composables/useMutation'
 import { usePolling } from '@/composables/usePolling'
 import { formatBytes, formatTime } from '@/utils/format'
@@ -67,6 +72,14 @@ function pickFile(): void {
 const source = ref<ReleaseSourceOut | null>(null)
 const buildVersion = ref('')
 const buildNotes = ref('')
+/**
+ * 要不要把「统一注册密钥」一起塞进这个包。
+ *
+ * **默认关**：装机入口（`/api/v1/agent/install/*`）刻意不鉴权（空机器上没有任何
+ * 凭据可用），所以附带密钥的包，任何能打开装机页的人都能下载到 —— 等于一张
+ * 能注册进这台服务端的通行证。警示文案写死在模板里，别抄成"建议"。
+ */
+const includeBootstrapKey = ref(false)
 
 async function loadSource(): Promise<void> {
   try {
@@ -142,12 +155,33 @@ const installCommand = computed(() => {
 })
 
 const build = useMutation(
-  () => releaseApi.build(buildVersion.value.trim(), buildNotes.value.trim()),
+  () =>
+    releaseApi.build(
+      buildVersion.value.trim(),
+      buildNotes.value.trim(),
+      'stable',
+      includeBootstrapKey.value,
+    ),
   {
-    success: (release) => `已构建并签发 ${release.version}（未铺开，Agent 还看不到）`,
-    onDone: async () => {
+    success: (release) =>
+      release.bootstrap_key_id
+        ? `已构建并签发 ${release.version}，包内附带统一注册密钥 ${release.bootstrap_key_label}（未铺开，Agent 还看不到）`
+        : `已构建并签发 ${release.version}（未铺开，Agent 还看不到）`,
+    onDone: async (release) => {
       buildNotes.value = ''
+      includeBootstrapKey.value = false
       await refresh()
+      // 回执里的那一句"等于通行证"不能只写在页面上：发完版的人多半已经滚走了。
+      // 但服务端**不返回明文**（库里只有哈希），能说的就是"哪一把、什么后果"。
+      if (release.bootstrap_key_id) {
+        ElMessage.warning({
+          message:
+            `这个包附带了一把统一注册密钥（${release.bootstrap_key_label}）—— 它等于一张「能注册进这台服务端」的通行证，` +
+            '任何能打开装机页的人都能下载它。发完就吊销这一把，或者换一个不带密钥的版本铺开。',
+          duration: 10000,
+          showClose: true,
+        })
+      }
     },
   },
 )
@@ -260,6 +294,43 @@ async function removeRelease(release: ReleaseOut): Promise<void> {
 const removeMutation = useMutation((release: ReleaseOut) => releaseApi.remove(release.id), {
   onDone: () => refresh(),
 })
+
+/**
+ * 吊销这个版本附带的那把统一注册密钥。
+ *
+ * 复用现成的密钥吊销接口（`POST /bootstrap-keys/{id}/revoke`）—— 不另开一条"让版本
+ * 去吊销自己的密钥"的捷径：密钥就是密钥，能吊销它的地方越少越好，而这条路已经
+ * 被「机器配对」那一页和 CLI 用过了。
+ *
+ * **吊销不会删掉版本记录**（服务端那边 `bootstrap_key_id` 保持不变，只是那把密钥
+ * 变成已吊销），所以事后还能回答"这个包当年带的是哪把钥匙"。
+ */
+const revokeKeyMutation = useMutation(
+  (keyId: number) => bootstrapKeyApi.revoke(keyId),
+  {
+    success: (key: BootstrapKeyOut) =>
+      `已吊销统一注册密钥 ${key.label || `#${key.id}`} —— 它不能再注册新机器，已注册的机器不受影响`,
+    onDone: () => refresh(),
+  },
+)
+
+async function revokeKey(release: ReleaseOut): Promise<void> {
+  if (!release.bootstrap_key_id) return
+  try {
+    await ElMessageBox.confirm(
+      `吊销版本 ${release.version} 附带的统一注册密钥（${release.bootstrap_key_label ?? `#${release.bootstrap_key_id}`}）？\n\n` +
+        '吊销之后**再用这个包装机就注册不上了** —— 这通常正是想要的效果：' +
+        '带密钥的包任何能打开装机页的人都下载得到，发完就该把这一把收掉。\n' +
+        '已经用别的办法注册好的机器不受影响（它们手里是各自的凭据，不是这把密钥）。\n' +
+        '版本记录会留着，随时能回看"当年发的是哪个包、带的是哪把钥匙"。',
+      '吊销统一注册密钥',
+      { type: 'warning', confirmButtonText: '吊销', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  await revokeKeyMutation.run(release.bootstrap_key_id)
+}
 
 function statusTag(release: ReleaseOut): {
   text: string
@@ -404,6 +475,26 @@ const editSave = useMutation(
         本机没有要内嵌进包里的发布公钥（<span class="mono">.key/release-key.pub.json</span>），
         服务端会拒绝构建；跑一次 <span class="mono">syncoj-server init</span> 生成它。
       </p>
+
+      <!--
+        「附带统一注册密钥」。
+        文案是**说得清的后果**，不是"建议"式的软话：这个包一旦流出，等于一张
+        "能注册进这台服务端"的通行证 —— 因为装机入口刻意不鉴权（空机器上没有任何
+        凭据可用），任何能打开装机页的人都能把它下载走。
+      -->
+      <div class="key-option">
+        <el-checkbox v-model="includeBootstrapKey" :disabled="!canBuild">
+          附带统一注册密钥（装完即可注册，不用手工拷）
+        </el-checkbox>
+        <p v-if="includeBootstrapKey" class="page-hint key-warning">
+          这个包从此等于一张「能注册进这台服务端」的通行证 ——
+          任何能打开装机页的人都能下载它。只在确认局域网里没有外人时用；<strong>用完/发完就吊销这把密钥</strong>，或者换一个不带密钥的版本铺开。
+          <br />
+          服务端会在构建这一刻<strong>现场签发一把新密钥</strong>（库里照旧只存哈希），
+          标签是「随版本 {{ buildVersion.trim() || source?.version }} 附带」，
+          所以它和别的版本互不影响，可以单独吊销。
+        </p>
+      </div>
     </el-card>
 
     <el-card v-else-if="signingReady && source && !source.available" shadow="never" class="section">
@@ -509,6 +600,21 @@ const editSave = useMutation(
           </template>
         </el-table-column>
 
+        <el-table-column label="附带密钥" min-width="150">
+          <template #default="{ row }">
+            <span v-if="!row.bootstrap_key_id" class="muted">—</span>
+            <el-tag
+              v-else
+              :type="row.bootstrap_key_revoked ? 'info' : 'danger'"
+              size="small"
+              effect="plain"
+            >
+              {{ row.bootstrap_key_label || `#${row.bootstrap_key_id}` }}
+              {{ row.bootstrap_key_revoked ? '（已吊销）' : '（有效）' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+
         <el-table-column label="说明" min-width="180">
           <template #default="{ row }">
             <span>{{ row.notes || '—' }}</span>
@@ -521,7 +627,7 @@ const editSave = useMutation(
           </template>
         </el-table-column>
 
-        <el-table-column label="操作" width="220" fixed="right">
+        <el-table-column label="操作" width="300" fixed="right">
           <template #default="{ row }">
             <el-button
               v-if="!row.rolled_out"
@@ -544,6 +650,21 @@ const editSave = useMutation(
               撤回
             </el-button>
             <el-button link size="small" @click="openEdit(row)">备注</el-button>
+            <!--
+              就地吊销这一版附带的那把统一注册密钥。已经吊销过的（或这个包本来
+              就没带密钥的）不显示 —— 留一个点了不会变的状态的按钮只会让人以为
+              "再点一次才是真吊销"。
+            -->
+            <el-button
+              v-if="row.bootstrap_key_id && !row.bootstrap_key_revoked"
+              link
+              type="danger"
+              size="small"
+              :loading="revokeKeyMutation.pending.value"
+              @click="revokeKey(row)"
+            >
+              吊销密钥
+            </el-button>
             <!--
               铺开中的版本服务端会直接拒绝删除（要先「撤回」再删），所以这里
               置灰并说明原因，而不是让教师点了再吃一句红字。
@@ -574,6 +695,10 @@ const editSave = useMutation(
       </el-table>
 
       <p class="page-hint">铺开中 {{ rolledOutCount }} 个，已撤回 {{ yankedCount }} 个。「删除」删的是发布记录，不是已经装到机器上的程序。</p>
+      <p class="page-hint key-warning">
+        附带过密钥的版本会一直标着那一把 —— 密钥已吊销也留着标记；「吊销密钥」只吊销那把钥匙，
+        <strong>不会动版本记录</strong>。
+      </p>
     </el-card>
 
     <el-dialog v-model="editVisible" :title="`编辑版本 ${editForm.version} 的备注`" width="520px">
@@ -655,6 +780,24 @@ const editSave = useMutation(
 /* 提醒用的提示行：不是错误，是"这一步会怎样" */
 .warn-hint {
   color: #e6a23c;
+}
+
+/*
+  附带密钥那一块。文案是"后果"而不是"建议"，所以用偏红的警示色 + 左边框，
+  让它和上面那些普通的 `.page-hint` 一眼分得开 —— 这一句读漏了，后果是这个包
+  等于一张能注册进这台服务端的通行证。
+*/
+.key-option {
+  margin-top: 12px;
+}
+
+.key-warning {
+  margin: 8px 0 0;
+  padding: 8px 12px;
+  border-left: 3px solid #f56c6c;
+  background: #fef0f0;
+  color: #c45656;
+  line-height: 1.6;
 }
 
 /*

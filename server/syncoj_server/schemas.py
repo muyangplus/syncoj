@@ -336,6 +336,12 @@ class ContestCreate(_Base):
     slug: Optional[str] = Field(default=None, max_length=64)
     status: str = Field(default="draft", max_length=16)
     note: Optional[str] = None
+    #: 考试时间窗，ISO-8601 字符串。**留空 = 不限制**（这是默认，练习场与
+    #: 还没定时间的场次都不该被时间门禁挡住）。只填一个也合法：只填
+    #: ``starts_at`` 就只管开考，只填 ``ends_at`` 就只管结束。
+    #: 服务端会拒绝 ``starts_at > ends_at`` 那种永远不可能成立的窗口。
+    starts_at: Optional[str] = Field(default=None, max_length=32)
+    ends_at: Optional[str] = Field(default=None, max_length=32)
     #: 默认名单。只作为"一键应用"的预设，不参与鉴权也不影响已有选手
     default_roster_id: Optional[int] = None
 
@@ -353,14 +359,27 @@ class ContestOut(_Base):
     #: 备注。**必须回显** —— ``PATCH`` 收下它却读不回来的话，界面上就是
     #: "改完保存再打开又变回空的"，而教师会以为是自己没保存成功
     note: Optional[str] = None
+    #: 考试时间窗（ISO-8601，带 ``Z``）。**必须回显**，理由同上：教师填完两个
+    #: 时间点再打开对话框，看到的必须是刚才填的那两个值，而不是空。
+    #: ``null`` = 这一端不限制。
+    starts_at: Optional[str] = None
+    ends_at: Optional[str] = None
 
 
 class ContestUpdate(_Base):
-    """场次的可改字段。全部可选 —— 只改传了的。"""
+    """场次的可改字段。全部可选 —— 只改传了的。
+
+    时间窗这里的"传了 ``null``"和"没传"是两件事，靠 pydantic 的
+    ``model_fields_set`` 区分（见 ``api/admin.py``）：前者是"清掉这个限制"，
+    后者是"这次别动它"。只按 ``is not None`` 判断的话，教师永远清不掉一个
+    填错的时间，而界面上看起来是保存成功了。
+    """
 
     name: Optional[str] = Field(default=None, min_length=1, max_length=200)
     status: Optional[str] = Field(default=None, max_length=16)
     note: Optional[str] = None
+    starts_at: Optional[str] = Field(default=None, max_length=32)
+    ends_at: Optional[str] = Field(default=None, max_length=32)
     default_roster_id: Optional[int] = None
     #: 显式置空用的开关。``None`` 字段没法区分"没传"和"传了 null"，
     #: 所以要多一个布尔 —— 否则教师永远清不掉已经选错的名单。
@@ -742,6 +761,22 @@ class AssetRenameIn(_Base):
     filename: str = Field(min_length=1, max_length=255)
 
 
+class AssetTextIn(_Base):
+    """**直接写一个纯文本资产**（`须知.txt` / `README.md` …）。
+
+    为什么要有这个入口，而不是"先在自己机器上造个文件再上传"：教师想说的那句话
+    本来就是在浏览器里打的，为了发它去造一个文件是纯粹的仪式。
+
+    ``content`` 的 200000 字上限（约 200 KB）**刻意远小于** ``max_asset_size``：
+    这个入口服务的是"随手写一段话"，真有大文件该走上传（那份能到 2 GB 且流式）。
+    上限放在 schema 上，超了就是 422 + 一句人话，不用自己写检查。
+    """
+
+    filename: str = Field(min_length=1, max_length=255, description="文件名，如 须知.txt")
+    content: str = Field(max_length=200_000, description="文本内容（UTF-8；换行统一成 LF）")
+    kind: str = Field(default="testdata", max_length=32)
+
+
 class DeployCreate(_Base):
     """创建下发任务。
 
@@ -900,6 +935,31 @@ class ReleaseUpdate(_Base):
     channel: Optional[str] = Field(default=None, max_length=16)
 
 
+class InstallLedgerOut(_Base):
+    """装机入口的台账：**当前可以装上去的 Agent 版本**。
+
+    这个接口**不鉴权**（见 ``api/agent.py`` 里那三个端点的说明）：初次安装时机器
+    手上什么都没有，没有任何凭据可用。所以它只报"本来就该发给每台机器"的东西 ——
+    版本号、校验和、大小、签名。**不含任何考场数据。**
+
+    ``bundle`` / ``installer`` 是相对路径，让客户端自己拼 base：服务端不知道
+    客户端是通过哪个地址访问它的（多网卡、反向代理），报绝对地址必然有一半是错的。
+    """
+
+    version: str
+    sha256: str
+    size: int
+    #: 包内那一版代码的签名（由发布私钥对 sha256 的十六进制串签）。机器上**有**
+    #: 发布公钥时能验；没有时只能靠 sha256，那一步的取舍写在 install.py 的说明里。
+    signature: Optional[str] = None
+    key_id: Optional[str] = None
+    notes: Optional[str] = None
+    bundle: str
+    installer: str
+    #: 那条"一条 curl 就能起头"的自举脚本。空机器上只有 shell 时用它。
+    bootstrap: str
+
+
 class ReleaseSourceOut(_Base):
     """本机有没有可构建的 Agent 源码、会打出哪个版本。
 
@@ -941,3 +1001,113 @@ class UpgradeStatusOut(_Base):
     error: Optional[str] = None
     active_release: Optional[ReleaseOut] = None
     releases: List[ReleaseOut] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------------- #
+# 选手页（免登录）
+# --------------------------------------------------------------------------- #
+#
+# 这一组模型是**给考场里的选手**看的，所以它们同时守两条边界：
+#
+# * 字段只够回答"我是谁、要交什么、有哪些注意事项"，一个字节的多余信息都不给 ——
+#   代码（SourceFile）、成绩（JudgeRun）、别的选手都不在模型里。前端不显示不是
+#   边界，**服务端不返回**才是。
+# * 路径与状态沿用现有枚举（``ContestStatus`` / ``DeployStatus`` 的字符串值），
+#   不另造一套"选手友好"的状态：前端要按同一套值分支，多一套就多一处要同步。
+
+
+class PlayerContestOut(_Base):
+    """选手页上的场次信息：标识、名字、状态，以及考试时间窗。
+
+    时间窗（``starts_at`` / ``ends_at``）是给**选手看**的：这一页上"几点开考、几点
+    结束"必须一眼看得到 —— 那是他能自己确认"现在到底还收不收卷"的地方（服务端到点
+    会把场次自动置为已结束，但选手在此之前就该知道几点结束）。留空 = 不限制，如实回
+    ``null`` 让页面显示"不限"，不要编一个时间出来。
+    """
+
+    slug: str
+    name: str
+    status: str
+    starts_at: Optional[str] = None
+    ends_at: Optional[str] = None
+
+
+class PlayerProfileOut(_Base):
+    """选手页上的"我是谁"：考号、姓名、座位、分组。
+
+    只回显他自己的（按查询参数定位到的那一个 ``Player``）。姓名等字段允许为空 ——
+    名单里没填就如实是空，不拿考号去顶替。
+    """
+
+    player_no: str
+    name: Optional[str] = None
+    seat: Optional[str] = None
+    group_name: Optional[str] = None
+
+
+class PlayerAssetOut(_Base):
+    """清单里的一行：下发了什么、该落在哪个目录、到没到。
+
+    ``dest_dir`` 是**任务的**目标目录模板展开后的样子（``DeployTask.dest_dir``），
+    不是某个选手磁盘上的绝对路径 —— 服务端不认识选手机器上的家目录，编一个
+    绝对路径只会是错的。空串表示"直接落在下发根目录"（默认就是桌面）。
+    """
+
+    filename: str
+    dest_dir: str = ""
+    #: ``DeployStatus`` 的取值：pending/ready/done/failed/cancelled
+    status: str
+    size: int = 0
+    sha256: str
+    #: 完成时间。只有 ``status == "done"`` 时才有意义，其余一律 null ——
+    #: 把"最后一次状态变化的时间"当成完成时间显示，会让选手以为文件已经到手了。
+    finished_at: Optional[str] = None
+
+
+class PlayerNoticeOut(_Base):
+    """下发给选手的**考场公告文件**。
+
+    用户定的形状：公告就是一份走"文件下发"那条路发下去的文件，服务端不去解析
+    它的内容、也不把它拆成"说明 + 保存规则"两段 —— 那些拼出来的说法迟早会和
+    教师真正发下去的那份文件对不上，而选手会照着页面上那句错的去做。
+
+    ``content`` 是 Markdown **原文**，不转 HTML：渲染是页面的事，服务端一转换，
+    "页面上看到的"和"下发给机器的那份文件"就不再是同一份东西了。
+    """
+
+    #: 实际下发的公告文件名，例如 ``NOTICE.md``
+    filename: str
+    #: 公告正文（Markdown 原文，不转 HTML）
+    content: str
+
+
+class PlayerContextOut(_Base):
+    """选手页一次要拿到的全部内容。
+
+    刻意做成**一个**接口而不是三个：这一页是给选手看的，"半张页面"（场次加载到了、
+    清单还在转圈）比多等一会儿更糟；而且"同一个场次、同一个人"这个一致性本来
+    就只能由服务端保证。
+
+    两种查法共用同一个模型：
+
+    * ``matched_by="machine"``：请求没带参数，服务端按来源 IP 认出了这台机器。
+      这是主路径 —— 选手在考场机器上打开就是一个带参数的快捷方式，一个字都不用填。
+    * ``matched_by="explicit"``：请求带了 ``contest`` + ``player_no``，按这两个值
+      精确查找。自动匹配不上时（教师的笔记本、Agent 没起来的机器、换了 IP）
+      靠它兜底。
+
+    回这个字段是让**页面**能说清"我这份清单是怎么定位到你的"：自动匹配到别人的
+    机器上时，页面上的考号会当场露馅，而不是安静地显示一份不属于这台机器的清单。
+    """
+
+    contest: PlayerContestOut
+    player: PlayerProfileOut
+    #: 这一场下发给选手的公告文件。**没下发就是 null**（不是空对象）：
+    #: 空对象会让页面显示一个"有公告、但内容是空的"的框，而事实是压根没有。
+    notice: Optional[PlayerNoticeOut] = None
+    assets: List[PlayerAssetOut] = Field(default_factory=list)
+    #: ``machine`` / ``explicit``，见类说明
+    matched_by: str
+    #: 服务端的 Unix 秒。时钟不一致时页面上还能显示"服务端现在几点"，
+    #: 而考试里"还剩多久"是靠它算的。
+    server_time: int

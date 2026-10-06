@@ -35,11 +35,14 @@ from ..models import (
     EventLog,
     Player,
     SourceFile,
+    iso_utc,
+    local_clock,
     utcnow,
 )
 from ..paths import PathValidationError, safe_join, validate_relpath
 from ..policy import build_policy
 from ..schemas import (
+    InstallLedgerOut,
     AgentEvent,
     EnrollRequest,
     EnrollResponse,
@@ -51,7 +54,7 @@ from ..schemas import (
 )
 from ..security import hash_token, new_pair_code, new_token
 from ..storage import BlobTooLarge, HashMismatch, materialize
-from ..services import enrollment
+from ..services import enrollment, packaging
 from ..services.collect import reconcile_scan, record_events
 from ..services.deploy import collect_deploy_jobs
 from ..services.ratelimit import RateLimitExceeded
@@ -77,6 +80,72 @@ _RANGE_CHUNK = 256 * 1024
 
 #: 响应中最多回传多少条待上传路径，避免超大目录一次性撑爆响应体
 MAX_NEED_UPLOAD = 500
+
+
+def _reject_outside_window(ctx: AppContext, identity: AgentIdentity, now) -> None:
+    """场次时间窗之外不收代码：还没开考、或者已经结束。
+
+    **只挡上传这一个端点。** tick、下载 assets、事件上报都不走这里，因为到点之后
+    机器还要活着：它还得拿题面、还得让教师看见它在线、还得把现场情况报上来。
+    把门禁加到那些地方，效果是"到点那一刻整间机房失联"—— 而真正该停的只是收卷。
+
+    **判据是服务端时间**（``utcnow()``）：考场机器的钟是最不可信的东西之一，
+    让客户端报时间等于让选手自己决定还能不能交。到点那一刻（``now == ends_at``）
+    按"已结束"处理，窗口是左闭右开的 ``[starts_at, ends_at)``。
+
+    ``409`` 而不是 ``403``：凭据没问题、机器也没问题 —— 挡下来的是**这场现在的
+    状态**不允许收文件，而不是"你是谁"或"你能不能碰这个资源"。同一个端点上的
+    ``stale_upload`` 也是 409，403 在这个端点的语义已经被"该资源未下发给本选手"
+    占着；两者混在一起，Agent 就分不清该重试还是该换人。附带的结构化字段让
+    Agent 不必去解析上面那句中文（中文是给人看的）。
+    """
+    with ctx.db.session() as session:
+        contest = session.get(Contest, identity.contest_id)
+        if contest is None:  # pragma: no cover - 外键约束下不会发生
+            return
+        starts_at = contest.starts_at
+        ends_at = contest.ends_at
+
+        if ends_at is not None and now >= ends_at:
+            raise ApiError(
+                409,
+                "contest_ended",
+                "本场考试已于 %s 结束，代码不再接收" % local_clock(ends_at),
+                {
+                    "reason": "ended",
+                    "starts_at": iso_utc(starts_at),
+                    "ends_at": iso_utc(ends_at),
+                },
+            )
+        if starts_at is not None and now < starts_at:
+            raise ApiError(
+                409,
+                "contest_not_started",
+                "本场考试还没开始（%s 开考），代码暂时不接收" % local_clock(starts_at),
+                {
+                    "reason": "not_started",
+                    "starts_at": iso_utc(starts_at),
+                    "ends_at": iso_utc(ends_at),
+                },
+            )
+
+
+def _unix_seconds(moment) -> int:
+    """把 ``utcnow()`` 给的 UTC 时间转成真正的 Unix 秒。
+
+    **必须显式补上 UTC 时区。** ``utcnow()`` 返回的是"没有时区标记的 UTC 时刻"，
+    而 ``datetime.timestamp()`` 对 naive 时间**按本机时区解释** —— 于是同一个时刻在
+    东八区机器上算出来的秒数差 28800。发给 Agent 的 ``server_time`` 因此一直偏 8 小时，
+    而它正是给客户端对时用的（考场机器时钟不准是常态）。
+
+    抽成一个函数是因为"同一个量只该有一处定义"：这个值在 tick 里出现两次，
+    选手页那边还有一处，三处各写一遍就必然有一处错（实际就错了）。
+    """
+    from datetime import timezone
+
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return int(moment.timestamp())
 
 
 def _agent_config(ctx: AppContext) -> Dict[str, Any]:
@@ -297,7 +366,7 @@ def tick(
     )
 
     return TickResponse(
-        server_time=int(now.replace(tzinfo=None).timestamp()),
+        server_time=_unix_seconds(now),
         next_tick_seconds=next_tick,
         need_upload=collect.need_upload[:MAX_NEED_UPLOAD],
         deploy_jobs=jobs,
@@ -381,7 +450,7 @@ def _tick_pending(
                     ctx.pair_codes.put(agent.id, pair_code, agent.pair_code_expires_at)
 
     return TickResponse(
-        server_time=int(now.replace(tzinfo=None).timestamp()),
+        server_time=_unix_seconds(now),
         next_tick_seconds=ctx.settings.tick_idle_seconds,
         claimed=identity.paired,
         pair_code=pair_code,
@@ -482,8 +551,143 @@ def _pending_upgrade(session, ctx: AppContext) -> Optional[UpgradeInfo]:
 
 
 # --------------------------------------------------------------------------- #
-# 上传
+# 装机入口（**不鉴权**）
 # --------------------------------------------------------------------------- #
+#
+# 这三个端点是"一台什么都没有的机器"唯一的起点：它上面没有 Agent、没有凭据、
+# 什么都没有，只有一条 curl。所以它们**不能要求鉴权** —— 要求了就没有入口。
+#
+# 那"凭什么信"？分两段看：
+#
+# * **初次安装这一段不做鉴权**。这是有意选的：装机时服务端还不认识这台机器，
+#   而包里装的只是一段"所有机器都要拿到的代码" —— 一场考试里没有秘密的另一半
+#   是题面与测试点，那些走的是下发（有凭据、有进度、有审计）。
+#   读者如果觉得这一步该验签，做法是**在镜像里预置发布公钥**，然后安装器就会
+#   自己把它验上（``install.py --from-server`` 的行为：有公钥就验，没有就如实报
+#   "未验签"并打印 sha256 供人核对）。
+# * **装完之后靠配对建立信任**。机器注册上来是"待认领"状态，教师必须在管理界面
+#   把它绑到名单里的某个人，它才开始收代码、收文件、收成绩 —— 这一步是有人看着的。
+#
+# 边界与别处一致：**只发已铺开、未撤回的版本**。"上传"和"铺开"的风险分界在这
+# 里也成立 —— 一个刚构建出来、教师还没敢铺开的包，不该能被装机入口拿走。
+
+#: 装机入口的路径。写成常量是为了让台账里的相对路径与真实路由**只有一处**，
+#: 否则某天有人改了路径，台账会指到一个 404 上，而现象是"装机装不上"。
+INSTALL_LEDGER_PATH = "/api/v1/agent/install.json"
+INSTALL_BUNDLE_PATH = "/api/v1/agent/install/bundle"
+INSTALL_INSTALLER_PATH = "/api/v1/agent/install/installer"
+INSTALL_BOOTSTRAP_PATH = "/api/v1/agent/install/bootstrap.sh"
+
+
+def _installable_release(session) -> Optional[AgentRelease]:
+    """当前可以被装机的版本：**已铺开且未撤回**，取最新的那个。
+
+    与 :func:`_pending_upgrade` 的判据一致（那边还多一条"配置了签名私钥"，
+    因为下发未签名的包等于下发一个 Agent 必然拒收的东西）。这里不查私钥：
+    装机入口给的是包体与校验和，客户端能不能验签是客户端的事。
+    """
+    return session.execute(
+        select(AgentRelease)
+        .where(
+            AgentRelease.published_at.isnot(None),
+            AgentRelease.yanked_at.is_(None),
+        )
+        .order_by(AgentRelease.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+
+@router.get("/install.json", response_model=InstallLedgerOut)
+def install_ledger(ctx: AppContext = Depends(get_ctx)) -> InstallLedgerOut:
+    """当前可装机版本的台账。**不鉴权。**
+
+    没有铺开任何版本时给 404 加一句人话 —— 而不是一个空对象：装机的人需要知道
+    "是没铺开"还是"我地址打错了"，这两件事的处理完全不同。
+    """
+    with ctx.db.session() as session:
+        row = _installable_release(session)
+        if row is None:
+            raise ApiError(
+                404,
+                "install_unavailable",
+                "这台服务端还没有铺开任何 Agent 版本。装机入口只发已铺开的版本 ——"
+                "在管理界面「Agent 发布」里选一个版本点「铺开」之后再来。",
+            )
+        return InstallLedgerOut(
+            version=row.version,
+            sha256=row.sha256,
+            size=int(row.size),
+            signature=row.signature,
+            key_id=ctx.signing_key.key_id if ctx.signing_key else None,
+            notes=row.notes,
+            bundle=INSTALL_BUNDLE_PATH,
+            installer=INSTALL_INSTALLER_PATH,
+            bootstrap=INSTALL_BOOTSTRAP_PATH,
+        )
+
+
+@router.get("/install/bundle")
+def install_bundle(request: Request, ctx: AppContext = Depends(get_ctx)) -> Response:
+    """当前可装机版本的包体。**不鉴权**，支持 Range。
+
+    与"给 Agent 升级用的下载端点"取的是同一份 blob、同一套 Range 逻辑 ——
+    两条路如果各写一遍，早晚会出现"升级能续传、装机不能"这种说不通的差别。
+    """
+    with ctx.db.session() as session:
+        row = _installable_release(session)
+        if row is None:
+            raise ApiError(
+                404,
+                "install_unavailable",
+                "这台服务端还没有铺开任何 Agent 版本。",
+            )
+        sha256 = row.sha256
+        expected_size = int(row.size)
+
+    blob_path = ctx.blobs.path_for(sha256)
+    if not blob_path.is_file():
+        raise HTTPException(status_code=410, detail="安装包内容缺失")
+    if expected_size and blob_path.stat().st_size != expected_size:
+        raise HTTPException(status_code=500, detail="安装包内容损坏，大小与台账不符")
+    return _range_response(blob_path, request)
+
+
+@router.get("/install/installer")
+def install_installer(ctx: AppContext = Depends(get_ctx)) -> Response:
+    """安装器本体（``install.py``）。**不鉴权**。
+
+    它**不在离线包里** —— 离线包是给机器**运行**用的，安装器是装机那一次用的，
+    所以空机器必须先从服务端拿到它。这也是最短的那条自举链：
+    一条 curl 拿到它，之后就全是 Python 的事了（shell 写错难查，能少写就少写）。
+    """
+    try:
+        path = packaging.installer_path()
+    except packaging.BuildError as exc:
+        # 生产上服务端可能是 pip 装出来的、根本不在仓库里。这时老实说清楚，
+        # 而不是给一个 404 让人以为是路径写错了。
+        raise ApiError(404, "installer_unavailable", "%s发不出去：%s" % ("安装器", exc.detail))
+    return FileResponse(
+        str(path),
+        media_type="text/x-python",
+        filename="install.py",
+    )
+
+
+@router.get("/install/bootstrap.sh")
+def install_bootstrap(ctx: AppContext = Depends(get_ctx)) -> Response:
+    """自举脚本（``bootstrap.sh``）。**不鉴权。**
+
+    给的是"**一条** curl 就能起头"的那条命令 —— 空机器上只有 shell，而教师不该
+    需要先手工把 install.py 弄过去。脚本本身极短：抓 install.py、跑起来、参数原样
+    传下去；真正的逻辑全在 Python 里。
+
+    它与安装器一样**不在**离线包里（``packaging/`` 被排除），所以只能由服务端发。
+    """
+    try:
+        path = packaging.bootstrap_path()
+    except packaging.BuildError as exc:
+        raise ApiError(404, "installer_unavailable", "%s发不出去：%s" % ("自举脚本", exc.detail))
+    return FileResponse(str(path), media_type="text/x-sh", filename="bootstrap.sh")
 
 @router.post("/files", response_model=UploadResult)
 def upload_file(
@@ -507,6 +711,11 @@ def upload_file(
 
     if not SHA256_RE.match(sha256 or ""):
         raise HTTPException(status_code=400, detail="sha256 格式不合法")
+
+    # 场次时间窗的门禁放在**读文件内容之前**：结束之后不该再往 blobs/ 里落任何
+    # 一个字节。放晚了（比如放到写台账那一步）虽然接口也返回 409，但磁盘上已经
+    # 多了一份内容、而且会被后续的"内容寻址去重"当成合法版本。
+    _reject_outside_window(ctx, identity, utcnow())
 
     try:
         actual_sha, size = ctx.blobs.put_stream(

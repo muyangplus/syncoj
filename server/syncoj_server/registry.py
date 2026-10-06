@@ -107,8 +107,15 @@ class AgentRegistry:
         contest_slug: str,
         machine_id: str,
         hostname: Optional[str] = None,
+        ip: Optional[str] = None,
     ) -> AgentRuntime:
-        """注册或刷新一台机器的静态身份信息（登录时调用一次即可）。"""
+        """注册或刷新一台机器的静态身份信息（每个带凭据的请求都会走）。
+
+        ``ip`` 是这次请求的来源地址。它和 ``note_tick`` 里那个是同一个字段，
+        谁后写谁生效 —— 两边都要写，因为**不是只有心跳才知道这台机器在哪**：
+        上传、下载、事件上报都带着凭据，而选手页自己不会触发心跳。
+        选手页的"自动匹配本机"就是按这个地址找机器的。
+        """
         with self._lock:
             runtime = self._agents.get(agent_id)
             if runtime is None:
@@ -125,6 +132,8 @@ class AgentRegistry:
             runtime.contest_slug = contest_slug
             runtime.machine_id = machine_id
             runtime.hostname = hostname
+            if ip:
+                runtime.last_seen_ip = ip
             return runtime
 
     def note_tick(

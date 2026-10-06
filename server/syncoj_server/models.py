@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Optional
 
 from sqlalchemy import (
     BigInteger,
@@ -30,6 +31,8 @@ from sqlalchemy.orm import declarative_base, relationship
 __all__ = [
     "Base",
     "utcnow",
+    "iso_utc",
+    "local_clock",
     "Admin",
     "AdminSession",
     "Contest",
@@ -57,6 +60,27 @@ Base = declarative_base()
 def utcnow() -> datetime:
     """当前 UTC 时间，刨掉 tzinfo（见模块 docstring）。"""
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def iso_utc(value: Optional[datetime]) -> Optional[str]:
+    """把库里的 naive UTC 渲染成 API 用的 ISO-8601（带 ``Z``）。
+
+    ``None`` 原样返回 ``None``：**"没配时间"和"配了某个时刻"必须能分开**，
+    塞一个空串或者当天的零点进去，前端就只能猜这是哪种意思。
+    """
+    return value.strftime("%Y-%m-%dT%H:%M:%SZ") if value else None
+
+
+def local_clock(value: datetime) -> str:
+    """把库里的 naive UTC 折算成**服务端本机时钟**的 ``HH:MM``。
+
+    只给日志与提示语用（"本场考试已于 11:30 结束"）。库里一律是 naive UTC，
+    但这句话是给人看的：东八区的考场直接印 UTC 会看到早 8 小时的时间，而
+    "几点结束"恰恰是照着这句话行动的人唯一需要的数。服务端与考试机在同一间屋、
+    同时区，所以折算成本机时间就是墙上那只钟。
+    """
+    aware = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    return aware.astimezone().strftime("%H:%M")
 
 
 class ContestStatus:
@@ -124,6 +148,15 @@ class Contest(Base, TimestampMixin):
     slug = Column(String(64), nullable=False, unique=True)
     name = Column(String(200), nullable=False)
     status = Column(String(16), nullable=False, default=ContestStatus.DRAFT)
+    #: 考试时间窗。**两个都可空，留空 = 不限制** —— 没配时间的场次绝不能被当成
+    #: "已结束"，那是出厂默认（新场次、练习场都不该被时间门禁挡住）。
+    #: 只配一个也合法：只填 ``starts_at`` 就只管开考，只填 ``ends_at`` 就只管结束。
+    #:
+    #: 语义是 ``[starts_at, ends_at)``：**到点那一刻就算结束**。宁可早一秒截止，
+    #: 也不要让"最后一秒"的提交落进一个没人打算再收的场次里。
+    #: 到点后 ``tasks/flush.py`` 会把 ``running`` 自动置成 ``closed``（那是给人看的
+    #: 状态）；而"收不收代码"只看这两个时间（见 ``api/agent.py`` 的上传门禁）——
+    #: 后台循环是周期跑的，"到点那一刻"不能靠等它。
     starts_at = Column(DateTime, nullable=True)
     ends_at = Column(DateTime, nullable=True)
     note = Column(Text, nullable=True)
@@ -348,6 +381,17 @@ class Agent(Base, TimestampMixin):
     enrolled_at = Column(DateTime, default=utcnow, nullable=False)
     last_enrolled_at = Column(DateTime, default=utcnow, nullable=False)
     last_seen_at = Column(DateTime, nullable=True)
+    #: 最近一次请求的**来源 IP**。
+    #:
+    #: 它存在的唯一理由是选手页的"自动匹配本机"：选手不输任何东西，服务端就靠
+    #: "哪个 IP 刚才来过"认出他坐的是哪台机器。所以它必须在**每一次**带凭据的
+    #: 请求上更新（见 ``api/deps.py`` 的 ``_note_ip``），而不是只在心跳时更新 ——
+    #: 选手页自己不会触发心跳，落在它后面就会永远匹配不上。
+    #:
+    #: 它**不是**身份依据（IP 可以变、可以共享、局域网里也可以伪造）：真正的身份
+    #: 是凭据 + 配对关系，这里只回答"打开这一页的浏览器大概在哪台机器上"。
+    #: 匹配不上时页面会退回到手填场次与考号，那条路才是兜底。
+    last_seen_ip = Column(String(64), nullable=True)
     revoked_at = Column(DateTime, nullable=True)
     #: 完成配对的时间
     claimed_at = Column(DateTime, nullable=True)

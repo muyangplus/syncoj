@@ -71,6 +71,22 @@ def _env_opt_str(name: str) -> Optional[str]:
     return raw.strip() if raw and raw.strip() else None
 
 
+def _env_opt_int(name: str, default: Optional[int]) -> Optional[int]:
+    """环境变量里的可空整数。空串 / 不合法 → 默认值；``"0"`` 表示**关掉**。
+
+    需要"关掉"这个第三态，因为 ``None`` 在环境变量里表达不出来（没设也是 None）。
+    允许 ``0`` 当哨兵：一个端口号为 0 的监听在这里没有别的含义。
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        return default
+    return None if value == 0 else value
+
+
 def _default_file_pattern() -> str:
     """默认代码路径模式。
 
@@ -169,6 +185,18 @@ class Settings:
     #: 拼出要广播的地址。放在 Settings 里是因为应答器跑在后台任务里，
     #: 拿不到命令行参数。
     http_port: int = 8000
+
+    #: **公开端口**：只放考试机要用的那两页（选手页 + 装机页），进去默认落在选手页。
+    #:
+    #: 默认 80 是有意的：考试机上的地址就是 ``http://10.0.0.5/``，浏览器对 http 默认
+    #: 就是 80，教师连端口都不用敲；而且这个端口上**没有管理界面**，学生不会误入
+    #: 登录页。``None`` = 不开第二个监听。
+    #:
+    #: ⚠️ 80 是特权端口：服务端跑在专用账号下时绑不上。由 ``serve`` 负责尝试，
+    #: **绑不上就降级**（管理端口照常），并打印两种修法（CAP_NET_BIND_SERVICE 或换端口）。
+    public_port: Optional[int] = field(
+        default_factory=lambda: _env_opt_int("SYNCOJ_PUBLIC_PORT", 80)
+    )
 
     #: 是否应答局域网里的发现探测。关掉它不影响任何别的功能。
     discovery_enabled: bool = field(

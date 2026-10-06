@@ -33,8 +33,14 @@ def make_engine(path: Path):
 #: 就永远不会被测出来 —— 生成出来的老结构会跟着模型一起变，两边永远一致。
 #: 手写会腐烂，所以下面配了一条 ``test_legacy_fixture_...`` 专门看守它。
 #:
-#: 定义逐字照抄当时的模型（DDL 从 ``CreateTable`` 导出），只有三处不同：
+#: 定义逐字照抄当时的模型（DDL 从 ``CreateTable`` 导出），只有几处不同：
 #: ``agent`` / ``contest`` 去掉本次新增的列，``problem`` 去掉上一次加漏迁移的列。
+#:
+#: **``contest`` 里那条 ``player_notice`` 是故意留着的**，它是本文件唯一一处
+#: "老结构比迁移器出现那天新"的地方：迁移 003 把它加上去、迁移 005 又把它拿掉，
+#: 而现在每一个真的开发库（``runtime/server/syncoj.db`` 停在版本 4）都带着这一列。
+#: 不把它放进来，005 的"重建删列"就只在我另写的那份测试里被覆盖，而这套
+#: "升级上来的库" 会走一条比真实情况更干净的路径 —— 那正是这套测试最怕的事。
 LEGACY_SCHEMA = """
 CREATE TABLE contest (
     id INTEGER NOT NULL PRIMARY KEY,
@@ -44,6 +50,7 @@ CREATE TABLE contest (
     starts_at DATETIME,
     ends_at DATETIME,
     note TEXT,
+    player_notice TEXT,
     created_at DATETIME NOT NULL
 );
 CREATE TABLE player (
@@ -108,7 +115,12 @@ MIGRATION_ADDED_COLUMNS = {
         "pair_code_hash",
         "pair_code_expires_at",
         "claimed_at",
+        #: ``last_seen_ip``：选手页按来源 IP 认机器要用它（§5.6）。
+        "last_seen_ip",
     },
+    #: ``player_notice`` 曾经在这一档里（迁移 003 加的"给选手看的注意事项"）。
+    #: 考场公告改成"下发一份 NOTICE.md 文件"之后它没有读者了，所以本轮由迁移 005
+    #: 真的把它删掉 —— 它现在在 ``MIGRATION_DROPPED_COLUMNS`` 里。
     "contest": {"default_roster_id"},
     "problem": {"file_patterns"},
     "player": set(),
@@ -123,13 +135,47 @@ MIGRATION_ADDED_COLUMNS = {
 #: ``contest.enrollment_mode`` **不在这里**：它是迁移 001 自己加进去的、
 #: 又被 002 拿掉的。对"迁移器之前建的库"来说它压根不存在，
 #: 所以老结构和模型在这张表上是天然一致的。
+#:
+#: ``contest.player_notice`` **在这里**，因为 ``LEGACY_SCHEMA`` 里特意留了这一列
+#: （理由见那边的说明）：它是 003 加的、005 拿掉的，而现在的开发库都带着它。
+#: 这一条是防"半迁移"最直接的例子 —— 005 如果哪天被改坏成"只补列、不重建"，
+#: 这条断言会当场变红。
 MIGRATION_DROPPED_COLUMNS = {
     "agent": {"player_id"},
-    "contest": set(),
+    "contest": {"player_notice"},
     "problem": set(),
     "player": set(),
     "agent_status": set(),
 }
+
+#: "开考/结束时间列之前"的 contest 形状：只有这张表少那两列（外加一张挂在它下面的
+#: ``player``，用来确认重建没有顺着外键把子表带走）。
+#: 单独写一份而不是去改 ``LEGACY_SCHEMA``：那一份是"升级路径"的样本，不该为了
+#: 一条边界测试变形。
+PRE_WINDOW_SCHEMA = """
+CREATE TABLE contest (
+    id INTEGER NOT NULL PRIMARY KEY,
+    slug VARCHAR(64) NOT NULL UNIQUE,
+    name VARCHAR(200) NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    note TEXT,
+    created_at DATETIME NOT NULL
+);
+CREATE TABLE player (
+    id INTEGER NOT NULL PRIMARY KEY,
+    contest_id INTEGER NOT NULL REFERENCES contest(id) ON DELETE CASCADE,
+    player_no VARCHAR(64) NOT NULL,
+    name VARCHAR(64),
+    seat VARCHAR(32),
+    group_name VARCHAR(64),
+    created_at DATETIME NOT NULL,
+    CONSTRAINT uq_player_contest_no UNIQUE (contest_id, player_no)
+);
+INSERT INTO contest (id, slug, name, status, note, created_at)
+    VALUES (1, 'mock-old', '校内模拟赛', 'running', '老备注', '2026-01-01 00:00:00');
+INSERT INTO player (id, contest_id, player_no, name, created_at)
+    VALUES (1, 1, 'S001', '张三', '2026-01-01 00:00:00');
+"""
 
 OLD_DATA = """
 INSERT INTO contest (id, slug, name, status, created_at)
@@ -156,6 +202,19 @@ def legacy_db(workdir: Path) -> Path:
             if statement.strip():
                 conn.execute(text(statement))
         for statement in OLD_DATA.strip().split(";"):
+            if statement.strip():
+                conn.execute(text(statement))
+    engine.dispose()
+    return path
+
+
+@pytest.fixture()
+def pre_window_db(workdir: Path) -> Path:
+    """造一个"contest 还没有开考/结束时间列"的库（见 ``PRE_WINDOW_SCHEMA``）。"""
+    path = workdir / "pre_window.db"
+    engine = make_engine(path)
+    with engine.begin() as conn:
+        for statement in PRE_WINDOW_SCHEMA.strip().split(";"):
             if statement.strip():
                 conn.execute(text(statement))
     engine.dispose()
@@ -256,18 +315,51 @@ def test_legacy_upgrade_adds_the_new_columns(legacy_db: Path) -> None:
 
 
 def test_legacy_upgrade_drops_the_retired_columns(legacy_db: Path) -> None:
-    """``agent.player_id`` 与 ``contest.enrollment_mode`` 必须真的消失。
+    """``agent.player_id`` 与 ``contest.player_notice`` 必须真的消失。
 
     SQLite 删不了列，只能重建表 —— 而重建是这套迁移里唯一会"整表搬动"的动作。
-    没有这条断言的话，重建漏掉了某一列也能跑过去，而两条升级路径从此结构分叉。
+    没有这条断言的话，重建漏掉了某一列也能跑过去，而两条升级路径从此结构分叉：
+    老库带着一列永远没人读的数据跑，新库没有那一列。
+
+    ``enrollment_mode`` 一起断言只是顺带（它在 ``LEGACY_SCHEMA`` 里压根不存在）。
     """
     engine = make_engine(legacy_db)
     migrations.migrate(engine)
 
     assert "player_id" not in {c["name"] for c in inspect(engine).get_columns("agent")}
-    assert "enrollment_mode" not in {
-        c["name"] for c in inspect(engine).get_columns("contest")
+    contest_columns = {c["name"] for c in inspect(engine).get_columns("contest")}
+    assert "player_notice" not in contest_columns
+    assert "enrollment_mode" not in contest_columns
+    engine.dispose()
+
+
+def test_upgrade_adds_missing_contest_window_columns(pre_window_db: Path) -> None:
+    """缺 ``starts_at`` / ``ends_at`` 的老库要在迁移 005 里被补上，**数据一行不少**。
+
+    这两列从服务端第一版起就在模型里，所以"缺列的库"大概率只存在于更早的结构里；
+    但"老库少一列"正是这套迁移机制唯一存在的理由（``db reset`` 只兜底开发机），
+    而它一旦真的发生，表现是每一个带时间判定的接口 500 —— 那种"只有升级上来的库
+    才坏"的故障最难查。所以这里手工造一个缺列的库，把那条路真的跑一遍。
+
+    顺带盯住重建的副作用：``contest`` 下面挂着 ``player``，外键是
+    ``ON DELETE CASCADE``。重建没按配方关外键的话，这里的孩子会被静默删光。
+    """
+    engine = make_engine(pre_window_db)
+    migrations.migrate(engine)
+
+    columns = {
+        c["name"]: bool(c["nullable"]) for c in inspect(engine).get_columns("contest")
     }
+    # 两列都要在，而且要**可空**："没配时间"必须能表示成 NULL
+    assert columns.get("starts_at") is True
+    assert columns.get("ends_at") is True
+
+    assert rows(engine, "SELECT slug, name, status, note FROM contest") == [
+        ("mock-old", "校内模拟赛", "running", "老备注")
+    ], "重建把场次那一行弄丢了（或改了内容）"
+    assert rows(engine, "SELECT COUNT(*) FROM player")[0][0] == 1, (
+        "重建 contest 时子表被外键级联删掉了 —— 外键没有真正关掉"
+    )
     engine.dispose()
 
 

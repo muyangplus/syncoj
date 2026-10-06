@@ -30,9 +30,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 #: 用 UTF-8 BOM 开头会出问题的文件类型。
 #: 特意**不**检查 ``.json`` —— JSON 规范允许 BOM，而且 ``web/openapi.json``
 #: 是生成物，改它没意义。
+#:
+#: 也特意**不**检查 ``.ps1``：它反过来**要求**带 BOM（见
+#: :func:`find_missing_bom`）。一个文件类型只能有一条规矩 —— 两条方向相反的守卫
+#: 同时套在同一个文件上，结果就是两边都"有理"，然后谁也没守住。
 BOM_SENSITIVE_SUFFIXES = (
     ".sh",
-    ".ps1",
     ".py",
     ".ini",
     ".md",
@@ -156,6 +159,72 @@ def test_bom_check_actually_catches_a_bom(workdir: Path) -> None:
     offenders = find_bom_offenders([bad, good, other])
     # 只比较文件名：路径前缀取决于测试临时目录放在哪，断言整个路径会假红
     assert [Path(name).name for name in offenders] == ["bad.py"], offenders
+
+
+# --------------------------------------------------------------------------- #
+# PowerShell 的 BOM 正好相反：**必须有**
+# --------------------------------------------------------------------------- #
+
+#: 必须带 UTF-8 BOM 的文件。与上面那条**方向相反**，不是笔误。
+#:
+#: Windows PowerShell 5.1 在文件**没有 BOM** 时按当前 ANSI 代码页（简体中文
+#: Windows 上是 GBK）解码脚本，于是仓库里这些中文注释会让它**整个脚本解析失败**，
+#: 报的还是"字符串缺少终止符"这种指向完全不相关位置的错。PS 7（pwsh）则默认识别
+#: BOM，所以带上 BOM 两边都对。
+#:
+#: 而上面那条禁 BOM 的理由（``#!/bin/sh`` 前面多三个字节，Linux 报 "required file
+#: not found"）**管不到 .ps1** —— 它只在 Windows 上执行，NOI Linux 上根本没有
+#: PowerShell。
+BOM_REQUIRED_SUFFIXES = (".ps1",)
+
+
+def find_missing_bom(paths: List[Path]) -> List[str]:
+    """挑出**该有 BOM 却没有**的 PowerShell 脚本。抽成函数同样是为了能被单独验证。"""
+    offenders = []
+    for path in paths:
+        if path.suffix not in BOM_REQUIRED_SUFFIXES or not path.is_file():
+            continue
+        if path.read_bytes()[:3] != b"\xef\xbb\xbf":
+            offenders.append(
+                str(path.relative_to(REPO_ROOT)) if path.is_relative_to(REPO_ROOT) else str(path)
+            )
+    return offenders
+
+
+def test_powershell_scripts_carry_a_utf8_bom(files: List[Path]) -> None:
+    """``.ps1`` 文件必须以 UTF-8 BOM 开头。
+
+    这条是补出来的：``scripts/check.ps1`` 一直是"UTF-8 无 BOM + 中文注释"，于是在
+    装了 PS 5.1、没装 pwsh 的开发机上**根本跑不起来** —— 而 README 让人在 Windows
+    上跑它。三条理由让方向毫无含糊：PS 5.1 就是 ANSI 解码无 BOM 文件；PS 7 认 BOM；
+    而 .ps1 永远不在 Linux 上执行，BOM 在那里没有任何坏处。
+
+    顺带守住第二件事：编辑类工具保存时**不会保留 BOM**，改一行中文注释就能把它弄丢，
+    而症状（换一台机器才发现脚本跑不起来）跟那次改动看起来毫无关系。
+    """
+    offenders = find_missing_bom(files)
+
+    assert not offenders, (
+        "以下 PowerShell 脚本缺少 UTF-8 BOM，在 Windows PowerShell 5.1 上会因为中文"
+        "注释而整体解析失败：\n"
+        + "\n".join("  %s" % name for name in offenders)
+        + "\n\n补上 BOM：\n"
+        '  python -c "from pathlib import Path;p=Path(\'文件\');p.write_bytes(b\'\\xef\\xbb\\xbf\'+p.read_bytes())"'
+    )
+
+
+def test_missing_bom_check_actually_catches_it(workdir: Path) -> None:
+    """用一个真的缺 BOM 的 .ps1 验证检查会红（照上面那条的先例）。"""
+    good = workdir / "good.ps1"
+    good.write_bytes(b"\xef\xbb\xbf" + "写一行中文注释\n".encode("utf-8"))
+    bad = workdir / "bad.ps1"
+    bad.write_bytes("写一行中文注释\n".encode("utf-8"))
+    other = workdir / "notes.py"  # 不在检查范围内
+    other.write_bytes(b"\xef\xbb\xbfx = 1\n")
+
+    offenders = find_missing_bom([good, bad, other])
+
+    assert [Path(name).name for name in offenders] == ["bad.ps1"], offenders
 
 
 def test_cr_check_actually_catches_crlf(workdir: Path) -> None:

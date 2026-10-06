@@ -12,7 +12,7 @@ import shutil
 import tempfile
 import zipfile
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
@@ -58,6 +58,7 @@ from ..models import (
     Roster,
     RosterEntry,
     SourceFile,
+    iso_utc,
     utcnow,
 )
 from ..paths import PathValidationError, safe_join, slugify, validate_relpath
@@ -69,6 +70,7 @@ from ..schemas import (
     ApplyRosterOut,
     AssetOut,
     AssetRenameIn,
+    AssetTextIn,
     BootstrapKeyIssueIn,
     BootstrapKeyIssuedOut,
     BootstrapKeyOut,
@@ -148,11 +150,60 @@ log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
-_ISO = "%Y-%m-%dT%H:%M:%SZ"
-
 
 def _iso(value) -> Optional[str]:
-    return value.strftime(_ISO) if value else None
+    """库里的 naive UTC → API 的 ISO-8601。
+
+    实现只有一处：``models.iso_utc``（时间格式与存储约定都写在那个模块的
+    docstring 里）。这里留一层薄封装只是因为本文件有几十处调用点。
+    """
+    return iso_utc(value)
+
+
+def _parse_iso(value: Optional[str], label: str) -> Optional[datetime]:
+    """请求里的 ISO-8601 字符串 → 库里的 naive UTC。
+
+    三种写法都要认：
+
+    * 带 ``Z``（``2026-06-01T01:00:00Z``）—— 我们自己回显用的就是这个形状，
+      "把服务端给的值再喂回来"必须成立
+    * 带偏移（``2026-06-01T09:00:00+08:00``）—— 浏览器 ``toISOString`` 之外的
+      工具会这么发；按它自己声明的时区折算，绝不当地时间硬存
+    * 不带时区（``2026-06-01T09:00:00``）—— **当成 UTC**。这是本系统对外的
+      时间约定（见 ``docs/api-conventions.md`` 的命名表），不是猜。
+
+    空串与 ``None`` 都是"这一端不限制"。
+    """
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    text_value = raw[:-1] + "+00:00" if raw[-1] in ("Z", "z") else raw
+    try:
+        parsed = datetime.fromisoformat(text_value)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="%s 不是合法的时间（例：2026-06-01T09:00:00），请检查格式" % label,
+        )
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def _require_valid_window(starts_at: Optional[datetime], ends_at: Optional[datetime]) -> None:
+    """开考时间必须早于结束时间。
+
+    反过来的窗口**永远不会成立**：整场考试从头到尾都"还没开考"，而到点判定又
+    说"已结束"。这种配置一旦存进去，现场只能用"把两个时间都删掉"来救，
+    所以宁可在写入时挡下来，并说清楚该怎么改。
+    """
+    if starts_at is not None and ends_at is not None and starts_at > ends_at:
+        raise ApiError(
+            400,
+            "bad_request",
+            "开考时间不能晚于结束时间，否则这场考试永远不会开始。请把结束时间改到开考之后",
+            {"starts_at": iso_utc(starts_at), "ends_at": iso_utc(ends_at)},
+        )
 
 
 def require_confirm(actual: Optional[str], given: Optional[str], label: str) -> None:
@@ -301,6 +352,12 @@ def create_contest(
     status_value = payload.status if payload.status in ContestStatus.ALL else ContestStatus.DRAFT
     slug = slugify(payload.slug or payload.name, fallback="contest")
 
+    # 时间窗在建场时就可以配（大多数场次是"先建好、顺手把考试时间定下来"）。
+    # 两个都留空 = 不限制，这是默认；只配一个也合法。
+    starts_at = _parse_iso(payload.starts_at, "开考时间")
+    ends_at = _parse_iso(payload.ends_at, "结束时间")
+    _require_valid_window(starts_at, ends_at)
+
     with ctx.db.session() as session:
         if session.execute(select(Contest).where(Contest.slug == slug)).scalar_one_or_none():
             raise HTTPException(status_code=409, detail="场次标识已存在: %s" % slug)
@@ -310,6 +367,8 @@ def create_contest(
             name=payload.name,
             status=status_value,
             note=payload.note,
+            starts_at=starts_at,
+            ends_at=ends_at,
             default_roster_id=roster.id if roster else None,
         )
         session.add(contest)
@@ -357,6 +416,12 @@ def update_contest(
     ``default_roster_id`` 有个特殊之处：``None`` 没法区分"没传"和"要清空"。
     所以清空要靠 ``clear_default_roster`` 这个显式开关 —— 否则教师一次选错
     名单就再也改不回来了。
+
+    时间窗（``starts_at`` / ``ends_at``）走另一条路：直接看
+    ``model_fields_set``。"传了 null" = 清掉这一端的时间限制，"压根没传" =
+    这次别动它。两者必须分得开 —— 用 ``is not None`` 判断的话，教师永远删不掉
+    一个填错的时间点，而界面上看起来是保存成功了（那种"改完又变回去"的故障
+    最难查，因为它不报错）。
     """
     with ctx.db.session() as session:
         contest = session.get(Contest, contest_id)
@@ -371,6 +436,16 @@ def update_contest(
             if payload.status not in ContestStatus.ALL:
                 raise HTTPException(status_code=400, detail="未知的场次状态: %s" % payload.status)
             contest.status = payload.status
+
+        # 时间窗要拿**改完之后**的两个值一起校验：只 POST 了新结束时间的请求，
+        # 同样可能把窗口配反（老的开考时间 > 新的结束时间）。
+        provided = payload.model_fields_set
+        starts_at = _parse_iso(payload.starts_at, "开考时间") if "starts_at" in provided else contest.starts_at
+        ends_at = _parse_iso(payload.ends_at, "结束时间") if "ends_at" in provided else contest.ends_at
+        _require_valid_window(starts_at, ends_at)
+        contest.starts_at = starts_at
+        contest.ends_at = ends_at
+
         roster = None
         if payload.clear_default_roster:
             contest.default_roster_id = None
@@ -414,6 +489,10 @@ def _contest_out(
         default_roster_id=contest.default_roster_id,
         default_roster_name=(roster.name if roster is not None else None),
         note=contest.note,
+        # 时间窗要能回显：教师填完再打开对话框，看到的是刚才那两个值。
+        # 不回显的话他会重新填一遍，而且永远不知道自己有没有填上。
+        starts_at=_iso(contest.starts_at),
+        ends_at=_iso(contest.ends_at),
     )
 
 
@@ -544,6 +623,41 @@ def update_roster(
         return _roster_out(roster, count)
 
 
+def _bound_player_nos(session, roster_id: int) -> List[str]:
+    """这份名单里**被机器绑着**的人的考号（去重、按考号排序）。
+
+    机器绑的是名单条目（``agent.roster_entry_id``），而条目被删时那个外键是
+    ``ON DELETE SET NULL`` —— 于是那台机器回到"未配对"，下一次心跳显示新的配对码，
+    要教师**重新配一遍**。这件事必须先说出来：它是不可逆的**批量**解绑，而且完全静默
+    （端点的说明原来只写"不动任何场次的选手" —— 对场次确实没动，机器被解绑了）。
+    """
+    rows = session.execute(
+        select(RosterEntry.player_no)
+        .join(Agent, Agent.roster_entry_id == RosterEntry.id)
+        .where(RosterEntry.roster_id == roster_id)
+        .order_by(RosterEntry.player_no)
+    ).scalars()
+    return list(dict.fromkeys(rows))
+
+
+def _roster_in_use_error(bound: List[str], what: str) -> ApiError:
+    """被机器绑着时**拒绝**，并给出台数、前几个人、以及出路。
+
+    选拒绝而不是"允许但警告"，与结构性删除要打名字是同一条理由（§5.4）：这是不可逆的
+    批量解绑，而一句"确定吗"在连续操作里会被手指记忆点掉。
+    """
+    shown = "、".join(bound[:3]) + ("…" if len(bound) > 3 else "")
+    return ApiError(
+        409,
+        "roster_in_use",
+        "%s里有 %d 台机器绑在上面的人（%s）。这么做会把这 %d 台机器全部解除配对 ——"
+        "它们下次心跳会显示新的配对码，要一台台重新配。请先到「机器配对」里把这几台"
+        "改派或解绑，再回来。"
+        % (what, len(bound), shown, len(bound)),
+        {"count": len(bound), "player_nos": bound[:20]},
+    )
+
+
 @router.delete("/rosters/{roster_id}", response_model=SimpleAck)
 def delete_roster(
     roster_id: int,
@@ -556,12 +670,20 @@ def delete_roster(
     **只删名单本身，不动任何场次的选手。** 名单是模板，场次的参赛者是从它
     复制出去的一份独立数据 —— 删模板不该牵动已发生的比赛。引用了这份名单的
     场次会被置空（``ON DELETE SET NULL``），只是"没预设名单了"而已。
+
+    **但机器不适用这句话**：机器绑的是名单里的**人**（条目），条目会随名单一起被删，
+    于是那批机器被解除配对、要重新配一遍。所以有机器绑着时**拒绝删除**，并说清代价
+    （见 :func:`_roster_in_use_error`）。这条直接关系到"配对一次、之后 N 场比赛零人工"
+    这个性质 —— 不能让人在以为"只是个模板"的时候把它悄悄拆掉。
     """
     with ctx.db.session() as session:
         roster = session.get(Roster, roster_id)
         if roster is None:
             return SimpleAck(ok=True, detail="名单不存在")
         require_confirm(roster.name, confirm, "名单名称")
+        bound = _bound_player_nos(session, roster_id)
+        if bound:
+            raise _roster_in_use_error(bound, "这份名单")
         name = roster.name
         referenced = session.execute(
             select(func.count(Contest.id)).where(Contest.default_roster_id == roster_id)
@@ -695,12 +817,19 @@ def clear_roster_entries(
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> SimpleAck:
-    """清空名单里的全部条目（保留名单本身）。"""
+    """清空名单里的全部条目（保留名单本身）。
+
+    与删整份名单同一个理由要拦：机器绑的是条目，清空等于把这份名单上**所有**机器的
+    配对照样解除掉。所以有机器绑着时拒绝，并说清是哪几个人。
+    """
     with ctx.db.session() as session:
         roster = session.get(Roster, roster_id)
         if roster is None:
             raise HTTPException(status_code=404, detail="名单不存在")
         require_confirm(roster.name, payload.confirm, "名单名称")
+        bound = _bound_player_nos(session, roster_id)
+        if bound:
+            raise _roster_in_use_error(bound, "这份名单")
         removed = 0
         for entry in session.execute(
             select(RosterEntry).where(RosterEntry.roster_id == roster_id)
@@ -718,14 +847,27 @@ def delete_roster_entry(
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> SimpleAck:
+    """从名单里删掉一个人。
+
+    **允许**（这本来就是"这个人走了"），但要把副作用如实说出来：绑在这条条目上的
+    机器会被解除配对（外键 ``ON DELETE SET NULL``），它下次心跳会显示新的配对码。
+    不说的话，教师只会看到"已移除 S001"，然后对着那台机器的配对码发愣 ——
+    这条路径不像"删整份名单"那样带批量风险，所以拦它反而碍事。
+    """
     with ctx.db.session() as session:
         entry = session.get(RosterEntry, entry_id)
         if entry is None:
             return SimpleAck(ok=True, detail="条目不存在")
         require_confirm(entry.player_no, confirm, "考号")
         player_no = entry.player_no
+        bound = session.execute(
+            select(func.count(Agent.id)).where(Agent.roster_entry_id == entry_id)
+        ).scalar_one()
         session.delete(entry)
-    return SimpleAck(ok=True, detail="已从名单中移除 %s" % player_no)
+    detail = "已从名单中移除 %s" % player_no
+    if bound:
+        detail += "（同时解除了 %d 台机器的配对，它们下次心跳会显示新的配对码）" % bound
+    return SimpleAck(ok=True, detail=detail)
 
 
 @router.post("/contests/{contest_id}/players/apply-roster", response_model=ApplyRosterOut)
@@ -2490,39 +2632,48 @@ def health(ctx: AppContext = Depends(get_ctx)) -> Dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
-@router.post("/contests/{contest_id}/assets", response_model=AssetOut)
-def upload_asset(
-    contest_id: int,
-    file: UploadFile = File(...),
-    kind: str = Form("testdata"),
-    ctx: AppContext = Depends(get_ctx),
-    admin: AdminIdentity = Depends(require_admin),
-) -> AssetOut:
-    """上传一个待下发文件。
+def _validate_asset_filename(name: str) -> str:
+    """校验并归一化资产文件名，返回能用的那一个。
 
-    走与服务端回收同一套内容寻址存储：相同内容只占一份磁盘。因此"给全场下发
-    同一份 500MB 测试点"实际只消耗 500MB，而不是 50 × 500MB。
+    文件名会**参与 Agent 侧的落地路径**，所以按路径段的规则校验一遍：不允许斜杠、
+    ``..``、控制字符 —— 否则"改个名字"就能把文件写到别的地方去。
+
+    上传、改名、新建文本三条路都走它：同一条规则抄三遍，迟早有一处松掉。
+    """
+    name = (name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="文件名不能为空")
+    if len(name) > 255:
+        raise HTTPException(status_code=400, detail="文件名超过 255 字符")
+    if name in (".", ".."):
+        raise HTTPException(status_code=400, detail="文件名不合法")
+    # 这一条是"文件名"而不是"相对路径"：`validate_relpath` 会**接受** `a/b.txt`
+    # （那是合法相对路径），于是一个填了斜杠的文件名会让文件在选手机器上落进一个
+    # 凭空多出来的子目录里 —— 界面说的明明是"文件名"。所以自己再拦一道。
+    # 上传那条路不受影响：浏览器可能发来完整路径，那边先取 `Path(...).name` 剥掉。
+    if "/" in name or "\\" in name:
+        raise HTTPException(status_code=400, detail="文件名不能带路径分隔符（/ 或 \\）")
+    try:
+        validate_relpath(name, max_length=255)
+    except PathValidationError as exc:
+        raise HTTPException(status_code=400, detail="文件名不合法: %s" % exc)
+    return name
+
+
+def _create_asset(
+    ctx: AppContext, contest_id: int, *, sha256: str, size: int, filename: str, kind: str
+) -> AssetOut:
+    """登记一个资产，内容已经在 blob 库里。
+
+    抽出来是因为现在有两条创建路（上传文件、直接写文本），而"同名同内容就复用"
+    这条判据必须一致 —— 各写一遍的话，一条会去重、另一条会造出两份一模一样的资产，
+    界面上看起来就是"我明明只发了一次"。
     """
     with ctx.db.session() as session:
         contest = session.get(Contest, contest_id)
         if contest is None:
             raise HTTPException(status_code=404, detail="场次不存在")
 
-    filename = Path(file.filename or "unnamed").name
-    if not filename:
-        raise HTTPException(status_code=400, detail="文件名不能为空")
-
-    try:
-        sha256, size = ctx.blobs.put_stream(
-            file.file,
-            max_bytes=ctx.settings.max_asset_size,
-        )
-    except BlobTooLarge as exc:
-        raise HTTPException(status_code=413, detail=str(exc))
-    except HashMismatch as exc:  # pragma: no cover - 未声明哈希时不会触发
-        raise HTTPException(status_code=400, detail=str(exc))
-
-    with ctx.db.session() as session:
         existing = session.execute(
             select(Asset).where(
                 Asset.contest_id == contest_id,
@@ -2540,6 +2691,95 @@ def upload_asset(
         session.add(asset)
         session.flush()
         return _asset_out(asset)
+
+
+@router.post("/contests/{contest_id}/assets", response_model=AssetOut)
+def upload_asset(
+    contest_id: int,
+    file: UploadFile = File(...),
+    kind: str = Form("testdata"),
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> AssetOut:
+    """上传一个待下发文件。
+
+    走与服务端回收同一套内容寻址存储：相同内容只占一份磁盘。因此"给全场下发
+    同一份 500MB 测试点"实际只消耗 500MB，而不是 50 × 500MB。
+    """
+    filename = _validate_asset_filename(Path(file.filename or "unnamed").name)
+
+    try:
+        sha256, size = ctx.blobs.put_stream(
+            file.file,
+            max_bytes=ctx.settings.max_asset_size,
+        )
+    except BlobTooLarge as exc:
+        raise HTTPException(status_code=413, detail=str(exc))
+    except HashMismatch as exc:  # pragma: no cover - 未声明哈希时不会触发
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    return _create_asset(
+        ctx, contest_id, sha256=sha256, size=size, filename=filename, kind=kind
+    )
+
+
+@router.post("/contests/{contest_id}/assets/text", response_model=AssetOut)
+def create_text_asset(
+    contest_id: int,
+    payload: AssetTextIn,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> AssetOut:
+    """**直接写一个纯文本资产**（`须知.txt`、`README.md`、`说明.md`…）。
+
+    为什么需要它：教师想给选手发一段"注意事项"，而为此要在自己机器上先造一个文件、
+    再上传，是纯粹的仪式 —— 内容本来就是在浏览器里打的。发完之后它和上传的资产
+    **完全一样**（同样的内容寻址、同样的下发流程），所以下游一行都不用改。
+
+    两条边界，都是为了让"界面里写的东西"和"落到选手桌面上的文件"逐字节一致：
+
+    * **换行统一成 LF**。浏览器 textarea 给的是 ``\\n``，但从别处粘进来的内容可能带
+      ``\\r\\n``，而目标机是 Linux —— 留着那个 ``\\r`` 会在选手的编辑器里显示成
+      ``^M``，看起来像文件坏了。
+    * **BOM 去掉**。从 Windows 记事本粘过来的文本可能带 U+FEFF，它会在 Linux 上
+      变成文件开头三个看不见的字节。
+    """
+    filename = _validate_asset_filename(payload.filename)
+    _reject_binary_filename(filename)
+
+    content = payload.content
+    if content.startswith("\ufeff"):
+        content = content[1:]
+    content = content.replace("\r\n", "\n").replace("\r", "\n")
+
+    try:
+        sha256, size = ctx.blobs.put_bytes(content.encode("utf-8"))
+    except BlobTooLarge as exc:  # pragma: no cover - 上限由 schema 兜着
+        raise HTTPException(status_code=413, detail=str(exc))
+
+    log.info("新建文本资产：%s（%s，%d 字节）", filename, payload.kind, size)
+    return _create_asset(
+        ctx, contest_id, sha256=sha256, size=size, filename=filename, kind=payload.kind
+    )
+
+
+#: 明显是二进制的扩展名。文本入口只服务"随手写一段话"，把 zip/png 之类塞给它
+#: 只会造出一个打不开的文件 —— 那时候教师看到的是"文件发下去了但学生打不开"。
+_BINARY_SUFFIXES = frozenset(
+    ".zip .tar .gz .tgz .bz2 .xz .7z .rar .jar .exe .msi .dll .so .dylib .bin "
+    ".img .iso .db .sqlite .png .jpg .jpeg .gif .webp .bmp .ico .pdf .mp3 .mp4 "
+    ".avi .mkv .mov .doc .docx .xls .xlsx .ppt .pptx".split()
+)
+
+
+def _reject_binary_filename(name: str) -> None:
+    suffix = Path(name).suffix.lower()
+    if suffix in _BINARY_SUFFIXES:
+        raise HTTPException(
+            status_code=400,
+            detail="%s 看起来是二进制文件 —— 请用「上传文件」，"
+            "这里只能写纯文本（.txt / .md / .csv / .ini …）" % suffix,
+        )
 
 
 @router.get("/contests/{contest_id}/assets", response_model=Page[AssetOut])
@@ -2608,19 +2848,7 @@ def rename_asset(
     已经下发给选手的文件不受影响（它们早就落地了），但**未完成**的下发任务
     会按新名字落地 —— 这一点要说清楚，否则教师会以为改名能修正已经发出去的文件。
     """
-    name = payload.filename.strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="文件名不能为空")
-    if len(name) > 255:
-        raise HTTPException(status_code=400, detail="文件名超过 255 字符")
-    # 文件名会参与 Agent 侧的落地路径，这里按路径段的规则校验一遍：
-    # 不允许斜杠、.. 、控制字符，避免"改个名把文件写到别的地方去"
-    try:
-        validate_relpath(name, max_length=255)
-    except PathValidationError as exc:
-        raise HTTPException(status_code=400, detail="文件名不合法: %s" % exc)
-    if name in (".", ".."):
-        raise HTTPException(status_code=400, detail="文件名不合法")
+    name = _validate_asset_filename(payload.filename)
 
     with ctx.db.session() as session:
         asset = session.get(Asset, asset_id)

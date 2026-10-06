@@ -53,6 +53,8 @@ __all__ = [
 AGENT_DIR_NAME = "agent"
 AGENT_PACKAGE_NAME = "syncoj_agent"
 BUILDER_RELPATH = ("packaging", "build_bundle.py")
+INSTALLER_RELPATH = ("packaging", "install.py")
+BOOTSTRAP_RELPATH = ("packaging", "bootstrap.sh")
 LAUNCHER_NAME = "run_agent.py"
 INIT_FILE_NAME = "__init__.py"
 VERSION_ATTR = "__version__"
@@ -173,6 +175,35 @@ def probe_source(public_url: Optional[str] = None) -> SourceProbe:
 
 def _as_str(path: Optional[Path]) -> Optional[str]:
     return str(path) if path is not None else None
+
+
+def installer_path() -> Path:
+    """``install.py`` —— 装机入口要发给空机器的那一个文件。
+
+    它**不在**离线包里：``build_bundle.py`` 的 ``EXCLUDE_DIRS`` 明确排除了
+    ``packaging/``，因为包是给机器运行用的，安装器是给**装机那一次**用的。
+    所以空机器上只有一个 curl 的时候，第一件要拿到的东西由服务端直接发。
+
+    与构建同一条定位方式（都是"服务端跑在仓库里"这个前提）；不在仓库布局里就
+    抛 :class:`BuildError`，调用方翻译成一句人话。
+    """
+    return _packaging_file(INSTALLER_RELPATH, "安装器")
+
+
+def bootstrap_path() -> Path:
+    """``bootstrap.sh`` —— 那条"一条 curl 起头"的自举脚本。
+
+    它只做三件事：拿到 ``install.py``、把它跑起来、把参数原样传下去。
+    真正的逻辑全在 Python 里（shell 写错难查，而且没法被 CI 覆盖）。
+    """
+    return _packaging_file(BOOTSTRAP_RELPATH, "自举脚本")
+
+
+def _packaging_file(relpath, label: str) -> Path:
+    path = agent_root().joinpath(*relpath)
+    if not path.is_file():
+        raise BuildError("找不到%s %s" % (label, path))
+    return path
 
 
 def build_agent_bundle(

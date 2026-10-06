@@ -33,7 +33,11 @@ OPENAPI_JSON = REPO_ROOT / "web" / "openapi.json"
 ENVELOPE_FIELDS = {"items", "total", "limit", "offset"}
 
 #: 管理端 / Agent 侧前缀
-API_PREFIXES = ("/api/v1/admin", "/api/v1/agent")
+#: 允许的命名空间。三个而不是两个：
+#:   admin  —— 管理端（要登录）
+#:   agent  —— 考试机（要凭据）
+#:   player —— **免登录**的选手页（靠来源 IP 或「场次+考号」定位，见 DESIGN §5.6）
+API_PREFIXES = ("/api/v1/admin", "/api/v1/agent", "/api/v1/player")
 
 #: 目前应该有多少个 GET 集合走信封。少一个就说明有人新加列表时忘了套 ——
 #: 下限而不是等号：加了新列表接口不该让这条测试变红，只要它是信封。

@@ -33,7 +33,7 @@ from sqlalchemy import select
 
 from ..context import AppContext
 from ..errors import ApiError
-from ..models import Agent, Contest, Player, RosterEntry
+from ..models import Agent, Contest, ContestStatus, Player, RosterEntry
 from ..security import hash_token
 
 __all__ = [
@@ -224,16 +224,38 @@ def resolve_machine(session, agent: Agent) -> Resolution:
         return Resolution(agent=agent, entry=entry, contest=contest, player=player)
 
     candidates: List[Tuple[Contest, Player]] = []
-    for contest, player in session.execute(
-        select(Contest, Player)
-        .join(Player, Player.contest_id == Contest.id)
-        .where(Player.player_no == entry.player_no)
-        .order_by(Contest.id)
-    ):
+    matches: List[Tuple[Contest, Player]] = list(
+        session.execute(
+            select(Contest, Player)
+            .join(Player, Player.contest_id == Contest.id)
+            .where(Player.player_no == entry.player_no)
+            .order_by(Contest.id)
+        )
+    )
+    for contest, player in matches:
         if contest.is_active:
             candidates.append((contest, player))
 
     if not candidates:
+        # "没有进行中的场次"里有两种完全不同的情况，说错了会让现场误判：
+        #
+        # * 这场**已经结束**了 —— 学生明明在考试（刚才还在交卷），看到"还没有包含
+        #   你的场次"会以为系统坏了、机器掉线了，跑去重启或者重新注册
+        # * 压根没有他的场次 —— 教师还没把名单应用到场次，那才是真的"还没有"
+        #
+        # 判据只看**已结束**这一个状态：``closed`` 是"这场结束了"，而机器该做的事
+        # 两种情况下完全一样（安静等着，不要重新注册），所以 ``code`` 仍然用
+        # ``no_active_contest`` —— Agent 那边不该为一句措辞多写一个分支。
+        finished = [contest for contest, _ in matches if contest.status == ContestStatus.CLOSED]
+        if finished:
+            return Resolution(
+                agent=agent,
+                entry=entry,
+                contest=None,
+                player=None,
+                reason="你所在的场次（%s）已经结束了" % "、".join(c.name for c in finished),
+                code="no_active_contest",
+            )
         return Resolution(
             agent=agent,
             entry=entry,
@@ -272,12 +294,15 @@ def require_agent(request: Request, ctx: AppContext = Depends(get_ctx)) -> Agent
     变成一场注册风暴**，还会把真正的原因埋进日志噪音里。
     """
     token_hash = hash_token(_bearer(request))
+    client_ip = _client_ip(request)
     with ctx.db.session() as session:
         agent = _load_agent(session, token_hash)
         if agent is None:
             raise _unauthorized("凭据无效")
         if agent.revoked_at is not None:
             raise _unauthorized("该机器的凭据已作废", code="machine_revoked")
+
+        _note_ip(agent, client_ip)
 
         resolved = resolve_machine(session, agent)
         if not resolved.ok:
@@ -292,12 +317,40 @@ def require_agent(request: Request, ctx: AppContext = Depends(get_ctx)) -> Agent
         machine_id = agent.machine_id
         hostname = agent.hostname
 
-    _remember(ctx, identity, machine_id, hostname)
+    _remember(ctx, identity, machine_id, hostname, client_ip)
     return identity
 
 
-def _remember(ctx: AppContext, identity: AgentIdentity, machine_id, hostname) -> None:
-    """把"这台机器现在是谁、在哪场比赛"写进内存注册表。
+def _client_ip(request: Request) -> Optional[str]:
+    """这次请求的来源地址。
+
+    ``request.client`` 在极少数情况下是 ``None``（ASGI 服务器没给出对端地址），
+    那时返回 None —— 记不下地址只会让选手页退回手填那一条路，不该让请求失败。
+    """
+    return request.client.host if request.client else None
+
+
+def _note_ip(agent: Agent, ip: Optional[str]) -> None:
+    """把来源 IP 记在这台机器上。
+
+    每个带凭据的请求都要走（心跳、上传、下载、事件），因为选手页的"自动匹配本机"
+    是按 IP 找机器的，而**这一页自己不会触发心跳** —— 它进来时还没有任何凭据。
+    只在心跳里记的话，选手刚开机看到的那一页会 404，几十秒后才"自己好了"。
+
+    只在变化时赋值，避免每次请求都把这行标脏（SQLAlchemy 会因此生成一条 UPDATE）。
+    """
+    if ip and agent.last_seen_ip != ip:
+        agent.last_seen_ip = ip
+
+
+def _remember(
+    ctx: AppContext,
+    identity: AgentIdentity,
+    machine_id,
+    hostname,
+    ip: Optional[str] = None,
+) -> None:
+    """把"这台机器现在是谁、在哪场比赛、从哪来"写进内存注册表。
 
     在线状态**只存在于内存里**（心跳时更新），所以每一个能干活请求都必须
     经过这里。漏掉任何一个（特别是 ``/tick`` —— 它才是心跳）的后果是
@@ -312,6 +365,7 @@ def _remember(ctx: AppContext, identity: AgentIdentity, machine_id, hostname) ->
         contest_slug=identity.contest_slug,
         machine_id=machine_id,
         hostname=hostname,
+        ip=ip,
     )
 
 
@@ -352,12 +406,18 @@ def require_principal(request: Request, ctx: AppContext = Depends(get_ctx)) -> P
     只会多出一堆需要判空的分支。
     """
     token_hash = hash_token(_bearer(request))
+    client_ip = _client_ip(request)
     with ctx.db.session() as session:
         agent = _load_agent(session, token_hash)
         if agent is None:
             raise _unauthorized("凭据无效")
         if agent.revoked_at is not None:
             raise _unauthorized("该机器的凭据已作废", code="machine_revoked")
+
+        # 干不了活的机器**也要**记 IP：它正是"配对好了但还没有场次"的那一档
+        # （或者还没配对），而选手页要用同一个地址把这台机器认出来、
+        # 再如实告诉选手"卡在哪一档"。
+        _note_ip(agent, client_ip)
 
         resolved = resolve_machine(session, agent)
         if resolved.ok:
@@ -366,7 +426,7 @@ def require_principal(request: Request, ctx: AppContext = Depends(get_ctx)) -> P
             hostname = agent.hostname
             # /tick 是**唯一**的心跳入口，而在线状态只活在内存注册表里。
             # 不在这里登记的话，管理界面看到的永远是一页空白 —— 而且不报错。
-            _remember(ctx, identity, machine_id, hostname)
+            _remember(ctx, identity, machine_id, hostname, client_ip)
             return identity
 
         entry = resolved.entry

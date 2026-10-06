@@ -458,6 +458,101 @@ def test_error_handlers_are_actually_installed() -> None:
     assert "install_error_handlers" in source
 
 
+#: 会直接显示给用户看的错误句子里，不该出现的 Markdown 标记。
+#:
+#: ``errors.py`` 顶部写着规矩：``detail`` 是"一个能直接显示给人看的中文句子"。
+#: 而 ``**已铺开**`` 到了管理界面里就是字面上的两个星号 —— 装机页在"还没有铺开
+#: 版本"时把那句 ``detail`` 原样显示出来，于是页面上真的出现了两个星号
+#: （在浏览器里截图才看出来）。反引号同理。
+#:
+#: ``__x__`` 是加粗语法，但 ``__version__`` 是 Python 标识符：源码里那句提示教师
+#: 去改 ``__version__`` 的文案是正常的，所以这条正则要求首尾配对。
+_MARKDOWN_IN_TEXT = re.compile(r"\*\*[^*]+\*\*|__[^_]+__|`[^`]+`")
+
+#: 扫的时候连 ``HTTPException`` 一起看：它的 detail 一样会显示给用户
+#: （统一处理器会把它包成同一个错误体）。而 :data:`_ERROR_RAISERS` 只管"code 从哪来"，
+#: 是另一个问题，所以这里单独列一份。
+_TEXT_RAISERS = {"ApiError", "error_response", "HTTPException"}
+
+
+def _error_texts_in_source(text: str) -> "list[tuple[int, str]]":
+    """挖出源码里**会显示给用户**的字符串字面量，返回 ``(行号, 内容)``。
+
+    只认那几个"把错误发出去"的调用。用 AST 而不是 grep：注释里成百上千个 ``**``
+    完全正常（那是文档），grep 会把它们一起捞出来，假警报一多这条守卫就没人看了。
+    """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:  # pragma: no cover - 源码有语法错误时不在这里报
+        return []
+    out = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or _call_name(node) not in _TEXT_RAISERS:
+            continue
+        for child in ast.walk(node):
+            if isinstance(child, ast.Constant) and isinstance(child.value, str):
+                out.append((child.lineno, child.value))
+    return out
+
+
+def _markdown_in(text: str) -> "str | None":
+    """这句错误文案里有没有会显示成字面符号的 Markdown 标记；有就把它返回。
+
+    ``__x__`` 有个真实的歧义：``__version__`` / ``__init__`` 是 Python 标识符，
+    和加粗语法长得**一模一样**。这里取的规矩是：内层是纯 ASCII 标识符就不算
+    （源码里那种写法十有八九是在说一个名字），中文夹在 ``__`` 中间才算加粗残留。
+    """
+    for match in _MARKDOWN_IN_TEXT.finditer(text):
+        token = match.group(0)
+        if token.startswith("__") and token[2:-2].isascii() and token[2:-2].isidentifier():
+            continue
+        return token
+    return None
+
+
+def test_给用户看的错误句子不夹带_Markdown_标记() -> None:
+    """错误句子是给人直接看的，不是给渲染器看的。"""
+    offenders = []
+    for name, source in _server_sources():
+        for line, text in _error_texts_in_source(source):
+            token = _markdown_in(text)
+            if token:
+                offenders.append(
+                    "%s:%d 出现 %r —— %s" % (name, line, token, text[:60])
+                )
+
+    assert not offenders, (
+        "错误句子里夹带 Markdown 标记，界面上会显示成字面符号：\n" + "\n".join(offenders)
+    )
+
+
+def test_Markdown_扫描器抓得住真的夹带() -> None:
+    """先证明扫描器有效。
+
+    没有这一条，正则一旦写坏（或者 ``ApiError`` 被改名），上面那一条会退化成
+    "空列表里没有违规"，永远绿 —— 这类失效在本仓库已经出现过。
+    """
+    sample = (
+        "raise ApiError(404, 'install_unavailable', '只发**已铺开**的版本')\n"
+        "raise ApiError(400, 'bad_request', '请先改 agent/syncoj_agent/__init__.py 里的 __version__')\n"
+        "raise ApiError(400, 'bad_request', '这场已经被 __关掉__ 了')\n"
+        "raise HTTPException(400, '看 `docs/protocol.md`')\n"
+        "raise SomethingElse(400, '**别人家的不算**')\n"
+    )
+
+    found = [
+        text
+        for _line, text in _error_texts_in_source(sample)
+        if _markdown_in(text)
+    ]
+
+    assert found == [
+        "只发**已铺开**的版本",
+        "这场已经被 __关掉__ 了",
+        "看 `docs/protocol.md`",
+    ]
+
+
 def test_api_error_without_detail_and_unknown_code_fails_loudly() -> None:
     """忘了给 detail 又用了一个没登记的码时，宁可当场炸 —— 让用户看到
     "None" 是最糟的失败方式：它既不报错，也说不清哪里错了。"""

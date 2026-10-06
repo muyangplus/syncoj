@@ -11,6 +11,7 @@ import argparse
 import logging
 import os
 import secrets
+import socket
 import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -278,6 +279,51 @@ def _configure_logging(level: str) -> None:
     logging.getLogger("syncoj").setLevel(level.upper())
 
 
+def _listen_socket(host: str, port: int) -> socket.socket:
+    """开一个监听用的 socket：**只绑定，不 listen**。
+
+    为什么要自己绑：这台服务端要同时听两个端口（管理端口 + 公开端口），而
+    ``uvicorn.run`` 只肯绑一个 —— 而且一旦传了 ``sockets=``，它连那一个都不绑了。
+    所以两个都得在这里绑好，再整批交给 ``uvicorn.Server.run(sockets=...)``。
+
+    只绑不 ``listen()``、也不设非阻塞：拿到已绑定的 socket 之后是 asyncio 在
+    ``loop.create_server(sock=…)`` 里负责 ``listen()`` 与设非阻塞。这里多做一步
+    反而会和它打架（那正是 uvicorn 自己 ``Config.bind_socket`` 的做法）。
+    """
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((host, port))
+    return sock
+
+
+def _warn_public_port_unavailable(port: int, admin_port: int) -> None:
+    """绑不上公开端口时把两条修法说清楚。
+
+    必须说：现场看到的只是"考生页打不开"，而根因是权限 —— 不提示的话没人会
+    往这个方向想，只会去查网络和防火墙。而且这时**管理界面是完全正常的**，
+    更容易让人以为前端出了问题。
+    """
+    print(
+        "[!] 公开端口 %d 绑不上（当前身份没有绑定特权端口的权限）。" % port,
+        file=sys.stderr,
+    )
+    print(
+        "    管理界面照常，考生页与装机页要从 http://<本机地址>:%d/ 打开。" % admin_port,
+        file=sys.stderr,
+    )
+    print("    两种修法，任选其一：", file=sys.stderr)
+    print(
+        "      1) 给服务进程绑定能力：systemd 里 AmbientCapabilities=CAP_NET_BIND_SERVICE"
+        "（或 setcap 'cap_net_bind_service=+ep' <解释器>）；",
+        file=sys.stderr,
+    )
+    print(
+        "      2) 换一个非特权端口：SYNCOJ_PUBLIC_PORT=8080 syncoj-server serve …",
+        file=sys.stderr,
+    )
+
+
 def _cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
@@ -299,13 +345,52 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     from . import main as app_module
 
     app = app_module.create_app(settings)
-    uvicorn.run(
+    # 前端要用它把装机命令里的地址指向**API 端口**（而不是它恰好在的那个端口）：
+    # 那个地址会被写进机器、从此长期使用，见 main._public_mode_script。
+    app.state.admin_port = args.port
+
+    try:
+        listeners = [_listen_socket(args.host, args.port)]
+    except OSError as exc:
+        print("错误：%s:%d 起不来 —— %s" % (args.host, args.port, exc), file=sys.stderr)
+        return 2
+
+    public_bound: Optional[int] = None
+    public_port = settings.public_port
+    if public_port and public_port != args.port:
+        try:
+            listeners.append(_listen_socket(args.host, public_port))
+            public_bound = public_port
+        except PermissionError:
+            _warn_public_port_unavailable(public_port, args.port)
+        except OSError as exc:
+            print(
+                "[!] 公开端口 %d 起不来（%s）—— 考生页与装机页仍可从 %d 打开。"
+                % (public_port, exc, args.port),
+                file=sys.stderr,
+            )
+    elif public_port == args.port:
+        print("[i] 公开端口与管理端口相同（%d）：不隔离端口，管理界面也从这里进。" % args.port)
+
+    # 门禁的总开关就是这一个值：**真的在听着**才挡管理端（见 main._public_port_of）。
+    # 绑不上、或公开端口就是管理端口时**不写它**，于是管理界面永远进得去 ——
+    # 一个绑不上特权端口的服务端，不该顺带把自己的管理界面也关掉。
+    if public_bound:
+        app.state.public_port = public_bound
+        print("[i] 考试机页面: http://%s/   （公开端口 %d；管理界面在 %d）" % (args.host, public_bound, args.port))
+
+    config = uvicorn.Config(
         app,
         host=args.host,
         port=args.port,
         log_level=args.log_level,
         access_log=not args.quiet_access,
     )
+    try:
+        uvicorn.Server(config).run(sockets=listeners)
+    finally:
+        for sock in listeners:
+            sock.close()
     return 0
 
 

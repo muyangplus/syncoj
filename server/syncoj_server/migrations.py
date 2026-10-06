@@ -13,12 +13,14 @@
 三条规矩
 --------
 1. **只前进，不回退。** 回退要处理数据丢失，收益远小于风险；要退就还原备份。
-2. **绝不在迁移里重建（rebuild）已有表。** SQLite 改不了列的可空性，网上给出的
-   办法是"建新表→搬数据→换名"，但那需要关闭外键强制，而 ``PRAGMA foreign_keys``
-   **在事务里是空操作**。真的关不掉时，``DROP TABLE`` 会做一次隐式 DELETE，
-   顺着 ``ON DELETE CASCADE`` 把子表数据一起删掉 —— 在考试系统里这是不可接受的
-   风险。所以本轮的"未认领机器"**另立一张表**（``machine_claim``），
-   而不是把 ``agent.player_id`` 改成可空。
+2. **重建表（rebuild）只能按 :func:`_rebuild_table` 的配方来。** 删一列、改一次
+   可空性，在 SQLite 里只能"建新表→搬数据→换名"。本方案一开始写的是"绝不重建"
+   （怕关不掉外键，让 ``DROP TABLE`` 顺着 ``ON DELETE CASCADE`` 把子表删光），
+   但那等于永久放弃改结构，代价太大 —— 所以改成把配方定死、并加看守测试
+   （见 ``DESIGN.md`` §4.8 与 ``tests/test_migrations.py``）。**三条必须同时成立**：
+   裸连接 + autocommit 下关 ``foreign_keys``（``PRAGMA`` 在事务里是空操作）、
+   打开 ``legacy_alter_table``（否则 ``RENAME`` 会去改写引用方）、DDL 用文本改写
+   生成而不是 ``to_metadata()``。少任何一条都是静默删数据的级别。
 3. **新表交给 create_all，新列交给迁移。** 这个分工省掉了在迁移里写
    ``CREATE TABLE``，也解释了为什么下面的步骤里看不到建表语句。
 """
@@ -331,9 +333,82 @@ def _bind_legacy_agents_to_roster(engine: Engine, bindings: List[Tuple[int, str]
             )
 
 
+def _migration_003_player_notice(engine: Engine) -> None:
+    """给场次加"给选手看的注意事项"（``contest.player_notice``）。
+
+    刻意做成最朴素的那种一步：**一个可空列的 ADD COLUMN**，不重建表、不回填、
+    不引入新表。
+
+    为什么不塞进 ``_BASELINE_COLUMNS``：基线只服务 ``user_version == 0`` 的库
+    （迁移器出现之前建的那些）。开发期已经停在版本 2 上的库不会被基线碰到 ——
+    而"老库少一列"恰恰只会在它身上发生，所以这里必须是一条真会跑的迁移。
+    漏掉的表现是：选手页在那个库上直接 500（``no such column``），
+    而新库一切正常 —— 那种"只有升级上来的库才坏"的故障最难查。
+
+    新库那边由 ``create_all`` 直接建出这一列，跑这里时是空操作；版本号照样推进，
+    否则两条路径的 ``user_version`` 会分叉。
+    """
+    if "contest" in _tables(engine):
+        _add_column(engine, "contest", "player_notice", "TEXT")
+
+
+def _migration_004_agent_last_seen_ip(engine: Engine) -> None:
+    """给机器加"最近一次请求的来源 IP"（``agent.last_seen_ip``）。
+
+    选手页的"自动匹配本机"要靠它：选手什么都不填，服务端按来源 IP 找到那台机器。
+    所以这一列必须在**每一次**带凭据的请求上更新，而不只是心跳时 —— 选手页
+    自己不会触发心跳（它拿着一个还没有身份的请求进来）。
+
+    同样是一个可空列的 ``ADD COLUMN``：老机器还没有这一列时是 NULL，
+    匹配不上就 404 并请选手手填场次与考号，而不是猜。
+    """
+    if "agent" in _tables(engine):
+        _add_column(engine, "agent", "last_seen_ip", "VARCHAR(64)")
+
+
+def _migration_005_contest_window(engine: Engine) -> None:
+    """场次的可配置考试时间窗：补上 ``starts_at`` / ``ends_at``，撤掉 ``player_notice``。
+
+    这一版一次做成两件事，因为它们动的是**同一张表、同一个重建动作**：
+
+    1. 补上 ``starts_at`` / ``ends_at``。这两列从服务端第一版起就在模型里，
+       但从来没有接口读写、也没留过迁移记录 —— 开发期的库结构靠
+       ``db reset --yes`` 兜底、不保证兼容，所以凡是缺列的库都在这里补上。
+    2. 删掉 ``player_notice``（迁移 003 加的）。考场公告改成"下发一份 NOTICE.md
+       文件"之后，这个字段没有任何读者了；留着它，老库会带着一列永远没人读的数据
+       跑下去，而新库没有那一列 —— 两条升级路径从此结构不同。
+
+    **为什么不去改 003 让它别加这一列**：003 早就跑过了。现在每一个真的开发库
+    （``runtime/server/syncoj.db`` 停在版本 4）里那一列都在，改历史只会让
+    "已经加上的列"永远没人删。所以是"003 加、005 减"，链条上看着多余，
+    但这正是迁移只能往前走的那一面。
+
+    重建只在**真的需要**时做：重建是这套迁移里唯一"整表搬动"的动作，配方见
+    :func:`_rebuild_table`（关外键 + autocommit，少一条就会顺着 ``ON DELETE
+    CASCADE`` 把 ``player`` / ``problem`` / ``agent_status`` 清空）。
+    表已经和模型一致时不重建 —— 无谓地跑一遍就是白冒一次丢数据的风险。
+    """
+    if "contest" not in _tables(engine):
+        return
+
+    columns = _columns(engine, "contest")
+    if "player_notice" not in columns and "starts_at" in columns and "ends_at" in columns:
+        # 已经和模型一致：什么都不用做（新库、以及已经升上来的库都走这一支）
+        return
+
+    _rebuild_table(engine, "contest")
+
+
 MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
     (1, "统一密钥注册 + 名单库所需的结构", _migration_001_enrollment),
     (2, "机器永久绑定名单条目；去掉注册码链路", _migration_002_roster_binding),
+    (3, "场次增加给选手看的注意事项", _migration_003_player_notice),
+    (4, "机器记录最近一次请求的来源 IP", _migration_004_agent_last_seen_ip),
+    (
+        5,
+        "场次增加开考/结束时间；去掉场次上的选手注意事项",
+        _migration_005_contest_window,
+    ),
 ]
 
 LATEST_VERSION = MIGRATIONS[-1][0] if MIGRATIONS else 0

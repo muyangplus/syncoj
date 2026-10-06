@@ -232,7 +232,7 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
   "machine_id": "0123456789abcdef0123456789abcdef",
   "hostname": "exam-pc-01",
   "ts": 1767225600,
-  "scan_root": "/home/student/code",
+  "scan_root": "/home/student/桌面",
   "scan": [
     { "path": "code/main.cpp", "sha256": "ab12…", "size": 1234, "mtime": 1767225500 }
   ],

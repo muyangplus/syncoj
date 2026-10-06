@@ -137,7 +137,17 @@ def _remember_public_url(app: FastAPI, ctx: AppContext) -> None:
             host = (request.headers.get("host") or "").strip()
             if host and not _is_loopback_host(host):
                 scheme = (request.headers.get("x-forwarded-proto") or "http").split(",")[0].strip()
-                ctx.public_url_hint = "%s://%s" % (scheme or "http", host)
+                new_hint = "%s://%s" % (scheme or "http", host)
+                if new_hint != ctx.public_url_hint:
+                    ctx.public_url_hint = new_hint
+                    # **把算出来的地址直接打出来**：现场第一个问题永远是"这台服务端
+                    # 认为自己是哪个地址"，而它只在第一次从局域网打开界面之后才有值。
+                    # 顺带印出来源 —— 来源决定了这个地址有多可信，也决定了要不要改用
+                    # SYNCOJ_PUBLIC_URL 固定下来。变了才打，避免每翻一页刷一行。
+                    url, source = discovery.advertised_url_with_source(
+                        ctx, request.client.host if request.client else None
+                    )
+                    log.info("对外地址: %s（来源：%s）", url or "还没有", source)
         return response
 
 

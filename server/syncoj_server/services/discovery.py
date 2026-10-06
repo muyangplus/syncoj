@@ -75,6 +75,7 @@ __all__ = [
     "build_probe",
     "build_reply",
     "describe_advertised_url",
+    "advertised_url_with_source",
     "run_discovery_responder",
     "local_address_for",
     "parse_probe",
@@ -232,6 +233,38 @@ def local_address_for(peer_ip: str, port: int = 9) -> Optional[str]:
         sock.close()
 
 
+def advertised_url_with_source(
+    ctx: AppContext, peer_ip: Optional[str] = None
+) -> Tuple[Optional[str], str]:
+    """同 :func:`describe_advertised_url`，但把"这个地址是从哪来的"一起返回。
+
+    为什么要这一半：现场第一个问题永远是"这台服务端认为自己是哪个地址"，
+    而"从哪来的"决定了它有多可信（显式配置 > 内核反推 > 教师浏览器用过的那条）。
+    日志里只写一个 URL，运维没法判断该不该信它、要不要改用
+    ``SYNCOJ_PUBLIC_URL`` 固定下来。
+
+    返回值第二段是给人看的一句中文；没有地址时是 ``"还没有"``。
+    """
+    configured = (ctx.settings.public_url or "").strip()
+    if configured:
+        return configured.rstrip("/"), "显式配置（SYNCOJ_PUBLIC_URL / --public-url）"
+
+    if peer_ip:
+        local = local_address_for(peer_ip)
+        # 推导出来的回环地址是**没用**的：那说明这台服务端和请求方在同一台机器上
+        # （或者中间隔着本机的反向代理），把 127.0.0.1 发给考试机等于让它们连自己。
+        if local and not local.startswith("127."):
+            return (
+                "http://%s:%d" % (local, ctx.settings.http_port),
+                "从请求来源反推（内核给出，客户端伪造不了）",
+            )
+
+    observed = (getattr(ctx, "public_url_hint", None) or "").strip()
+    if observed:
+        return observed.rstrip("/"), "管理界面访问地址（Host 头，只记成功的请求）"
+    return None, "还没有"
+
+
 def describe_advertised_url(ctx: AppContext, peer_ip: Optional[str] = None) -> Optional[str]:
     """这台服务端该对外说自己是哪个地址；说不出来就 ``None``。
 
@@ -248,21 +281,7 @@ def describe_advertised_url(ctx: AppContext, peer_ip: Optional[str] = None) -> O
     三条都没有就返回 ``None``：**宁可不吭声，也不要退回 127.0.0.1** ——
     那会让 50 台机器各自连自己，而现场只看到"注册不上"。
     """
-    configured = (ctx.settings.public_url or "").strip()
-    if configured:
-        return configured.rstrip("/")
-
-    if peer_ip:
-        local = local_address_for(peer_ip)
-        # 推导出来的回环地址是**没用**的：那说明这台服务端和请求方在同一台机器上
-        # （或者中间隔着本机的反向代理），把 127.0.0.1 发给考试机等于让它们连自己。
-        if local and not local.startswith("127."):
-            return "http://%s:%d" % (local, ctx.settings.http_port)
-
-    observed = (getattr(ctx, "public_url_hint", None) or "").strip()
-    if observed:
-        return observed.rstrip("/")
-    return None
+    return advertised_url_with_source(ctx, peer_ip)[0]
 
 
 def _remember_peer(seen: Dict[str, Tuple[float, int]], peer_ip: str, limit: int, now: float):

@@ -322,6 +322,95 @@ def test_什么都没有时_宁可不吭声(ctx, monkeypatch: pytest.MonkeyPatch
     assert discovery.describe_advertised_url(ctx) is None
 
 
+def test_地址从哪来也要报出来(ctx, monkeypatch: pytest.MonkeyPatch) -> None:
+    """只报一个 URL，运维没法判断该不该信它。
+
+    现场第一个问题永远是"这台服务端认为自己是哪个地址"，第二个问题就是
+    "这个地址是从哪来的、要不要用 --public-url 固定"。所以两件事一起返回。
+    """
+    # 1) 显式配置最优先
+    ctx.settings.public_url = "http://10.0.0.5:8000/"
+    url, source = discovery.advertised_url_with_source(ctx, "10.0.0.9")
+    assert url == "http://10.0.0.5:8000"
+    assert "显式配置" in source
+
+    # 2) 没配就看请求来源反推
+    ctx.settings.public_url = ""
+    monkeypatch.setattr(discovery, "local_address_for", lambda peer, port=9: "10.0.0.7")
+    url, source = discovery.advertised_url_with_source(ctx, "10.0.0.9")
+    assert url == "http://10.0.0.7:%d" % ctx.settings.http_port
+    assert "反推" in source
+
+    # 3) 再退到"教师浏览器用过的那个 Host"
+    monkeypatch.setattr(discovery, "local_address_for", lambda peer, port=9: None)
+    ctx.public_url_hint = "http://10.0.0.9:8000"
+    url, source = discovery.advertised_url_with_source(ctx, "10.0.0.9")
+    assert url == "http://10.0.0.9:8000"
+    assert "管理界面" in source
+
+    # 4) 什么都没有：如实说"还没有"，而不是硬凑一个
+    ctx.public_url_hint = None
+    url, source = discovery.advertised_url_with_source(ctx)
+    assert url is None
+    assert source == "还没有"
+
+
+def test_第一次从局域网打开管理界面时把算出来的地址打出来(
+    ctx, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """这一行日志是现场判断"机器会拿到哪个地址"的唯一直接证据。
+
+    启动时服务端确实不知道自己的对外地址（没有请求就没有线索），所以必须在**学会
+    的那一刻**把结果打出来；而且只在变化时打 —— 每翻一页刷一行会把日志淹掉。
+    """
+    import logging
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from syncoj_server import main as app_module
+
+    # 让"从请求来源反推"不参与，单看 Host 那条路（真实机器上两条都可能给出答案，
+    # 谁优先由 describe_advertised_url 定，这里只验"有没有把答案打出来"）
+    monkeypatch.setattr(discovery, "local_address_for", lambda peer, port=9: None)
+
+    app = FastAPI()
+    app_module._remember_public_url(app, ctx)
+
+    @app.get("/api/v1/admin/ping")
+    def _ping() -> dict:  # pragma: no cover - 只为触发中间件
+        return {"ok": True}
+
+    with TestClient(app) as client:
+        with caplog.at_level(logging.INFO, logger="syncoj_server.main"):
+            first = client.get(
+                "/api/v1/admin/ping", headers={"host": "10.0.0.9:8000"}
+            )
+            assert first.status_code == 200
+            assert ctx.public_url_hint == "http://10.0.0.9:8000"
+            assert any(
+                "10.0.0.9:8000" in record.getMessage() for record in caplog.records
+            ), "学会了对外地址却没打进日志：%r" % [r.getMessage() for r in caplog.records]
+
+            caplog.clear()
+            client.get("/api/v1/admin/ping", headers={"host": "10.0.0.9:8000"})
+            assert caplog.records == [], "地址没变就不该再打一遍"
+
+            # 换了地址（比如教师换了网线）→ 新的那个才该被报出来
+            client.get("/api/v1/admin/ping", headers={"host": "10.0.0.30:8000"})
+            assert ctx.public_url_hint == "http://10.0.0.30:8000"
+            assert caplog.records, "地址变了却没报"
+
+            # 失败的请求不许污染它（Host 头谁都能写，只有成功过的地址才算证据）
+            caplog.clear()
+            missing = client.get(
+                "/api/v1/admin/does-not-exist", headers={"host": "attacker.example:9"}
+            )
+            assert missing.status_code == 404
+            assert ctx.public_url_hint == "http://10.0.0.30:8000"
+            assert caplog.records == []
+
+
 def test_不知道地址时不应答(ctx, signer, monkeypatch: pytest.MonkeyPatch) -> None:
     """连自己对外是什么地址都不知道，就该闭嘴 —— 而不是回一个 127.0.0.1。"""
     monkeypatch.setattr(discovery, "local_address_for", lambda peer, port=9: None)

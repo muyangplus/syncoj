@@ -335,11 +335,16 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     if args.public_url:
         settings.public_url = args.public_url
     if settings.public_url:
-        print("[i] 对外地址: %s" % settings.public_url)
+        print("[i] 对外地址: %s（显式配置）" % settings.public_url)
     elif args.host not in ("127.0.0.1", "localhost", "::1"):
-        # 没显式配、又确实在对外监听：地址将从"教师浏览器用过的那个 Host"学出来。
-        # 这件事必须说出来 —— 否则"包里的地址是从哪来的"在现场是个谜。
-        print("[i] 未指定对外地址：将从管理界面的访问地址推出来（也可用 SYNCOJ_PUBLIC_URL / --public-url 固定）")
+        # 没显式配、又确实在对外监听：地址将从"教师浏览器用过的那个 Host"或
+        # "请求来源反推"里学出来。这件事必须说出来 —— 否则"包里的地址是从哪来的"
+        # 在现场是个谜。而且要说清**此刻还没有**：启动时确实不知道，第一次从局域网
+        # 打开管理界面时才会打出一行"对外地址: …（来源：…）"。
+        print(
+            "[i] 对外地址: 还没有 —— 第一次从局域网打开管理界面时会算出并打印出来"
+            "（也可用 SYNCOJ_PUBLIC_URL / --public-url 现在就固定下来）"
+        )
 
     # 用工厂模式，避免 import 时产生磁盘副作用
     from . import main as app_module

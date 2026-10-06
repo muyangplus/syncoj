@@ -26,6 +26,19 @@ export const assetApi = {
     return request<AssetOut>(paths.contestAssets(contestId), { method: 'POST', form })
   },
 
+  /**
+   * 直接在界面里写一个纯文本资产（`须知.txt`、`NOTICE.md`…）。
+   *
+   * 内容本来就是在浏览器里打的，为发一句话先在自己机器上造个文件是纯粹的仪式。
+   * 落盘后它与上传的资产**完全一样**（同一套内容寻址 + 同一条下发流程）；服务端
+   * 会把换行统一成 LF、去掉 BOM，并且**同场次 + 同名 + 同内容只留一条** ——
+   * 命中已有那条时返回的是**原来那个 id**，不是新记录。
+   */
+  createText: (
+    contestId: number,
+    payload: { filename: string; content: string; kind?: string },
+  ) => request<AssetOut>(paths.contestAssetsText(contestId), { method: 'POST', body: payload }),
+
   /** 改名。内容按 sha256 存，改名只换标签 —— 未完成的下发任务会按新名字落地。 */
   rename: (assetId: number, payload: AssetRenameIn) =>
     request<AssetOut>(paths.asset(assetId), { method: 'PATCH', body: payload }),

@@ -203,9 +203,7 @@ async function askRemove(row: SourceFileOut): Promise<void> {
   try {
     await ElMessageBox.confirm(
       `把 ${row.player_no} 的 ${row.rel_path} 从台账里删掉？\n\n` +
-        '这是一条**墓碑**：记录还在，勾上「含已删除」仍然看得到，导出归档里也仍然包含它。\n' +
-        '注意：文件只要还在选手机器上，下一轮扫描就会被重新收上来 —— ' +
-        '这个按钮管的是服务端的归档，管不到那边的文件。',
+        '这是一条墓碑：勾上「含已删除」仍看得到；文件还在机器上，下一轮扫描会被重新收上来。',
       '删除台账记录',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
     )
@@ -281,7 +279,7 @@ const scopeLabel = computed(() => {
 <template>
   <PageShell
     title="代码台账"
-    hint="收上来的选手代码，同名文件只留最新版本；本页内最近更新的排最前。"
+    hint="收上来的选手代码，同名文件只留最新版本。"
     :error="list.error.value"
     error-action="代码台账取不到时，成绩与交付判断都不可信。"
     retryable
@@ -289,8 +287,7 @@ const scopeLabel = computed(() => {
   >
     <template #hint>
       <HelpTip>
-        同名文件的每一次内容变化都会让修订号 +1；迟到的旧版本会被服务端拒绝，
-        不会覆盖新版本。
+        修订号随内容变化 +1；迟到的旧版本会被服务端拒绝。
       </HelpTip>
     </template>
     <template #toolbar>
@@ -378,9 +375,7 @@ const scopeLabel = computed(() => {
       <el-tag v-if="problems.loose" size="small" type="warning" effect="plain">
         本页有文件没归到任何题目
       </el-tag>
-      <span class="muted">
-        「归属」由题目清单里的「代码路径」模式决定，改模式立刻生效，不用重收文件。
-      </span>
+      <span class="muted">「归属」由题目清单里的「代码路径」模式决定，改模式立刻生效。</span>
     </div>
 
     <DataTable
@@ -491,7 +486,7 @@ const scopeLabel = computed(() => {
 
       <template #empty>
         <p>还没有回收任何代码。</p>
-        <p class="page-hint">代码由 Agent 扫描后自己上报。一直空着说明机器没在线或没配对。</p>
+        <p class="page-hint">一直空着说明机器没在线或没配对。</p>
         <el-button type="primary" size="small" style="margin-top: 12px" @click="router.push({ name: 'overview' })">
           去看选手状态
         </el-button>
@@ -499,7 +494,6 @@ const scopeLabel = computed(() => {
     </DataTable>
 
     <p v-if="list.total.value > rows.length" class="page-hint" style="margin-top: 8px">
-      本页 {{ rows.length }} 条，共 {{ list.total.value }} 条。
       搜索与归题筛选只作用在本页 —— 要缩小范围请用选手筛选。
     </p>
 
@@ -536,10 +530,7 @@ const scopeLabel = computed(() => {
         `当前范围共 ${list.total.value} 条记录`,
         clearPurge ? '连还在的记录一起清理（已勾选）' : '只清「已消失」的墓碑记录',
       ]"
-      :detail="
-        `将清理：${scopeLabel}。` +
-        '默认只清「已消失」的墓碑记录，这不会影响任何还在的东西。'
-      "
+      :detail="`将清理：${scopeLabel}。`"
       @confirm="clearFiles.run(undefined)"
     >
       <div style="margin-bottom: 4px">
@@ -550,7 +541,7 @@ const scopeLabel = computed(() => {
       <el-alert v-if="clearPurge" type="error" :closable="false" show-icon>
         <template #title>注意：机器还在报的文件下一轮就会被重新收上来</template>
         <template #default>
-          它不会删掉学生机器上的文件 —— 只适合归档完毕、准备清场的场景。
+          它不会删掉学生机器上的文件。
         </template>
       </el-alert>
     </ConfirmByNameDialog>

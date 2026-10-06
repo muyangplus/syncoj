@@ -325,7 +325,7 @@ const saveManual = useMutation(
   },
   {
     // `JudgeRunOut` 上没有服务端的回执，自己拼一句，并把"不会被覆盖"这个关键约定写出来
-    success: '已保存。这一格是手工录入，自动扫描与「立即重扫」都不会覆盖它。',
+    success: '已保存。',
     onDone: async () => {
       editing.value = false
       await Promise.all([reloadMatrix(), runs.reload()])
@@ -419,7 +419,7 @@ function runStatusLabel(parseStatus: string): string {
 <template>
   <PageShell
     title="成绩"
-    hint="评测器输出目录：judge_result/<场次>/<选手>/<题目>/。点格子可手工录分。"
+    hint="点矩阵里的格子可手工录分或修正。"
     :error="error"
     error-action="矩阵取不到时不要手工录分 —— 会重复记。"
     retryable
@@ -427,8 +427,7 @@ function runStatusLabel(parseStatus: string): string {
   >
     <template #hint>
       <HelpTip>
-        服务端每 10 秒扫一次结果目录并自动汇总。点一下矩阵里的格子可以手工录分或修正；
-        手工录的分会被标记并永久保留，自动扫描不会覆盖它。
+        手工录的分永久保留，自动扫描不会覆盖它。
       </HelpTip>
     </template>
     <template #toolbar>
@@ -458,11 +457,7 @@ function runStatusLabel(parseStatus: string): string {
           <li v-for="(item, index) in scanErrors" :key="index">{{ item }}</li>
         </ul>
         <div v-else class="page-hint">没有读取层面的错误。</div>
-        <div class="page-hint">
-          「未变化」是 mtime 没动、这次没重新解析的格子；「跳过」是结果目录里没有
-          可用的结果文件（或目录名对不上本场次的选手）；「保留手工录入」是你亲手录的、
-          重扫不会覆盖的那些。
-        </div>
+        <div class="page-hint">「未变化」是这次没重新解析；「跳过」是目录里没有可用结果。</div>
       </template>
     </el-alert>
 
@@ -523,7 +518,7 @@ function runStatusLabel(parseStatus: string): string {
             {{ item.row.player_no }} / {{ item.cell.problem }}
           </el-tag>
           <span v-if="pendingCells.length > 20" class="muted">
-            等 {{ pendingCells.length }} 项。文件已收到，只差评测器出结果 —— 也可以直接点格子手工录分。
+            只差评测器出结果，也可以直接点格子手工录分。
           </span>
         </div>
       </template>
@@ -552,8 +547,7 @@ function runStatusLabel(parseStatus: string): string {
             {{ item.row.player_no }} / {{ item.cell.problem }}
           </el-tag>
           <span v-if="missingCells.length > 20" class="muted">
-            共 {{ missingCells.length }} 项。代码按「代码路径」模式认领 ——
-            模式配错了也会显示成没交，可在「题目清单 → 路径试算」里确认。
+            模式配错也会显示成没交，可在「题目清单 → 路径试算」确认。
           </span>
         </div>
       </template>
@@ -623,7 +617,6 @@ function runStatusLabel(parseStatus: string): string {
 
     <el-card v-else shadow="never">
       <div class="empty-block">
-        <p>还没有任何评测成绩，也没有登记题目。</p>
         <p>先登记题目清单，或点右上角「立即重扫」。</p>
         <el-button
           type="primary"
@@ -661,7 +654,7 @@ function runStatusLabel(parseStatus: string): string {
         </div>
       </div>
 
-      <p class="page-hint">每一格成绩来自哪个文件、为什么没读懂，都在这里。<strong>点「补录」可手工判分。</strong></p>
+      <p class="page-hint">点「补录」可手工判分。</p>
 
       <DataTable
         :rows="runs.rows.value"
@@ -718,8 +711,7 @@ function runStatusLabel(parseStatus: string): string {
         </template>
 
         <template #empty>
-          <p>没有匹配的评测记录。</p>
-          <p>记录来自 <code>judge_result/&lt;场次&gt;/&lt;选手&gt;/&lt;题目&gt;/</code>。一条都没有就先确认目录写对了，再点「立即重扫」。</p>
+          <p>一条都没有就先确认结果目录写对了，再点「立即重扫」。</p>
         </template>
       </DataTable>
     </div>
@@ -753,8 +745,7 @@ function runStatusLabel(parseStatus: string): string {
       <el-alert v-if="manualUnparsed" type="warning" :closable="false" show-icon style="margin-bottom: 10px">
         <template #title>这一格是自动解析失败的，原因：{{ manualSeed?.detail || '（服务端没有给出原因）' }}</template>
         <template #default>
-          系统没法覆盖所有评测器格式，所以这里给你留了补录的口子。
-          下面「评测记录」里能按「未解析」过滤出所有同类记录。
+          可到下面「评测记录」按「未解析」筛出同类记录。
         </template>
       </el-alert>
 
@@ -762,7 +753,7 @@ function runStatusLabel(parseStatus: string): string {
         type="info"
         :closable="false"
         show-icon
-        title="手工录的分永久保留，重扫不会覆盖它；要恢复自动扫描点「清除这一格」。"
+        title="要恢复自动扫描，点「清除这一格」。"
       />
 
       <template #footer-prepend>

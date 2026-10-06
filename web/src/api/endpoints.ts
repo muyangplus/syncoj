@@ -104,6 +104,8 @@ export const paths = {
 
   // ---- 文件下发 ----
   contestAssets: (contestId: number) => `${ADMIN}/contests/${contestId}/assets`,
+  /** 直接写一个纯文本资产（`须知.txt`、`NOTICE.md`…）。返回与上传同一个 `AssetOut`。 */
+  contestAssetsText: (contestId: number) => `${ADMIN}/contests/${contestId}/assets/text`,
   asset: (assetId: number) => `${ADMIN}/assets/${assetId}`,
   contestDeploys: (contestId: number) => `${ADMIN}/contests/${contestId}/deploys`,
   deploy: (taskId: number) => `${ADMIN}/deploys/${taskId}`,
@@ -135,4 +137,14 @@ export const paths = {
   releaseRollout: (releaseId: number) => `${ADMIN}/releases/${releaseId}/rollout`,
   releaseYank: (releaseId: number) => `${ADMIN}/releases/${releaseId}/yank`,
   release: (releaseId: number) => `${ADMIN}/releases/${releaseId}`,
+
+  // ---- 装机入口（**免登录**）----
+  // 不在 `/api/v1/admin` 下面，因为调用者不是登录后的管理界面，而是"任意一台还没
+  // 装 Agent 的机器"和站在它前面的教师。**这里也放选手页的只读接口** —— 它同样
+  // 免登录（选手不登录），身份靠场次 slug + 考号。
+  installLedger: () => '/api/v1/agent/install.json',
+  installBundle: () => '/api/v1/agent/install/bundle',
+  installInstaller: () => '/api/v1/agent/install/installer',
+  installBootstrap: () => '/api/v1/agent/install/bootstrap.sh',
+  playerContext: () => '/api/v1/player/context',
 } as const

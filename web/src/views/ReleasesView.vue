@@ -111,6 +111,36 @@ const canBuild = computed(
   () => buildable.value && !trustAnchorMissing.value && !!buildVersion.value.trim(),
 )
 
+async function copyText(value: string | undefined, what: string): Promise<void> {
+  if (!value) return
+  try {
+    await navigator.clipboard.writeText(value)
+    ElMessage.success(`已复制${what}`)
+  } catch {
+    // 非 HTTPS 或浏览器策略下剪贴板不可用，提示手工复制而不是静默失败
+    ElMessage.warning('浏览器不允许自动复制，请手工选中复制')
+  }
+}
+
+/**
+ * 给空机器的安装命令。
+ *
+ * 一台什么都没有的机器上只有 shell，所以起头那一下必须是 curl —— 而机器该去哪个
+ * 地址拿，只有服务端自己知道（见 `/releases/source` 的 `public_url`）。
+ *
+ * **服务端报不出自己的地址时这条命令就不显示**：那样拼出来的会是 `127.0.0.1`，
+ * 而在别的机器上它指向那台机器自己 —— 教师会照着敲，然后看着"连不上"去查网线与
+ * 防火墙。宁可这里空着，也不能给一条必然是错的命令。
+ */
+const installCommand = computed(() => {
+  const base = source.value?.public_url
+  if (!activeRelease.value || !base) return ''
+  return (
+    `curl -fsSL ${base}/api/v1/agent/install/bootstrap.sh | ` +
+    `sudo sh -s -- --server ${base}`
+  )
+})
+
 const build = useMutation(
   () => releaseApi.build(buildVersion.value.trim(), buildNotes.value.trim()),
   {
@@ -217,12 +247,7 @@ async function removeRelease(release: ReleaseOut): Promise<void> {
   try {
     await ElMessageBox.confirm(
       `删除版本 ${release.version} 的发布记录？\n\n` +
-        '发布包按 sha256 存在服务端的 blob 存储里、内容寻址：删掉这条记录不会动磁盘上' +
-        '其它记录还在引用的包，只有没有任何记录再引用同一份内容时才会把它一起回收。\n' +
-        (release.yanked
-          ? '这个版本已经撤回过，机器不会再被提供它。'
-          : '这个版本从未铺开，Agent 从来没见过它。') +
-        '\n\n删掉之后「当时推的是哪个包」就没有对照物了。',
+        '包文件不会动，但删掉之后「当时推的是哪个包」就没有对照物了。',
       '删除发布记录',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
     )
@@ -314,8 +339,7 @@ const editSave = useMutation(
         <span class="blocked-title">服务端没有配置发布签名私钥 —— 自更新功能整体关闭</span>
       </template>
 
-      <p class="page-hint">没有私钥就签不出包，而 Agent 一律拒绝没签名的包 —— 所以现在升级不了任何一台机器。</p>
-
+      <p class="page-hint">没有私钥就签不出包，现在升级不了任何一台机器。</p>
 
       <el-descriptions :column="1" size="small" border style="margin-top: 12px">
         <el-descriptions-item label="第一步：生成密钥对">
@@ -363,29 +387,22 @@ const editSave = useMutation(
       </div>
 
       <p class="page-hint">
-        从本机
-        <span class="mono">{{ source?.agent_root }}</span>
-        的源码打一个包，用签名私钥签好，直接进版本历史。
-        <strong>仍然是「未铺开」—— 要再点「铺开」，机器才拿得到。</strong>
+        打出来的包直接进版本历史，但<strong>仍然是「未铺开」—— 要再点「铺开」，机器才拿得到。</strong>
       </p>
 
       <p v-if="versionDrifts" class="page-hint warn-hint">
         提交的版本号和源码里写的
         <span class="mono">{{ source?.version }}</span>
-        不一致，服务端会拒绝。要么改
-        <span class="mono">agent/syncoj_agent/__init__.py</span> 里的
-        <span class="mono">__version__</span>，要么把这里改回来 —— 两者不一致时，
-        包里那份代码和发布记录上那个号就对不上了。
+        不一致，服务端会拒绝；两边改成一样再提交。
       </p>
       <p v-else-if="versionExists" class="page-hint warn-hint">
-        历史里已经有 {{ buildVersion.trim() }}。未铺开的同名版本会被覆盖（没有机器拿过它）；
-        正在铺开的会被服务端拒绝，要先「撤回」。
+        历史里已经有 {{ buildVersion.trim() }}：未铺开的同名版本会被覆盖，
+        正在铺开的要先「撤回」。
       </p>
 
       <p v-if="trustAnchorMissing" class="page-hint warn-hint">
         本机没有要内嵌进包里的发布公钥（<span class="mono">.key/release-key.pub.json</span>），
-        服务端会拒绝构建 —— 那样打出来的包机器验不了签名，铺开之后所有机器都会静默不升级。
-        跑一次 <span class="mono">syncoj-server init</span> 会把它生成出来。
+        服务端会拒绝构建；跑一次 <span class="mono">syncoj-server init</span> 生成它。
       </p>
     </el-card>
 
@@ -406,7 +423,7 @@ const editSave = useMutation(
           选择安装包并上传
         </el-button>
       </div>
-      <p class="page-hint">上传后服务端会用私钥给包的 sha256 签名。<strong>传完仍然是「未铺开」，Agent 看不到它。</strong></p>
+      <p class="page-hint">上传后服务端会用私钥签名，但<strong>传完仍是「未铺开」</strong>。</p>
       <p v-if="status?.key_id" class="page-hint">
         当前用于签名的密钥：<span class="mono">{{ status.key_id }}</span>
       </p>
@@ -433,6 +450,27 @@ const editSave = useMutation(
         </el-button>
       </div>
       <p class="page-hint">客户端按 <code>upgrade.mode</code> 行动：<code>off</code> 只记录不下载；<code>stage</code> 下载并验签但不激活；<code>apply</code> 才切换并重启。</p>
+
+      <!--
+        给空机器的安装命令。**只发已铺开的版本**（与升级同一个判据），所以它必须
+        出现在这块"当前铺开版本"卡片里 —— 没铺开就没有可安装的东西。
+        服务端报不出自己地址时这条不显示，原因见 installCommand 的注释。
+      -->
+      <template v-if="installCommand">
+        <div class="install-row">
+          <div class="install-label">在新机器上装 Agent：</div>
+          <code class="install-command">{{ installCommand }}</code>
+          <el-button size="small" @click="copyText(installCommand, '安装命令')">复制</el-button>
+        </div>
+        <p class="page-hint" style="margin-bottom: 0">
+          这条命令会从服务端取安装器与 <span class="mono">{{ activeRelease.version }}</span>
+          的包，并<strong>对照服务端台账校验 sha256</strong>。
+        </p>
+      </template>
+      <p v-else class="page-hint warn-hint">
+        这台服务端报不出自己对外的地址，所以给不出安装命令 ——
+        配好 <span class="mono">SYNCOJ_PUBLIC_URL</span> 再回来看。
+      </p>
     </el-card>
 
     <el-card v-else-if="signingReady && !loading" shadow="never" class="section">
@@ -531,13 +569,11 @@ const editSave = useMutation(
         </el-table-column>
 
         <template #empty>
-          <div class="empty-block">
-            还没有上传过任何 Agent 版本。上传不会影响任何机器，铺开才会。
-          </div>
+          <div class="empty-block">还没有上传过任何 Agent 版本。</div>
         </template>
       </el-table>
 
-      <p class="page-hint">共 {{ releases.length }} 个版本：铺开中 {{ rolledOutCount }} 个，已撤回 {{ yankedCount }} 个。「删除」删的是发布记录，不是已经装到机器上的程序。</p>
+      <p class="page-hint">铺开中 {{ rolledOutCount }} 个，已撤回 {{ yankedCount }} 个。「删除」删的是发布记录，不是已经装到机器上的程序。</p>
     </el-card>
 
     <el-dialog v-model="editVisible" :title="`编辑版本 ${editForm.version} 的备注`" width="520px">
@@ -619,5 +655,37 @@ const editSave = useMutation(
 /* 提醒用的提示行：不是错误，是"这一步会怎样" */
 .warn-hint {
   color: #e6a23c;
+}
+
+/*
+  安装命令那一行：等宽、可换行、占满宽度。
+  **不能截断** —— 一条被省略号吃掉尾巴的命令，教师复制过去就是语法错误，
+  而报错会指向 shell，指不到"这里少了一段"。
+*/
+.install-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.install-label {
+  font-size: 13px;
+  color: #606266;
+  line-height: 26px;
+}
+
+.install-command {
+  flex: 1;
+  min-width: 280px;
+  padding: 4px 8px;
+  background: #f5f7fa;
+  border: 1px solid #e4e7ed;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 18px;
+  word-break: break-all;
+  white-space: pre-wrap;
 }
 </style>

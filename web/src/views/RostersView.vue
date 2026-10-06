@@ -211,10 +211,9 @@ function askRemoveRoster(): void {
  */
 const deleteRosterDetail = computed(() =>
   [
-    '删掉的只是模板：这份名单本身，以及它记录的人。',
-    '各场次里的选手是从名单复制出去的独立数据，不受影响 —— ' +
-      '他们的成绩、代码、下发目标都还挂在自己身上。',
-    '用过这份名单的场次只是不再指向它（预设名单变成空），需要时重新选一份就行。',
+    '删掉的只是这份名单本身和它记录的人。',
+    '各场次里的选手不受影响 —— 他们的成绩、代码、下发目标都还挂在自己身上；' +
+      '用过这份名单的场次只是不再指向它。',
   ].join('\n'),
 )
 
@@ -309,8 +308,8 @@ async function batchRemoveEntries(): Promise<void> {
   try {
     await ElMessageBox.confirm(
       `从名单「${selectedName.value}」里删除选中的 ${picked.length} 条？\n\n` +
-        '只删名单里的记录 —— 已经应用到场次的选手不受影响。\n' +
-        '服务端没有批量删除接口，这里会逐条调用；失败的会汇总告诉你，不会静默跳过。',
+        '只删名单里的记录，已经应用到场次的选手不受影响。\n' +
+        '失败的会汇总告诉你，不会静默跳过。',
       '删除选中的条目',
       { type: 'warning', confirmButtonText: `删除 ${picked.length} 条`, cancelButtonText: '取消' },
     )
@@ -575,9 +574,7 @@ watch(selectedRosterId, () => {
   >
     <template #hint>
       <HelpTip>
-        一次录入、多场次复用。名单是模板，场次里的选手是从它复制出去的独立数据。<br />
-        机器配对绑的也是名单里的<strong>人</strong>，不是某一场比赛的选手 ——
-        所以同一份名单换一场比赛不用重新配。
+        机器配对绑的也是名单里的<strong>人</strong>，不是某一场比赛的选手。
       </HelpTip>
     </template>
     <template #toolbar>
@@ -611,7 +608,7 @@ watch(selectedRosterId, () => {
           <el-button size="small" type="danger" plain @click="askRemoveRoster">删除名单</el-button>
           <div class="spacer" />
           <el-button size="small" type="primary" @click="openImport">粘贴导入</el-button>
-          <el-tooltip content="名单里有而场次里没有的补上；场次里多出来的选手保持不动。">
+          <el-tooltip content="名单里有而场次里没有的补上；场次里多出来的保持不动。">
             <el-button
               size="small"
               type="success"
@@ -741,8 +738,7 @@ watch(selectedRosterId, () => {
         <template v-if="selectedRoster">
           <p v-if="keyword.trim()">这份名单里没有匹配「{{ keyword.trim() }}」的人。</p>
           <template v-else>
-            <p>「{{ selectedRoster.name }}」还是空的。</p>
-            <p>粘贴一份 Excel 名单就能一次录完，也可以先应用到场次再单独加人。</p>
+            <p>「{{ selectedRoster.name }}」还是空的，粘贴导入就能一次录完。</p>
             <el-button type="primary" size="small" @click="openImport">粘贴导入</el-button>
           </template>
         </template>
@@ -781,9 +777,7 @@ watch(selectedRosterId, () => {
           />
         </el-form-item>
       </el-form>
-      <p class="page-hint">
-        名称是删除时用来确认的标识，所以它必须唯一 —— 重名会被服务端拒绝。
-      </p>
+      <p class="page-hint">名称必须唯一，重名会被服务端拒绝。</p>
     </FormDialog>
 
     <!-- 编辑单条：编号、姓名、座位、分组都在这里改，不用删了重加 -->
@@ -822,8 +816,7 @@ watch(selectedRosterId, () => {
       <el-alert type="info" :closable="false" show-icon style="margin-bottom: 12px">
         <template #title>每行一名选手，用逗号、制表符或空格分隔</template>
         <template #default>
-          <code>编号,姓名,座位,分组</code> —— 只有编号是必填的。
-          直接从 Excel 复制粘贴即可（制表符分隔）。以 <code>#</code> 开头的行会被忽略。
+          <code>编号,姓名,座位,分组</code> —— 只有编号是必填的，其余可留空。
           <br />
           <strong>相同编号会更新已有条目</strong>，所以名单可以反复导。
         </template>
@@ -878,10 +871,6 @@ watch(selectedRosterId, () => {
             </template>
           </el-table-column>
         </el-table>
-
-        <p v-if="invalidRows.length" class="page-hint">
-          有问题的行会被自动跳过，其余照常导入。
-        </p>
       </div>
 
       <template #footer>
@@ -942,7 +931,6 @@ watch(selectedRosterId, () => {
           <template #default>
             <div class="mono">{{ applyReport.protected.join('、') }}</div>
             <div class="page-hint">
-              这是刻意的：删掉他们会连代码与成绩一起清掉，而名单整理不该造成这种后果。
               确实要清人，请到「选手」里逐个处理。
             </div>
           </template>
@@ -989,7 +977,7 @@ watch(selectedRosterId, () => {
       :detail="
         `从名单「${selectedName}」里删掉 ${entryDeleteTarget?.player_no ?? ''}` +
         `${entryDeleteTarget?.name ? ` ${entryDeleteTarget.name}` : ''}。` +
-        '只删名单里的这一条 —— 各场次里的选手是从名单复制出去的独立数据，不受影响。'
+        '只删这一条，各场次里的选手不受影响。'
       "
       @confirm="removeEntry.run(undefined)"
     />
@@ -1002,8 +990,8 @@ watch(selectedRosterId, () => {
       :submitting="clearEntries.pending.value"
       confirm-text="清空"
       :detail="
-        `将清空名单「${selectedName}」里的全部 ${entries.total.value} 条记录，名单本身保留。` +
-        '场次里的选手是从名单复制出去的独立数据，不受影响。'
+        `将清空名单「${selectedName}」里的全部 ${entries.total.value} 条记录，名单本身保留；` +
+        '各场次里的选手不受影响。'
       "
       @confirm="clearEntries.run(undefined)"
     />

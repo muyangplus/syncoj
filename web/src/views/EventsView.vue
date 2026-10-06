@@ -264,9 +264,7 @@ const clearCountHint = computed(() => {
   >
     <template #hint>
       <HelpTip>
-        只增不改。「选手删了哪个文件、什么时候删的、什么时候又出现的」是复核时的唯一依据。<br />
-        默认看<strong>全部场次</strong>：机器注册与指纹告警都发生在配对之前，
-        那时它还不属于任何场次 —— 按场次筛就永远看不到。
+        只增不改；默认「全部」才看得到配对前的全局告警。
       </HelpTip>
     </template>
 
@@ -308,10 +306,7 @@ const clearCountHint = computed(() => {
       <el-button size="small" type="danger" plain @click="openClear">清空日志</el-button>
     </template>
 
-    <p class="page-hint" style="margin-bottom: 8px">
-      范围：{{ scopeLabel }}。级别与分类由服务端筛选（作用于全部日志），
-      关键词只筛本页这 {{ list.rows.value.length }} 条。
-    </p>
+    <p class="page-hint" style="margin-bottom: 8px">范围：{{ scopeLabel }}。</p>
 
     <DataTable
       :rows="rows"
@@ -380,10 +375,8 @@ const clearCountHint = computed(() => {
       <template #empty>
         <p v-if="scope === 'contest' && !contest.currentId">还没选场次。</p>
         <template v-else>
-          <p>这个范围里还没有审计事件。</p>
           <p class="page-hint">
-            如果刚有机器注册上来却没看到，先把范围切回「全部」—— 配对之前的事件
-            不属于任何场次。
+            这个范围里还没有审计事件；刚注册的机器看不到时请把范围切回「全部」。
           </p>
         </template>
       </template>
@@ -401,7 +394,7 @@ const clearCountHint = computed(() => {
       :expected="clearConfirmName"
       :placeholder="clearConfirmPlaceholder"
       :submitting="clearEvents.pending.value"
-      :detail="`即将清空：${clearScopeText}。日志没有墓碑，删掉就没了。${clearCountHint}。`"
+      :detail="`即将清空：${clearScopeText}。${clearCountHint}。`"
       confirm-text="清空"
       @confirm="clearEvents.run(undefined)"
     >
@@ -421,9 +414,6 @@ const clearCountHint = computed(() => {
             <el-radio value="info">只清「信息」级</el-radio>
             <el-radio value="">连警告与错误一起清</el-radio>
           </el-radio-group>
-          <div class="muted">
-            排错靠的往往是警告与错误，只清信息级是更保守的一档。
-          </div>
         </el-form-item>
 
         <el-form-item label="时间范围">
@@ -444,11 +434,7 @@ const clearCountHint = computed(() => {
         show-icon
         style="margin-top: 4px"
         title="不限天数会连最老的日志一起删掉"
-      >
-        <template #default>
-          三天前那台机器为什么掉线，唯一线索可能就在这里面。
-        </template>
-      </el-alert>
+      />
 
       <el-alert
         v-if="clearIsTotal"
@@ -459,8 +445,7 @@ const clearCountHint = computed(() => {
         title="这是最彻底的一档：全部场次 + 不限天数"
       >
         <template #default>
-          执行后服务端只会留下一条「某人在某时清理了审计日志」的记录，其余全部消失。
-          要确认请在上面的输入框里打入 <strong class="mono">{{ GLOBAL_CONFIRM }}</strong>。
+          执行后只会留下一条「某人在某时清理了审计日志」的记录。
         </template>
       </el-alert>
 

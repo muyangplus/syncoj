@@ -150,6 +150,79 @@ function handleFileChange(event: Event): void {
 }
 
 // --------------------------------------------------------------------------- //
+// 在界面里直接写一个纯文本资产
+//
+// 落盘后它与上传的资产**完全一样**（同一套内容寻址、同一条下发流程），之所以
+// 还要这个入口，是因为"比赛结束后不要关机"这句话本来就是在浏览器里打的 ——
+// 为了发它先在自己机器上造一个文件再传上来，是纯粹的仪式。
+//
+// 考场公告是它的一个特例：文件名固定是 `NOTICE.md`，选手页会把它显示成
+// 「考场公告」。所以这里只多一个预填的名字，不另开一条代码路径。
+// --------------------------------------------------------------------------- //
+
+/** 选手页「考场公告」认的就是这个文件名。 */
+const NOTICE_FILENAME = 'NOTICE.md'
+
+const textDialog = ref(false)
+const textForm = reactive({ filename: '', content: '' })
+
+/** 标题与提示都跟着文件名走：它是不是考场公告，看的就是这个名字。 */
+const textIsNotice = computed(() => textForm.filename.trim() === NOTICE_FILENAME)
+
+/**
+ * 两个入口共用一个对话框，区别只有预填的文件名。
+ *
+ * 复制成两份表单的话，"内容可以为空"这类规则迟早只在其中一份里改 ——
+ * 而它们本来就该是同一个动作。
+ */
+function openTextDialog(filename = ''): void {
+  textForm.filename = filename
+  textForm.content = ''
+  // 「写考场公告」把用途预置成「须知」：kind 决定它落到机器上的目标目录，
+  // 一份 NOTICE.md 落在「题面」目录里是脏的。对话框里的 select 绑的是这同一个
+  // ref，所以教师看得见、也还能改；「新建文本文件」保持他当前选的那一个。
+  if (filename.trim() === NOTICE_FILENAME) uploadKind.value = '须知'
+  textDialog.value = true
+}
+
+const createText = useMutation(
+  async () => {
+    const contestId = contest.currentId
+    if (!contestId) throw new Error('还没有选场次')
+    const filename = textForm.filename.trim()
+    if (!filename) throw new Error('文件名不能为空')
+    // 提交前先拍一份快照。服务端对"同场次 + 同名 + 同内容"返回的是**已存在的
+    // 那一条**（id 与之前相同），所以拿返回的 id 跟这份快照比，就能分清这次是
+    // 新建还是复用 —— 一律报"新建成功"会让教师以为生成了两份。
+    //
+    // 快照只是**当前这一页**：列表被截断时（资产超过一页）还有第三种可能 ——
+    // 复用的是更早那一页上的那条。那时不去额外拉一页确认，也不撒谎，只说"已保存"。
+    const knownIds = new Set(assets.rows.value.map((row) => row.id))
+    const truncated = assets.total.value > assets.rows.value.length
+    const asset = await assetApi.createText(contestId, {
+      filename,
+      // 用途沿用工具栏那一套选项：同一个词，上传和手写没有理由用两个
+      kind: uploadKind.value,
+      content: textForm.content,
+    })
+    return { asset, reused: knownIds.has(asset.id), truncated }
+  },
+  {
+    success: ({ asset, reused, truncated }) => {
+      if (reused) return `已存在同名同内容的资产「${asset.filename}」，没有重复创建`
+      // 列表没看全时不敢断言"新建"：命中更早那一页上的旧资产同样是合法的。
+      // 两种情况的最终状态完全一样（不会造出两份），差的只是收据的措辞。
+      const verb = truncated ? '已保存' : '已新建'
+      return `${verb}文本文件「${asset.filename}」（${formatBytes(asset.size)}）`
+    },
+    onDone: async () => {
+      textDialog.value = false
+      await assets.reload()
+    },
+  },
+)
+
+// --------------------------------------------------------------------------- //
 // 资产：改名与删除
 // --------------------------------------------------------------------------- //
 
@@ -207,11 +280,8 @@ const removeAsset = useMutation((asset: AssetOut) => assetApi.remove(asset.id), 
 async function askRemoveAsset(asset: AssetOut): Promise<void> {
   try {
     await ElMessageBox.confirm(
-      `删除可下发文件「${asset.filename}」？\n\n` +
-        '这是软删除：记录还在，磁盘上的内容也不会立刻回收。\n' +
         '引用它的下发任务与逐选手进度会一起被删掉。\n' +
-        '已经落到选手机器上的文件不会撤回 —— 服务端管不到那边的文件，' +
-        '这个按钮只影响"以后还能不能发"。',
+        '已经落到选手机器上的文件不会撤回。',
       '删除可下发文件',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
     )
@@ -326,8 +396,7 @@ async function askCancel(task: DeployTaskOut): Promise<void> {
   try {
     await ElMessageBox.confirm(
       `取消下发「${task.filename}」？\n\n` +
-        '只把还没完成的目标停掉，已经收到文件的机器不会回滚 —— ' +
-        '要求客户端删文件是危险动作，可能误删教师自己放的东西。',
+        '只停掉还没完成的目标 —— 已经收到文件的机器不会回滚。',
       '取消下发',
       { type: 'warning', confirmButtonText: '取消下发', cancelButtonText: '再想想' },
     )
@@ -356,9 +425,8 @@ async function askRemoveTask(task: DeployTaskOut): Promise<void> {
   try {
     await ElMessageBox.confirm(
       `删除下发记录「${task.filename}」？\n\n` +
-        '已经落地的文件不会撤回（服务端管不到选手机器）。\n' +
-        '还没下完的机器不会再收到这个作业，但已经传过去的部分会留在硬盘上。\n' +
-        '要停止下发请用「取消」—— 那个会保留记录，只是不再派发。',
+        '已经落地的文件不会撤回；还没下完的机器不会再收到这个作业。\n' +
+        '要停止下发请用「取消」。',
       '删除下发记录',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
     )
@@ -408,9 +476,7 @@ function targetKindLabel(kind: string): string {
   >
     <template #hint>
       <HelpTip>
-        服务端原样存、原样发、不解压，学生桌面上拿到的就是那一个 zip 文件。<br />
-        带密码的题面：把 <code>password.txt</code> 当普通资产一起下发即可 ——
-        系统既不读、也不存这个密码。
+        带密码的题面：把 <code>password.txt</code> 当普通资产一起下发即可。
       </HelpTip>
     </template>
     <template #toolbar>
@@ -420,6 +486,8 @@ function targetKindLabel(kind: string): string {
         <el-option v-for="kind in KIND_PRESETS" :key="kind" :label="kind" :value="kind" />
       </el-select>
       <el-button size="small" :loading="upload.pending.value" @click="pickFile">上传文件</el-button>
+      <el-button size="small" @click="openTextDialog()">新建文本文件</el-button>
+      <el-button size="small" @click="openTextDialog(NOTICE_FILENAME)">写考场公告</el-button>
       <el-button
         size="small"
         type="primary"
@@ -502,7 +570,7 @@ function targetKindLabel(kind: string): string {
 
       <template #empty>
         <p>还没有上传任何文件。</p>
-        <p>题面与样例先在本地打包成 zip 再传 —— 系统不解压，学生拿到的就是那个 zip。</p>
+        <p>先在本地打包成 zip 再传。</p>
         <el-button type="primary" size="small" style="margin-top: 12px" @click="pickFile">
           上传文件
         </el-button>
@@ -514,9 +582,7 @@ function targetKindLabel(kind: string): string {
         下发任务
         <span class="muted">（共 {{ tasks.total.value }} 条）</span>
       </h3>
-      <p class="page-hint" style="margin: 0">
-        进度由客户端上报，约 10 秒更新一次。展开一行看每一台机器的情况。
-      </p>
+      <p class="page-hint" style="margin: 0">展开一行看每一台机器的情况。</p>
     </div>
 
     <DataTable
@@ -724,9 +790,6 @@ function targetKindLabel(kind: string): string {
           </el-select>
           <div class="page-hint">
             通用资料（题面 zip、样例 zip、须知）<strong>不用选</strong>，留空即落到桌面根目录。
-            <div v-if="!problems.length">
-              本场次还没登记题目。可以先去「场次管理 → 题目」登记，或直接手填目标目录。
-            </div>
           </div>
         </el-form-item>
 
@@ -736,16 +799,8 @@ function targetKindLabel(kind: string): string {
             placeholder="留空 = 桌面根目录；{player_no}/题目名 = 该选手的题目目录"
           />
           <div class="page-hint">
-            <strong>留空就是桌面根目录</strong> —— 题面 zip、样例 zip、须知这类东西
-            直接摆在桌面上最省事，选手双击解压就能看。
-            <br />
-            要按题分发附件（额外样例、数据、模板）时才填
-            <code>{player_no}/&lt;题目名&gt;</code>，对应约定
-            <code>桌面/&lt;准考证号&gt;/&lt;题目名&gt;/</code>；上面选了题目会自动填好。
-            <br />
-            路径相对于客户端配置里的 <code>deploy_root</code>（默认就是<strong>桌面</strong>）。
-            <code>{player_no}</code> 会由服务端<strong>逐选手展开</strong>成准考证号 ——
-            全员下发时每台机器的目标目录都不同。
+            <strong>留空就是桌面根目录</strong>；按题分发填
+            <code>{player_no}/&lt;题目名&gt;</code>，选了题目会自动填好。
             <br />
             <strong>实际落点预览：</strong>
             <code>{{ destPreview }}</code>
@@ -758,8 +813,7 @@ function targetKindLabel(kind: string): string {
             <el-radio value="skip_exist">已存在则跳过</el-radio>
           </el-radio-group>
           <div class="page-hint">
-            下发的是<strong>文件</strong>：目标位置上如果已经有一个同名文件，
-            覆盖会把它换掉，跳过则留着原来那份。zip 不会被解开，所以
+            目标位置上已有同名文件时：覆盖会换掉它，跳过则留原来那份。
             「同名」指的是整个 zip 的名字。
           </div>
         </el-form-item>
@@ -782,9 +836,54 @@ function targetKindLabel(kind: string): string {
       <template #title>只改显示名</template>
       <template #default>
         文件内容按 sha256 存，改名只换标签，已经落地的那份不受影响。
-        <strong>还没下完的任务会按新名字落地</strong>，同一份文件在不同机器上可能叫两个名字。
+        <strong>还没下完的任务会按新名字落地。</strong>
       </template>
     </el-alert>
+    </FormDialog>
+
+    <!-- 「新建文本文件」与「写考场公告」共用这一个对话框，区别只有预填的文件名 -->
+    <FormDialog
+      v-model="textDialog"
+      :title="textIsNotice ? '写考场公告' : '新建文本文件'"
+      :submitting="createText.pending.value"
+      :disabled="!textForm.filename.trim()"
+      confirm-text="创建"
+      @submit="createText.run(undefined)"
+    >
+      <el-alert
+        v-if="textIsNotice"
+        type="info"
+        :closable="false"
+        show-icon
+        style="margin-bottom: 14px"
+      >
+        <template #title>
+          这个文件会显示在选手页的「考场公告」里 —— 每个选手看到的是本场下发给他自己的那份。
+        </template>
+      </el-alert>
+
+      <el-form label-width="90px">
+        <el-form-item label="文件名" required>
+          <el-input v-model="textForm.filename" placeholder="例如 须知.txt" maxlength="255" />
+        </el-form-item>
+
+        <el-form-item label="用途">
+          <el-select v-model="uploadKind" style="width: 100%">
+            <el-option v-for="kind in KIND_PRESETS" :key="kind" :label="kind" :value="kind" />
+          </el-select>
+        </el-form-item>
+
+        <el-form-item label="内容">
+          <el-input
+            v-model="textForm.content"
+            class="text-content"
+            type="textarea"
+            :rows="14"
+            maxlength="200000"
+            placeholder="可以留空 —— 留空就是一个空文件"
+          />
+        </el-form-item>
+      </el-form>
     </FormDialog>
   </PageShell>
 </template>
@@ -825,5 +924,10 @@ function targetKindLabel(kind: string): string {
 .error-text {
   color: #f56c6c;
   font-size: 12px;
+}
+
+/* 正文往往是写给选手照着抄的（一行命令、一个路径），等宽字体比默认字体好抄 */
+.text-content :deep(textarea) {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
 }
 </style>

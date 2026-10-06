@@ -38,6 +38,13 @@ const form = reactive({
   name: '',
   status: 'draft',
   note: '',
+  /**
+   * 考试时间窗。存的是 `Date | null`：`null` = 这一端不限制。
+   * 从服务端回来的是带 Z 的 UTC 字符串，`new Date(...)` 之后 el-date-picker
+   * 显示的就是本机时区的那个时刻 —— 教师看到的就是他刚才填的那个点。
+   */
+  startsAt: null as Date | null,
+  endsAt: null as Date | null,
   defaultRosterId: null as number | null,
 })
 
@@ -46,6 +53,8 @@ watch(visible, async (open) => {
   form.name = props.contest.name
   form.status = props.contest.status
   form.note = props.contest.note ?? ''
+  form.startsAt = props.contest.starts_at ? new Date(props.contest.starts_at) : null
+  form.endsAt = props.contest.ends_at ? new Date(props.contest.ends_at) : null
   form.defaultRosterId = props.contest.default_roster_id ?? null
   applyReceipt.value = ''
   try {
@@ -112,6 +121,11 @@ async function submit(): Promise<void> {
     name: form.name.trim(),
     status: form.status,
     note: form.note.trim(),
+    // **显式传 null**（不是省掉这个字段）：服务端按 `model_fields_set` 判断，
+    // "传了 null" = 清掉这一端的时间限制，"没传" = 这次别动它。清空日期选择框
+    // 就该是前者 —— 否则教师永远删不掉一个填错的时间点。
+    starts_at: form.startsAt ? form.startsAt.toISOString() : null,
+    ends_at: form.endsAt ? form.endsAt.toISOString() : null,
     // null 分不清"没传"和"要清空"，所以清空走显式开关
     clear_default_roster: form.defaultRosterId === null,
     default_roster_id: form.defaultRosterId,
@@ -136,9 +150,8 @@ async function submit(): Promise<void> {
       <el-form-item label="标识">
         <el-input :model-value="contest?.slug ?? ''" disabled />
         <div class="page-hint">
-          标识已经固定在磁盘路径（<code>source/&lt;标识&gt;/…</code>）与评测器配置里，
-          改它会让已有成绩找不到位置，所以这里只读。
-          要删掉整场请回列表页用「删除」——那个入口要求把标识原样打一遍。
+          标识已经固定在磁盘路径（<code>source/&lt;标识&gt;/…</code>）与评测器配置里，所以这里只读。
+          要删掉整场请回列表页用「删除」。
         </div>
       </el-form-item>
 
@@ -152,7 +165,30 @@ async function submit(): Promise<void> {
           />
         </el-select>
         <div class="page-hint">
-          「已封榜」停止下发新文件但仍然收卷 —— 封榜不影响已经在考的机器。
+          「已封榜」停止下发新文件但仍然收卷。
+        </div>
+      </el-form-item>
+
+      <el-form-item label="开考时间">
+        <el-date-picker
+          v-model="form.startsAt"
+          type="datetime"
+          placeholder="留空 = 不限制"
+          clearable
+          style="width: 100%"
+        />
+      </el-form-item>
+
+      <el-form-item label="结束时间">
+        <el-date-picker
+          v-model="form.endsAt"
+          type="datetime"
+          placeholder="留空 = 不限制"
+          clearable
+          style="width: 100%"
+        />
+        <div class="page-hint">
+          <strong>留空 = 不限制</strong>；到结束时间后机器不再接收代码（心跳与题面照常）。
         </div>
       </el-form-item>
 

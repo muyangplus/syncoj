@@ -78,6 +78,7 @@ export type ManualScoreIn = S['ManualScoreIn']
 export type ReleaseOut = S['ReleaseOut']
 export type ReleaseUpdate = S['ReleaseUpdate']
 export type ReleaseSourceOut = S['ReleaseSourceOut']
+export type InstallLedgerOut = S['InstallLedgerOut']
 export type UpgradeStatusOut = S['UpgradeStatusOut']
 
 export type SimpleAck = S['SimpleAck']

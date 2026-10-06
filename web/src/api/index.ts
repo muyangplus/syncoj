@@ -25,6 +25,9 @@ export { assetApi } from './assets'
 export { deployApi } from './deploys'
 export { scoreApi } from './scores'
 export { releaseApi } from './releases'
+export { installApi, absolute, bootstrapCommand } from './install'
+export { playerPageApi } from './playerPage'
+export type { PlayerAssetOut, PlayerContextOut, PlayerNoticeOut } from './playerPage'
 
 // 公共类型也在这里转出去：页面不该关心它实际定义在 crud.ts 还是别处
 export type { ListParams } from './crud'

@@ -49,6 +49,14 @@ const form = reactive({
   slug: '',
   status: 'running',
   note: '',
+  /**
+   * 考试时间窗。类型是 `Date | null`，提交时才转成 ISO 字符串：
+   * el-date-picker 给的是**本机时区**的那一刻，`.toISOString()` 把它变成
+   * 带 Z 的 UTC，服务端按同一个时刻存下来 —— 页面上再显示出来还是这个点。
+   * 直接提交本地格式的字符串会让"服务端按 UTC 解释"和"教师看着钟填的"差 8 小时。
+   */
+  startsAt: null as Date | null,
+  endsAt: null as Date | null,
   defaultRosterId: null as number | null,
 })
 
@@ -86,6 +94,8 @@ watch(visible, (open) => {
   form.slug = ''
   form.status = 'running'
   form.note = ''
+  form.startsAt = null
+  form.endsAt = null
   form.defaultRosterId = null
   slugTouched.value = false
   formRef.value?.clearValidate()
@@ -115,6 +125,9 @@ async function submit(): Promise<void> {
     slug: form.slug.trim() || null,
     status: form.status,
     note: form.note.trim() || null,
+    // `null` = 这一端不限制（服务端的默认语义），不是"某个时刻"
+    starts_at: form.startsAt ? form.startsAt.toISOString() : null,
+    ends_at: form.endsAt ? form.endsAt.toISOString() : null,
     default_roster_id: form.defaultRosterId,
   })
 }
@@ -141,8 +154,8 @@ async function submit(): Promise<void> {
           @input="slugTouched = true"
         />
         <div class="page-hint">
-          用于服务端目录名（<code>source/&lt;标识&gt;/…</code>）与结果目录。
-          <strong>创建后不建议改动</strong> —— 它已经固定在磁盘路径与评测器配置里了。
+          用于服务端目录名（<code>source/&lt;标识&gt;/…</code>）。
+          <strong>创建后不建议改动。</strong>
         </div>
       </el-form-item>
 
@@ -153,6 +166,30 @@ async function submit(): Promise<void> {
           <el-option label="已封榜（停止下发，仍收卷）" value="frozen" />
           <el-option label="已结束（不再自动扫成绩）" value="closed" />
         </el-select>
+      </el-form-item>
+
+      <el-form-item label="开考时间">
+        <el-date-picker
+          v-model="form.startsAt"
+          type="datetime"
+          placeholder="留空 = 不限制"
+          clearable
+          style="width: 100%"
+        />
+      </el-form-item>
+
+      <el-form-item label="结束时间">
+        <el-date-picker
+          v-model="form.endsAt"
+          type="datetime"
+          placeholder="留空 = 不限制"
+          clearable
+          style="width: 100%"
+        />
+        <div class="page-hint">
+          <strong>留空 = 不限制</strong>，只填一个也合法。
+          到结束时间之后机器不再接收代码（心跳与题面照常）。
+        </div>
       </el-form-item>
 
       <el-form-item label="默认名单">
@@ -170,11 +207,8 @@ async function submit(): Promise<void> {
           />
         </el-select>
         <div class="page-hint">
-          只是一个<strong>预设</strong> —— 创建后到「名单库」页点一次「应用」才会把
-          选手落到这个场次。改名单不会自动影响场次。
-          <span v-if="!rosters.length">
-            还没有名单，可以先去「名单库」建一份。
-          </span>
+          只是个预设：创建后到「名单库」点一次「应用」才会把选手落到这个场次。
+          <span v-if="!rosters.length">还没有名单，可以先去「名单库」建一份。</span>
         </div>
       </el-form-item>
 

@@ -305,9 +305,7 @@ const problemCount = computed(() => problems.total.value)
         「代码路径」<HelpTip>
           按题目覆盖的 glob 模式，留空即用默认值 <code>{ident}/**</code>。
           <code>*</code> 不跨 <code>/</code>，<code>**</code> 跨，
-          <code>?</code> 单字符，<code>[abc]</code> 字符类。<br />
-          <code>{ident}</code> 与 <code>{title}</code> 是活占位符（每次匹配时展开），
-          所以改了标识或标题不用回来改模式；标题留空时 <code>{title}</code> 退回标识。
+          <code>?</code> 单字符，<code>[abc]</code> 字符类。
         </HelpTip>
       </template>
     </el-alert>
@@ -382,8 +380,7 @@ const problemCount = computed(() => problems.total.value)
       </template>
 
       <template #empty>
-        <p>还没有登记任何题目。</p>
-        <p>在下面「批量登记」里粘贴清单即可。标识会同时成为目录名、代码文件名与矩阵列名。</p>
+        <p>还没有登记任何题目，在下面「批量登记」里粘贴清单即可。</p>
       </template>
     </DataTable>
 
@@ -413,8 +410,7 @@ const problemCount = computed(() => problems.total.value)
         </template>
       </div>
       <div class="page-hint">
-        这是服务端算出来的结果，和回收文件时用的是同一份实现 —— 拿不准就在这里试，
-        别对着模式猜。
+        这是服务端算出来的结果，拿不准就在这里试。
       </div>
     </div>
 
@@ -446,7 +442,7 @@ const problemCount = computed(() => problems.total.value)
           第 {{ row.line }} 行：{{ row.error }}
         </span>
         <span v-if="validRows.some((row) => row.patterns.length)" class="muted">
-          带自定义代码路径的题目会用配的模式认领文件，其余用服务端默认值。
+          其余题目用服务端默认值。
         </span>
       </div>
 
@@ -493,7 +489,7 @@ const problemCount = computed(() => problems.total.value)
           />
         </el-form-item>
       </el-form>
-      <p class="page-hint">改标识<strong>不会</strong>改已有成绩记录的列名 —— 它们会以旧标识留在矩阵里。拿不准就先用下面的「路径试算」验一遍。</p>
+      <p class="page-hint">改标识<strong>不会</strong>改已有成绩记录的列名；拿不准就先用「路径试算」验一遍。</p>
     </FormDialog>
 
     <!--
@@ -508,8 +504,7 @@ const problemCount = computed(() => problems.total.value)
       confirm-text="删除题目"
       :detail="
         `从清单里删除题目「${deleteTarget?.ident ?? ''}」。` +
-        '已经收到的评测成绩**不会**被删掉 —— 它们会以「未登记」的形式继续显示在成绩矩阵里，' +
-        '名单与代码台账也不受影响。'
+        '已经收到的评测成绩**不会**被删掉 —— 它们会以「未登记」的形式继续显示在成绩矩阵里。'
       "
       @confirm="removeProblem.run(undefined)"
     />

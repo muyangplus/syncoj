@@ -50,46 +50,84 @@ async function loadAlerts(): Promise<void> {
 void loadAlerts()
 
 // --------------------------------------------------------------------------- //
-// 配给谁
+// 配对（**主路径**：点某一行的「配给…」）
 //
-// 配对绑的是**名单条目**（一个人），不是某场比赛的选手 —— 所以必须两步：
-// 先选名单，再选人。这两步收在 RosterPersonPicker 里，因为「改派」也要用
-// 同一个东西，而"换名单要清掉已选的人"这种细节抄第二遍一定会漏。
+// 配对绑的是**名单条目**（一个人），不是某场比赛的选手 —— 所以对话框里两步：
+// 先选名单，再选人。这两步收在 RosterPersonPicker 里，因为「改派」也要用同一个
+// 东西，而"换名单要清掉已选的人"这种细节抄第二遍一定会漏。
+//
+// 为什么不做成页面顶部一个常驻表单（第一版就是那样）：教师到现场先看到的应该是
+// "有哪几台机器等我认领"，而表单要求他**先选人、再回想是哪台机器** —— 顺序反了。
+// 而且顶部那个输入框和表格里的「配对码」列长得一样，看起来像两个码。现在配对码
+// 只属于**那一台机器**（显示在它那一行里、带剩余时间），教师点那一行的按钮，
+// 对话框里只需选人。
 // --------------------------------------------------------------------------- //
 
-const entryId = ref<number | null>(null)
+const bindTarget = ref<PendingMachineOut | null>(null)
+const bindOpen = ref(false)
+const bindEntryId = ref<number | null>(null)
 
-// --------------------------------------------------------------------------- //
-// 配对
-// --------------------------------------------------------------------------- //
+function askBind(row: PendingMachineOut): void {
+  bindTarget.value = row
+  bindEntryId.value = null
+  bindOpen.value = true
+}
 
-const pairCode = ref('')
-
-const bindByCode = useMutation(
-  async () => {
-    const code = pairCode.value.trim()
-    if (!code) throw new Error('请输入机器上显示的配对码')
-    if (!entryId.value) throw new Error('请先选择这份名单里的一个人')
-    return machineApi.bindByCode(code, entryId.value)
+const bindFromRow = useMutation(
+  () => {
+    const row = bindTarget.value
+    if (!row) throw new Error('没有选中机器')
+    if (!bindEntryId.value) throw new Error('请先选一个人')
+    // 走"按机器 id 配对"这条路：教师是点了这一行才进来的，"此刻站在这台机器前面"
+    // 由这一次点击表达。要更强的证明就走工具栏的「按码配对」—— 那个必须输码。
+    return machineApi.bind(row.id, bindEntryId.value)
   },
   {
-    // 服务端的回执里带着"绑到了谁、在哪份名单"，比界面自己编一句"配对成功"有用
+    // 服务端的回执带着绑到了谁，比界面自己编一句"配对成功"有用
+    success: (result) =>
+      `已把 ${result.player_no} 配给 ${result.roster_name || '名单里的人'}`,
     onDone: async () => {
-      pairCode.value = ''
+      bindOpen.value = false
+      bindTarget.value = null
       await pending.reload()
     },
   },
 )
 
-const bindFromList = useMutation(
-  async (row: PendingMachineOut) => {
-    if (!entryId.value) throw new Error('先在下面选一位选手，再点「配对」')
-    // 手工点选也把配对码带上（如果填了）：主机名可能是重复的，而配对码是唯一
-    // 能证明"教师确实站在这台机器前面"的东西
-    return machineApi.bind(row.id, entryId.value, pairCode.value.trim() || undefined)
+// --------------------------------------------------------------------------- //
+// 按码配对（**次要路径**：手里有码、但列表里找不到那台机器时）
+// --------------------------------------------------------------------------- //
+
+const byCodeOpen = ref(false)
+const pairCode = ref('')
+const pairEntryId = ref<number | null>(null)
+
+const bindByCode = useMutation(
+  async () => {
+    const code = pairCode.value.trim()
+    if (!code) throw new Error('请输入机器上显示的配对码')
+    if (!pairEntryId.value) throw new Error('请先选一个人')
+    return machineApi.bindByCode(code, pairEntryId.value)
   },
-  { onDone: () => pending.reload() },
+  {
+    success: (result) => `已把机器配给 ${result.player_no || '名单里的人'}`,
+    onDone: async () => {
+      pairCode.value = ''
+      pairEntryId.value = null
+      byCodeOpen.value = false
+      await pending.reload()
+    },
+  },
 )
+
+// --------------------------------------------------------------------------- //
+// 装机设置（抽屉：统一注册密钥）
+//
+// 它降级成抽屉是有理由的：一间机房**一次**的动作，不该和"每天要做的配对"同等
+// 地摆在页面上。第一版把两者平铺在同一页，教师的第一反应就是"这里有两套密钥体系？"
+// --------------------------------------------------------------------------- //
+
+const settingsOpen = ref(false)
 
 // --------------------------------------------------------------------------- //
 // 移除待配对的机器
@@ -242,23 +280,26 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
 <template>
   <PageShell
     title="机器配对"
-    hint="读机器桌面上的六位配对码，认领到名单里的某个人。"
+    hint="点某一行的「配给…」，把机器认领给名单里的某个人。"
     :error="pending.error.value"
-    error-action="待配对列表取不到时，先别急着发密钥。"
+    error-action="待配对列表取不到时，先别急着动密钥。"
     retryable
     @retry="pending.reload"
   >
     <template #hint>
+      <!-- 一段话把"这两个不是一回事"说完就够了；写成三段反而没人看（第一版就是那样） -->
       <HelpTip>
-        用镜像统一密钥注册上来的机器还没有归属 —— 服务端不知道它是哪个学生。
-        配对是永久的，绑的是名单里的<strong>人</strong>，换场次不用重配。
+        <strong>配对码</strong>管"这台机器前面站着的是谁"，
+        <strong>统一注册密钥</strong>管"这台机器能不能注册"（在右上角「装机设置」里）。
       </HelpTip>
     </template>
     <template #toolbar>
       <el-button size="small" :loading="pending.loading.value" @click="pending.reload">
         刷新
       </el-button>
-      <el-button size="small" @click="issueOpen = true">签发统一密钥</el-button>
+      <!-- 手里有码、但列表里找不到那台机器时的入口（次要路径，所以是普通按钮） -->
+      <el-button size="small" @click="byCodeOpen = true">按码配对</el-button>
+      <el-button size="small" @click="settingsOpen = true">装机设置</el-button>
     </template>
 
     <!--
@@ -292,42 +333,18 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
           <strong>建议逐台确认配对，别用「从列表里配对」批量点。</strong>
         </template>
         <template v-else>
-          整间机房用同一份镜像时撞指纹是正常的，现在还没有谁的身份可被冒领。
           配对之后要留意：快照还原的「按指纹认回原机器」可能认错机器。
         </template>
       </template>
     </el-alert>
 
-    <el-card shadow="never" style="margin-bottom: 12px">
-      <div class="pair-row">
-        <span class="field-label">配对码</span>
-        <el-input
-          v-model="pairCode"
-          placeholder="机器桌面上「配对码.txt」里的 6 位数字"
-          style="width: 230px"
-          class="mono-input"
-          maxlength="6"
-          @keyup.enter="bindByCode.run(undefined)"
-        />
-
-        <span class="field-label">配给</span>
-        <RosterPersonPicker
-          v-model="entryId"
-          :default-roster-id="contest.current?.default_roster_id ?? null"
-        />
-
-        <el-button
-          type="primary"
-          :loading="bindByCode.pending.value"
-          :disabled="!pairCode.trim() || !entryId"
-          @click="bindByCode.run(undefined)"
-        >
-          配对
-        </el-button>
-      </div>
-
-      <p class="page-hint">还没选人 —— 先在「配给」那一栏选名单，再选这份名单里的一个人。</p>
-    </el-card>
+    <!--
+      这里只留一句说明，不再放常驻表单：教师到现场先要看的是"有哪几台机器等我认领"，
+      而表单要求他先选人、再回想是哪台机器 —— 顺序反了。配对动作在表格每一行里。
+    -->
+    <p class="page-hint" style="margin-top: 0">
+      配对码是<strong>服务端发给那台机器</strong>的六位数字，限时 30 分钟、用一次即废。
+    </p>
 
     <div class="list-head">
       <h3 class="section-title">
@@ -410,17 +427,10 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
           </template>
         </el-table-column>
 
-        <el-table-column label="操作" width="140" fixed="right">
+        <el-table-column label="操作" width="150" fixed="right">
           <template #default="{ row }">
-            <el-button
-              link
-              type="primary"
-              size="small"
-              :loading="bindFromList.pending.value"
-              :disabled="!entryId"
-              @click="bindFromList.run(row)"
-            >
-              配对
+            <el-button link type="primary" size="small" @click="askBind(row)">
+              配给…
             </el-button>
             <el-button link type="danger" size="small" @click="askRevoke(row)">移除</el-button>
           </template>
@@ -428,18 +438,34 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
       </template>
 
       <template #empty>
-        <p>没有待配对的机器。</p>
-        <p>用统一密钥装好的机器开机后会自动出现在这里。一台都没出现，就先确认镜像里放了 <code>bootstrap.key</code>。</p>
-        <el-button type="primary" size="small" style="margin-top: 12px" @click="issueOpen = true">
-          签发统一密钥
+        <p>现在没有机器等认领。</p>
+        <!--
+          空状态必须给出"两种可能"，而不是只写"机器开机后会自动出现在这里"——
+          那句在"镜像里忘了放密钥"时是误导：教师会一直等，而机器永远不会出现。
+        -->
+        <p class="cell-sub">
+          机器开机注册后就会出现在这里；一直没出现，查两件事：镜像里有没有统一密钥、它连不连得上服务端。
+        </p>
+        <el-button type="primary" size="small" style="margin-top: 12px" @click="settingsOpen = true">
+          去装机设置
         </el-button>
       </template>
     </DataTable>
 
-    <h3 class="section-title">统一注册密钥</h3>
-    <p class="page-hint">密钥在机器上只是 <code>root</code> 只读的一份文件，<strong>不写进 <code>agent.ini</code></strong>（那个文件选手账号可读）。</p>
+    <!--
+      ② 装机设置：统一注册密钥收进抽屉。
+      一间机房**一次**的动作，不该和"每天要做的配对"同等地摆在页面上 —— 第一版把
+      两者平铺在同一页，教师的第一反应就是"这里有两套密钥体系？"。
+    -->
+    <el-drawer v-model="settingsOpen" title="装机设置：统一注册密钥" size="880px">
+      <p class="page-hint" style="margin-top: 0">
+        这是<strong>装 Agent 之前</strong>的事：把它烤进镜像，机器开机注册时用它换一枚自己的凭据。
+      </p>
+      <el-button type="primary" size="small" style="margin-bottom: 12px" @click="issueOpen = true">
+        签发一把
+      </el-button>
 
-    <DataTable
+      <DataTable
       :rows="keys.rows.value"
       :row-key="(row: BootstrapKeyOut) => row.id"
       :loading="keys.loading.value"
@@ -509,11 +535,11 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
       </template>
 
       <template #empty>
-        <p>还没有统一密钥。</p>
         <p>装整间机房就签发一把，装机时用 <code>--bootstrap-key</code> 传给安装器。</p>
         <el-button type="primary" size="small" @click="issueOpen = true">签发一把</el-button>
       </template>
-    </DataTable>
+      </DataTable>
+    </el-drawer>
 
     <!-- 移除待配对机器：机器是结构性数据，按约定要打一遍主机名 -->
     <ConfirmByNameDialog
@@ -523,9 +549,8 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
       :submitting="revoke.pending.value"
       confirm-text="移除"
       :detail="
-        '这台机器会从待配对列表里消失，凭据被作废。它下次心跳会拿到 401，' +
-        '然后等下次开机由注册单元重新注册一遍（会拿到新的配对码）。' +
-        '要挡住它反复回来，得先吊销统一密钥。'
+        '这台机器会从待配对列表里消失、凭据作废；下次开机它还会用镜像里的统一密钥重新注册上来，' +
+        '要挡住得先吊销那把密钥。'
       "
       @confirm="revoke.run(undefined)"
     />
@@ -538,9 +563,8 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
       :submitting="clearPending.pending.value"
       confirm-text="清空"
       :detail="
-        `会把当前 ${pending.total.value} 台待配对机器全部移除（凭据作废）。` +
-        '它们下次开机用镜像里的统一密钥还会重新注册上来 —— ' +
-        '要彻底挡住，请先在上面把统一密钥吊销。'
+        `会把当前 ${pending.total.value} 台待配对机器全部移除、凭据作废；` +
+        '它们下次开机还会用镜像里的统一密钥重新注册上来。'
       "
       @confirm="clearPending.run(undefined)"
     />
@@ -584,6 +608,65 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
       <template #footer>
         <el-button @click="copyText(issuedKey?.key, '密钥')">复制</el-button>
         <el-button type="primary" @click="keyDialog = false">我已抄好</el-button>
+      </template>
+    </el-dialog>
+    <!--
+      **主路径**：从某台机器那一行点进来。这里只要选人 —— "教师此刻站在这台机器前面"
+      已经由"点了那一行"表达；要更强的证明就走工具栏的「按码配对」（那个必须输码）。
+    -->
+    <el-dialog v-model="bindOpen" title="把机器配给谁" width="580px">
+      <p class="page-hint" style="margin-top: 0">
+        机器：<span class="mono">{{ bindTarget?.hostname || bindTarget?.machine_id || '—' }}</span>
+        <template v-if="bindTarget">
+          · 配对码{{ pairCodeLeft(bindTarget).text }}
+        </template>
+      </p>
+      <RosterPersonPicker
+        v-model="bindEntryId"
+        :default-roster-id="contest.current?.default_roster_id ?? null"
+      />
+      <p class="page-hint">配对是<strong>永久</strong>的：绑的是名单里的人，之后换场次不用再配。</p>
+      <template #footer>
+        <el-button @click="bindOpen = false">取消</el-button>
+        <el-button
+          type="primary"
+          :disabled="!bindEntryId"
+          :loading="bindFromRow.pending.value"
+          @click="bindFromRow.run(undefined)"
+        >
+          配对
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- **次要路径**：手里有码、但列表里找不到那台机器时（比如机器换过名字） -->
+    <el-dialog v-model="byCodeOpen" title="按配对码配对" width="580px">
+      <div class="pair-row">
+        <span class="field-label">配对码</span>
+        <el-input
+          v-model="pairCode"
+          placeholder="机器桌面上「配对码.txt」里的 6 位数字"
+          style="width: 230px"
+          class="mono-input"
+          maxlength="6"
+          @keyup.enter="bindByCode.run(undefined)"
+        />
+      </div>
+      <RosterPersonPicker
+        v-model="pairEntryId"
+        :default-roster-id="contest.current?.default_roster_id ?? null"
+      />
+      <p class="page-hint">码限时 30 分钟、用一次即废。</p>
+      <template #footer>
+        <el-button @click="byCodeOpen = false">取消</el-button>
+        <el-button
+          type="primary"
+          :disabled="!pairCode.trim() || !pairEntryId"
+          :loading="bindByCode.pending.value"
+          @click="bindByCode.run(undefined)"
+        >
+          配对
+        </el-button>
       </template>
     </el-dialog>
   </PageShell>

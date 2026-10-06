@@ -329,9 +329,7 @@ async function askUnbind(agent: AgentRuntimeOut): Promise<void> {
   try {
     await ElMessageBox.confirm(
       `把 ${agent.player_no} 的这台机器解除绑定？\n\n` +
-        '机器会回到「待配对」列表，桌面上重新出现配对码，等下一次配对。' +
-        '它手里的凭据仍然有效 —— 解除绑定不撤权，只是让它暂时没有归属。\n' +
-        '要换人请用「改派」：那不需要机器重启，也不会有中间的空档。',
+        '机器会回到「待配对」列表，凭据仍然有效；要换人请用「改派」。',
       '解除绑定',
       { type: 'warning', confirmButtonText: '解除绑定', cancelButtonText: '取消' },
     )
@@ -439,7 +437,7 @@ function handleCommand(
   >
     <template #hint>
       <HelpTip>
-        每 5 秒自动刷新。在线与否由服务端按超时判定，与浏览器无关。
+        每 5 秒自动刷新；在线与否由服务端按超时判定。
       </HelpTip>
     </template>
 
@@ -704,8 +702,7 @@ function handleCommand(
       <el-alert type="info" :closable="false" show-icon>
         <template #title>改了考号，磁盘上的旧目录不会改名</template>
         <template #default>
-          已有代码留在 <code>source/&lt;场次&gt;/&lt;考号&gt;/…</code> 不动 ——
-          评测器配置与历史成绩都指着它。
+          已有代码留在 <code>source/&lt;场次&gt;/&lt;考号&gt;/…</code> 不动。
         </template>
       </el-alert>
     </FormDialog>
@@ -717,11 +714,6 @@ function handleCommand(
       :expected="deleteTarget?.player_no ?? ''"
       :submitting="deletePlayer.pending.value"
       :impact="deletePlayerImpact"
-      :detail="
-        '这名选手在本场次的记录会被删掉，连同他的代码台账与成绩（级联）。' +
-        '注意：**他的机器不会被动**。机器绑的是名单里的那个人，不是这场比赛 ——' +
-        '同一个学生明天还有比赛，机器明天照样要用。要作废机器请在「机器」那一列里单独做。'
-      "
       @confirm="deletePlayer.run(undefined)"
     />
 
@@ -733,7 +725,6 @@ function handleCommand(
       :submitting="clearPlayers.pending.value"
       confirm-text="清空"
       :impact="clearPlayersImpact"
-      detail="机器同样不受影响 —— 它们绑的是名单里的人。"
       @confirm="clearPlayers.run(undefined)"
     >
       <el-checkbox v-model="clearKeepWithSubmissions">
@@ -741,9 +732,6 @@ function handleCommand(
       </el-checkbox>
       <el-alert v-if="!clearKeepWithSubmissions" type="error" :closable="false" show-icon>
         <template #title>关掉保护会把提交一起删掉，而且不可逆</template>
-        <template #default>
-          有代码或成绩的选手也会被删掉。复核时那些代码是唯一凭据。
-        </template>
       </el-alert>
     </ConfirmByNameDialog>
 
@@ -756,7 +744,7 @@ function handleCommand(
       confirm-text="改派"
       @submit="rebind.run(undefined)"
     >
-      <p class="page-hint">凭据不用动、不用重启 —— 服务端改一下绑定，机器下一轮心跳就拿到新考号。</p>
+      <p class="page-hint">凭据不用动、不用重启，下一轮心跳就换人。</p>
       <RosterPersonPicker
         v-model="rebindEntryId"
         :default-roster-id="contest.current?.default_roster_id ?? null"
@@ -787,7 +775,7 @@ function handleCommand(
         type="info"
         :closable="false"
         show-icon
-        title="留空 = 自动匹配。找不到、或找到多个，服务端都会明说，不会替你挑一个。"
+        title="留空 = 自动匹配。"
       />
     </FormDialog>
 
@@ -798,11 +786,7 @@ function handleCommand(
       :expected="revokeTarget?.hostname || revokeTarget?.machine_id || ''"
       :submitting="revokeAgent.pending.value"
       confirm-text="作废"
-      :detail="
-        `这台机器的凭据会被作废，它下一轮心跳会拿到 401。` +
-        '要让它重新工作，得等下次开机由注册单元重新注册，然后重新配对 —— ' +
-        '如果只是想换个人，用「改派」而不是这个：改派不用重启。'
-      "
+      detail="凭据作废（下一轮心跳 401），要重新注册并配对；只想换人请用「改派」。"
       @confirm="revokeAgent.run(undefined)"
     />
   </PageShell>

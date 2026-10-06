@@ -40,6 +40,18 @@ async function refreshAll(): Promise<void> {
   await contest.load().catch(() => undefined)
 }
 
+/**
+ * 列表里的时间窗摘要：`MM-DD HH:mm → MM-DD HH:mm`。
+ *
+ * 两个都留空是**默认**、也是最容易看错的一种状态，所以它必须显示成"不限"而不是
+ * 空白 —— 空白会被读成"这一列没数据"，而这一列恰恰决定"到点还收不收卷"。
+ */
+function windowLabel(row: ContestOut): string {
+  const start = row.starts_at ? formatTime(row.starts_at).slice(5, 16) : '不限'
+  const end = row.ends_at ? formatTime(row.ends_at).slice(5, 16) : '不限'
+  return `${start} → ${end}`
+}
+
 // --------------------------------------------------------------------------- //
 // 新建 / 设置 / 进入
 // --------------------------------------------------------------------------- //
@@ -128,7 +140,6 @@ const deleteImpact = computed(() => {
   return [
     `这场有 ${row.player_count} 名选手`,
     `此刻有 ${row.online_count} 台机器在线`,
-    '机器本身不受影响 —— 它们绑的是名单库里的人',
   ]
 })
 const clearKeep = ref(true)
@@ -159,16 +170,9 @@ function askClear(row: ContestOut): void {
 function clearDetail(count: number): string {
   const base = `这场共有 ${count} 名选手。`
   if (clearKeep.value) {
-    return (
-      base +
-      '已经有代码或成绩的选手会被保留 —— 删掉他们的提交是不可逆的，' +
-      '所以默认不动。没有提交的那部分会被删掉。'
-    )
+    return base + '有代码或成绩的会被保留，其余的删掉。'
   }
-  return (
-    base +
-    '这次连有提交的选手一起删：他们的代码台账与成绩会一并消失，无法恢复。'
-  )
+  return base + '连有提交的一起删：他们的代码台账与成绩会一并消失，无法恢复。'
 }
 </script>
 
@@ -182,9 +186,7 @@ function clearDetail(count: number): string {
     @retry="refreshAll"
   >
     <template #hint>
-      <HelpTip>
-        选手、代码、下发任务、成绩都按场次隔离。顶栏的下拉框切换的是「当前操作哪个场次」。
-      </HelpTip>
+      <HelpTip>选手、代码、下发任务、成绩都按场次隔离。</HelpTip>
     </template>
 
     <template #toolbar>
@@ -233,6 +235,17 @@ function clearDetail(count: number): string {
             <el-tag :type="contestStatusType(row.status)" size="small" effect="plain">
               {{ contestStatusLabel(row.status) }}
             </el-tag>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="考试时间" width="170">
+          <template #default="{ row }">
+            <!-- 原始值留在 tooltip 里：表里给的是摘要，而教师核对时看的是准确时刻 -->
+            <el-tooltip :content="`${row.starts_at ?? '不限'} → ${row.ends_at ?? '不限'}`">
+              <span :class="{ muted: !row.starts_at && !row.ends_at }">
+                {{ windowLabel(row) }}
+              </span>
+            </el-tooltip>
           </template>
         </el-table-column>
 
@@ -313,8 +326,7 @@ function clearDetail(count: number): string {
       </template>
 
       <template #empty>
-        <p>还没有任何场次。</p>
-        <p>还没有场次。先建一个，再导入选手。</p>
+        <p>还没有任何场次，先建一个再导入选手。</p>
         <el-button type="primary" style="margin-top: 12px" @click="createVisible = true">
           新建第一个场次
         </el-button>
@@ -346,10 +358,8 @@ function clearDetail(count: number): string {
       confirm-text="删除场次"
       :impact="deleteImpact"
       :detail="
-        `场次「${deleteTarget?.name ?? ''}」连同它的一切都会被删掉：` +
-        '选手、代码台账、下发任务、成绩、资产都在里面，删完无法恢复。' +
-        '机器不受影响 —— 它们绑的是名单库里的人，不是这场比赛的记录，' +
-        '换一场比赛照样能用，不需要重新配对。'
+        `场次「${deleteTarget?.name ?? ''}」连同选手、代码台账、下发任务、成绩、资产一起删掉，无法恢复。` +
+        '机器不受影响，换一场比赛照样能用，不需要重新配对。'
       "
       @confirm="removeContest.run(undefined)"
     />
@@ -371,11 +381,7 @@ function clearDetail(count: number): string {
         <el-checkbox v-model="clearKeep">保留有代码或成绩的选手（推荐先留着）</el-checkbox>
       </div>
       <el-alert v-if="!clearKeep" type="error" :closable="false" show-icon>
-        <template #title>注意：有提交的选手也会被删，他们的代码与成绩一起消失</template>
-        <template #default>
-          被删掉的提交没有回收站 —— 数据库里不会留任何副本。
-          只有确认这批人不再需要复核成绩时才关掉这个保护。
-        </template>
+        <template #title>有提交的选手也会被删，代码与成绩一起消失、无法恢复</template>
       </el-alert>
     </ConfirmByNameDialog>
   </PageShell>

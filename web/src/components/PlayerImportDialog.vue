@@ -128,8 +128,7 @@ function submit(): void {
     <el-alert type="info" :closable="false" show-icon style="margin-bottom: 12px">
       <template #title>每行一名选手：<code>编号,姓名,座位,分组</code></template>
       <template #default>
-        只有编号必填，可直接从 Excel 粘贴；<code>#</code> 开头的行为注释。
-        <br />
+        只有编号必填，可直接从 Excel 粘贴（<code>#</code> 开头的行为注释）。
         <strong>相同编号会更新已有选手</strong>，可以反复导入。
       </template>
     </el-alert>
@@ -185,7 +184,7 @@ function submit(): void {
       </el-table>
 
       <p v-if="invalidRows.length" class="page-hint">
-        有问题的行会被自动跳过，其余照常导入。
+        有问题的行会被自动跳过。
       </p>
     </div>
   </FormDialog>

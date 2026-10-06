@@ -275,6 +275,12 @@ export interface paths {
          *     ``default_roster_id`` 有个特殊之处：``None`` 没法区分"没传"和"要清空"。
          *     所以清空要靠 ``clear_default_roster`` 这个显式开关 —— 否则教师一次选错
          *     名单就再也改不回来了。
+         *
+         *     时间窗（``starts_at`` / ``ends_at``）走另一条路：直接看
+         *     ``model_fields_set``。"传了 null" = 清掉这一端的时间限制，"压根没传" =
+         *     这次别动它。两者必须分得开 —— 用 ``is not None`` 判断的话，教师永远删不掉
+         *     一个填错的时间点，而界面上看起来是保存成功了（那种"改完又变回去"的故障
+         *     最难查，因为它不报错）。
          */
         patch: operations["update_contest_api_v1_admin_contests__contest_id__patch"];
         trace?: never;
@@ -326,6 +332,38 @@ export interface paths {
          *     同一份 500MB 测试点"实际只消耗 500MB，而不是 50 × 500MB。
          */
         post: operations["upload_asset_api_v1_admin_contests__contest_id__assets_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/contests/{contest_id}/assets/text": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create Text Asset
+         * @description **直接写一个纯文本资产**（`须知.txt`、`README.md`、`说明.md`…）。
+         *
+         *     为什么需要它：教师想给选手发一段"注意事项"，而为此要在自己机器上先造一个文件、
+         *     再上传，是纯粹的仪式 —— 内容本来就是在浏览器里打的。发完之后它和上传的资产
+         *     **完全一样**（同样的内容寻址、同样的下发流程），所以下游一行都不用改。
+         *
+         *     两条边界，都是为了让"界面里写的东西"和"落到选手桌面上的文件"逐字节一致：
+         *
+         *     * **换行统一成 LF**。浏览器 textarea 给的是 ``\n``，但从别处粘进来的内容可能带
+         *       ``\r\n``，而目标机是 Linux —— 留着那个 ``\r`` 会在选手的编辑器里显示成
+         *       ``^M``，看起来像文件坏了。
+         *     * **BOM 去掉**。从 Windows 记事本粘过来的文本可能带 U+FEFF，它会在 Linux 上
+         *       变成文件开头三个看不见的字节。
+         */
+        post: operations["create_text_asset_api_v1_admin_contests__contest_id__assets_text_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1353,7 +1391,15 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Delete Roster Entry */
+        /**
+         * Delete Roster Entry
+         * @description 从名单里删掉一个人。
+         *
+         *     **允许**（这本来就是"这个人走了"），但要把副作用如实说出来：绑在这条条目上的
+         *     机器会被解除配对（外键 ``ON DELETE SET NULL``），它下次心跳会显示新的配对码。
+         *     不说的话，教师只会看到"已移除 S001"，然后对着那台机器的配对码发愣 ——
+         *     这条路径不像"删整份名单"那样带批量风险，所以拦它反而碍事。
+         */
         delete: operations["delete_roster_entry_api_v1_admin_roster_entries__entry_id__delete"];
         options?: never;
         head?: never;
@@ -1400,6 +1446,11 @@ export interface paths {
          *     **只删名单本身，不动任何场次的选手。** 名单是模板，场次的参赛者是从它
          *     复制出去的一份独立数据 —— 删模板不该牵动已发生的比赛。引用了这份名单的
          *     场次会被置空（``ON DELETE SET NULL``），只是"没预设名单了"而已。
+         *
+         *     **但机器不适用这句话**：机器绑的是名单里的**人**（条目），条目会随名单一起被删，
+         *     于是那批机器被解除配对、要重新配一遍。所以有机器绑着时**拒绝删除**，并说清代价
+         *     （见 :func:`_roster_in_use_error`）。这条直接关系到"配对一次、之后 N 场比赛零人工"
+         *     这个性质 —— 不能让人在以为"只是个模板"的时候把它悄悄拆掉。
          */
         delete: operations["delete_roster_api_v1_admin_rosters__roster_id__delete"];
         options?: never;
@@ -1443,6 +1494,9 @@ export interface paths {
         /**
          * Clear Roster Entries
          * @description 清空名单里的全部条目（保留名单本身）。
+         *
+         *     与删整份名单同一个理由要拦：机器绑的是条目，清空等于把这份名单上**所有**机器的
+         *     配对照样解除掉。所以有机器绑着时拒绝，并说清是哪几个人。
          */
         post: operations["clear_roster_entries_api_v1_admin_rosters__roster_id__entries_clear_post"];
         delete?: never;
@@ -1541,6 +1595,102 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/agent/install.json": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Install Ledger
+         * @description 当前可装机版本的台账。**不鉴权。**
+         *
+         *     没有铺开任何版本时给 404 加一句人话 —— 而不是一个空对象：装机的人需要知道
+         *     "是没铺开"还是"我地址打错了"，这两件事的处理完全不同。
+         */
+        get: operations["install_ledger_api_v1_agent_install_json_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/agent/install/bootstrap.sh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Install Bootstrap
+         * @description 自举脚本（``bootstrap.sh``）。**不鉴权。**
+         *
+         *     给的是"**一条** curl 就能起头"的那条命令 —— 空机器上只有 shell，而教师不该
+         *     需要先手工把 install.py 弄过去。脚本本身极短：抓 install.py、跑起来、参数原样
+         *     传下去；真正的逻辑全在 Python 里。
+         *
+         *     它与安装器一样**不在**离线包里（``packaging/`` 被排除），所以只能由服务端发。
+         */
+        get: operations["install_bootstrap_api_v1_agent_install_bootstrap_sh_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/agent/install/bundle": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Install Bundle
+         * @description 当前可装机版本的包体。**不鉴权**，支持 Range。
+         *
+         *     与"给 Agent 升级用的下载端点"取的是同一份 blob、同一套 Range 逻辑 ——
+         *     两条路如果各写一遍，早晚会出现"升级能续传、装机不能"这种说不通的差别。
+         */
+        get: operations["install_bundle_api_v1_agent_install_bundle_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/agent/install/installer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Install Installer
+         * @description 安装器本体（``install.py``）。**不鉴权**。
+         *
+         *     它**不在离线包里** —— 离线包是给机器**运行**用的，安装器是装机那一次用的，
+         *     所以空机器必须先从服务端拿到它。这也是最短的那条自举链：
+         *     一条 curl 拿到它，之后就全是 Python 的事了（shell 写错难查，能少写就少写）。
+         */
+        get: operations["install_installer_api_v1_agent_install_installer_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/agent/me": {
         parameters: {
             query?: never;
@@ -1595,6 +1745,30 @@ export interface paths {
          * @description 一次心跳。已认领的机器收发文件，未认领的机器只在这里"排队等叫号"。
          */
         post: operations["tick_api_v1_agent_tick_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/player/context": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Player Context
+         * @description 取选手页要显示的全部内容。**不鉴权。**
+         *
+         *     不传参数 = 按来源 IP 自动匹配本机；两个参数都传 = 显式查找。
+         *     只传一个直接 400：单独一个 ``contest`` 或单独一个 ``player_no`` 都定位不到人，
+         *     而"猜另一半"正是这一页最不该做的事。
+         */
+        get: operations["player_context_api_v1_player_context_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1767,6 +1941,34 @@ export interface components {
         AssetRenameIn: {
             /** Filename */
             filename: string;
+        };
+        /**
+         * AssetTextIn
+         * @description **直接写一个纯文本资产**（`须知.txt` / `README.md` …）。
+         *
+         *     为什么要有这个入口，而不是"先在自己机器上造个文件再上传"：教师想说的那句话
+         *     本来就是在浏览器里打的，为了发它去造一个文件是纯粹的仪式。
+         *
+         *     ``content`` 的 200000 字上限（约 200 KB）**刻意远小于** ``max_asset_size``：
+         *     这个入口服务的是"随手写一段话"，真有大文件该走上传（那份能到 2 GB 且流式）。
+         *     上限放在 schema 上，超了就是 422 + 一句人话，不用自己写检查。
+         */
+        AssetTextIn: {
+            /**
+             * Content
+             * @description 文本内容（UTF-8；换行统一成 LF）
+             */
+            content: string;
+            /**
+             * Filename
+             * @description 文件名，如 须知.txt
+             */
+            filename: string;
+            /**
+             * Kind
+             * @default testdata
+             */
+            kind: string;
         };
         /**
          * BindByCodeIn
@@ -1960,12 +2162,16 @@ export interface components {
         ContestCreate: {
             /** Default Roster Id */
             default_roster_id?: number | null;
+            /** Ends At */
+            ends_at?: string | null;
             /** Name */
             name: string;
             /** Note */
             note?: string | null;
             /** Slug */
             slug?: string | null;
+            /** Starts At */
+            starts_at?: string | null;
             /**
              * Status
              * @default draft
@@ -1980,6 +2186,8 @@ export interface components {
             default_roster_id?: number | null;
             /** Default Roster Name */
             default_roster_name?: string | null;
+            /** Ends At */
+            ends_at?: string | null;
             /** Id */
             id: number;
             /** Name */
@@ -1998,12 +2206,19 @@ export interface components {
             player_count: number;
             /** Slug */
             slug: string;
+            /** Starts At */
+            starts_at?: string | null;
             /** Status */
             status: string;
         };
         /**
          * ContestUpdate
          * @description 场次的可改字段。全部可选 —— 只改传了的。
+         *
+         *     时间窗这里的"传了 ``null``"和"没传"是两件事，靠 pydantic 的
+         *     ``model_fields_set`` 区分（见 ``api/admin.py``）：前者是"清掉这个限制"，
+         *     后者是"这次别动它"。只按 ``is not None`` 判断的话，教师永远清不掉一个
+         *     填错的时间，而界面上看起来是保存成功了。
          */
         ContestUpdate: {
             /**
@@ -2013,10 +2228,14 @@ export interface components {
             clear_default_roster: boolean;
             /** Default Roster Id */
             default_roster_id?: number | null;
+            /** Ends At */
+            ends_at?: string | null;
             /** Name */
             name?: string | null;
             /** Note */
             note?: string | null;
+            /** Starts At */
+            starts_at?: string | null;
             /** Status */
             status?: string | null;
         };
@@ -2277,6 +2496,37 @@ export interface components {
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /**
+         * InstallLedgerOut
+         * @description 装机入口的台账：**当前可以装上去的 Agent 版本**。
+         *
+         *     这个接口**不鉴权**（见 ``api/agent.py`` 里那三个端点的说明）：初次安装时机器
+         *     手上什么都没有，没有任何凭据可用。所以它只报"本来就该发给每台机器"的东西 ——
+         *     版本号、校验和、大小、签名。**不含任何考场数据。**
+         *
+         *     ``bundle`` / ``installer`` 是相对路径，让客户端自己拼 base：服务端不知道
+         *     客户端是通过哪个地址访问它的（多网卡、反向代理），报绝对地址必然有一半是错的。
+         */
+        InstallLedgerOut: {
+            /** Bootstrap */
+            bootstrap: string;
+            /** Bundle */
+            bundle: string;
+            /** Installer */
+            installer: string;
+            /** Key Id */
+            key_id?: string | null;
+            /** Notes */
+            notes?: string | null;
+            /** Sha256 */
+            sha256: string;
+            /** Signature */
+            signature?: string | null;
+            /** Size */
+            size: number;
+            /** Version */
+            version: string;
         };
         /**
          * JudgeRunClearIn
@@ -2690,6 +2940,34 @@ export interface components {
             seconds_since_seen?: number | null;
         };
         /**
+         * PlayerAssetOut
+         * @description 清单里的一行：下发了什么、该落在哪个目录、到没到。
+         *
+         *     ``dest_dir`` 是**任务的**目标目录模板展开后的样子（``DeployTask.dest_dir``），
+         *     不是某个选手磁盘上的绝对路径 —— 服务端不认识选手机器上的家目录，编一个
+         *     绝对路径只会是错的。空串表示"直接落在下发根目录"（默认就是桌面）。
+         */
+        PlayerAssetOut: {
+            /**
+             * Dest Dir
+             * @default
+             */
+            dest_dir: string;
+            /** Filename */
+            filename: string;
+            /** Finished At */
+            finished_at?: string | null;
+            /** Sha256 */
+            sha256: string;
+            /**
+             * Size
+             * @default 0
+             */
+            size: number;
+            /** Status */
+            status: string;
+        };
+        /**
          * PlayerClearIn
          * @description 清空一个场次的选手名单。
          *
@@ -2704,6 +2982,57 @@ export interface components {
              * @default true
              */
             keep_with_submissions: boolean;
+        };
+        /**
+         * PlayerContestOut
+         * @description 选手页上的场次信息：标识、名字、状态，以及考试时间窗。
+         *
+         *     时间窗（``starts_at`` / ``ends_at``）是给**选手看**的：这一页上"几点开考、几点
+         *     结束"必须一眼看得到 —— 那是他能自己确认"现在到底还收不收卷"的地方（服务端到点
+         *     会把场次自动置为已结束，但选手在此之前就该知道几点结束）。留空 = 不限制，如实回
+         *     ``null`` 让页面显示"不限"，不要编一个时间出来。
+         */
+        PlayerContestOut: {
+            /** Ends At */
+            ends_at?: string | null;
+            /** Name */
+            name: string;
+            /** Slug */
+            slug: string;
+            /** Starts At */
+            starts_at?: string | null;
+            /** Status */
+            status: string;
+        };
+        /**
+         * PlayerContextOut
+         * @description 选手页一次要拿到的全部内容。
+         *
+         *     刻意做成**一个**接口而不是三个：这一页是给选手看的，"半张页面"（场次加载到了、
+         *     清单还在转圈）比多等一会儿更糟；而且"同一个场次、同一个人"这个一致性本来
+         *     就只能由服务端保证。
+         *
+         *     两种查法共用同一个模型：
+         *
+         *     * ``matched_by="machine"``：请求没带参数，服务端按来源 IP 认出了这台机器。
+         *       这是主路径 —— 选手在考场机器上打开就是一个带参数的快捷方式，一个字都不用填。
+         *     * ``matched_by="explicit"``：请求带了 ``contest`` + ``player_no``，按这两个值
+         *       精确查找。自动匹配不上时（教师的笔记本、Agent 没起来的机器、换了 IP）
+         *       靠它兜底。
+         *
+         *     回这个字段是让**页面**能说清"我这份清单是怎么定位到你的"：自动匹配到别人的
+         *     机器上时，页面上的考号会当场露馅，而不是安静地显示一份不属于这台机器的清单。
+         */
+        PlayerContextOut: {
+            /** Assets */
+            assets?: components["schemas"]["PlayerAssetOut"][];
+            contest: components["schemas"]["PlayerContestOut"];
+            /** Matched By */
+            matched_by: string;
+            notice?: components["schemas"]["PlayerNoticeOut"] | null;
+            player: components["schemas"]["PlayerProfileOut"];
+            /** Server Time */
+            server_time: number;
         };
         /**
          * PlayerImportOut
@@ -2727,6 +3056,23 @@ export interface components {
              * @default 0
              */
             updated: number;
+        };
+        /**
+         * PlayerNoticeOut
+         * @description 下发给选手的**考场公告文件**。
+         *
+         *     用户定的形状：公告就是一份走"文件下发"那条路发下去的文件，服务端不去解析
+         *     它的内容、也不把它拆成"说明 + 保存规则"两段 —— 那些拼出来的说法迟早会和
+         *     教师真正发下去的那份文件对不上，而选手会照着页面上那句错的去做。
+         *
+         *     ``content`` 是 Markdown **原文**，不转 HTML：渲染是页面的事，服务端一转换，
+         *     "页面上看到的"和"下发给机器的那份文件"就不再是同一份东西了。
+         */
+        PlayerNoticeOut: {
+            /** Content */
+            content: string;
+            /** Filename */
+            filename: string;
         };
         /** PlayerOut */
         PlayerOut: {
@@ -2755,6 +3101,23 @@ export interface components {
              * @default false
              */
             online: boolean;
+            /** Player No */
+            player_no: string;
+            /** Seat */
+            seat?: string | null;
+        };
+        /**
+         * PlayerProfileOut
+         * @description 选手页上的"我是谁"：考号、姓名、座位、分组。
+         *
+         *     只回显他自己的（按查询参数定位到的那一个 ``Player``）。姓名等字段允许为空 ——
+         *     名单里没填就如实是空，不拿考号去顶替。
+         */
+        PlayerProfileOut: {
+            /** Group Name */
+            group_name?: string | null;
+            /** Name */
+            name?: string | null;
             /** Player No */
             player_no: string;
             /** Seat */
@@ -3884,6 +4247,41 @@ export interface operations {
         requestBody: {
             content: {
                 "multipart/form-data": components["schemas"]["Body_upload_asset_api_v1_admin_contests__contest_id__assets_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_text_asset_api_v1_admin_contests__contest_id__assets_text_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contest_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AssetTextIn"];
             };
         };
         responses: {
@@ -5980,6 +6378,86 @@ export interface operations {
             };
         };
     };
+    install_ledger_api_v1_agent_install_json_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InstallLedgerOut"];
+                };
+            };
+        };
+    };
+    install_bootstrap_api_v1_agent_install_bootstrap_sh_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    install_bundle_api_v1_agent_install_bundle_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    install_installer_api_v1_agent_install_installer_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
     whoami_api_v1_agent_me_get: {
         parameters: {
             query?: never;
@@ -6053,6 +6531,40 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TickResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    player_context_api_v1_player_context_get: {
+        parameters: {
+            query?: {
+                /** @description 场次标识（slug），自动匹配不上时手填 */
+                contest?: string | null;
+                /** @description 考号，自动匹配不上时手填 */
+                player_no?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlayerContextOut"];
                 };
             };
             /** @description Validation Error */

@@ -14,6 +14,7 @@ Agent 必须零第三方依赖，所以**不能** import 服务端的 pydantic �
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -34,6 +35,24 @@ AGENT_DIR = REPO_ROOT / "agent"
 FIXTURE_TOOL = AGENT_DIR / "tools" / "build_fixture.py"
 
 
+def _utf8_env() -> dict:
+    """让子进程按 UTF-8 写 stdout。
+
+    Windows 上 Python 默认按控制台代码页编码 stdout（简中系统是 cp936），而这里
+    是用 ``encoding="utf-8"`` 读的。样本里只要有**一个**中文（``reason``、
+    ``errors`` 里就有），父进程就会在读取线程里撞 ``UnicodeDecodeError`` ——
+    报出来的是一个跟被测代码毫无关系的错误，本模块 9 条测试会一起变红。
+
+    以前靠 ``scripts/check.sh`` 导出 ``PYTHONIOENCODING`` 兜着，但那意味着
+    **直接跑 ``pytest`` 就是红的**，而"只能从一个脚本跑才绿"的测试迟早会被
+    某个人在本地跑一遍、然后花半小时怀疑自己改坏了什么。测试该自己站稳。
+    """
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    return env
+
+
 @pytest.fixture(scope="module")
 def fixture() -> dict:
     """调用 Agent 自己的构造函数生成报文样本。"""
@@ -45,6 +64,7 @@ def fixture() -> dict:
         text=True,
         encoding="utf-8",
         cwd=str(REPO_ROOT),
+        env=_utf8_env(),
     )
     if completed.returncode != 0:
         pytest.fail("生成 Agent 报文样本失败：\n%s\n%s" % (completed.stdout, completed.stderr))

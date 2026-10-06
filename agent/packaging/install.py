@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -74,6 +75,16 @@ BOOTSTRAP_KEY_FILENAME = "bootstrap.key"
 #: ``<config-dir>/`` 而不是版本目录里 —— 版本目录会被清理，把信任锚放在那儿等于
 #: 某天升级会因为"公钥不见了"而整体失效，而那时没人会想到是删旧版本删出来的。
 PUBLIC_KEY_FILENAME = "release-key.pub.json"
+
+#: 包内内嵌的服务端地址（``build_bundle.py --server-url`` 写的那个文件）。
+SERVER_URL_FILENAME = "server.json"
+
+#: ``--server`` 与包内地址都缺、局域网也问不到时用的值。
+#:
+#: 这个默认值是**故意留成回环**的：它是一个明确的"还没配好"，而不是一个看起来
+#: 像配好了的猜值。安装器会为此打一条显眼的警告 —— 因为把它当成真实地址的后果
+#: 是机器去连自己，而现场只看到"注册不上"。
+DEFAULT_SERVER_URL = "https://127.0.0.1:8000"
 #: 从源码仓库跑安装器时，密钥的默认位置（``syncoj-server init`` 生成的地方）。
 DEFAULT_BOOTSTRAP_KEY_FILE = REPO_ROOT / ".key" / BOOTSTRAP_KEY_FILENAME
 #: 装机时以 root 身份跑一次注册的单元。
@@ -512,8 +523,11 @@ class Installer:
             self.report.note("（如需重建请加 --force-config，会覆盖现有配置）")
             return
 
+        server_url, origin = self.resolve_server_url(version)
+        self.report.note("服务端地址: %s（%s）" % (server_url, origin))
+
         content = render_config(
-            server_url=self.options.server or "https://127.0.0.1:8000",
+            server_url=server_url,
             verify_tls=not self.options.insecure,
             ca_file=self.options.ca_file or "",
             bootstrap_key_file=_posix(self.config_dir / BOOTSTRAP_KEY_FILENAME),
@@ -543,6 +557,111 @@ class Installer:
         os.replace(str(tmp), str(self.config_path))
         self._restrict_config_to_run_user()
         self.report.action("已写入 %s" % self.config_path)
+
+    def resolve_server_url(self, version: str) -> "Tuple[str, str]":
+        """定出 ``server.url``，返回 ``(地址, 这个地址是哪来的)``。
+
+        四条来源，**按可信度**：
+
+        1. ``--server`` —— 操作员明确说的，永远最优先
+        2. 安装包内嵌的 ``server.json`` —— 包是那台服务端自己打的，所以这就是
+           它自己知道的地址。这是主路径：装 50 台一个字都不用输
+        3. **局域网发现** —— 包没带地址（别处打的包），或者地址变了。应答用发布
+           公钥验过签才认
+        4. 出厂默认 —— 都没找到。这时**必须说出来**，因为默认值是
+           ``127.0.0.1``，而它意味着机器会去连自己
+
+        第 3 条失败时**不退回**一个猜出来的地址：见 :meth:`discover_server_url`。
+        """
+        if self.options.server:
+            return self.options.server.rstrip("/"), "--server"
+
+        embedded = self.bundle_server_url(version)
+        if embedded:
+            return embedded, "安装包内嵌（服务端自己写的）"
+
+        if self.options.no_discover:
+            self.report.warn("已指定 --no-discover，跳过局域网发现")
+        else:
+            found, reason = self.discover_server_url(version)
+            if found:
+                return found, "局域网发现（%s）" % reason
+
+        self.report.warn(
+            "没能自动确定服务端地址，先用默认值 127.0.0.1 —— "
+            "**这台机器会去连自己**，必须改成服务端的真实地址才能注册"
+        )
+        return DEFAULT_SERVER_URL, "默认值（需要手工改）"
+
+    def bundle_server_url(self, version: str) -> Optional[str]:
+        """安装包里内嵌的服务端地址；没有就 ``None``。
+
+        只读不写。来源是打包时 ``build_bundle.py --server-url`` 写的
+        ``server.json``（用 ``--from-dir`` 时就是那个目录下的同名文件）。
+        """
+        for base in (
+            self.prefix / RELEASES_DIR / version,
+            Path(self.options.from_dir) if self.options.from_dir else None,
+        ):
+            if base is None:
+                continue
+            candidate = base / SERVER_URL_FILENAME
+            if not candidate.is_file():
+                continue
+            try:
+                payload = json.loads(candidate.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                self.report.warn("包内 %s 读不出来，忽略：%s" % (candidate, exc))
+                continue
+            # 合法 JSON 不等于合法内容：这个文件是人/脚本写的，也能被工具改坏。
+            # 少这一句 `isinstance`，一个 `[]` 就会让安装器当场抛 AttributeError。
+            if not isinstance(payload, dict):
+                self.report.warn("包内 %s 不是对象，忽略" % candidate)
+                continue
+            url = str(payload.get("url") or "").strip()
+            if url.startswith(("http://", "https://")):
+                return url.rstrip("/")
+            self.report.warn("包内 %s 里的地址不像话，忽略：%r" % (candidate, url))
+        return None
+
+    def discover_server_url(self, version: str) -> "Tuple[Optional[str], str]":
+        """在局域网里问一次。返回 ``(地址 或 None, 说明)``。
+
+        **验签用的公钥来自包本身**（那份复制到 ``<config-dir>`` 的信任锚），
+        所以"应答是不是这台服务端发的"有据可依。没有公钥就**不问** —— 分不出
+        "服务端"和"局域网里随便一个应答者"时，宁可让人去手填地址。
+
+        歧义（两个都验得过）时也**不猜**：猜错的表现是"代码交上去了但成绩是空的"，
+        现场看不出来。
+        """
+        public_key_path = self.prefix / RELEASES_DIR / version / PUBLIC_KEY_FILENAME
+        if not public_key_path.is_file():
+            return None, "机器上没有发布公钥，无法验证应答来源"
+
+        from syncoj_agent import discovery  # 延迟 import：只有这条路才用得上
+
+        key = discovery.load_public_key(public_key_path)
+        if key is None:
+            return None, "发布公钥读不出来"
+
+        if self.report.dry_run:
+            self.report.plan("在局域网里寻找服务端（UDP 广播）")
+            return None, "预览模式不真的发探测"
+
+        targets = None
+        if self.options.discover_address:
+            targets = [self.options.discover_address]
+        outcome = discovery.discover(
+            key,
+            timeout=self.options.discover_timeout,
+            machine_id=discovery.machine_id_hint(),
+            targets=targets,
+        )
+        if outcome.url:
+            return outcome.url, "在局域网里问到的"
+        if outcome.ambiguous:
+            self.report.warn(outcome.explain())
+        return None, outcome.explain()
 
     def install_public_key(self, version: str) -> str:
         """把升级公钥放到机器上，返回 ``agent.ini`` 里 ``public_key`` 该写的路径。
@@ -1241,7 +1360,30 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--sha256", default="", help="安装包 sha256，用于完整性校验")
 
     config = parser.add_argument_group("配置")
-    config.add_argument("--server", help="服务端地址，如 https://10.0.0.1:8443")
+    config.add_argument(
+        "--server",
+        help=(
+            "服务端地址，如 https://10.0.0.1:8443。**通常不用传**：安装包里内嵌了"
+            "服务端自己写的地址；包没带的话会先在局域网里问一次（应答要验签）。"
+            "传了就完全听这个。"
+        ),
+    )
+    config.add_argument(
+        "--no-discover",
+        action="store_true",
+        help="跳过局域网发现。包内地址与 --server 都没有时就直接用默认值并警告。",
+    )
+    config.add_argument(
+        "--discover-address",
+        default=None,
+        help="直接问这个地址而不是广播（有些交换机禁广播）。",
+    )
+    config.add_argument(
+        "--discover-timeout",
+        type=float,
+        default=1.5,
+        help="等发现应答的秒数，默认 1.5。",
+    )
     config.add_argument(
         "--bootstrap-key",
         help=(

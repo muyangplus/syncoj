@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
+import json
 import sys
 import tarfile
 from pathlib import Path
@@ -34,6 +36,15 @@ PACKAGE_NAME = "syncoj_agent"
 #: 且没有任何报错。
 PUBLIC_KEY_NAME = "release-key.pub.json"
 DEFAULT_PUBLIC_KEY = REPO_ROOT / ".key" / PUBLIC_KEY_NAME
+
+#: 服务端地址在包里的名字（同样放在包目录之外、与启动器同级）。
+#:
+#: 装 50 台机器时，"服务端地址"是唯一还要人手填的一项，而它是**打包这台服务端
+#: 自己就知道**的 —— 所以让它随包走，装机时一个字都不用输。
+SERVER_URL_NAME = "server.json"
+
+#: 这一项的格式版本，与发现协议（``syncoj_server.services.discovery``）同号。
+SERVER_URL_FORMAT = 1
 
 #: 放在发布根目录（包目录之外）的启动器。
 #:
@@ -107,11 +118,22 @@ def resolve_public_key(explicit: Optional[str]) -> Optional[Path]:
     return DEFAULT_PUBLIC_KEY if DEFAULT_PUBLIC_KEY.is_file() else None
 
 
+def server_url_bytes(url: str) -> bytes:
+    """包内 ``server.json`` 的内容。
+
+    **LF 结尾、显式 UTF-8、可复现**：这个文件参与 sha256，而 sha256 又要被签名，
+    所以它的字节必须稳定 —— 同一份输入在哪台机器上打都是同一串。
+    """
+    payload = {"v": SERVER_URL_FORMAT, "url": url.strip().rstrip("/")}
+    return (json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+
+
 def build(
     bundle_path: Path,
     agent_root: Path,
     reproducible: bool = True,
     public_key: Optional[Path] = None,
+    server_url: Optional[str] = None,
 ) -> Tuple[str, int, str]:
     """打包，返回 ``(版本号, 字节数, sha256)``。"""
     version = read_version(agent_root)
@@ -134,10 +156,24 @@ def build(
             with gzip.GzipFile(
                 filename="", fileobj=raw, mode="wb", compresslevel=9, mtime=0
             ) as gz:
-                _write_tar(gz, files, agent_root, reproducible=True, public_key=public_key)
+                _write_tar(
+                    gz,
+                    files,
+                    agent_root,
+                    reproducible=True,
+                    public_key=public_key,
+                    server_url=server_url,
+                )
     else:
         with tarfile.open(str(bundle_path), "w:gz", compresslevel=9) as archive:
-            _add_files(archive, files, agent_root, reproducible=False, public_key=public_key)
+            _add_files(
+                archive,
+                files,
+                agent_root,
+                reproducible=False,
+                public_key=public_key,
+                server_url=server_url,
+            )
 
     raw_bytes = bundle_path.read_bytes()
     return version, len(raw_bytes), hashlib.sha256(raw_bytes).hexdigest()
@@ -149,9 +185,10 @@ def _write_tar(
     agent_root: Path,
     reproducible: bool,
     public_key: Optional[Path] = None,
+    server_url: Optional[str] = None,
 ) -> None:
     with tarfile.open(fileobj=stream, mode="w") as archive:
-        _add_files(archive, files, agent_root, reproducible, public_key)
+        _add_files(archive, files, agent_root, reproducible, public_key, server_url)
 
 
 def _add_files(
@@ -160,20 +197,30 @@ def _add_files(
     agent_root: Path,
     reproducible: bool,
     public_key: Optional[Path] = None,
+    server_url: Optional[str] = None,
 ) -> None:
     package = agent_root / PACKAGE_NAME
-    entries: List[Tuple[Path, str]] = [(launcher_path(agent_root), LAUNCHER_NAME)]
+    #: ``(包内路径, 来源)``。来源是 ``Path`` 就读文件，是 ``bytes`` 就当场造一份 ——
+    #: ``server.json`` 没有对应的磁盘文件，它是打包时才算出来的。
+    entries: List[Tuple[str, object]] = [(LAUNCHER_NAME, launcher_path(agent_root))]
     for path in files:
         entries.append(
-            (path, "%s/%s" % (PACKAGE_NAME, path.relative_to(package).as_posix()))
+            ("%s/%s" % (PACKAGE_NAME, path.relative_to(package).as_posix()), path)
         )
-    # 公钥放在包目录之外（与启动器同级）：它是给安装器看的，不是包的一部分，
-    # 混进 syncoj_agent/ 里只会让它被当成模块或数据文件
+    # 公钥与地址都放在包目录之外（与启动器同级）：它们是给**安装器**看的，
+    # 不是包的一部分，混进 syncoj_agent/ 里只会被当成模块或数据文件
     if public_key is not None:
-        entries.append((public_key, PUBLIC_KEY_NAME))
+        entries.append((PUBLIC_KEY_NAME, public_key))
+    if server_url:
+        entries.append((SERVER_URL_NAME, server_url_bytes(server_url)))
 
-    for path, arcname in entries:
-        info = archive.gettarinfo(str(path), arcname=arcname)
+    for arcname, source in entries:
+        payload = source if isinstance(source, bytes) else None
+        if payload is None:
+            info = archive.gettarinfo(str(source), arcname=arcname)
+        else:
+            info = tarfile.TarInfo(arcname)
+            info.size = len(payload)
         info.uid = 0
         info.gid = 0
         info.uname = "root"
@@ -181,8 +228,11 @@ def _add_files(
         if reproducible:
             info.mtime = 0
             info.mode = 0o644
-        with open(str(path), "rb") as handle:
-            archive.addfile(info, handle)
+        if payload is None:
+            with open(str(source), "rb") as handle:
+                archive.addfile(info, handle)
+        else:
+            archive.addfile(info, io.BytesIO(payload))
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -194,6 +244,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--public-key", default=None,
                         help="打进包里的升级公钥。不指定时用仓库 .key/release-key.pub.json"
                              "（存在才用）；都没有就不打，机器上自更新保持关闭。")
+    parser.add_argument("--server-url", default=None,
+                        help="服务端地址，如 http://10.0.0.5:8000。会写进包内 %s，"
+                             "装机时不必再手填 —— 装 50 台时这是唯一还要人输的一项。"
+                             % SERVER_URL_NAME)
     parser.add_argument("--print-sha256-only", action="store_true")
     args = parser.parse_args(argv)
 
@@ -201,8 +255,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     version = read_version(agent_root)
     out = Path(args.out) if args.out else REPO_ROOT / "dist" / ("syncoj-agent-%s.tar.gz" % version)
     public_key = resolve_public_key(args.public_key)
+    if args.server_url is not None and not args.server_url.strip():
+        raise SystemExit("--server-url 不能是空字符串（不要它就别传这个参数）")
 
-    version, size, digest = build(out, agent_root, public_key=public_key)
+    version, size, digest = build(
+        out, agent_root, public_key=public_key, server_url=args.server_url
+    )
 
     if args.print_sha256_only:
         print(digest)
@@ -219,6 +277,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         print("  升级公钥: 没有（%s 不存在，也没给 --public-key）" % DEFAULT_PUBLIC_KEY)
         print("    包照样能装能跑，只是机器上自更新保持关闭 —— 签不出包就没法升。")
+
+    if args.server_url:
+        print("  服务端地址: %s → 包内 %s" % (args.server_url, SERVER_URL_NAME))
+        print("    装机时 install.py 自动用它，不用再传 --server；")
+        print("    机器上找不到服务端时还会用局域网发现再问一次。")
+    else:
+        print("  服务端地址: 没打进去（没给 --server-url）")
+        print("    装机时得传 --server，或者靠局域网发现自己问出来。")
 
     if args.verify_signature:
         # 延迟导入：只有需要签名时才依赖服务端模块

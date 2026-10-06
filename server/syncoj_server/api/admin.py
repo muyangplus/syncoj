@@ -132,7 +132,7 @@ from ..security import (
     new_token,
     verify_password,
 )
-from ..services import enrollment, matching, packaging, rosters
+from ..services import discovery, enrollment, matching, packaging, rosters
 from ..services.deploy import validate_dest_template
 from ..services.signing import parse_version
 from ..storage import BlobTooLarge, HashMismatch
@@ -3845,6 +3845,7 @@ def _expected_public_key_path(ctx: AppContext) -> Path:
 
 @router.get("/releases/source", response_model=ReleaseSourceOut)
 def release_source(
+    request: Request,
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> ReleaseSourceOut:
@@ -3854,19 +3855,35 @@ def release_source(
     解释（"生产上服务端可能没 checkout，请改用上传"），而不是让人点一下再吃
     一个 500。所以这里把"不可用"当成正常状态返回。
     """
-    probe = packaging.probe_source()
+    probe = packaging.probe_source(public_url=_advertised_url(request, ctx))
     return ReleaseSourceOut(
         available=probe.available,
         version=probe.version,
         agent_root=probe.agent_root,
         public_key=probe.public_key,
+        public_url=probe.public_url,
         reason=probe.reason,
     )
+
+
+def _advertised_url(request: Request, ctx: AppContext) -> Optional[str]:
+    """这台服务端该对考试机说自己是哪个地址。
+
+    顺序由 :func:`discovery.describe_advertised_url` 定：显式配置 →
+    "教师浏览器用过的那个非回环 Host" → 从**这次请求的来源**反推本机地址。
+
+    最后那条是给"全新服务端、没人配过地址"准备的：教师是从局域网上点进来的，
+    内核告诉他这条路走哪个网卡，那个地址就是考试机该用的地址 —— 于是零配置也
+    能打出带正确地址的包。
+    """
+    peer_ip = request.client.host if request.client else None
+    return discovery.describe_advertised_url(ctx, peer_ip)
 
 
 @router.post("/releases/build", response_model=ReleaseOut)
 def build_release(
     payload: ReleaseBuildIn,
+    request: Request,
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> ReleaseOut:
@@ -3899,7 +3916,7 @@ def build_release(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="版本号不合法: %s" % exc)
 
-    probe = packaging.probe_source()
+    probe = packaging.probe_source(public_url=_advertised_url(request, ctx))
     if not probe.available:
         raise ApiError(503, "release_source_missing", probe.reason or "找不到可构建的源码")
     if probe.version != version:
@@ -3918,7 +3935,12 @@ def build_release(
     tmp_dir = Path(tempfile.mkdtemp(prefix="build-", dir=str(ctx.blobs.tmp_root)))
     tmp_path = tmp_dir / ("syncoj-agent-%s.tar.gz" % version)
     try:
-        built_version, size, sha256 = packaging.build_agent_bundle(tmp_path)
+        # 把服务端地址一起写进包：装 50 台时这是唯一还要人手输的一项。算不出来
+        # （没人从局域网打开过界面、也没配 public_url）时不写，机器那边还有
+        # 局域网发现兜着 —— 但**绝不退化成 127.0.0.1**，那会让 50 台机器各自找自己。
+        built_version, size, sha256 = packaging.build_agent_bundle(
+            tmp_path, server_url=probe.public_url
+        )
         if built_version != version:  # pragma: no cover - 上面刚比对过，双保险
             raise ApiError(409, "version_mismatch", "构建出的版本是 %s" % built_version)
         with tmp_path.open("rb") as handle:

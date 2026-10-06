@@ -310,6 +310,25 @@ class AgentClient:
         self._control: Optional[http.client.HTTPConnection] = None
         self._transfer: Optional[http.client.HTTPConnection] = None
 
+    def repoint(self, base_url: str) -> None:
+        """把客户端指向另一个地址，用于**服务端换了 IP** 之后。
+
+        存在的理由：地址是配置里写死的，而 DHCP 让服务端换一次地址就足以让
+        整间机房的机器一起失联。局域网发现能问出新地址，但"问出来"和"用上去"
+        之间还差这一步。
+
+        先把两个连接关掉再改字段：留着旧连接的话，下一轮请求会发到一个已经
+        不对的地址上，而报出来的是超时 —— 看起来像网络问题，不像配置问题。
+        """
+        parsed = urllib.parse.urlsplit(base_url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise ProtocolError("服务端地址必须是 http:// 或 https:// 开头并带主机名")
+        self.close()
+        self.scheme = parsed.scheme
+        self.host = parsed.hostname
+        self.port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        self.prefix = parsed.path.rstrip("/")
+
     # ---------------------------------------------------------------- #
     # 连接管理
     # ---------------------------------------------------------------- #

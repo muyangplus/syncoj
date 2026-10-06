@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from . import __version__
+from . import discovery
 from .client import (
     AgentClient,
     AgentError,
@@ -99,6 +100,13 @@ log = logging.getLogger("syncoj.agent")
 MAX_BACKOFF = 300.0
 #: 事件积压上限，防止长时间离线导致内存里堆一堆事件
 MAX_PENDING_EVENTS = 200
+
+#: 连续多少轮连不上服务端之后，去局域网里问一次它在哪。
+#:
+#: 攒够再问是因为"连不上"的常见原因不是地址变了（服务端重启、网线抖动、
+#: Wi-Fi 重连都会连不上），而发现要往整个局域网广播。三轮配合指数退避大约是
+#: 5+10+20 秒 —— 够排除抖动，也不会让一台换了网段的机器干等太久。
+REDISCOVER_AFTER_FAILURES = 3
 
 #: 连续多少个成功周期后才认为新版本可信、清掉回滚状态。
 #: 不用"启动成功"作为判据 —— 起得来但一 tick 就崩的版本同样必须回滚。
@@ -221,6 +229,10 @@ class Agent:
         #: 连续成功周期计数，用于确认新版本可用后清掉回滚状态
         self._healthy_cycles = 0
         self._public_key = self._load_release_public_key()
+        #: 连续多少轮连不上服务端。攒够了才去局域网里问一次地址 ——
+        #: 服务端重启一下、网线抖一下都会连不上，而那些情况下地址并没有变，
+        #: 每轮都广播只会打扰整个局域网（见 REDISCOVER_AFTER_FAILURES）
+        self._network_failures = 0
         #: 扫描根与上报前缀。注册拿到准考证号之后才能确定，见 _resolve_roots()
         self._roots: List[Tuple[str, Path]] = []
         self._roots_ready = False
@@ -1121,6 +1133,12 @@ class Agent:
                 self._backoff = min(MAX_BACKOFF, max(5.0, self._backoff * 2 or 5.0))
                 log.warning("网络不可用，%.0f 秒后重试：%s", self._backoff, exc)
                 delay = self._backoff
+                self._network_failures += 1
+                if self._network_failures >= REDISCOVER_AFTER_FAILURES:
+                    # 计数在**尝试之后**清零：发现失败也要再等 N 轮才重试，
+                    # 否则退避就白做了（每轮都往局域网里广播一次）。
+                    self._network_failures = 0
+                    self._try_rediscover()
             except AgentError as exc:
                 self._backoff = min(MAX_BACKOFF, max(10.0, self._backoff * 2 or 10.0))
                 log.warning("本轮失败，%.0f 秒后重试：%s", self._backoff, exc)
@@ -1135,6 +1153,60 @@ class Agent:
         log.info("Agent 已停止")
         self.client.close()
         return 0
+
+    def _try_rediscover(self) -> None:
+        """连不上服务端时，去局域网里问一次：它是不是换地址了？
+
+        **只在同一个地址连续失败若干轮之后**才做这一件事。理由是代价不对称：
+        服务端重启一下、网线抖一下、Wi-Fi 重连都会连不上，而那些情况下地址并没有
+        变 —— 每轮都广播一次会打扰整个局域网，而它换地址是很少见的事。
+
+        问到的新地址**只在这个进程内生效**，不写回 ``agent.ini``：那是教师的文件，
+        Agent 悄悄改它会让"配置文件里写的是什么"失去意义。代价是重启之后再发现
+        一次，这可以接受（几秒钟，而且是机器自己的事）。
+
+        **认的是签名，不是"谁先回答"**：见 ``syncoj_agent/discovery.py``。
+        """
+        if self._public_key is None:
+            log.info("连不上服务端，但机器上没有发布公钥 —— 无法验证应答来源，不做发现")
+            return
+
+        outcome = discovery.discover(
+            self._public_key,
+            machine_id=discovery.machine_id_hint(),
+        )
+        if not outcome.url:
+            log.warning("局域网发现没结果：%s", outcome.explain())
+            return
+
+        current = (self.config.server_url or "").rstrip("/")
+        if outcome.url == current:
+            # 最常见的结局：地址没变，是网络或服务端本身的问题。这条日志能省掉
+            # 一次"是不是地址配错了"的怀疑。
+            log.warning("局域网发现的地址与配置一致（%s）：问题不在地址上", outcome.url)
+            return
+
+        log.warning(
+            "服务端换地址了：%s → %s（本次运行内生效；agent.ini 里仍是旧值）",
+            current or "（空）",
+            outcome.url,
+        )
+        self._emit(
+            "warning",
+            "server_address_changed",
+            "服务端地址变了，已自动改用 %s（原 %s）" % (outcome.url, current or "（空）"),
+            {"from": current, "to": outcome.url},
+        )
+        try:
+            self.client.repoint(outcome.url)
+        except AgentError as exc:
+            log.error("改用新地址失败，继续用原地址：%s", exc)
+            return
+        self.config.server_url = outcome.url
+        # 地址换了，之前那份凭据对应的服务端可能不是同一台 —— 不清凭据，
+        # 但要让下一轮重新走一遍身份解析（服务端会自己判断这台机器是谁）。
+        self._roots_ready = False
+        self._backoff = 0.0
 
     def _sleep(self, seconds: float) -> None:
         """可被停止信号打断的休眠。

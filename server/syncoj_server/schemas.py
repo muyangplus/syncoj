@@ -905,12 +905,17 @@ class ReleaseSourceOut(_Base):
 
     ``available=False`` 时 ``reason`` 一定是一句能直接显示的中文 ——
     这个接口设计成"永远 200"，因为"没有源码"是一种正常状态而不是错误。
+
+    ``public_url`` 是会被内嵌进包里的服务端地址。装 50 台机器时机器就靠它找
+    服务端，所以它要在这里露出来：教师需要知道这个包"能不能自己找到服务器"，
+    而不是装完 50 台之后才发现每台都得手填一次。
     """
 
     available: bool
     version: Optional[str] = None
     agent_root: Optional[str] = None
     public_key: Optional[str] = None
+    public_url: Optional[str] = None
     reason: Optional[str] = None
 
 

@@ -85,6 +85,10 @@ class SourceProbe:
     ``public_key`` 是会被内嵌进包里的那把公钥的路径（没有就是 ``None``）。
     把它一起报出来是为了让界面能**在点之前**说清"这样发出去机器验不了"，
     而不是等构建成功、铺开、然后所有机器静默不升级。
+
+    ``public_url`` 是会被内嵌进包里的服务端地址（没有就是 ``None``）。它同样是
+    "点之前就该看见"的信息：装 50 台时机器就靠它找服务端，而它取决于有没有人从
+    局域网打开过界面 —— 不说出来的话，教师不会知道这个包"能不能自己找到服务器"。
     """
 
     available: bool
@@ -92,6 +96,7 @@ class SourceProbe:
     agent_root: Optional[str] = None
     reason: Optional[str] = None
     public_key: Optional[str] = None
+    public_url: Optional[str] = None
 
 
 def agent_root() -> Path:
@@ -139,19 +144,30 @@ def source_version(root: Optional[Path] = None) -> str:
     raise BuildError("%s 里没有可用的 %s" % (init_file, VERSION_ATTR))
 
 
-def probe_source() -> SourceProbe:
-    """能不能构建、会打出哪个版本、包里会带哪把公钥。**不抛异常。**"""
+def probe_source(public_url: Optional[str] = None) -> SourceProbe:
+    """能不能构建、会打出哪个版本、包里会带哪把公钥和哪个地址。**不抛异常。**
+
+    ``public_url`` 由调用方算好传进来（它需要请求上下文才能确定，见
+    :func:`syncoj_server.services.discovery.describe_advertised_url`）——
+    这里只负责如实报出去，不自己猜。
+    """
     public_key = keys.release_public_key_path()
     try:
         root = agent_root()
         version = source_version(root)
     except BuildError as exc:
-        return SourceProbe(available=False, reason=exc.detail, public_key=_as_str(public_key))
+        return SourceProbe(
+            available=False,
+            reason=exc.detail,
+            public_key=_as_str(public_key),
+            public_url=public_url,
+        )
     return SourceProbe(
         available=True,
         version=version,
         agent_root=str(root),
         public_key=_as_str(public_key),
+        public_url=public_url,
     )
 
 
@@ -159,8 +175,13 @@ def _as_str(path: Optional[Path]) -> Optional[str]:
     return str(path) if path is not None else None
 
 
-def build_agent_bundle(destination: Path) -> Tuple[str, int, str]:
+def build_agent_bundle(
+    destination: Path, server_url: Optional[str] = None
+) -> Tuple[str, int, str]:
     """把仓库里的 Agent 源码打成 ``destination``，返回 ``(版本, 字节数, sha256)``。
+
+    ``server_url`` 会被写进包内 ``server.json`` —— 装 50 台机器时，地址是唯一
+    还要人手填的一项，而它是打包这台服务端**自己就知道**的。
 
     sha256 是**我们自己**对产物算的，不用构建脚本打印的那个 —— 它打印的值要经过
     一次 stdout 往返（还有编码），而签名正是签在这个值上：宁可信文件本身。
@@ -189,6 +210,8 @@ def build_agent_bundle(destination: Path) -> Tuple[str, int, str]:
     public_key = keys.release_public_key_path()
     if public_key is not None:
         argv += ["--public-key", str(public_key)]
+    if server_url:
+        argv += ["--server-url", server_url]
 
     env = dict(os.environ)
     # 子进程按 UTF-8 写 stdout/stderr，父进程也按 UTF-8 读。不钉这一下的话，

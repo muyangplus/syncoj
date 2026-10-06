@@ -136,41 +136,59 @@ function envelopePaths() {
 }
 
 /**
- * `api/index.ts` 里 `export const xApi = {` 下的方法名 → `xApi.method`。
+ * `api/` 下每个资源模块里 `export const xApi = {` 的方法名 → `xApi.method`。
  *
  * 靠**缩进**认方法：每个资源的 `export const xApi = {` 在顶层，它的方法固定在
  * 两格缩进上，方法体更深。不做通用 AST 解析是有意的 —— 这里要的是"能挡住
  * 漏接接口"，不是"能解析任意 TS"；而通用解析的复杂度会让人不敢改它。
  *
- * 代价是它对格式化敏感，所以下面有一个**条数下限**：一旦被重新格式化导致
- * 一条都认不出来，检查会红，而不是静默通过（"什么都没找到"等于"全部通过"
- * 是这类检查最典型的死法）。
+ * **扫整个 `api/` 目录而不是只扫 `index.ts`**：一个资源一个模块之后，方法散在
+ * 十几个文件里，只读入口的话会一条都认不出来（而入口现在几乎全是 re-export）。
+ * `client.ts` / `crud.ts` / `endpoints.ts` / `types.ts` 里没有这种块，扫到也无妨。
+ *
+ * 代价是它对格式化敏感，所以下面有一个**条数下限**：一旦被重新格式化、或者
+ * 某个模块被挪走导致一条都认不出来，检查会红，而不是静默通过（"什么都没找到"
+ * 等于"全部通过"是这类检查最典型的死法）。
  */
 const MIN_EXPECTED_METHODS = 40
 
+/** `api/` 下会被扫描的模块（排除生成物 —— 它是从 openapi.json 生成的）。 */
+function apiModules() {
+  const dir = join(SRC, 'api')
+  return readdirSync(dir)
+    .filter((name) => name.endsWith('.ts') && !name.endsWith('.d.ts'))
+    .map((name) => join(dir, name))
+}
+
 function declaredMethods() {
-  const text = readText(join(SRC, 'api', 'index.ts'))
   const found = []
-  let current = null
-  for (const line of text.split('\n')) {
-    const open = /^export const (\w+) = \{$/.exec(line)
-    if (open) {
-      current = open[1]
-      continue
+  for (const file of apiModules()) {
+    let current = null
+    for (const line of readText(file).split('\n')) {
+      const open = /^export const (\w+) = \{$/.exec(line)
+      if (open) {
+        // 只认资源对象（`xApi`）。`endpoints.ts` 里也有一个顶层对象
+        // （`export const paths = {`），它的成员是**路径构造器**而不是接口方法 ——
+        // 当成方法收进来会得出"paths.releaseYank 没有界面入口"这种假问题，
+        // 而且是 58 条一起报。
+        current = open[1].endsWith('Api') ? open[1] : null
+        continue
+      }
+      if (line === '}') {
+        current = null
+        continue
+      }
+      if (current === null) continue
+      const method = /^ {2}(\w+):\s*(?:async\s*)?\(/.exec(line)
+      if (method) found.push(`${current}.${method[1]}`)
     }
-    if (line === '}') {
-      current = null
-      continue
-    }
-    if (current === null) continue
-    const method = /^ {2}(\w+):\s*(?:async\s*)?\(/.exec(line)
-    if (method) found.push(`${current}.${method[1]}`)
   }
   if (found.length < MIN_EXPECTED_METHODS) {
     console.error(
-      `入口对账自身失效：只从 api/index.ts 里认出 ${found.length} 个方法` +
+      `入口对账自身失效：只从 api/ 下认出 ${found.length} 个方法` +
         `（预期至少 ${MIN_EXPECTED_METHODS} 个）。` +
-        '多半是文件被重新格式化、缩进变了 —— 改这个脚本的匹配规则，而不是放宽下限。',
+        '多半是文件被重新格式化、缩进变了，或者资源模块被挪到了 api/ 之外 ——' +
+        '改这个脚本的匹配规则，而不是放宽下限。',
     )
     process.exit(1)
   }
@@ -210,14 +228,17 @@ for (const [path, line] of declaredPaths) {
 // `list`（GET，信封）用、也被 `create`（POST，单个对象）用，后者当然不用
 // `listPage`。所以判据取两个**精确**的：
 //   ① 把信封路径断言成数组（`request<T[]>`）—— 这是那个 bug 的签名
-//   ② 一个信封路径在 index.ts 里被引用过、却没有任何一处走 listPage
+//   ② 一个信封路径在某个资源模块里被引用过、却没有任何一处走 listPage
+//
+// 扫的是 `api/` 下的**每个**模块，不是入口 index.ts —— 一条资源一个模块之后，
+// 入口里已经没有 `paths.xxx(` 了。
 const envelopes = envelopePaths()
 const endpointNames = pathNames()
-const indexLines = readText(join(SRC, 'api', 'index.ts')).split('\n')
+const apiLines = apiModules().flatMap((file) => readText(file).split('\n'))
 
 const envelopeRefs = new Map()
 let listPageCalls = 0
-for (const line of indexLines) {
+for (const line of apiLines) {
   for (const match of line.matchAll(/\bpaths\.(\w+)\(/g)) {
     const path = endpointNames.get(match[1])
     if (!path || !envelopes.has(path)) continue

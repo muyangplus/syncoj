@@ -6,8 +6,9 @@
  * 数据**的删除都要带 `confirm`。页面代码因此不需要再碰 `items`/`total`、
  * 也不需要自己拼 `?confirm=`。
  *
- * 这**不是**一个通用 ORM 封装：每个资源的路径与字段仍然写在 `index.ts` 里，
- * 这里只放"每个资源都一样"的那部分。
+ * 这**不是**一个通用 ORM 封装：每个资源的路径写在 `endpoints.ts` 里、方法写在
+ * 各自的资源模块里（`contests.ts`、`files.ts`…），这里只放"每个资源都一样"的
+ * 那部分。
  */
 
 import { ApiError, query, request } from './client'
@@ -32,6 +33,15 @@ export interface Page<T> {
 
 /** 查询参数值。布尔要能表达"不传"，所以允许 undefined。 */
 export type Params = Record<string, string | number | boolean | undefined | null>
+
+/**
+ * 列表方法的入参：分页 + 该资源自己的筛选条件。
+ *
+ * 放在这里而不是 `index.ts`，是因为每个资源模块都要用它，而模块之间不该
+ * 互相 import（入口只做汇总）。`index.ts` 会把它再转出去，页面照旧可以
+ * `import type { ListParams } from '@/api'`。
+ */
+export type ListParams = ListQuery & Params
 
 /** 一份空页。加载器用它在"还没选场次"时表达"没有数据"，而不是抛错。 */
 export function emptyPage<T>(limit = 50, offset = 0): Page<T> {

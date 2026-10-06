@@ -500,14 +500,21 @@ web/src/api/schema.d.ts                ← 生成物，不要手改
 | 文件 | 职责 |
 |---|---|
 | `api/client.ts` | `request`/`query`/`download`，把错误体转成带 `code` 的 `ApiError` |
-| `api/resource.ts` | 每个资源声明一次（路径 + 类型 + 过滤参数） |
+| `api/endpoints.ts` | 所有路径的唯一定义 —— 服务端改路径时只需要改这一处 |
+| `api/crud.ts` | 分页、信封、删除语义的公共实现 |
+| `api/<资源>.ts` | **一个资源一个模块**，只有「路径 + 参数 + 返回类型」的映射 |
+| `api/index.ts` | 入口，几乎全是 re-export；页面只从这里 import |
 | `composables/useList.ts` | 分页、筛选、加载/错误、刷新、批量选择、可中断的请求 |
 | `composables/useMutation.ts` | 执行写操作、弹提示、刷新列表、管理按钮 pending 态 |
 | `components/` | `PageShell` / `DataTable` / `ConfirmByNameDialog` / `FormDialog` |
 
-新增一个资源 = 在 `resource.ts` 里加一条 + 写一个页面，而不是再抄一遍
-loading/error/分页/轮询。这是上一版前端的真实问题：每个 view 都手写了一遍
-同样的十几行，于是加一个入口的成本高到没人愿意加。
+新增一个资源 = 一个资源模块 + 一个页面（外加在 `index.ts` 里加一行转出），
+而不是再抄一遍 loading/error/分页/轮询。这是上一版前端的真实问题：每个 view 都
+手写了一遍同样的十几行，于是加一个入口的成本高到没人愿意加。
+
+> 拆开而不是堆在一个 `index.ts` 里，是为了让"这个资源有哪些动作"一眼能看完。
+> 十几个资源的七十七个方法挤在一个文件里时，**漏接一个入口**和**看漏一行**是
+> 同一件事 —— 而"很多功能没有入口"正是这一轮要解决的用户诉求。
 
 ### 5.4 删除语义
 

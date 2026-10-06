@@ -21,17 +21,6 @@ if str(AGENT_ROOT) not in sys.path:
 from syncoj_agent import discovery  # noqa: E402
 
 
-@pytest.fixture(scope="module")
-def installer_module():
-    """按路径把 ``packaging/install.py`` 导进来（它不是包的一部分）。"""
-    path = AGENT_ROOT / "packaging" / "install.py"
-    spec = importlib.util.spec_from_file_location("syncoj_installer", path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules.setdefault("syncoj_installer", module)
-    spec.loader.exec_module(module)
-    return module
-
-
 @pytest.fixture()
 def make(installer_module, workdir: Path):
     """造一个够用的 Installer，并把 ``releases/<版本>/`` 摆出来。"""
@@ -259,7 +248,7 @@ def test_成功时不留警告(make) -> None:
     assert warnings == []
 
 
-def test_内嵌地址与实际写进配置的一致(make) -> None:
+def test_内嵌地址与实际写进配置的一致(make, installer_module) -> None:
     """解析出来的地址必须真的落进 agent.ini —— 否则前面这些都没意义。
 
     用预览模式跑 ``write_config``：它会走完解析与渲染，但不碰磁盘。
@@ -276,7 +265,7 @@ def test_内嵌地址与实际写进配置的一致(make) -> None:
         rendered.update(kwargs)
         return "[server]\nurl = %s\n" % kwargs["server_url"]
 
-    instance_module = sys.modules["syncoj_installer"]
+    instance_module = installer_module
     original = instance_module.render_config
     instance_module.render_config = fake_render
     try:

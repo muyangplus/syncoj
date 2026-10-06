@@ -19,34 +19,61 @@
 > 每种都要维护、测试，并且迟早有人选错。`agent.ini` 里若还留着 `enroll_code =`，
 > 它会被静默忽略（升级过来的机器不该因为这个起不来）。
 
-## 一键安装（三种入口，共用同一份逻辑）
+## 一键安装（四种入口，共用同一份逻辑）
 
 ```bash
-# 1. 镜像预装（推荐：整间机房一份镜像）
-#    --user 必须填**选手登录账号**（见下方"运行身份"）
-#    密钥用 syncoj-server bootstrap-key issue 签发，明文只显示一次
+# 1. 从服务端直接装（推荐：空机器、整间机房一份小镜像）
+#    地址不填也行 —— 那就去局域网里广播着找一次（那时要给 --public-key 才能验应答）
 sudo python3 install.py \
-    --download-url https://10.0.0.1:8443/dist/syncoj-agent-bundle.tar.gz \
-    --sha256 <从服务端界面抄下来的校验和> \
-    --server https://10.0.0.1:8443 \
+    --from-server --server http://10.0.0.1:8000 \
     --bootstrap-key <签发出的密钥> \
     --user student
 
-# 2. 离线包安装（考场无网）
+# 2. 镜像预装（把安装包预先放进镜像）
 sudo python3 install.py \
     --bundle ./syncoj-agent-0.1.0.tar.gz \
     --sha256 <校验和> \
-    --server https://10.0.0.1:8443 \
+    --server http://10.0.0.1:8000 \
     --bootstrap-key <签发出的密钥> \
     --user student
 
-# 3. 在线自举（一条命令）
-curl -fsSL https://10.0.0.1:8443/dist/bootstrap.sh | sudo sh -s -- \
-    --server https://10.0.0.1:8443 --bootstrap-key <签发出的密钥> --user student
+# 3. 在线自举（**空机器上的第一条命令**）
+curl -fsSL http://10.0.0.1:8000/api/v1/agent/install/bootstrap.sh | sudo sh -s -- \
+    --server http://10.0.0.1:8000 --bootstrap-key <签发出的密钥> --user student
 
-# 先看看会做什么（不需要 root，不做任何改动）
-python3 install.py --bundle ./x.tar.gz --server https://x --dry-run
+# 4. 通用下载（任意 URL，比如内网静态文件服务器）
+sudo python3 install.py \
+    --download-url http://10.0.0.1/x/syncoj-agent-bundle.tar.gz \
+    --sha256 <从服务端界面抄下来的校验和> \
+    --server http://10.0.0.1:8000 --user student
+
+# 先看看会做什么（不需要 root，不做任何改动；预览**不联网**）
+python3 install.py --from-server --server http://x --dry-run
 ```
+
+### 从服务端直接装：凭什么信
+
+`--from-server` 走的是服务端那四个**不鉴权**的装机端点
+（`/api/v1/agent/install/*`）。不鉴权是有意的：**初次安装时机器手上什么都没有** ——
+没有 Agent、没有凭据，要求鉴权就没有入口。装完之后靠**配对**建立信任：机器注册上来是
+"待认领"状态，教师必须在管理界面「机器配对」里把它绑到名单里的某个人，它才开始
+收代码、收文件、收成绩。
+
+服务端只发**已铺开**的版本 —— 与升级同一条判据。教师刚构建出来、还没敢铺开的包，
+装机入口也拿不到。
+
+安装器把**能验的都验上**，并如实报告做了哪些：
+
+| 机器上有没有发布公钥 | 验到什么程度 |
+|---|---|
+| 有（`--public-key`，或已装好的机器） | sha256 **+ 签名**。这一步才真正挡住"有人替你换了个包" |
+| 没有 | 只验 sha256（对照服务端台账）。**明说未验签**，并打印校验和供人跟界面对一遍 |
+
+想把验签也带上：把 `release-key.pub.json` 放进镜像，用
+`--public-key <路径>` 或 `RELEASE_PUBLIC_KEY=<路径>`（自举脚本认这个环境变量）。
+
+> **sha256 挡得住什么、挡不住什么。** 台账与包来自同一个未鉴权的地方，所以它挡的是
+> 传输损坏与"传了一半"，**挡不住恶意服务端**。要挡住后者只有验签。
 
 > **重复执行安装器时不必再传一遍密钥。** 它已经在那台机器上了，而"
 > 没传 `--bootstrap-key`"不等于"这台机器没有密钥" —— 安装器会认出现有的密钥文件。

@@ -6,6 +6,7 @@ Agent 本身零依赖，测试需要 pytest —— 但 pytest 只在开发机上
 
 from __future__ import annotations
 
+import importlib.util
 import shutil
 import sys
 import uuid
@@ -79,3 +80,28 @@ def make_tree(root: Path, files) -> None:
         target = root / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(content if isinstance(content, bytes) else content.encode("utf-8"))
+
+
+@pytest.fixture(scope="session")
+def installer_module():
+    """``packaging/install.py`` —— **整个测试会话只加载一次**。
+
+    它不是一个包（``packaging/`` 不在 Agent 的 import 路径上），只能按路径加载，
+    而"按路径加载"带来过一个真实的坑：三个测试文件各自
+    ``spec_from_file_location("syncoj_installer", ...)`` + ``sys.modules.setdefault``。
+
+    于是**先加载的那个赢**：后面那个文件拿到的其实是最先那个模块对象，而
+    ``test_server_address.py`` 里有一处 monkeypatch 是打在
+    ``sys.modules["syncoj_installer"].render_config`` 上的 —— 当它拿到的是**另一个**
+    模块对象时，补丁打在了空气上，被测代码照旧调用真的 ``render_config``，
+    结果是一个 `KeyError: 'server_url'`。
+
+    那种失败只在**全量跑**时出现（单独跑那个文件是绿的），而且报错和被测代码毫无
+    关系。所以加载器收到这里，只此一份，谁也别再 ``setdefault``。
+    """
+    path = AGENT_ROOT / "packaging" / "install.py"
+    spec = importlib.util.spec_from_file_location("syncoj_installer", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["syncoj_installer"] = module
+    spec.loader.exec_module(module)
+    return module

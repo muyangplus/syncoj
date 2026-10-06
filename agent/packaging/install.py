@@ -79,6 +79,12 @@ PUBLIC_KEY_FILENAME = "release-key.pub.json"
 #: 包内内嵌的服务端地址（``build_bundle.py --server-url`` 写的那个文件）。
 SERVER_URL_FILENAME = "server.json"
 
+#: 服务端装机入口的路径。**必须与 ``api/agent.py`` 里的常量一致** ——
+#: 两边各写一遍的话，改了路由就会在这里变成一个 404，而现象是"装机装不上"。
+#: 有一条测试（``tests/test_install_entry.py``）从服务端那一侧盯着它们。
+INSTALL_LEDGER_PATH = "/api/v1/agent/install.json"
+INSTALL_BUNDLE_PATH = "/api/v1/agent/install/bundle"
+
 #: ``--server`` 与包内地址都缺、局域网也问不到时用的值。
 #:
 #: 这个默认值是**故意留成回环**的：它是一个明确的"还没配好"，而不是一个看起来
@@ -278,6 +284,31 @@ def current_version(prefix: Path) -> Optional[str]:
 # --------------------------------------------------------------------------- #
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(str(path), "rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _decode_signature(text: str) -> Optional[bytes]:
+    """base64url 解码，容忍缺填充。解不出来就是 None（调用方按验签失败处理）。"""
+    import base64
+    import binascii
+
+    cleaned = (text or "").strip().replace("+", "-").replace("/", "_")
+    if not cleaned:
+        return None
+    try:
+        return base64.urlsafe_b64decode(cleaned + "=" * (-len(cleaned) % 4))
+    except (binascii.Error, ValueError):
+        return None
+
+
 class Installer:
     def __init__(self, options: argparse.Namespace, report: Reporter) -> None:
         self.options = options
@@ -309,9 +340,11 @@ class Installer:
             )
 
         sources = [bool(self.options.bundle), bool(self.options.download_url),
-                   bool(self.options.from_dir)]
+                   bool(self.options.from_dir), bool(self.options.from_server)]
         if sum(sources) != 1:
-            raise InstallError("必须且只能指定一个来源：--bundle / --download-url / --from-dir")
+            raise InstallError(
+                "必须且只能指定一个来源：--bundle / --download-url / --from-server / --from-dir"
+            )
 
         if self.options.bundle and not Path(self.options.bundle).is_file():
             raise InstallError("安装包不存在: %s" % self.options.bundle)
@@ -375,6 +408,9 @@ class Installer:
         if self.options.bundle:
             return Path(self.options.bundle)
 
+        if self.options.from_server:
+            return self.fetch_from_server()
+
         if self.options.download_url:
             url = self.options.download_url
             target = Path(tempfile.mkdtemp(prefix="syncoj-install-")) / "bundle.tar.gz"
@@ -382,17 +418,178 @@ class Installer:
                 self.report.plan("从 %s 下载安装包" % url)
                 return target
             self.report.plan("从 %s 下载安装包" % url)
-            try:
-                with urllib.request.urlopen(url, timeout=60) as response:  # noqa: S310
-                    with open(str(target), "wb") as handle:
-                        shutil.copyfileobj(response, handle, 1024 * 1024)
-            except (urllib.error.URLError, OSError) as exc:
-                raise InstallError("下载失败: %s" % exc)
+            self._download(url, target)
             self.report.action("已下载 %s" % url)
             return target
 
         # --from-dir：直接用一个已经解开的目录（镜像预装时最方便）
         return Path(self.options.from_dir)
+
+    def _download(self, url: str, target: Path) -> int:
+        """下载到 ``target``，返回字节数。"""
+        try:
+            with urllib.request.urlopen(url, timeout=60) as response:  # noqa: S310
+                with open(str(target), "wb") as handle:
+                    shutil.copyfileobj(response, handle, 1024 * 1024)
+        except (urllib.error.URLError, OSError) as exc:
+            raise InstallError("下载失败 %s: %s" % (url, exc))
+        return target.stat().st_size
+
+    def fetch_from_server(self) -> Path:
+        """``--from-server``：从服务端直接拿当前可装机的那个版本。
+
+        ## 鉴权取舍（这是有意选的，不是漏了）
+
+        初次安装时机器手上**什么都没有** —— 没有 Agent、没有凭据，所以服务端那
+        三个装机端点（``/api/v1/agent/install.json``、``/install/bundle``、
+        ``/install/installer``）**不鉴权**。装完之后靠**配对**建立信任：机器注册
+        上来是"待认领"状态，教师必须在管理界面把它绑到名单里的某个人，它才开始
+        收代码、收文件、收成绩。
+
+        ## 能验的都验上
+
+        这一层的职责是把免费的检查全部做掉，并**如实报告做了哪些**：
+
+        * **sha256 一定验**（对照服务端给的台账）。它挡的是传输损坏与"传了一半"。
+          挡不住恶意服务端 —— 台账和包来自同一个未鉴权的地方，这是明摆着的。
+        * **有发布公钥就再验签名**。那一步才真正挡住"有人替你换了一个包"：
+          签名由发布私钥签，机器上用公钥验，中间人凑不出来。
+          公钥可以来自 ``--public-key``，也可以来自已经装好的机器。
+        * 两者都没有 → **明说未验签**，并把 sha256 打出来，供人跟服务端界面上那个
+          对一遍。"装了但不知道装的是什么"比"装不上"更糟。
+        """
+        base = self._fetch_base_url()
+        if self.report.dry_run:
+            # 预览**不联网**（与 --check 同一条约定）：拿不到版本号就不显示它，
+            # 而不是先去把台账拉下来 —— 那样"预览"会在服务端没起来时直接失败。
+            self.report.plan("从 %s 取装机台账（当前已铺开的版本）" % base)
+            self.report.plan("下载并校验 sha256" + ("与签名" if self.options.public_key else "（未给 --public-key，只能校验 sha256）"))
+            return Path(tempfile.mkdtemp(prefix="syncoj-install-")) / "bundle.tar.gz"
+
+        ledger_url = "%s%s" % (base, INSTALL_LEDGER_PATH)
+        self.report.plan("从 %s 取装机台账" % base)
+        ledger = self._fetch_ledger(ledger_url)
+
+        version = str(ledger.get("version") or "").strip()
+        expected = str(ledger.get("sha256") or "").strip().lower()
+        if not version or len(expected) != 64:
+            raise InstallError("服务端给的装机台账不合法（version=%r sha256=%r）" % (version, expected))
+        # 教师从界面上抄来的校验和是**更强**的证据（它不来自那台服务端），
+        # 所以两边都要对得上，而不是"有一个就行"。
+        given = (self.options.sha256 or "").strip().lower()
+        if given and given != expected:
+            raise InstallError(
+                "服务端给的校验和与你给的 --sha256 不一致：\n"
+                "  服务端: %s\n  你给的: %s\n"
+                "这通常意味着中间有人改过（或者界面上的版本换了）。停下来是对的。" % (expected, given)
+            )
+
+        target = Path(tempfile.mkdtemp(prefix="syncoj-install-")) / "bundle.tar.gz"
+        bundle_path = str(ledger.get("bundle") or INSTALL_BUNDLE_PATH)
+        url = bundle_path if bundle_path.startswith("http") else base + bundle_path
+        size = self._download(url, target)
+        self.report.action("已下载 Agent %s（%d 字节）" % (version, size))
+
+        actual = _sha256_file(target)
+        if actual != expected:
+            raise InstallError(
+                "下载下来的包和台账对不上：\n  台账: %s\n  实际: %s\n"
+                "可能是传输损坏，也可能是中间有人改了包。" % (expected, actual)
+            )
+        self.report.note("sha256 校验通过: %s" % expected[:16])
+
+        self._verify_signature_if_possible(ledger, expected)
+        return target
+
+    def _fetch_base_url(self) -> str:
+        """``--from-server`` 该往哪个地址要包。
+
+        只认两条：显式 ``--server``，或者**验得过签的**局域网发现。刻意**不接**
+        :meth:`resolve_server_url` 里那条"退回 127.0.0.1"的兜底 —— 那条兜底会让人
+        从一个不存在的本机服务端下载，而报错会是"下载失败"，指不到真正的原因。
+        """
+        if self.options.server:
+            return self.options.server.rstrip("/")
+        if self.options.public_key:
+            from syncoj_agent import discovery
+
+            key = discovery.load_public_key(self.options.public_key)
+            if key is None:
+                raise InstallError("--public-key 读不出来: %s" % self.options.public_key)
+            outcome = discovery.discover(
+                key,
+                timeout=self.options.discover_timeout,
+                machine_id=discovery.machine_id_hint(),
+            )
+            if outcome.url:
+                return outcome.url
+            raise InstallError("没找到服务端：%s" % outcome.explain())
+        raise InstallError(
+            "用 --from-server 时必须给 --server，或者给 --public-key 让它去局域网里找：\n"
+            "  sudo python3 install.py --from-server --server http://10.0.0.5:8000\n"
+            "（不给公钥就没法验证局域网里那个应答是不是服务端发的，所以不接受"
+            "「不给地址、盲信一个应答」。）"
+        )
+
+    def _fetch_ledger(self, url: str) -> dict:
+        try:
+            with urllib.request.urlopen(url, timeout=30) as response:  # noqa: S310
+                raw = response.read()
+        except urllib.error.HTTPError as exc:
+            # 404 是"还没铺开任何版本"，不是网络问题 —— 把它和网络错误分开报，
+            # 否则教师会去查网线，而真正要做的动作是在界面上点「铺开」。
+            detail = ""
+            try:
+                detail = str(json.loads(exc.read().decode("utf-8")).get("detail") or "")
+            except (ValueError, OSError):
+                pass
+            if exc.code == 404:
+                raise InstallError("服务端说还没有可装机的版本：%s" % (detail or url))
+            raise InstallError("取装机台账失败（HTTP %d）%s" % (exc.code, ("：" + detail) if detail else ""))
+        except (urllib.error.URLError, OSError) as exc:
+            raise InstallError("连不上服务端 %s: %s" % (url, exc))
+        try:
+            ledger = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise InstallError("装机台账不是合法 JSON: %s" % exc)
+        if not isinstance(ledger, dict):
+            raise InstallError("装机台账不是一个对象")
+        return ledger
+
+    def _verify_signature_if_possible(self, ledger: dict, sha256_hex: str) -> None:
+        """有公钥就验签；没有就**明说没验**。"""
+        signature = str(ledger.get("signature") or "").strip()
+        key_path = self.options.public_key
+        if not key_path:
+            installed = self.config_dir / PUBLIC_KEY_FILENAME
+            key_path = str(installed) if installed.is_file() else None
+        if not key_path:
+            self.report.warn(
+                "包**未验签**：机器上没有发布公钥，只校验了 sha256（它来自同一台服务端，"
+                "挡得住传输损坏、挡不住恶意服务端）"
+            )
+            self.report.note("要验签就加 --public-key <release-key.pub.json>；")
+            self.report.note("抄下这个校验和，跟服务端「Agent 发布」页上那个对一遍：")
+            self.report.note("  %s" % sha256_hex)
+            return
+        if not signature:
+            self.report.warn("服务端没给签名，跳过验签（机器上有公钥却用不上）")
+            return
+        from syncoj_agent import discovery
+        from syncoj_agent.rsa import verify_pkcs1v15_sha256
+
+        key = discovery.load_public_key(key_path)
+        if key is None:
+            self.report.warn("发布公钥读不出来（%s），跳过验签" % key_path)
+            return
+        raw = _decode_signature(signature)
+        if raw is None or not verify_pkcs1v15_sha256(key, sha256_hex.encode("ascii"), raw):
+            raise InstallError(
+                "**签名校验不通过** —— 这个包不是这台服务端的发布私钥签的。\n"
+                "安装被中止。请核对：服务端是不是换过密钥、这个地址是不是你以为的那台。"
+            )
+        self.report.action("签名校验通过（key_id=%s）" % (ledger.get("key_id") or "?"))
+
 
     def install_release(self, source: Path) -> str:
         """把 Agent 代码放进 ``releases/<版本>/``，返回版本号。
@@ -1356,6 +1553,15 @@ def build_parser() -> argparse.ArgumentParser:
     source = parser.add_argument_group("安装包来源（三选一）")
     source.add_argument("--bundle", help="本地 tar.gz 安装包（离线安装）")
     source.add_argument("--download-url", help="下载安装包的 URL（在线自举）")
+    source.add_argument(
+        "--from-server",
+        action="store_true",
+        help=(
+            "直接从服务端拿**当前已铺开**的 Agent 版本（装机入口，不鉴权）。"
+            "地址取 --server；不给 --server 时会去局域网里找（那时必须给 "
+            "--public-key 才能验证应答）。有公钥就验签，没有就只验 sha256 并如实警告。"
+        ),
+    )
     source.add_argument("--from-dir", help="已解开的 Agent 目录（镜像预装）")
     source.add_argument("--sha256", default="", help="安装包 sha256，用于完整性校验")
 

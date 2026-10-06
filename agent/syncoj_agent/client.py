@@ -44,6 +44,27 @@ log = logging.getLogger(__name__)
 
 _READ_CHUNK = 256 * 1024
 
+#: 诊断包上传的超时（秒）。它是"顺便留个现场"的旁路请求 —— 绝不能像资产下载
+#: 那样默认 600 秒，否则一次卡住就把心跳拖死。
+DIAGNOSTICS_TIMEOUT_SECONDS = 15
+
+#: "长连接竞态"在连接层留下的几种痕迹。
+#:
+#: 现场（3.4 KB 的 NOTICE.md 连续两次"发起下载失败: Remote end closed connection
+#: without response"，第三次才成功）就是它：Agent 抱着一条 keep-alive 连接，而
+#: uvicorn 默认 ``--timeout-keep-alive 5`` 秒把空闲连接关掉 —— 下一次请求正好撞上
+#: 服务端那一下关闭。这些异常都是**瞬时**的，而且请求本身幂等（GET），所以值得
+#: "丢连接 + 新建一条 + 立刻再试一次"。
+#:
+#: ``RemoteDisconnected`` 同时是 ``ConnectionResetError`` 与 ``BadStatusLine`` 的
+#: 子类，列全只是为了可读：谁看代码都能一眼看出这里要挡哪几类。
+RETRYABLE_CONNECTION_ERRORS = (
+    http.client.RemoteDisconnected,
+    ConnectionResetError,
+    http.client.BadStatusLine,
+    http.client.IncompleteRead,
+)
+
 
 # --------------------------------------------------------------------------- #
 # 异常
@@ -309,6 +330,17 @@ class AgentClient:
 
         self._control: Optional[http.client.HTTPConnection] = None
         self._transfer: Optional[http.client.HTTPConnection] = None
+        #: 每条连接**上次用过**的时刻（monotonic）。服务端会关掉空闲连接，
+        #: 复用一条"可能已经半死"的连接就是现场"静默挂死一读 34 分钟"的根因。
+        self._control_used_at = 0.0
+        self._transfer_used_at = 0.0
+        #: 时钟可注入（测试里推进时间，不用真等）
+        self._clock = time.monotonic
+
+    #: 空闲多久就**主动**把连接关掉重开。服务端（uvicorn）默认
+    #: ``--timeout-keep-alive 5`` 秒关空闲连接，4 秒是安全的提前量：
+    #: 宁可多握一次手，也不要复用一条服务端已经悄悄关掉的连接。
+    IDLE_RECYCLE_SECONDS = 4.0
 
     def repoint(self, base_url: str) -> None:
         """把客户端指向另一个地址，用于**服务端换了 IP** 之后。
@@ -340,14 +372,48 @@ class AgentClient:
             )
         return http.client.HTTPConnection(self.host, self.port, timeout=timeout)
 
-    def _connection(self, transfer: bool) -> http.client.HTTPConnection:
+    def _apply_socket_timeout(
+        self, connection: http.client.HTTPConnection, timeout: int
+    ) -> None:
+        """把读超时**显式钉在 socket 上**（每次请求都做一遍）。
+
+        ``http.client`` 建连时会用 ``timeout``，但复用/隧道等路径上 socket 的
+        timeout 有可能被改回去 —— 现场那次"挂死在一读上、34 分钟没心跳"就是读
+        没有超时：``wchan = do_sys_poll``，阻塞式 socket 读。
+
+        连不上不在这里报错（连接失败留给 :meth:`request` 那条路，它知道怎么
+        退避与重试）。
+        """
+        try:
+            if connection.sock is None:
+                connection.connect()
+            connection.sock.settimeout(timeout)
+        except (OSError, AttributeError):
+            pass
+
+    def _connection(self, transfer: bool, timeout: Optional[int] = None) -> http.client.HTTPConnection:
         slot = "_transfer" if transfer else "_control"
+        used_at = "_transfer_used_at" if transfer else "_control_used_at"
         connection = getattr(self, slot)
+        if connection is not None:
+            idle = self._clock() - getattr(self, used_at)
+            if idle > self.IDLE_RECYCLE_SECONDS:
+                # **主动**重开：服务端多半已经把这条空闲连接关了，而复用它有两种
+                # 坏结局 —— 侥幸报一次 RemoteDisconnected，或者（更糟）静默挂死
+                # 在一次读上。宁可多一次握手。
+                log.debug("连接已空闲 %.0f 秒，主动重开（服务端会关掉空闲连接）", idle)
+                self._drop(transfer)
+                connection = None
         if connection is None:
-            connection = self._new_connection(
-                self.download_timeout if transfer else self.timeout
-            )
+            if timeout is None:
+                timeout = self.download_timeout if transfer else self.timeout
+            connection = self._new_connection(timeout)
             setattr(self, slot, connection)
+        else:
+            if timeout is None:
+                timeout = self.download_timeout if transfer else self.timeout
+        setattr(self, used_at, self._clock())
+        self._apply_socket_timeout(connection, timeout)
         return connection
 
     def _drop(self, transfer: bool) -> None:
@@ -401,11 +467,18 @@ class AgentClient:
         headers: Optional[Dict[str, str]] = None,
         transfer: bool = False,
         retries: int = 2,
+        timeout: Optional[int] = None,
     ) -> Tuple[int, bytes]:
         """发一个请求，返回 ``(状态码, 响应体)``。
 
-        连接层错误自动重建连接并重试（``retries`` 次）—— 长连接被中间的 NAT/
-        防火墙静默掐断是常态，不重试的话 Agent 会周期性误报离线。
+        **超时口径**：``timeout=None`` 时，控制面（tick/事件/注册/上传）用
+        ``request_timeout``，只有资产传输（``transfer=True`` 且显式传了
+        ``download_timeout`` 的下载路径）用 ``download_timeout`` —— 后者默认 600 秒，
+        拿它当心跳超时等于没有超时。
+
+        **重试口径**：只对"长连接竞态"那几类（:data:`RETRYABLE_CONNECTION_ERRORS`）
+        重连重试；``socket.timeout`` 这类**不重试** —— 已经白等了一个超时周期，
+        再立刻重来一次只会把这一轮拖得更久（下一次请求自然会用新连接）。
         """
         url = self.prefix + path
         sent_headers = {
@@ -421,7 +494,7 @@ class AgentClient:
 
         last_error: Optional[BaseException] = None
         for attempt in range(retries + 1):
-            connection = self._connection(transfer)
+            connection = self._connection(transfer, timeout)
             try:
                 connection.request(method, url, body=body, headers=sent_headers)
                 response = connection.getresponse()
@@ -434,13 +507,17 @@ class AgentClient:
                 if response.will_close:
                     self._drop(transfer)
                 return status, payload
-            except (http.client.HTTPException, OSError, ssl.SSLError) as exc:
+            except RETRYABLE_CONNECTION_ERRORS as exc:
                 last_error = exc
                 self._drop(transfer)
                 if attempt < retries:
                     # 退避一下再重试；连接被掐断往往是瞬时的
                     time.sleep(0.5 * (attempt + 1))
                     continue
+            except (http.client.HTTPException, OSError, ssl.SSLError) as exc:
+                # 超时/别的连接错误：丢连接，但**不在本轮里重试**
+                self._drop(transfer)
+                raise NetworkError("请求 %s %s 失败: %s" % (method, path, exc)) from exc
         raise NetworkError("请求 %s %s 失败: %s" % (method, path, last_error))
 
     def request_json(
@@ -525,7 +602,14 @@ class AgentClient:
         }
         try:
             status, raw = self.request(
-                "POST", "/api/v1/agent/files", body=body, headers=headers, transfer=True
+                "POST",
+                "/api/v1/agent/files",
+                body=body,
+                headers=headers,
+                transfer=True,
+                # **上传是控制面**：拿 download_timeout（默认 600s）当上传超时，
+                # 一旦服务端不吭声就会把整个心跳拖死
+                timeout=self.timeout,
             )
         finally:
             body.close()
@@ -541,6 +625,74 @@ class AgentClient:
             return data if isinstance(data, dict) else {}
         self._raise(status, data, "事件上报失败")
 
+    def upload_diagnostics(
+        self, blob: bytes, timeout: int = DIAGNOSTICS_TIMEOUT_SECONDS
+    ) -> dict:
+        """把诊断包（**已经 gzip 好的字节**）发上去。
+
+        * 控制面接口，``Content-Type: application/gzip``；
+        * 超时**短**（默认 15 秒）：它只是"顺便留个现场"，绝不许把心跳拖住；
+        * 服务端按机器限速 → 429 会变成 :class:`RateLimited`，**调用方**把它当作
+          "这次没传成"：不重试、不报错，下一轮自然再来。
+        """
+        headers = {
+            "Content-Type": "application/gzip",
+            "Content-Length": str(len(blob)),
+        }
+        status, raw = self.request(
+            "POST",
+            "/api/v1/agent/diagnostics",
+            body=blob,
+            headers=headers,
+            transfer=True,
+            timeout=timeout,
+        )
+        data = _decode_json(raw, status, "/api/v1/agent/diagnostics")
+        if status == 200:
+            return data if isinstance(data, dict) else {}
+        self._raise(status, data, "诊断上报失败")
+
+    def _open_get_response(
+        self, url: str, headers: Dict[str, str], what: str
+    ) -> "tuple":
+        """发一个**幂等 GET** 并把响应头交出去；撞上长连接竞态时重连再试一次。
+
+        为什么只重试"发请求 + 拿响应头"这一段：下载是流式的，调用方要自己消费
+        ``response``，一旦响应体读了一半再重试就会把两份内容拼在一起 —— 而这两个
+        调用方（续传下载、安装包下载）本来就有自己的偏移量与校验。**拿不到响应头
+        时请求根本没生效**，重发一次是安全的；拿到响应之后再出错就交给上层。
+
+        只试一次（``for attempt in (0, 1)``）：这只挡"服务端刚把空闲连接关了"，
+        不是网络抖动重试 —— 后者归 ``run_forever`` 的退避管。成功那一路记 DEBUG
+        （环境噪音，不该每小时刷 WARNING），仍失败则在 ``NetworkError`` 里说清
+        "已重试一次"，由调用方的 WARNING 带出来。
+        """
+        last_error: Optional[BaseException] = None
+        for attempt in (0, 1):
+            connection = self._connection(True, self.download_timeout)
+            try:
+                connection.request("GET", url, headers=headers)
+                response = connection.getresponse()
+            except RETRYABLE_CONNECTION_ERRORS as exc:
+                last_error = exc
+                self._drop(True)
+                if attempt == 0:
+                    log.debug(
+                        "%s：长连接被服务端关掉了（%s），重连后再试一次", what, exc
+                    )
+                    continue
+                break
+            except (http.client.HTTPException, OSError, ssl.SSLError) as exc:
+                # 非"竞态"类的连接错误：不重试，交给上层的退避（它知道该怎么等）
+                self._drop(True)
+                raise NetworkError("%s: %s" % (what, exc))
+            else:
+                if attempt == 1:
+                    log.debug("%s：重连后成功（重试 1 次）", what)
+                return response
+
+        raise NetworkError("%s: %s（已重试一次）" % (what, last_error))
+
     def download_to_file(self, path: str, dest: Path, max_bytes: int) -> int:
         """把 ``path`` 的内容流式下载到 ``dest``，返回写入字节数。
 
@@ -548,7 +700,6 @@ class AgentClient:
         的内存预算只有 200MB。
         """
         dest.parent.mkdir(parents=True, exist_ok=True)
-        connection = self._connection(True)
         url = self.prefix + path
         headers = {
             "Host": self.host if self.port in (80, 443) else "%s:%d" % (self.host, self.port),
@@ -558,12 +709,7 @@ class AgentClient:
         if self.token:
             headers["Authorization"] = "Bearer " + self.token
 
-        try:
-            connection.request("GET", url, headers=headers)
-            response = connection.getresponse()
-        except (http.client.HTTPException, OSError, ssl.SSLError) as exc:
-            self._drop(True)
-            raise NetworkError("下载 %s 失败: %s" % (path, exc))
+        response = self._open_get_response(url, headers, "下载 %s 失败" % path)
 
         if response.status != 200:
             payload = response.read()
@@ -608,7 +754,6 @@ class AgentClient:
         if offset > 0:
             headers["Range"] = "bytes=%d-" % offset
 
-        connection = self._connection(True)
         url = self.prefix + "/api/v1/agent/assets/%d" % asset_id
         sent = {
             "Host": self.host,
@@ -620,16 +765,11 @@ class AgentClient:
         if offset > 0:
             sent["Range"] = headers["Range"]
 
-        try:
-            connection.request("GET", url, headers=sent)
-            response = connection.getresponse()
-        except (http.client.HTTPException, OSError, ssl.SSLError) as exc:
-            self._drop(True)
-            raise NetworkError("发起下载失败: %s" % exc)
+        response = self._open_get_response(url, sent, "发起下载失败")
 
         if response.status not in (200, 206):
             payload = response.read()
-            connection.close()
+            # 这条响应体已经读完、状态码也不该复用：整条连接丢掉
             self._drop(True)
             data = _decode_json(payload, response.status, "下载")
             self._raise(response.status, data, "下载 asset %d 失败" % asset_id)

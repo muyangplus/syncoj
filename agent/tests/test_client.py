@@ -585,3 +585,256 @@ def test_events_403_is_not_an_auth_error() -> None:
             client.report_events([{"level": "info", "category": "x", "message": "y"}])
     finally:
         client.close()
+
+
+# --------------------------------------------------------------------------- #
+# 长连接竞态：重连 + 立刻再试一次（**只一次**）
+# --------------------------------------------------------------------------- #
+#
+# 现场：3.4 KB 的 NOTICE.md 连着两次"发起下载失败: Remote end closed connection
+# without response"，第三次（下一轮 cycle）才成功 —— Agent 抱着一条 keep-alive
+# 连接，而 uvicorn 默认 5 秒空闲就把连接关了，下一次请求正好撞上那一下。
+# 这类失败是瞬时的、请求又是幂等的，所以值得"丢连接 + 新建一条 + 再试一次"。
+
+
+class FakeResponse:
+    """假响应：``read()`` 与真响应一样**读完就空**（不是永远返回同一段内容）。
+
+    踩过一次：第一版 ``read()`` 总是返回 payload，于是 ``_drain_quietly`` 里的
+    "读到空为止"变成死循环 —— 测试挂住，还不报错。
+    """
+
+    def __init__(self, status: int = 200, payload: bytes = b"ok") -> None:
+        self.status = status
+        self._payload = payload
+        self._offset = 0
+        self.will_close = False
+
+    def read(self, amount: int = -1) -> bytes:
+        if amount is None or amount < 0:
+            amount = len(self._payload) - self._offset
+        chunk = self._payload[self._offset : self._offset + amount]
+        self._offset += len(chunk)
+        return chunk
+
+    def getheaders(self):
+        return [("Content-Length", str(len(self._payload)))]
+
+    def getheader(self, name, default=None):
+        return None
+
+
+class ScriptedConnection:
+    """按剧本演：``queue`` 里第 N 项是异常就抛，是响应就返回。
+
+    剧本**在所有连接之间共用**（同一个 list）：第一条第 1 项抛异常、第二条拿第 2
+    项 —— 这正是"重连之后换了一条连接"要区分的东西。
+    """
+
+    def __init__(self, queue) -> None:
+        self.queue = queue
+        self.requests = 0
+        self.closed = False
+
+    def request(self, *args, **kwargs) -> None:
+        self.requests += 1
+
+    def getresponse(self):
+        item = self.queue.pop(0) if self.queue else None
+        if isinstance(item, BaseException):
+            raise item
+        return item or FakeResponse()
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def scripted_client(monkeypatch, script, created=None):
+    """把客户端的连接工厂换成按剧本演的替身，记录新建了几条连接。"""
+    from syncoj_agent.client import AgentClient
+
+    client = AgentClient("https://127.0.0.1:8000")
+    made = created if created is not None else []
+    queue = list(script)
+
+    def new_connection(timeout):
+        connection = ScriptedConnection(queue)
+        made.append(connection)
+        return connection
+
+    monkeypatch.setattr(client, "_new_connection", new_connection)
+    return client, made
+
+
+def test_下载撞上长连接竞态时重连再试一次(
+    monkeypatch, capture_logs
+) -> None:
+    import http.client
+
+    records = capture_logs("syncoj_agent.client")
+    client, made = scripted_client(
+        monkeypatch,
+        [http.client.RemoteDisconnected("Remote end closed connection without response"),
+         FakeResponse()],
+    )
+    try:
+        status, _headers, _response = client.open_download(7)
+    finally:
+        client.close()
+
+    assert status == 200, "重试之后应当成功"
+    assert len(made) == 2, "应当丢掉旧连接、新建一条：%d 条" % len(made)
+    assert made[0].closed is True, "旧连接必须关掉"
+    texts = [r.getMessage() for r in records]
+    assert any("重连后成功" in text for text in texts), texts
+    assert all(r.levelno == 10 for r in records if "重连后成功" in r.getMessage()), (
+        "环境噪音只该记 DEBUG"
+    )
+
+
+def test_只重试一次_第二次仍失败就放弃(monkeypatch) -> None:
+    """**防无限重试**：两次都撞上就停下，把"已重试一次"写进错误里。"""
+    import http.client
+
+    from syncoj_agent.client import NetworkError
+
+    client, made = scripted_client(
+        monkeypatch,
+        [http.client.RemoteDisconnected("closed"),
+         http.client.RemoteDisconnected("closed again")],
+    )
+    try:
+        with pytest.raises(NetworkError) as excinfo:
+            client.open_download(7)
+    finally:
+        client.close()
+
+    assert len(made) == 2, "只许试两次（原始 + 重试一次），实际建了 %d 条连接" % len(made)
+    assert "已重试一次" in str(excinfo.value), str(excinfo.value)
+
+
+def test_安装包下载也走同一条重试(monkeypatch, workdir: Path) -> None:
+    import http.client
+
+    client, made = scripted_client(
+        monkeypatch,
+        [http.client.RemoteDisconnected("closed"), FakeResponse(payload=b"bundle")],
+    )
+    dest = workdir / "bundle.tar.gz"
+    try:
+        written = client.download_to_file("/api/v1/agent/releases/1", dest, 1024)
+    finally:
+        client.close()
+
+    assert written == len(b"bundle")
+    assert dest.read_bytes() == b"bundle"
+    assert len(made) == 2
+
+
+# --------------------------------------------------------------------------- #
+# 主动回收空闲连接（**根因**，不是事后重试）
+# --------------------------------------------------------------------------- #
+#
+# 现场：一次 keep-alive 竞态之后 Agent 静默挂死在一读上、34 分钟没心跳，
+# 旁边留着一条 CLOSE-WAIT。服务端 5 秒关空闲连接，所以我们自己先动手：
+# 距上次使用超过 4 秒就把连接关掉重开，绝不复用一条"可能已经半死"的。
+
+
+def test_空闲超过四秒就主动重开连接(monkeypatch) -> None:
+    client, made = scripted_client(monkeypatch, [FakeResponse() for _ in range(4)])
+    now = [0.0]
+    monkeypatch.setattr(client, "_clock", lambda: now[0])
+
+    try:
+        client.open_download(1)  # t=0 → 建连接 A
+        now[0] = 3.0
+        client.open_download(1)  # 3 秒 → 还在 4 秒内，继续用 A
+        now[0] = 8.0
+        client.open_download(1)  # 距上次使用 5 秒 → 主动重开 B
+    finally:
+        client.close()
+
+    assert len(made) == 2, "应当只在空闲超过 4 秒时重开一次，实际建了 %d 条" % len(made)
+    assert made[0].requests == 2, "4 秒内的第二次请求应当复用原连接"
+    assert made[0].closed is True, "重开时必须把旧连接关掉"
+    assert made[1].requests == 1
+
+
+def test_控制面用_request_timeout_资产才用_download_timeout(monkeypatch, workdir: Path) -> None:
+    """`download_timeout` 默认 600 秒 —— 拿它当心跳超时等于没有超时。"""
+    from syncoj_agent.client import AgentClient
+
+    seen = []
+
+    def measure(action) -> int:
+        client = AgentClient("http://127.0.0.1:9", timeout=7, download_timeout=99)
+        queue = [FakeResponse(payload=b"{}")]
+        monkeypatch.setattr(
+            client,
+            "_new_connection",
+            lambda timeout: seen.append(timeout) or ScriptedConnection(queue),
+        )
+        try:
+            action(client, workdir)
+        finally:
+            client.close()
+        return seen[-1]
+
+    assert measure(lambda c, w: c.tick({"agent_version": "0.0.0"})) == 7
+
+    source = workdir / "code.cpp"
+    source.write_text("int main() {}\n", encoding="utf-8")
+    assert measure(lambda c, w: c.upload_file("p1/p1.cpp", source, "deadbeef")) == 7
+    assert (
+        measure(
+            lambda c, w: c.download_to_file("/api/v1/agent/releases/1", w / "b.bin", 1024)
+        )
+        == 99
+    )
+
+
+def test_读超时到点就抛_不会挂住(workdir: Path) -> None:
+    """本地假服务器：连上但**永不回包** → 必须在超时那一刻抛出去。
+
+    现场那次"挂死在一读上 34 分钟"就是这条没有生效（``wchan=do_sys_poll``）。
+    """
+    import socket
+    import threading
+    import time as time_module
+
+    from syncoj_agent.client import AgentClient, NetworkError
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    accepted = []
+
+    def serve() -> None:  # pragma: no cover - 线程里等待
+        try:
+            conn, _ = listener.accept()
+            accepted.append(conn)
+            time_module.sleep(5)  # **刻意不回包**
+            conn.close()
+        except OSError:
+            pass
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+
+    client = AgentClient("http://127.0.0.1:%d" % port, timeout=1, download_timeout=1)
+    started = time_module.monotonic()
+    try:
+        with pytest.raises(NetworkError) as excinfo:
+            client.tick({"agent_version": "0.0.0"})
+        elapsed = time_module.monotonic() - started
+    finally:
+        client.close()
+        listener.close()
+        for conn in accepted:
+            conn.close()
+
+    assert isinstance(excinfo.value.__cause__, socket.timeout), (
+        "底层应当是读超时：%r" % (excinfo.value.__cause__,)
+    )
+    assert elapsed < 4.0, "等了 %.1f 秒 —— 超时没有生效" % elapsed

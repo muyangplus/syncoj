@@ -24,6 +24,7 @@ import signal
 import socket
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -144,6 +145,60 @@ REGISTRATION_POLL_SECONDS = 60.0
 #: 在本地日志里说明（运维要查全量在那儿查）。
 SCAN_MISSING_MAX = 5
 
+#: **整轮看门狗**的下限（秒）。
+#:
+#: 真正的保命符：任何一次阻塞调用（socket 读、文件系统、网络盘上的 ``os.utime``）
+#: 都不允许让心跳停摆超过这个时间。它比"给每个调用都加超时"可靠 —— 不用去
+#: 穷举所有阻塞点。
+#:
+#: 取值 ``max(120, request_timeout * 3)``：单次控制面请求最多 30 秒，撞上长连接
+#: 竞态时最多重试两次 → 90 秒，再留 30 秒余量。**升级切换那一段会临时放宽**
+#: （见 ``Agent._watchdog_paused``）：下载上百 MB 的包、切软链、交给 systemd
+#: 重启，本来就该花更久，拿"单轮 120 秒"去掐它是误伤。
+WATCHDOG_MIN_SECONDS = 120.0
+
+
+class RoundTimeout(Exception):
+    """看门狗掐掉了一轮 —— **中止这一轮**，不是退出进程。
+
+    它由 SIGALRM 的处理函数抛出，落进 ``run_forever`` 那个 ``except``，
+    记一条 WARNING 后照常进入下一轮。
+    """
+
+
+def watchdog_supported() -> bool:
+    """这个平台能不能用 SIGALRM/``setitimer``（Windows 上没有）。"""
+    return hasattr(signal, "setitimer") and hasattr(signal, "SIGALRM")
+
+
+def _watchdog_handler(signum, frame) -> None:  # pragma: no cover - 由信号触发
+    raise RoundTimeout("这一轮超过了看门狗上限")
+
+
+def arm_watchdog(seconds: float) -> bool:
+    """给当前这一轮上闹钟；返回是否真的装上了。
+
+    只有**主线程**能用 SIGALRM —— ``run_forever`` 就是主线程。``--once`` /
+    ``--check`` 与测试**不装**它：那几条路径要么是排障、要么要跑到自己想要的
+    地方为止。
+
+    SIGALRM 与既有的 SIGTERM/SIGINT **是两条线**：那两个把 ``self._stop`` 置位
+    （"跑完这一轮就退出"），SIGALRM 抛异常（"这一轮不算，重来"）。两者互不覆盖：
+    这里只注册 SIGALRM，不动另外两个。
+    """
+    if not watchdog_supported():
+        return False
+    signal.signal(signal.SIGALRM, _watchdog_handler)
+    signal.setitimer(signal.ITIMER_REAL, float(seconds))
+    return True
+
+
+def disarm_watchdog() -> None:
+    """撤掉闹钟。**每轮结束时都要撤**，否则会漂到下一轮里去。"""
+    if not watchdog_supported():
+        return
+    signal.setitimer(signal.ITIMER_REAL, 0)
+
 
 def _run_uninstall_command(argv, stdin_bytes):
     """真正执行 ``sudo -n <self_uninstall.sh>``：令牌**只走 stdin**。
@@ -185,6 +240,17 @@ def state_from_payload(data: Dict[str, object]) -> str:
     if not bool(data.get("claimed", True)):
         return STATE_UNCLAIMED
     return STATE_READY if bool(data.get("bound", True)) else STATE_WAITING
+
+
+def _read_desktop_text(path: Path) -> Optional[str]:
+    """读桌面提示文件的现有内容；读不到（不存在/读不了/不是 UTF-8）返回 ``None``。
+
+    ``None`` 一律当作"内容不一致" → 会触发重写。文件被人删掉正是靠这一条自愈的。
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
 
 
 def _scan_missing_for_payload(raw) -> List[str]:
@@ -341,6 +407,11 @@ class Agent:
         self._refresh_nudge_failed: set = set()
         #: 桌面一致性核对只说一次
         self._desktop_checked = False
+        #: 整轮看门狗：秒数（见 WATCHDOG_MIN_SECONDS）与"这一轮有没有装着"
+        self.watchdog_seconds = max(
+            WATCHDOG_MIN_SECONDS, float(config.request_timeout) * 3
+        )
+        self._watchdog_active = False
 
     # ---------------------------------------------------------------- #
     # 生命周期
@@ -638,7 +709,21 @@ class Agent:
         self._write_desktop_file(path, text, "等待场次说明")
 
     def _write_desktop_file(self, path: Path, text: str, label: str) -> None:
+        """把提示文件刷成 ``text``；**内容已经一致就什么都不做**。
+
+        为什么还要"每轮都来"：教师可能刚开机才看桌面，而上一次写是在重启之前
+        ——文件被删掉、被改坏、或被别的程序覆盖，都要能自己补回来。
+
+        为什么"一致就不写"：以前是无条件重写，心跳改成 30 秒之后
+        「等待场次.txt」会在 ``agent.log`` 里留下一天几千行"已写到…"，而日志
+        4 MB 就轮转 —— 真正要看的"状态变化"会被这些"我还活着"冲掉。
+
+        **自愈性质没丢**：文件被人删掉 = 读不到 = 内容不一致 → 下一轮自然补写。
+        这条日志的价值在"状态（或内容）变了"，不在"进程还活着"。
+        """
         try:
+            if _read_desktop_text(path) == text:
+                return
             path.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_text(path, text, mode=0o644)
             log.info("%s 已写到 %s", label, path)
@@ -670,8 +755,10 @@ class Agent:
     def _show_state_files(self, credential: Credential, reason: str = "") -> None:
         """按当前三态把桌面上的提示文件刷成对的。
 
-        **每一轮都重写**，而不是只在状态变化时写一次：教师可能刚开机才来看，
-        而文件只在内存里有一份时，重启一次就看不见了。无关的文件也要清掉 ——
+        **每轮都来核对一遍**（不只是状态变化时）：教师可能刚开机才来看，文件
+        可能在上次写完之后被删掉/被改坏 —— 那都要能补回来。但**内容一致就不写、
+        也不记日志**（判据在 :meth:`_write_desktop_file`）：心跳 30 秒一轮，
+        无条件重写会把 agent.log 刷满。无关的文件也要清掉 ——
         「配对码.txt」和「等待场次.txt」同时躺在桌面上，谁也不知道该信哪个。
 
         ``reason`` 是服务端给的那句话，直接写进「等待场次.txt」：**只有服务端
@@ -1250,6 +1337,24 @@ class Agent:
         # 那会要求额外的 polkit 授权，平白扩大 Agent 的权限面
         self._restart_requested = True
 
+    @contextmanager
+    def _watchdog_paused(self):
+        """临时**放宽**看门狗：升级那一段本来就该花很久。
+
+        ``_handle_upgrade`` 里要下载（可能上百 MB）、验签、写回滚状态、切软链，
+        最后还要交回给 systemd 重启 —— 拿"单轮 120 秒"去掐它是误伤，而且掐在
+        切软链的中间会把机器留在最难查的状态里。所以这一段关掉闹钟，出去时按
+        **完整的** ``watchdog_seconds`` 重新上（不是"剩下的零头"）。
+        """
+        active = self._watchdog_active
+        if active:
+            disarm_watchdog()
+        try:
+            yield
+        finally:
+            if active and self._watchdog_active:
+                arm_watchdog(self.watchdog_seconds)
+
     def _emit(self, level: str, category: str, message: str, meta: Optional[dict] = None) -> None:
         if len(self._pending_events) >= MAX_PENDING_EVENTS:
             return
@@ -1421,7 +1526,9 @@ class Agent:
 
         upgrade = tick.get("upgrade")
         if upgrade:
-            self._handle_upgrade(upgrade)
+            # 升级这一段关掉看门狗（理由见 _watchdog_paused）
+            with self._watchdog_paused():
+                self._handle_upgrade(upgrade)
 
         self._flush_events()
         self.cache.save(self.config.hash_cache_path)
@@ -1526,13 +1633,29 @@ class Agent:
         # 启动时说一次就够，不占每轮的报文，也不改任何配置
         self._check_desktop_consistency()
 
+        if not watchdog_supported():
+            log.debug("这个平台没有 SIGALRM/setitimer，整轮看门狗不可用（不影响功能）")
+
         while not self._stop:
             if self._restart_requested:
                 log.info("为应用新版本而退出，systemd 将以新版本重新拉起")
                 break
+            # **整轮看门狗**：每轮开始上闹钟、结束撤掉（finally）。任何一次阻塞
+            # 调用都不能让心跳停摆超过 watchdog_seconds —— 现场那次卡在一次 socket
+            # 读上 34 分钟，就是没有被兜住。
+            self._watchdog_active = arm_watchdog(self.watchdog_seconds)
             try:
                 delay = self.cycle()
                 self._backoff = 0.0
+            except RoundTimeout as exc:
+                # 看门狗掐掉这一轮：**不退出进程**，把话说清楚后照常进入下一轮。
+                # 下一次心跳用短一点的间隔，别让教师等满一个周期才知道出过事。
+                log.warning(
+                    "这一轮超过 %.0f 秒没有结束（%s），已中止；下次心跳继续",
+                    self.watchdog_seconds,
+                    exc,
+                )
+                delay = max(5.0, min(float(self.config.scan_interval), 3600.0))
             except AuthError as exc:
                 # 只有这一种错误该清掉凭据重新注册（401）。403 走的是
                 # UnboundError，它在上面的循环里就被消化掉了 —— 见 client.py 的注释。
@@ -1575,6 +1698,12 @@ class Agent:
                 self._backoff = min(MAX_BACKOFF, max(10.0, self._backoff * 2 or 10.0))
                 log.exception("未预期的错误，%.0f 秒后重试", self._backoff)
                 delay = self._backoff
+            finally:
+                # 必须撤掉：闹钟漂到下一轮里，就会在"下一轮明明很正常"的时候
+                # 把它掐掉，而且报出来的是一条看不懂的超时。
+                if self._watchdog_active:
+                    disarm_watchdog()
+                    self._watchdog_active = False
 
             self._sleep(delay)
 

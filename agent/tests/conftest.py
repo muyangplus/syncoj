@@ -7,11 +7,12 @@ Agent 本身零依赖，测试需要 pytest —— 但 pytest 只在开发机上
 from __future__ import annotations
 
 import importlib.util
+import logging
 import shutil
 import sys
 import uuid
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, List
 
 import pytest
 
@@ -80,6 +81,43 @@ def make_tree(root: Path, files) -> None:
         target = root / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(content if isinstance(content, bytes) else content.encode("utf-8"))
+
+
+class _LogCollector(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__(level=logging.DEBUG)
+        self.items: List[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:  # pragma: no cover - 平凡
+        self.items.append(record)
+
+
+@pytest.fixture()
+def capture_logs():
+    """按 logger 名收集日志：``records = capture_logs("syncoj.agent.client")``。
+
+    为什么不直接用 ``caplog``：有别的用例会调 ``setup_logging()``，而那一句是
+    ``root.handlers = []`` —— pytest 挂在 root 上的捕获 handler 会被一起换掉，
+    于是 caplog 之后什么都看不到（单独跑绿、全量跑红，而且报的是"日志条数是 0"）。
+    挂在具体 logger 上的 handler 不受影响。
+    """
+
+    def factory(name: str) -> List[logging.LogRecord]:
+        logger = logging.getLogger(name)
+        handler = _LogCollector()
+        old_level = logger.level
+        logger.addHandler(handler)
+        logger.setLevel(logging.DEBUG)
+        installed.append((logger, handler, old_level))
+        return handler.items
+
+    installed = []
+    try:
+        yield factory
+    finally:
+        for logger, handler, old_level in installed:
+            logger.removeHandler(handler)
+            logger.setLevel(old_level)
 
 
 @pytest.fixture(scope="session")

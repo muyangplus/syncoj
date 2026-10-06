@@ -82,7 +82,7 @@ python3 install.py --from-server --server http://x --dry-run
 
 ### 装完会发生什么
 
-装好后多了一个单元 `syncoj-enroll.service`：开机时**以 root 身份**跑一次
+装好后多了一个单元 `syncoj-agent-enroll.service`：开机时**以 root 身份**跑一次
 `run_agent.py --provision`，用 `/etc/syncoj/bootstrap.key` 换回本机凭据，
 再 chown 给选手账号。之后 Agent 本体（选手身份）只读凭据，碰不到密钥。
 
@@ -115,7 +115,7 @@ python3 /opt/syncoj/current/run_agent.py --config /etc/syncoj/agent.ini --pair-c
 1. 装 Agent（此时不要启动服务、不要跑 --once、不要跑 --provision）
 2. 做镜像
 3. 部署到各机器
-4. 首次开机 → syncoj-enroll.service 生成**每台各自的**凭据 + machine_uuid
+4. 首次开机 → syncoj-agent-enroll.service 生成**每台各自的**凭据 + machine_uuid
 ```
 
 > 如果母机必须在建镜像前先验证一遍能不能装上，请在建镜像**之前**删掉状态目录里的

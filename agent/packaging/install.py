@@ -3371,7 +3371,7 @@ run_user = {run_user}
 ; 统一注册密钥文件（整间机房一份），**root 只读**。
 ; 密钥的**内容**绝不写进本文件：agent.ini 的属主是选手账号，
 ; 学生读得到里面的每一个字节，而那把钥匙能注册整间机房。
-; 真正干活的是 syncoj-enroll.service（以 root 身份跑一次注册）。
+; 真正干活的是 {enroll_unit}（以 root 身份跑一次注册）。
 bootstrap_key_file = {bootstrap_key_file}
 state_dir = {state_dir}
 machine_id =
@@ -3421,6 +3421,9 @@ public_key = {public_key}
         ca_file=ca_file,
         bootstrap_key_file=bootstrap_key_file,
         run_user=run_user,
+        # 单元名从常量来（ENROLL_UNIT_FILENAME）：写进每台机器的配置注释，
+        # 手打字符串就是上次那个错名的来源
+        enroll_unit=ENROLL_UNIT_FILENAME,
         state_dir=_posix(state_dir),
         deploy_root=deploy_root,
         scan_roots=scan_roots,

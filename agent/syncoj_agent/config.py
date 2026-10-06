@@ -176,7 +176,7 @@ ca_file =
 run_user =
 # 镜像内置的统一注册密钥文件（整间机房一份）。
 # **只有 root 读得到**，所以这条路径通常用不上 —— 真正干活的是装机时装的
-# syncoj-enroll.service（root 身份跑一次，把凭据写进 state_dir）。
+# syncoj-agent-enroll.service（root 身份跑一次，把凭据写进 state_dir）。
 # 留在这里是为了：root 直接跑 Agent 时能自己注册，以及排查时能手工触发。
 #
 # 绝对不要把密钥**内容**写进这个文件：agent.ini 的属主是选手账号，
@@ -279,7 +279,7 @@ class AgentConfig:
     run_user: str = ""
 
     #: 统一注册密钥文件（root 只读）。Agent 以选手身份跑时读不到它 ——
-    #: 那种情况下由 syncoj-enroll.service 以 root 身份先换好凭据。
+    #: 那种情况下由 syncoj-agent-enroll.service 以 root 身份先换好凭据。
     #: **没有 enroll_code**：每选手注册码那条链路已被"机器永久绑定名单条目"取代。
     bootstrap_key_file: Optional[Path] = field(
         default_factory=lambda: Path("/etc/syncoj/bootstrap.key")

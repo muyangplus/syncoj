@@ -2203,7 +2203,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.pair_code:
         credential = load_credential(config.credential_path)
         if credential is None:
-            print("还没有凭据 —— 先让 syncoj-enroll.service 注册一次。")
+            # 名字从常量来：这一行是印给现场照着敲的，手打错了就是 "Unit not found"
+            print("还没有凭据 —— 先让 %s 注册一次。" % ENROLL_UNIT_NAME)
             return 1
         if credential.state != STATE_UNCLAIMED:
             print("这台机器已经配对过了（或不需要配对）。")

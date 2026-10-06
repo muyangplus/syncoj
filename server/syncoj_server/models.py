@@ -601,6 +601,17 @@ class AgentRelease(Base, TimestampMixin):
     signature = Column(Text, nullable=False)
     size = Column(BigInteger, nullable=False, default=0)
     notes = Column(Text, nullable=True)
+    #: 构建这个包时**现场签发**的那把统一注册密钥（``bootstrap.key`` 就来自它）。
+    #:
+    #: 服务端只存哈希、拿不到明文，所以"挑一把已签发的密钥塞进包"这件事
+    #: 从一开始就做不到 —— 只能在构建那一刻签一把新的，然后把 id 记在这里。
+    #:
+    #: ``ON DELETE SET NULL`` 而不是 CASCADE：密钥被删/吊销之后**版本记录必须还在**
+    #: （"这个包是哪天发出去的、当时带的是哪把钥匙"是排查现场的第一手材料），
+    #: 只是不再指着某一行密钥。吊销本身只改 ``revoked_at``，不动这一列。
+    bootstrap_key_id = Column(
+        Integer, ForeignKey("bootstrap_key.id", ondelete="SET NULL"), nullable=True
+    )
     #: 非空 = 已铺开，会随 tick 下发给 Agent
     published_at = Column(DateTime, nullable=True)
     #: 非空 = 已撤回，不再下发

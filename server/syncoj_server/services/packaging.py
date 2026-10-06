@@ -28,18 +28,22 @@ import 出来的 —— 难看一点，但这条边界值得。
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import os
 import subprocess
 import sys
+import tarfile
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 from .. import keys
 
 __all__ = [
     "BUILD_TIMEOUT_SECONDS",
+    "BOOTSTRAP_KEY_NAME",
     "BuildError",
     "SourceProbe",
     "agent_root",
@@ -58,6 +62,17 @@ BOOTSTRAP_RELPATH = ("packaging", "bootstrap.sh")
 LAUNCHER_NAME = "run_agent.py"
 INIT_FILE_NAME = "__init__.py"
 VERSION_ATTR = "__version__"
+
+#: 随包附带的统一注册密钥在包里的名字。
+#:
+#: 放在 tar.gz **根目录**下（与 ``syncoj_agent/``、``run_agent.py`` 同级），
+#: 和 ``release-key.pub.json`` / ``server.json`` 同一个位置 —— 它们都是给
+#: **安装器**看的，不是包的一部分，混进 ``syncoj_agent/`` 里只会被当成模块或数据文件。
+#: 权限 0600：这把钥匙能注册整间机房，不该躺在别人读得到的地方。
+BOOTSTRAP_KEY_NAME = "bootstrap.key"
+
+#: 附带的密钥在包内的权限位。**不能**跟着其它成员走 0644。
+BOOTSTRAP_KEY_MODE = 0o600
 
 #: 构建超时。这个包只有几百 KB，正常一两秒；给到 2 分钟是因为目标机可能同时在
 #: 跑评测或收代码，而"误杀一次构建"比"多等 100 秒"的代价大得多。
@@ -207,12 +222,22 @@ def _packaging_file(relpath, label: str) -> Path:
 
 
 def build_agent_bundle(
-    destination: Path, server_url: Optional[str] = None
+    destination: Path,
+    *,
+    server_url: Optional[str] = None,
+    bootstrap_key: Optional[str] = None,
 ) -> Tuple[str, int, str]:
     """把仓库里的 Agent 源码打成 ``destination``，返回 ``(版本, 字节数, sha256)``。
 
     ``server_url`` 会被写进包内 ``server.json`` —— 装 50 台机器时，地址是唯一
     还要人手填的一项，而它是打包这台服务端**自己就知道**的。
+
+    ``bootstrap_key`` 给定时，它的明文会被写进包内 ``bootstrap.key``（根目录、
+    0600）。**服务端只存密钥的哈希、拿不到明文**，所以这里接的是"构建那一刻
+    现场签发的那把新密钥"，不是"从库里挑一把" —— 那条路根本走不通。
+
+    明文只经过这个函数的局部变量和那个临时 tar 成员：不落库、不进日志、
+    不进任何响应，见 ``api/admin.py`` 的 ``build_release``。
 
     sha256 是**我们自己**对产物算的，不用构建脚本打印的那个 —— 它打印的值要经过
     一次 stdout 往返（还有编码），而签名正是签在这个值上：宁可信文件本身。
@@ -276,6 +301,11 @@ def build_agent_bundle(
             log=log,
         )
 
+    if bootstrap_key:
+        # 公钥/地址由构建脚本按同一套规矩打进去（顺序、mtime=0、uid/gid=0）；
+        # 密钥是**服务端**才知道的东西，只能在包打好之后补进去。
+        _inject_bootstrap_key(destination, bootstrap_key)
+
     digest = hashlib.sha256()
     size = 0
     with destination.open("rb") as handle:
@@ -286,3 +316,103 @@ def build_agent_bundle(
             size += len(chunk)
             digest.update(chunk)
     return version, size, digest.hexdigest()
+
+
+def _inject_bootstrap_key(bundle_path: Path, bootstrap_key: str) -> None:
+    """把明文密钥作为**根目录**下的 ``bootstrap.key``（0600）补进已经打好的包。
+
+    为什么不改 ``build_bundle.py``：那个脚本属 ``agent/``，它得同时服务
+    "人手跑一条命令打包"这条路径，而密钥是服务端构建时才签出来的；把它做成命令行
+    参数，明文就会出现在进程参数表里（任何同机进程都能看到 ``ps``），比写在
+    临时文件里更糟。
+
+    为什么是"解开重打"而不是"往 tar.gz 后面追加"：gzip 是流式压缩，
+    追加的字节根本不会被解压出来。所以走"先解开 → 补一个成员 → 按同一套
+    可复现规矩重打一份"。
+
+    重打时**顺序固定成路径排序**、成员一律 ``mtime=0``/``uid=gid=0``，
+    并用 ``GzipFile(filename="", mtime=0)`` —— 可复现性不能因为多带了一个密钥
+    就丢掉，否则同一次发版打两遍会得到两个 sha256，而签名签的正是那个值。
+    """
+    payload = (bootstrap_key.strip() + "\n").encode("utf-8")
+
+    with tempfile.TemporaryDirectory(prefix="bundle-") as tmp:
+        staging = Path(tmp)
+        extracted = staging / "tree"
+        with tarfile.open(str(bundle_path), "r:gz") as archive:
+            _extract_safely(archive, extracted)
+
+        names = _relative_files(extracted)
+        (extracted / BOOTSTRAP_KEY_NAME).write_bytes(payload)
+
+        _write_reproducible_tar(
+            bundle_path, extracted, names + [BOOTSTRAP_KEY_NAME]
+        )
+
+
+def _extract_safely(archive: tarfile.TarFile, destination: Path) -> None:
+    """把包解开到 ``destination``，**拒绝任何逃出这个目录的成员**。
+
+    这个包是**我们刚打出来的**，理论上不会有害成员；但"输入恰好总是正常的"
+    不是一个可以依赖的性质，而这里一个 ``../`` 就能写到临时目录之外。
+    """
+    destination.mkdir(parents=True, exist_ok=True)
+    root = destination.resolve()
+    for member in archive.getmembers():
+        if member.isdir():
+            continue
+        if not member.isfile():
+            # 符号链接/设备节点在包里没有用武之地，直接不搬
+            continue
+        target = (destination / member.name).resolve()
+        if target != root and root not in target.parents:
+            raise BuildError("包内成员的路径不合法：%s" % member.name)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source = archive.extractfile(member)
+        if source is None:  # pragma: no cover - 上面已经过滤过非普通文件
+            continue
+        try:
+            with target.open("wb") as handle:
+                while True:
+                    chunk = source.read(1 << 20)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+        finally:
+            source.close()
+
+
+def _relative_files(root: Path) -> List[str]:
+    """树里所有普通文件的相对路径（``/`` 分隔、排序）。"""
+    return sorted(
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file()
+    )
+
+
+def _write_reproducible_tar(target: Path, root: Path, names: List[str]) -> None:
+    """按 ``names`` 的顺序把 ``root`` 下的文件重打成 ``target``（可复现）。
+
+    内层 tar 不压缩，外层 gzip 只压一次（``compresslevel=9``，与
+    ``build_bundle.py`` 一致，免得"带密钥的包"和"不带密钥的包"两套规矩）。
+    """
+    with target.open("wb") as raw:
+        with gzip.GzipFile(
+            filename="", fileobj=raw, mode="wb", compresslevel=9, mtime=0
+        ) as gz:
+            with tarfile.open(fileobj=gz, mode="w", format=tarfile.GNU_FORMAT) as archive:
+                for name in names:
+                    path = root / name
+                    info = tarfile.TarInfo(name)
+                    info.size = path.stat().st_size
+                    info.mode = (
+                        BOOTSTRAP_KEY_MODE if name == BOOTSTRAP_KEY_NAME else 0o644
+                    )
+                    info.uid = 0
+                    info.gid = 0
+                    info.uname = "root"
+                    info.gname = "root"
+                    info.mtime = 0
+                    with path.open("rb") as handle:
+                        archive.addfile(info, handle)

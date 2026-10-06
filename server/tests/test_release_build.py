@@ -26,6 +26,7 @@ from typing import Iterator
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import func, select
 
 from conftest import (
     ADMIN_PASSWORD,
@@ -40,8 +41,8 @@ from conftest import (
 from syncoj_server import keys
 from syncoj_server.config import Settings
 from syncoj_server.main import create_app
-from syncoj_server.models import Admin, EventLog
-from syncoj_server.security import hash_password
+from syncoj_server.models import Admin, AgentRelease, BootstrapKey, EventLog
+from syncoj_server.security import hash_bootstrap_key, hash_password
 from syncoj_server.services import packaging
 from syncoj_server.services.signing import (
     generate_keypair,
@@ -299,9 +300,225 @@ def test_同一份源码两次构建字节完全相同(build_env: SimpleNamespac
 
     _, size_a, sha_a = packaging.build_agent_bundle(first)
     _, size_b, sha_b = packaging.build_agent_bundle(second)
-
     assert sha_a == sha_b, "同样内容产出不同字节，说明时间戳/文件名漏进了压缩流"
     assert size_a == size_b
+
+
+# --------------------------------------------------------------------------- #
+# 可选附带统一注册密钥
+#
+# 服务端只有密钥的哈希、拿不到明文，所以"挑一把已签发的密钥塞进包"这条路
+# 从一开始就不存在 —— 只能在构建那一刻**现场签一把新的**。这一节盯的就是：
+# 不勾选时什么都没多签；勾选时包里真的有一把能注册的密钥、而库里仍然只有哈希。
+# --------------------------------------------------------------------------- #
+
+
+def _bootstrap_key_count(ctx) -> int:
+    with ctx.db.session() as session:
+        return int(
+            session.execute(select(func.count()).select_from(BootstrapKey)).scalar() or 0
+        )
+
+
+def _bundle_bootstrap_key(data: bytes) -> bytes:
+    """取包内的 ``bootstrap.key``；没有就断言失败（消息里带上全部成员名）。"""
+    with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+        names = archive.getnames()
+        assert packaging.BOOTSTRAP_KEY_NAME in names, (
+            "包里的根目录下没有 %s：%r" % (packaging.BOOTSTRAP_KEY_NAME, names)
+        )
+        return archive.extractfile(packaging.BOOTSTRAP_KEY_NAME).read()
+
+
+@requires_source
+def test_不勾选附带密钥时包里没有密钥也不多签一把(
+    build_env: SimpleNamespace, built: dict
+) -> None:
+    """默认必须是关的，而且"关"要关得彻底：**库里一把密钥都不该多出来**。
+
+    这条不只是"字段默认值是 False"——它守的是"没勾选的那条路上一次
+    ``new_bootstrap_key()`` 都没调过"。多签一把没人用的密钥会污染密钥列表，
+    而列表本身是教师判断"哪把钥匙还在外面"的唯一依据。
+    """
+    before = _bootstrap_key_count(build_env.ctx)
+    response = build_env.client.post(
+        BUILD_URL,
+        json={"version": packaging.source_version(), "include_bootstrap_key": False},
+        headers=build_env.headers,
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    assert body["bootstrap_key_id"] is None, body
+    assert body["bootstrap_key_label"] is None, body
+    assert body["bootstrap_key_revoked"] is False, body
+
+    data = blob_bytes(build_env.ctx, body["sha256"])
+    with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+        assert packaging.BOOTSTRAP_KEY_NAME not in archive.getnames()
+
+    assert _bootstrap_key_count(build_env.ctx) == before, "没勾选却多签了一把密钥"
+
+
+@requires_source
+def test_勾选附带密钥时包里有一把能注册的密钥(build_env: SimpleNamespace) -> None:
+    """勾选之后，包里的 ``bootstrap.key`` 必须**真的能注册**。
+
+    "包里有一个叫 bootstrap.key 的文件"这种断言太弱了：权限错了、内容少了换行、
+    或者塞进去的是哈希而不是明文，都会让那条断言照样绿、而装机时注册不上。
+    所以这里拿它的内容直接走一次真实的 ``/api/v1/agent/enroll``。
+    """
+    before = _bootstrap_key_count(build_env.ctx)
+    response = build_env.client.post(
+        BUILD_URL,
+        json={"version": packaging.source_version(), "include_bootstrap_key": True},
+        headers=build_env.headers,
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    # 1) 回执：明确写出"这个包附带了一把统一注册密钥（#id，标签）"
+    assert body["bootstrap_key_id"] is not None, body
+    assert body["bootstrap_key_label"] == "随版本 %s 附带" % body["version"], body
+    assert body["bootstrap_key_revoked"] is False, body
+
+    # 2) 包内确实有它，而且权限是 0600（这把钥匙不该躺在别人读得到的地方）
+    data = blob_bytes(build_env.ctx, body["sha256"])
+    plain = _bundle_bootstrap_key(data)
+    with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+        mode = archive.getmember(packaging.BOOTSTRAP_KEY_NAME).mode
+    assert mode == packaging.BOOTSTRAP_KEY_MODE, "密钥在包内的权限应当是 0600"
+
+    # 3) 明文能注册 —— 用真接口、真明文，不是"看着像"
+    raw = plain.decode("utf-8").strip()
+    enrolled = enroll_machine(build_env.client, raw, machine_id="m-bundled-key")
+    assert enrolled["token"]
+
+    # 4) 库里**只有哈希**：拿明文去查哈希列，一行都不该有
+    with build_env.ctx.db.session() as session:
+        keys = list(session.execute(select(BootstrapKey)).scalars())
+        matched = [
+            row for row in keys
+            if row.id == body["bootstrap_key_id"] and row.key_hash == raw
+        ]
+    assert not matched, "库里存下了明文或明文长度不够的哈希"
+    row = next(k for k in keys if k.id == body["bootstrap_key_id"])
+    assert row.key_hash == hash_bootstrap_key(raw)
+    assert raw not in row.key_hash
+
+    # 5) 库里只该多出这一把
+    assert _bootstrap_key_count(build_env.ctx) == before + 1
+
+
+@requires_source
+def test_附带密钥的包不会把明文漏进任何响应(build_env: SimpleNamespace) -> None:
+    """明文只该寄生在包里那一个字节串上。
+
+    构造失败那次最容易漏：回执里带一句"密钥是 xxx"，或者审计事件把明文写进
+    ``meta_json`` —— 而 events 表是教师界面能翻的，等于把密钥重新公开一次。
+    """
+    response = build_env.client.post(
+        BUILD_URL,
+        json={"version": packaging.source_version(), "include_bootstrap_key": True},
+        headers=build_env.headers,
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    raw = _bundle_bootstrap_key(blob_bytes(build_env.ctx, body["sha256"])).decode().strip()
+
+    status = build_env.client.get("/api/v1/admin/releases", headers=build_env.headers)
+    keys = build_env.client.get("/api/v1/admin/bootstrap-keys", headers=build_env.headers)
+    events = build_env.client.get("/api/v1/admin/events", headers=build_env.headers)
+
+    for name, payload in (("构建回执", body), ("版本列表", status.json()),
+                          ("密钥列表", keys.json()), ("审计日志", events.json())):
+        assert raw not in json.dumps(payload, ensure_ascii=False), (
+            "%s 里出现了密钥明文" % name
+        )
+
+
+@requires_source
+def test_吊销附带密钥后注册被拒而版本记录还在(build_env: SimpleNamespace) -> None:
+    """带密钥的版本要能**按版本单独吊销**，而且吊销不能顺手删掉版本记录。
+
+    "这个包是哪天发出去的、当时带的是哪把钥匙"是排查现场的第一手材料。
+    同时这里守住 ``release.bootstrap_key_id`` 在吊销后**仍然指着那一行**：
+    只有密钥记录被**删除**时才回落成 NULL（界面回落到 ``#id``）。
+    """
+    built = build_env.client.post(
+        BUILD_URL,
+        json={"version": packaging.source_version(), "include_bootstrap_key": True},
+        headers=build_env.headers,
+    ).json()
+    key_id = built["bootstrap_key_id"]
+    assert key_id is not None
+
+    revoke = build_env.client.post(
+        "/api/v1/admin/bootstrap-keys/%d/revoke" % key_id, headers=build_env.headers
+    )
+    assert revoke.status_code == 200, revoke.text
+    assert revoke.json()["revoked_at"] is not None
+
+    # 1) 机器再用它注册会被拒
+    raw = _bundle_bootstrap_key(blob_bytes(build_env.ctx, built["sha256"])).decode().strip()
+    denied = build_env.client.post(
+        "/api/v1/agent/enroll",
+        json={"bootstrap_key": raw, "machine_id": "m-after-revoke"},
+    )
+    assert denied.status_code == 403, denied.text
+    assert denied.json()["code"] == "bootstrap_key_revoked"
+
+    # 2) 版本记录还在，而且仍然指向那一把（只是标记为已吊销）
+    with build_env.ctx.db.session() as session:
+        row = session.get(AgentRelease, built["id"])
+        assert row is not None, "吊销密钥把版本记录一起带走了"
+        assert row.bootstrap_key_id == key_id, (
+            "吊销不该动版本记录上的引用（只有**删除**密钥记录时才置 NULL）"
+        )
+        assert row.sha256 == built["sha256"]
+
+    listing = build_env.client.get(
+        "/api/v1/admin/releases", headers=build_env.headers
+    ).json()["releases"]
+    shown = next(r for r in listing if r["id"] == built["id"])
+    assert shown["bootstrap_key_revoked"] is True
+    assert shown["bootstrap_key_label"] == "随版本 %s 附带" % built["version"]
+
+
+@requires_source
+def test_删掉没有用过的附带密钥之后版本记录还在(
+    build_env: SimpleNamespace,
+) -> None:
+    """密钥记录被**删除**（不是吊销）时版本记录必须活着，只是不再指着那一行。
+
+    这一列的外键是 ``ON DELETE SET NULL`` 而不是 ``CASCADE`` —— 反过来写的话，
+    随手清掉一行密钥记录会把"当时发的是哪个包"一起静默干掉。
+    """
+    built = build_env.client.post(
+        BUILD_URL,
+        json={"version": packaging.source_version(), "include_bootstrap_key": True},
+        headers=build_env.headers,
+    ).json()
+    key_id = built["bootstrap_key_id"]
+
+    removed = build_env.client.delete(
+        "/api/v1/admin/bootstrap-keys/%d" % key_id, headers=build_env.headers
+    )
+    assert removed.status_code == 200, removed.text
+
+    with build_env.ctx.db.session() as session:
+        row = session.get(AgentRelease, built["id"])
+        assert row is not None, "密钥被删之后版本记录不该跟着消失"
+        assert row.bootstrap_key_id is None, (
+            "外键应当是 ON DELETE SET NULL：版本记录活着，引用置空"
+        )
+
+    listing = build_env.client.get(
+        "/api/v1/admin/releases", headers=build_env.headers
+    ).json()["releases"]
+    shown = next(r for r in listing if r["id"] == built["id"])
+    assert shown["bootstrap_key_id"] is None
+    assert shown["bootstrap_key_label"] is None
 
 
 # --------------------------------------------------------------------------- #

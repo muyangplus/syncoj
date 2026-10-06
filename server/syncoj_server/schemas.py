@@ -974,6 +974,18 @@ class ReleaseOut(_Base):
     created_at: str
     published_at: Optional[str] = None
     key_id: Optional[str] = None
+    #: 构建这个包时**现场签发**的那把统一注册密钥的 id。
+    #:
+    #: 空 = 这个包没附带密钥。非空时界面要显示"哪个版本附带过密钥（哪一把）"
+    #: 并给一个就地吊销的入口 —— 所以下面把展示要用的标签与状态一起带出来，
+    #: 免得前端为了渲染一行表格再去分页拉一遍密钥列表（那还得自己算 id 对不上）。
+    bootstrap_key_id: Optional[int] = None
+    #: 那把密钥的用途标签（签发时写的是「随版本 x.y.z 附带」）。密钥记录被删掉后
+    #: 回落到 ``#id``，这样版本记录还在时界面不会显示成一个空白的"附带过密钥"。
+    bootstrap_key_label: Optional[str] = None
+    #: 那把密钥已经吊销了。**吊销不会动版本记录**，所以这一位是界面判断"还要不要
+    #: 显示吊销按钮"的唯一依据。
+    bootstrap_key_revoked: bool = False
 
 
 class ReleaseUpdate(_Base):
@@ -1032,11 +1044,18 @@ class ReleaseBuildIn(_Base):
     "猜一个默认值"。让发版这件事必须经过一次显式确认，是为了在"改了代码忘了改
     版本号"时撞上"这个版本已经存在"，而不是静默覆盖掉上一版 —— 后者更糟，
     因为已经升级过的机器会因为"版本不高于当前"拒绝升级，而界面上一切正常。
+
+    ``include_bootstrap_key`` **默认关**，因为打开它的后果是"这个包从此等于一张
+    能注册进这台服务端的通行证"。装机入口（``/api/v1/agent/install/*``）刻意不鉴权
+    —— 空机器上没有任何凭据可用 —— 于是**任何能打开装机页的人都能把这个包下载下来，
+    也就拿到了那把密钥**。只有"局域网里确定没有外人"时才该打开它，而且发完就该吊销。
     """
 
     version: str = Field(min_length=1, max_length=64)
     channel: str = Field(default="stable", max_length=16)
     notes: Optional[str] = Field(default=None, max_length=2000)
+    #: 在构建那一刻现场签发一把统一注册密钥、塞进包里。库里照旧只存哈希。
+    include_bootstrap_key: bool = False
 
 
 class UpgradeStatusOut(_Base):

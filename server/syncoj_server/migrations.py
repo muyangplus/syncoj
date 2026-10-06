@@ -399,6 +399,34 @@ def _migration_005_contest_window(engine: Engine) -> None:
     _rebuild_table(engine, "contest")
 
 
+def _migration_006_release_bootstrap_key(engine: Engine) -> None:
+    """给发布记录加"这个包附带的是哪把统一注册密钥"（``agent_release.bootstrap_key_id``）。
+
+    需求是"发版时可以选择附带一把统一注册密钥"。服务端只存密钥的哈希、拿不到明文，
+    所以带不动"已经签发过的那一把" —— 只能在构建那一刻现场签一把新的，然后把
+    **它的 id** 记在这一列上，界面据此显示标签、并给一个就地吊销的入口。
+
+    **为什么是重建而不是 ADD COLUMN**：这一列要带 ``ON DELETE SET NULL``，
+    而 SQLite 的 ``ALTER TABLE ADD COLUMN`` 不接受带动作的外键子句
+    （会报 "Cannot add a REFERENCES column with non-NULL default value" 这一族错误）。
+    ``agent_release`` 没有子表、也没有外部索引，重建的代价只是一行数据搬移；
+    配方照 :func:`_rebuild_table`（关外键 + autocommit），见模块 docstring 的三条规矩。
+
+    ``SET NULL`` 而不是 ``CASCADE``：密钥被删之后**版本记录必须还在**。
+    "这个包是哪天发出去的、当时带的是哪把钥匙"是排查现场的第一手材料，
+    不能因为随手清掉一行密钥记录就一起消失。
+
+    新库由 ``create_all`` 直接建出这一列，跑这里时是空操作 —— 但版本号照样推进，
+    否则两条路径的 ``user_version`` 会分叉。
+    """
+    if "agent_release" not in _tables(engine):
+        return
+    if "bootstrap_key_id" in _columns(engine, "agent_release"):
+        # 已经和模型一致（新库、以及已经升上来的库都走这一支）
+        return
+    _rebuild_table(engine, "agent_release")
+
+
 MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
     (1, "统一密钥注册 + 名单库所需的结构", _migration_001_enrollment),
     (2, "机器永久绑定名单条目；去掉注册码链路", _migration_002_roster_binding),
@@ -408,6 +436,11 @@ MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
         5,
         "场次增加开考/结束时间；去掉场次上的选手注意事项",
         _migration_005_contest_window,
+    ),
+    (
+        6,
+        "发布记录记住随包附带的那把统一注册密钥",
+        _migration_006_release_bootstrap_key,
     ),
 ]
 

@@ -34,6 +34,7 @@ from fastapi import (
 # /openapi.json 上 —— 而 /docs 和前端类型生成都依赖那个端点。
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from sqlalchemy import func, or_, select
+from sqlalchemy.orm import Session
 
 from .. import keys
 from ..config import Settings
@@ -4211,7 +4212,10 @@ def list_releases(
                 select(AgentRelease).order_by(AgentRelease.id.desc())
             ).scalars()
         )
-        releases = [_release_out(row) for row in rows]
+        # 随包附带的密钥一次查完，而不是每行一次 —— 版本历史可能很长，而这一页
+        # 每次刷新都要走这里。缺行（密钥被删）时按 id 回落成 ``#id``。
+        bootstrap_keys = _bootstrap_keys_by_id(session, rows)
+        releases = [_release_out(row, bootstrap_keys) for row in rows]
         active = next((r for r in releases if r.rolled_out and not r.yanked), None)
 
     return UpgradeStatusOut(
@@ -4220,6 +4224,62 @@ def list_releases(
         error=ctx.signing_key_error,
         active_release=active,
         releases=releases,
+    )
+
+
+def _bootstrap_keys_by_id(
+    session: Session, rows: "list[AgentRelease]"
+) -> Dict[int, BootstrapKey]:
+    """把版本记录提到的那几把密钥一次取出来。
+
+    刻意不建 ORM 关系：``BootstrapKey`` 那边没有"附带它的版本"这个概念
+    （一把密钥可能先于版本存在，也可能在版本删掉之后还留着），
+    而这里要的只是显示用的两三个字段。列表里没有一行带密钥时**一次库都不查**。
+    """
+    key_ids = {row.bootstrap_key_id for row in rows if row.bootstrap_key_id}
+    if not key_ids:
+        return {}
+    found = session.execute(
+        select(BootstrapKey).where(BootstrapKey.id.in_(sorted(key_ids)))
+    ).scalars()
+    return {key.id: key for key in found}
+
+
+def _release_out(
+    row: AgentRelease, bootstrap_keys: Optional[Dict[int, BootstrapKey]] = None
+) -> ReleaseOut:
+    """把一行发布记录翻译成回执。
+
+    ``bootstrap_keys`` 是 ``{id: BootstrapKey}``。**列表接口必须传**（它一次把
+    所有提到过的密钥查出来，避免一行一次查询）；单个版本的动作接口走
+    :func:`_release_with_key`，那里只查当前这一行提到的那一把。
+    """
+    key_id = row.bootstrap_key_id
+    label: Optional[str] = None
+    revoked = False
+    if key_id is not None:
+        key = None if bootstrap_keys is None else bootstrap_keys.get(int(key_id))
+        if key is not None:
+            label = key.label or "#%d" % key.id
+            revoked = key.revoked_at is not None
+        elif bootstrap_keys is not None:
+            # 密钥记录被删了（允许删"签错了、没被用过"的那种），版本记录还在。
+            # 报 ``#id`` 而不是空字符串：界面上要能回答"这个包附带过密钥吗"。
+            label = "#%d" % key_id
+    return ReleaseOut(
+        id=row.id,
+        version=row.version,
+        channel=row.channel,
+        sha256=row.sha256,
+        size=int(row.size),
+        notes=row.notes,
+        rolled_out=row.published_at is not None and row.yanked_at is None,
+        yanked=row.yanked_at is not None,
+        created_at=_iso(row.created_at) or "",
+        published_at=_iso(row.published_at),
+        bootstrap_key_id=key_id,
+        bootstrap_key_label=label,
+        bootstrap_key_revoked=revoked,
     )
 
 
@@ -4248,6 +4308,7 @@ def _store_release(
     filename: str,
     admin: AdminIdentity,
     source: str,
+    bootstrap_key_id: Optional[int] = None,
 ) -> ReleaseOut:
     """把一份升级包**收进库并签发**，返回发布记录。
 
@@ -4255,6 +4316,10 @@ def _store_release(
     在"签名对象是什么、同名版本怎么处理、留哪条审计"上**必须完全一致**：
     任何一处不同都会让两条路产出行为不同的发布，而现场只看得出来"有时能升级
     有时不能"。真正不同的只有 ``source``（审计里那份包是打哪儿来的）。
+
+    ``bootstrap_key_id`` 只在"构建时附带密钥"那条路上有值（上传的包是别人打好的，
+    服务端不知道里面有没有密钥，所以上传一律不写这一列）。**这里只收 id，
+    收不到明文** —— 调用方在构建前一刻现场签发的那把密钥，明文只在它手里待了一次。
     """
     _require_signing_key(ctx)
     try:
@@ -4284,6 +4349,11 @@ def _store_release(
             existing.notes = notes or existing.notes
             existing.channel = channel or existing.channel
             existing.yanked_at = None
+            # 不给值时**保持原样**：重打一个不带密钥的同名版本，不该悄悄把
+            # "上一版附带的是哪把钥匙"这条记录抹掉 —— 那把钥匙还在外面流通，
+            # 界面必须还看得见它、还能吊销它。
+            if bootstrap_key_id is not None:
+                existing.bootstrap_key_id = bootstrap_key_id
             session.flush()
             row = existing
         else:
@@ -4294,6 +4364,7 @@ def _store_release(
                 signature=signature,
                 size=size,
                 notes=notes or None,
+                bootstrap_key_id=bootstrap_key_id,
             )
             session.add(row)
             session.flush()
@@ -4302,15 +4373,31 @@ def _store_release(
             EventLog(
                 level="info",
                 category="release_%s" % source,
-                message="%s Agent 版本 %s（%s，%d 字节，%s）"
-                % (_SOURCE_LABELS[source], version, filename, size, sha256[:12]),
+                message="%s Agent 版本 %s（%s，%d 字节，%s）%s"
+                % (
+                    _SOURCE_LABELS[source],
+                    version,
+                    filename,
+                    size,
+                    sha256[:12],
+                    # 审计里只写"附带了哪一把"的 id —— **明文绝不进这里**：
+                    # events 表是教师界面能翻的，写进去等于把密钥重新公开一次。
+                    ("，附带统一注册密钥 #%d" % bootstrap_key_id)
+                    if bootstrap_key_id is not None
+                    else "",
+                ),
                 meta_json=json.dumps(
-                    {"by": admin.username, "source": source, "version": version},
+                    {
+                        "by": admin.username,
+                        "source": source,
+                        "version": version,
+                        "bootstrap_key_id": bootstrap_key_id,
+                    },
                     ensure_ascii=False,
                 ),
             )
         )
-        return _release_out(row)
+        return _release_with_key(session, row)
 
 
 #: 审计里怎么称呼这个包的来路。用固定词表而不是自由文本，日志才 grep 得动。
@@ -4424,11 +4511,54 @@ def build_release(
     tmp_dir = Path(tempfile.mkdtemp(prefix="build-", dir=str(ctx.blobs.tmp_root)))
     tmp_path = tmp_dir / ("syncoj-agent-%s.tar.gz" % version)
     try:
+        # 「附带统一注册密钥」：**在构建这一刻现场签一把新的**。
+        #
+        # 不能改成"从已签发的密钥里挑一把"：``BootstrapKey`` 只存
+        # ``hash_bootstrap_key(key)``，服务端拿不到任何明文可塞 —— 明文只在
+        # 签发那一刻出现过一次（UI 原话："库里只存哈希。丢了就重新签发一把"）。
+        #
+        # 现在这样做反而更好：**每发一个带密钥的版本就对应一把独立的密钥**，
+        # 于是可以按版本单独吊销。万一某个包流出去了，吊销那一把就行，别的机器
+        # （包括共用机房主密钥的那些）不受影响 —— 比"共用一把主密钥"安全得多。
+        #
+        # 明文的去向只有一条：``build_agent_bundle`` 的入参 → 包内 ``bootstrap.key``。
+        # 它不进数据库（这里只把 ``hash_bootstrap_key(raw)`` 交给 BootstrapKey）、
+        # 不进日志（下面所有文案都只带 id）、不进响应（回执里只有 id 和标签）。
+        raw_key: Optional[str] = None
+        bootstrap_key_id: Optional[int] = None
+        if payload.include_bootstrap_key:
+            raw_key = new_bootstrap_key(ctx.settings.bootstrap_key_bytes)
+            with ctx.db.session() as session:
+                key = BootstrapKey(
+                    key_hash=hash_bootstrap_key(raw_key),
+                    label="随版本 %s 附带" % version,
+                    note="构建时现场签发、随包下发，装机即注册。用完请吊销这一把。",
+                )
+                session.add(key)
+                session.flush()
+                bootstrap_key_id = key.id
+                session.add(
+                    EventLog(
+                        level="warning",
+                        category="bootstrap_key",
+                        message="为 Agent 版本 %s 附带签发统一注册密钥 #%d"
+                        % (version, bootstrap_key_id),
+                        meta_json=json.dumps(
+                            {
+                                "by": admin.username,
+                                "version": version,
+                                "bootstrap_key_id": bootstrap_key_id,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
+                )
+
         # 把服务端地址一起写进包：装 50 台时这是唯一还要人手输的一项。算不出来
         # （没人从局域网打开过界面、也没配 public_url）时不写，机器那边还有
         # 局域网发现兜着 —— 但**绝不退化成 127.0.0.1**，那会让 50 台机器各自找自己。
         built_version, size, sha256 = packaging.build_agent_bundle(
-            tmp_path, server_url=probe.public_url
+            tmp_path, server_url=probe.public_url, bootstrap_key=raw_key
         )
         if built_version != version:  # pragma: no cover - 上面刚比对过，双保险
             raise ApiError(409, "version_mismatch", "构建出的版本是 %s" % built_version)
@@ -4442,10 +4572,16 @@ def build_release(
                 filename=tmp_path.name,
                 admin=admin,
                 source="built",
+                bootstrap_key_id=bootstrap_key_id,
             )
     except packaging.BuildError as exc:
         # 原文只进日志：它可能带着一大堆路径和栈
         log.warning("构建 Agent 发布包失败：%s", exc.log)
+        # 构建失败时那把已经签发的密钥会留在库里（一条没有任何包对应的记录）。
+        # 这是**故意**的：它确实存在过、确实可能已经被谁看到，悄悄删掉反而会让人
+        # 以为"没签发过"；而且它已经被写进过磁盘上的临时包（失败点在存储那一步时
+        # 甚至已经进了 blob）。界面上它带着「随版本 x.y.z 附带」的标签，一眼能认出来，
+        # 顺手吊销即可 —— 这也正是"用独立密钥、按版本吊销"这条路的意义。
         raise ApiError(500, "release_build_failed", exc.detail)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -4531,7 +4667,7 @@ def rollout_release(
                 % (target.version, ("（自动撤回 %s）" % ", ".join(previous)) if previous else ""),
             )
         )
-        return _release_out(target)
+        return _release_with_key(session, target)
 
 
 @router.post("/releases/{release_id}/yank", response_model=ReleaseOut)
@@ -4558,7 +4694,7 @@ def yank_release(
                 message="撤回 Agent 版本 %s" % row.version,
             )
         )
-        return _release_out(row)
+        return _release_with_key(session, row)
 
 
 @router.patch("/releases/{release_id}", response_model=ReleaseOut)
@@ -4577,22 +4713,17 @@ def update_release(
         if payload.channel is not None:
             row.channel = payload.channel[:16]
         session.flush()
-        return _release_out(row)
+        return _release_with_key(session, row)
 
 
-def _release_out(row: AgentRelease) -> ReleaseOut:
-    return ReleaseOut(
-        id=row.id,
-        version=row.version,
-        channel=row.channel,
-        sha256=row.sha256,
-        size=int(row.size),
-        notes=row.notes,
-        rolled_out=row.published_at is not None and row.yanked_at is None,
-        yanked=row.yanked_at is not None,
-        created_at=_iso(row.created_at) or "",
-        published_at=_iso(row.published_at),
-    )
+def _release_with_key(session: Session, row: AgentRelease) -> ReleaseOut:
+    """单个版本动作（铺开/撤回/改备注/入库）的回执。
+
+    和列表那条路的区别只有一个：这里连着当前会话查一次密钥，好让界面上的
+    "附带过密钥 / 已吊销"在动作之后立刻是新的（而不是等下一次刷新列表）。
+    版本记录本来就在手边，多这一次查询换来一条自洽的回执。
+    """
+    return _release_out(row, _bootstrap_keys_by_id(session, [row]))
 
 
 @router.delete("/releases/{release_id}", response_model=SimpleAck)

@@ -34,7 +34,8 @@ def make_engine(path: Path):
 #: 手写会腐烂，所以下面配了一条 ``test_legacy_fixture_...`` 专门看守它。
 #:
 #: 定义逐字照抄当时的模型（DDL 从 ``CreateTable`` 导出），只有几处不同：
-#: ``agent`` / ``contest`` 去掉本次新增的列，``problem`` 去掉上一次加漏迁移的列。
+#: ``agent`` / ``contest`` 去掉本次新增的列，``problem`` 去掉上一次加漏迁移的列，
+#: ``agent_release`` 去掉迁移 006 才加的 ``bootstrap_key_id``。
 #:
 #: **``contest`` 里那条 ``player_notice`` 是故意留着的**，它是本文件唯一一处
 #: "老结构比迁移器出现那天新"的地方：迁移 003 把它加上去、迁移 005 又把它拿掉，
@@ -100,6 +101,18 @@ CREATE TABLE problem (
     created_at DATETIME NOT NULL,
     CONSTRAINT uq_problem_contest_ident UNIQUE (contest_id, ident)
 );
+CREATE TABLE agent_release (
+    id INTEGER NOT NULL PRIMARY KEY,
+    version VARCHAR(32) NOT NULL UNIQUE,
+    channel VARCHAR(16) NOT NULL,
+    sha256 VARCHAR(64) NOT NULL,
+    signature TEXT NOT NULL,
+    size BIGINT NOT NULL,
+    notes TEXT,
+    published_at DATETIME,
+    yanked_at DATETIME,
+    created_at DATETIME NOT NULL
+);
 """
 
 #: 模型里有、老结构里没有的列 —— 迁移负责补上（无论是 ADD COLUMN 还是重建）。
@@ -125,6 +138,9 @@ MIGRATION_ADDED_COLUMNS = {
     "problem": {"file_patterns"},
     "player": set(),
     "agent_status": set(),
+    #: ``bootstrap_key_id``：发布记录记住"这个包附带的是哪把统一注册密钥"（迁移 006）。
+    #: 老结构里没有它 —— 那一轮的发布记录本来就不带密钥，升上来一律是 NULL。
+    "agent_release": {"bootstrap_key_id"},
 }
 
 #: 老结构里有、模型里已经不要的列 —— 迁移负责**删掉**（只能靠重建表）。
@@ -146,6 +162,7 @@ MIGRATION_DROPPED_COLUMNS = {
     "problem": set(),
     "player": set(),
     "agent_status": set(),
+    "agent_release": set(),
 }
 
 #: "开考/结束时间列之前"的 contest 形状：只有这张表少那两列（外加一张挂在它下面的
@@ -189,6 +206,10 @@ INSERT INTO agent_status (agent_id, online, file_count, disk_free, updated_at)
     VALUES (1, 1, 7, 123456, '2026-01-01 00:00:00');
 INSERT INTO problem (id, contest_id, ident, order_index, created_at)
     VALUES (1, 1, 'p1', 1, '2026-01-01 00:00:00');
+INSERT INTO agent_release
+        (id, version, channel, sha256, signature, size, notes, published_at, created_at)
+    VALUES (1, '1.4.2', 'stable', 'sha-of-bundle', 'sig-of-bundle', 2048,
+            '老版本', '2026-01-02 00:00:00', '2026-01-01 00:00:00');
 """
 
 
@@ -359,6 +380,73 @@ def test_upgrade_adds_missing_contest_window_columns(pre_window_db: Path) -> Non
     ], "重建把场次那一行弄丢了（或改了内容）"
     assert rows(engine, "SELECT COUNT(*) FROM player")[0][0] == 1, (
         "重建 contest 时子表被外键级联删掉了 —— 外键没有真正关掉"
+    )
+    engine.dispose()
+
+
+def test_legacy_upgrade_adds_the_release_bootstrap_key_column(legacy_db: Path) -> None:
+    """发布记录要补出 ``agent_release.bootstrap_key_id``。
+
+    老库那一列不存在（那一轮的发布记录本来就不带密钥）。迁移 006 走的是**重建表**，
+    而不是 ADD COLUMN —— 因为这一列带着 ``ON DELETE SET NULL`` 外键，而 SQLite 的
+    ``ALTER TABLE ADD COLUMN`` 不接受带动作的外键子句。所以这里同时盯两件事：
+    列补出来了，而且**老发布记录一行不少、字段没被搬错**。
+    """
+    engine = make_engine(legacy_db)
+    migrations.migrate(engine)
+
+    columns = {c["name"] for c in inspect(engine).get_columns("agent_release")}
+    assert "bootstrap_key_id" in columns
+
+    release = rows(
+        engine,
+        "SELECT version, channel, sha256, signature, size, notes, bootstrap_key_id "
+        "FROM agent_release WHERE id = 1",
+    )
+    assert release == [
+        ("1.4.2", "stable", "sha-of-bundle", "sig-of-bundle", 2048, "老版本", None)
+    ], "重建 agent_release 时老记录被弄丢或搬错了：%r" % (release,)
+    engine.dispose()
+
+
+def test_release_survives_its_bootstrap_key_being_deleted(legacy_db: Path) -> None:
+    """密钥被删之后**版本记录必须还在**（``ON DELETE SET NULL`` 而不是 CASCADE）。
+
+    "这个包是哪天发出去的、当时带的是哪把钥匙"是排查现场的第一手材料 ——
+    随手清掉一行密钥记录不该把它一起带走。这条同时守住重建出来的那张表真的带上了
+    ``ON DELETE SET NULL`` 这个动作（重建时漏掉它，这里会变成一行都不剩）。
+    """
+    engine = make_engine(legacy_db)
+    migrations.migrate(engine)
+
+    # 迁移链里重建表时要临时关掉外键（配方见 ``_rebuild_table``），这里按真实
+    # 服务端那样用 connect 钩子把它打开 —— db.py 的 ``_install_pragmas`` 就是这么做的。
+    # 不打开的话，下面那条 DELETE 不会触发 ON DELETE SET NULL，测的就不是真行为。
+    from sqlalchemy import event
+
+    @event.listens_for(engine, "connect")
+    def _fk_on(dbapi_connection, _record) -> None:  # noqa: ANN001
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    # 连接池里那条连接是在钩子挂上**之前**建的（上面那次 migrate 用掉的），
+    # 不 dispose 的话它会原样被复用，钩子永远不生效。
+    engine.dispose()
+
+    with engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO bootstrap_key (id, key_hash, use_count, created_at)"
+                 " VALUES (7, 'hash-7', 0, '2026-01-01 00:00:00')")
+        )
+        conn.execute(
+            text("UPDATE agent_release SET bootstrap_key_id = 7 WHERE id = 1")
+        )
+        conn.execute(text("DELETE FROM bootstrap_key WHERE id = 7"))
+
+    release = rows(engine, "SELECT version, bootstrap_key_id FROM agent_release WHERE id = 1")
+    assert release == [("1.4.2", None)], (
+        "密钥被删之后版本记录不该跟着消失（应当置 NULL 而不是级联删除）：%r" % (release,)
     )
     engine.dispose()
 

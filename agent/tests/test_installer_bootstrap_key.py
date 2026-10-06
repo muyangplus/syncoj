@@ -290,20 +290,111 @@ def test_bootstrap_key_file_内容也优先于包内(installer_module, workdir: 
     assert not release_key_of(instance, version).exists()
 
 
-def test_机器上已有的密钥优先于包内(installer_module, workdir: Path) -> None:
+def test_包内带了密钥时默认替换掉机器上那把(installer_module, workdir: Path) -> None:
+    """**新默认：包内带了密钥 → 覆盖机器上已有的那把。**
+
+    现场就是被旧行为坑到的：机器上躺着一把已吊销的密钥，教师勾了"携带密钥"重新
+    打包，安装器却按"已有一份就不覆盖"静默跳过 —— 机器永远注册不上，而回执说
+    "安装成功"。覆盖一份共享密钥不可逆，所以**旧的必须留备份**。
+    """
     bundle = make_bundle(workdir / "b.tar.gz", version="0.1.0", bootstrap_key=BUNDLE_KEY)
     instance = make_installer(installer_module, workdir)
 
     config_key = config_key_of(instance)
     config_key.parent.mkdir(parents=True, exist_ok=True)
     config_key.write_text(EXISTING_KEY + "\n", encoding="utf-8")
+    messages = collect_messages(instance)
 
     version = instance.install_release(bundle)
 
     assert instance.install_bootstrap_key(version, bundle) is True
-    assert config_key.read_text(encoding="utf-8").strip() == EXISTING_KEY
-    # 包内那份没被用上，但解包产物同样不能留在选手可读的版本目录里
+
+    assert config_key.read_text(encoding="utf-8").strip() == BUNDLE_KEY, "没有换成包内那把"
+    backups = sorted(config_key.parent.glob("bootstrap.key.replaced-*"))
+    assert len(backups) == 1, "旧密钥没有留备份：%r" % backups
+    assert backups[0].read_text(encoding="utf-8").strip() == EXISTING_KEY, "备份内容不对"
+    if os.name == "posix":
+        assert backups[0].stat().st_mode & 0o777 == 0o600, "备份权限必须是 0600"
+    # 回执要说清"替换了谁、备份在哪"
+    assert "已替换" in texts(messages, "action")
+    assert str(backups[0]) in texts(messages, "action") + texts(messages, "note")
+    assert instance.bootstrap_key_replaced is True
+    # 包内那份密钥的**内容**不能留在选手可读的版本目录里
     assert not release_key_of(instance, version).exists()
+
+
+def test_策略显式_keep_时不覆盖但要警告(installer_module, workdir: Path) -> None:
+    """包里（或台账里）明确说 ``keep`` 时回到旧行为：不覆盖，但必须把冲突说出来。
+
+    现场就是这样卡住的：机器上那把已经被服务端吊销（注册返回
+    ``HTTP 403 bootstrap_key_revoked``），而新包里附带的那把才是能用的 ——
+    静默跳过的话教师看到的是"安装成功"。
+    """
+    bundle = make_bundle(workdir / "b.tar.gz", version="0.1.0", bootstrap_key=BUNDLE_KEY)
+    instance = make_installer(installer_module, workdir)
+    instance.install_policy = installer_module.parse_install_policy(
+        {"bootstrap_key_policy": "keep"}
+    )
+    config_key = config_key_of(instance)
+    config_key.parent.mkdir(parents=True, exist_ok=True)
+    config_key.write_text(EXISTING_KEY + "\n", encoding="utf-8")
+
+    version = instance.install_release(bundle)
+    messages = collect_messages(instance)
+
+    assert instance.install_bootstrap_key(version, bundle) is True
+
+    # 1) 旧内容**一个字节都不许动**
+    assert config_key.read_text(encoding="utf-8").strip() == EXISTING_KEY, (
+        "策略说 keep，密钥却被覆盖了"
+    )
+    assert not list(config_key.parent.glob("bootstrap.key.replaced-*")), "没覆盖就不该有备份"
+    # 2) 必须警告，而且要给出可执行的换法
+    warning = texts(messages, "warn")
+    assert "不是同一把" in warning, warning
+    assert "没有覆盖" in warning, warning
+    notes = texts(messages, "note")
+    assert "--bootstrap-key" in notes, "没给出显式换密钥的办法：%s" % notes
+    assert str(config_key) in notes, "没给出「先删掉旧的」那条路：%s" % notes
+    # 3) 完成回执里也要留一句（中间那一大段输出很容易被刷过去）
+    assert instance.bootstrap_key_conflict is True
+    receipt = collect_messages(instance)
+    instance._note_conflict_in_receipt()
+    assert "--bootstrap-key" in texts(receipt, "note")
+
+
+def test_已有的密钥与包内一致时不刷噪音(installer_module, workdir: Path) -> None:
+    """同一批镜像重装是最常见的情况 —— 这时什么都不用说。"""
+    bundle = make_bundle(workdir / "b.tar.gz", version="0.1.0", bootstrap_key=BUNDLE_KEY)
+    instance = make_installer(installer_module, workdir)
+    config_key = config_key_of(instance)
+    config_key.parent.mkdir(parents=True, exist_ok=True)
+    config_key.write_text(BUNDLE_KEY + "\n", encoding="utf-8")
+
+    version = instance.install_release(bundle)
+    messages = collect_messages(instance)
+
+    assert instance.install_bootstrap_key(version, bundle) is True
+    assert instance.bootstrap_key_conflict is False
+    assert texts(messages, "warn") == "", texts(messages, "warn")
+    assert texts(messages, "note") == "", texts(messages, "note")
+
+
+def test_包内没有密钥时不会平白警告(installer_module, workdir: Path) -> None:
+    """包内没带密钥 → 沿用旧行为：什么都没有可说。"""
+    bundle = make_bundle(workdir / "b.tar.gz", version="0.1.0", bootstrap_key=None)
+    instance = make_installer(installer_module, workdir)
+    config_key = config_key_of(instance)
+    config_key.parent.mkdir(parents=True, exist_ok=True)
+    config_key.write_text(EXISTING_KEY + "\n", encoding="utf-8")
+
+    version = instance.install_release(bundle)
+    messages = collect_messages(instance)
+
+    assert instance.install_bootstrap_key(version, bundle) is True
+    assert instance.bootstrap_key_conflict is False
+    assert texts(messages, "warn") == ""
+    assert config_key.read_text(encoding="utf-8").strip() == EXISTING_KEY
 
 
 # --------------------------------------------------------------------------- #

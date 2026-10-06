@@ -167,18 +167,34 @@ _FINGERPRINT_SOURCES = (
 )
 
 
-def resolve_machine_uuid(state_dir: Path) -> str:
-    """本机身份 UUID，**首次运行时生成**并持久化。
+def resolve_machine_uuid(
+    state_dir: Path, authoritative_path: Optional[Path] = None
+) -> str:
+    """本机身份 UUID，**优先读权威那份**（``<config-dir>/machine_uuid``）。
 
-    为什么不用 ``/etc/machine-id`` 当身份：做镜像时如果忘了通用化，50 台克隆机
-    的 machine-id 完全相同，服务端会看到 50 个同 ID 的 Agent 互相覆盖，
-    而文件是**静默错的**。
+    权威那份由安装器以 root 写（0644），选手账号改不动；远程卸载的授权令牌就是
+    拿它当判据的（服务端签令牌时绑这个值，卸载脚本比对本地这个文件）。用状态
+    目录那份当判据是不行的 —— 那份归选手账号，等于可以把别的机器泄漏的令牌
+    搬来删本机。
+
+    读不到权威那份（老版本装的机器）才退回状态目录里那份：**并记一条警告** ——
+    那条路仍然能用，但"令牌绑的是这台机器"这件事就不再是硬保证了。
 
     生成时机也有讲究：**必须在首次开机之后**。如果在建镜像时跑过一次 Agent
     （哪怕只是 ``--check``，它已经会建状态目录），UUID 就被烙进镜像了，
     等于没生成 —— 而且是"看起来做了防护"的那种没做。installer 会在建镜像时
     检查状态目录里有没有残留凭据并告警。
     """
+    if authoritative_path is not None:
+        existing = _read_text(authoritative_path)
+        if existing:
+            return _sanitize(existing)
+        log.warning(
+            "没有权威机器身份 %s，退回状态目录里那份 —— "
+            "它的判据可被选手账号改写，远程卸载的绑定强度会打折",
+            authoritative_path,
+        )
+
     path = state_dir / "machine_uuid"
     existing = _read_text(path)
     if existing:

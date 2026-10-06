@@ -119,6 +119,81 @@ def artifacts(installer_module, layout):
 # --------------------------------------------------------------------------- #
 
 
+def test_卸载会删掉机器身份_sudoers_与辅助目录(
+    installer_module, workdir: Path, monkeypatch, no_systemctl
+) -> None:
+    """远程卸载那一套辅助件也必须跟着走。
+
+    留下 sudoers 规则 = 留下一条**常驻**的"运行账号可以免密以 root 执行某个
+    固定脚本"的授权；留下辅助目录 = 留一份能验令牌、能删系统的脚本；
+    留下 ``machine_uuid`` = 本机身份还在（远程卸载令牌绑的就是它）。
+    """
+    layout = make_installed(installer_module, workdir)
+
+    # 这三样在真机上都在系统目录里（/etc/sudoers.d、/usr/local/lib/syncoj），
+    # 测试里把它们指到 workdir —— 常量是可注入的。
+    sudoers = workdir / "sudoers.d" / "syncoj-uninstall"
+    helper = workdir / "usr" / "local" / "lib" / "syncoj"
+    monkeypatch.setattr(installer_module, "SUDOERS_PATH", sudoers)
+    monkeypatch.setattr(installer_module, "HELPER_DIR", helper)
+    monkeypatch.setattr(
+        installer_module, "SELF_UNINSTALL_PATH", helper / "self_uninstall.sh"
+    )
+    monkeypatch.setattr(
+        installer_module, "VERIFY_TOKEN_PATH", helper / "verify_uninstall_token.py"
+    )
+
+    sudoers.parent.mkdir(parents=True)
+    sudoers.write_text(
+        "noi ALL=(root) NOPASSWD: %s\n" % (helper / "self_uninstall.sh"), encoding="utf-8"
+    )
+    helper.mkdir(parents=True)
+    (helper / "self_uninstall.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    (helper / "verify_uninstall_token.py").write_text("# verify\n", encoding="utf-8")
+    # 权威机器身份：安装器写在配置目录旁边（不是状态目录里那份）
+    uuid_file = layout.config / "machine_uuid"
+    uuid_file.write_text("uuid\n", encoding="utf-8")
+
+    instance = make_installer(installer_module, layout, extra=["--yes", "--keep-user"])
+    messages = collect(instance)
+
+    assert instance.uninstall() == installer_module.EXIT_OK
+
+    assert not uuid_file.exists(), "machine_uuid 没删（远程卸载令牌绑的就是它）"
+    assert not sudoers.exists(), "sudoers 规则没删"
+    assert not helper.exists(), "辅助脚本目录没删"
+    text = all_text(messages)
+    assert str(sudoers) in text, text
+    assert str(helper) in text, text
+
+
+def test_辅助目录不像我们的就不动(
+    installer_module, workdir: Path, monkeypatch, no_systemctl
+) -> None:
+    """同名目录里没有那两个脚本 → 不是我们的，宁可不删（别人的东西不可逆）。"""
+    layout = make_installed(installer_module, workdir)
+    helper = workdir / "usr" / "local" / "lib" / "syncoj"
+    monkeypatch.setattr(installer_module, "HELPER_DIR", helper)
+    monkeypatch.setattr(
+        installer_module, "SELF_UNINSTALL_PATH", helper / "self_uninstall.sh"
+    )
+    monkeypatch.setattr(
+        installer_module, "VERIFY_TOKEN_PATH", helper / "verify_uninstall_token.py"
+    )
+    monkeypatch.setattr(
+        installer_module, "SUDOERS_PATH", workdir / "sudoers.d" / "syncoj-uninstall"
+    )
+    helper.mkdir(parents=True)
+    (helper / "someone-else.txt").write_text("not ours\n", encoding="utf-8")
+
+    instance = make_installer(installer_module, layout, extra=["--yes", "--keep-user"])
+    collect(instance)
+
+    assert instance.uninstall() == installer_module.EXIT_OK
+
+    assert helper.is_dir(), "把别人的同名目录删了"
+
+
 def test_卸载把装过的东西删干净(installer_module, workdir: Path, no_systemctl) -> None:
     layout = make_installed(installer_module, workdir)
     instance = make_installer(installer_module, layout, extra=["--yes", "--keep-user"])

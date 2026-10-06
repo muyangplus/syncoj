@@ -173,6 +173,48 @@ def test_从服务端拿到包并校验_sha256(make_installer) -> None:
     assert "sha256 校验通过" in messages_of(instance, "note")
 
 
+def test_台账验过之后不再警告跳过完整性校验(make_installer) -> None:
+    """现场的误导：紧挨着"sha256 校验通过"又冒出"未提供 --sha256，跳过完整性校验"。
+
+    教师读到的结论是"这次装机没校验"，于是养成每次手抄一份校验和的习惯 ——
+    而 ``--sha256`` 真正的用武之地是**离线包**那条路（没有台账可比的时候）。
+    台账已经对过了，就不该再发这条警告。
+    """
+    instance = make_installer("--from-server")
+    with fake_server(make_ledger(BUNDLE), BUNDLE) as server:
+        instance.options.server = server.base
+        path = instance.fetch_bundle()
+
+    assert instance.ledger_sha256 == hashlib.sha256(BUNDLE).hexdigest()
+    # 解包前那一步（_verify_checksum）也不该再说"跳过校验"
+    instance._verify_checksum(path)
+
+    assert "跳过安装包完整性校验" not in messages_of(instance, "warn"), (
+        messages_of(instance, "warn")
+    )
+
+
+def test_离线包没有台账时才轮到_sha256(make_installer, workdir: Path) -> None:
+    """离线包（--bundle / --download-url）没有台账可比 —— 这时才该提醒。"""
+    bundle = workdir / "bundle.tar.gz"
+    bundle.write_bytes(BUNDLE)
+    instance = make_installer()
+
+    instance._verify_checksum(bundle)
+
+    assert "跳过安装包完整性校验" in messages_of(instance, "warn")
+
+
+def test_离线包给了_sha256_就真验(make_installer, workdir: Path) -> None:
+    bundle = workdir / "bundle.tar.gz"
+    bundle.write_bytes(BUNDLE)
+    instance = make_installer("--sha256", hashlib.sha256(BUNDLE).hexdigest())
+
+    instance._verify_checksum(bundle)  # 不抛
+
+    assert "跳过安装包完整性校验" not in messages_of(instance, "warn")
+
+
 def test_没有公钥时明说未验签并打出校验和(make_installer) -> None:
     """**"装了但不知道装的是什么"比"装不上"更糟。**
 

@@ -184,6 +184,7 @@ def config_args(**overrides):
         upgrade_mode="off",
         install_root=Path("/opt/syncoj"),
         public_key="",
+        run_user="noi",
     )
     args.update(overrides)
     return args
@@ -199,6 +200,8 @@ def test_render_config_contains_all_settings(installer) -> None:
     assert "deploy_root = {desktop}" in text
     assert "prefix = none" in text
     assert "mode = off" in text
+    # 运行账号必须进配置：{home}/{desktop} 的展开只认它，不认"谁在跑"
+    assert "run_user = noi" in text
 
 
 def test_render_config_has_no_place_to_put_a_secret(installer) -> None:
@@ -275,14 +278,38 @@ def test_rendered_config_is_parseable(installer, workdir: Path) -> None:
     assert Path(str(config.scan_roots[0]).replace("{player_no}", "S001")) == desktop / "S001"
 
 
-def test_rendered_config_supports_home_and_contest_slug(installer, workdir: Path) -> None:
-    """用 ``{home}`` / ``{contest_slug}`` 写出来的配置也必须能读进来。"""
+@pytest.fixture()
+def fake_accounts(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """把 ``pwd.getpwnam`` 换成一个临时家目录，返回那个"家目录"。
+
+    凡是加载**安装器生成的** agent.ini 的测试都得带上它：配置里记着 ``run_user``
+    （运行时账号），而 ``{home}`` / ``{desktop}`` 一律按那个账号解析。测试不该
+    依赖真机器的 ``/etc/passwd``（Windows 开发机上连 ``pwd`` 模块都没有）。
+    """
+    from syncoj_agent import config as config_module
+
+    home = workdir / "home" / "runuser"
+    (home / "Desktop").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(config_module, "_pwd_home", lambda user: home)
+    return home
+
+
+def test_rendered_config_supports_home_and_contest_slug(
+    installer, workdir: Path, fake_accounts: Path
+) -> None:
+    """用 ``{home}`` / ``{contest_slug}`` 写出来的配置也必须能读进来。
+
+    而且 ``{home}`` / ``{desktop}`` 是按**运行账号**（安装器定的那个）展开的，
+    **不是**按"当前是谁在跑"。用户口径：**桌面应该是安装用户（运行账号）的桌面**
+    —— 注册单元以 root 跑，退回当前用户就等于把桌面算成 ``/root/桌面``，
+    那台机器上不存在：注册退出 2、journal 里一个字都没有（真机事故）。
+    """
     from syncoj_agent.config import AgentConfig
 
     text = installer.render_config(
         **config_args(
             ca_file="",
-            deploy_root="{home}",
+            deploy_root="{desktop}",
             scan_roots="{home}/{contest_slug}/{player_no}",
         )
     )
@@ -290,11 +317,17 @@ def test_rendered_config_supports_home_and_contest_slug(installer, workdir: Path
     config_file.write_text(text, encoding="utf-8")
 
     config = AgentConfig.load(config_file)
-    assert config.deploy_root == Path.home()
+    assert config.run_user == "noi"
+    # Desktop 真的存在于那个家里，所以探测必须选中它（而不是写死「桌面」）
+    assert config.deploy_root == fake_accounts / "Desktop"
+    assert Path(str(config.deploy_root).replace("\\", "/")) == fake_accounts / "Desktop"
+    # 独立的一条：结果里不许出现 /root
+    assert "/root" not in str(config.deploy_root).replace("\\", "/")
     assert config.needs_credential is True
     # 两个占位符都要能展开，而不是只展开左边那个
     resolved = config.resolved_roots("S001", "mock-1")
-    assert resolved == [Path.home() / "mock-1" / "S001"]
+    assert resolved == [fake_accounts / "mock-1" / "S001"]
+    assert all("/root" not in str(p).replace("\\", "/") for p in resolved)
 
 
 def make_installer(installer, workdir: Path, user: str, *, quiet: bool = True, argv=None):
@@ -447,7 +480,12 @@ def test_render_unit_permissions_follow_contestant_user(installer) -> None:
 
     # %h = User= 的家目录（覆盖选手桌面）；安装器自建的目录也开写权限。
     # **每一条都带 `-`**：路径不存在时 systemd 跳过它，而不是 226 起不来。
-    assert "ReadWritePaths=-%h -/opt/syncoj -/var/lib/syncoj" in text
+    # 后四条是给"管理端授权的远程卸载"用的（沙箱里要能删单元文件与辅助脚本），
+    # 它们本身是 root:0755，运行账号在 DAC 上写不进去 —— 详见 _writable_paths。
+    assert (
+        "ReadWritePaths=-%h -/opt/syncoj -/var/lib/syncoj "
+        "-/etc/syncoj -/etc/systemd/system -/etc/sudoers.d -/usr/local/lib/syncoj"
+    ) in text
     # 模板路径与可选配置不该被塞进来 —— 它们可能不存在，正是 226 的来源
     assert "{desktop}" not in text
     assert "{player_no}" not in text
@@ -478,7 +516,10 @@ def test_render_unit_uses_current_symlink(installer) -> None:
     # 选手怎么 pip install 都污染不到 Agent
     assert " -E -s " in text
     assert "StandardOutput=null" in text
-    assert "NoNewPrivileges=yes" in text
+    # 沙箱还在（换一条代表性加固断言）：NoNewPrivileges 是**刻意去掉**的 ——
+    # 它会挡死 setuid 的 sudo，让管理端授权的远程卸载没法工作，见 render_unit 注释。
+    assert "ProtectSystem=strict" in text
+    assert "NoNewPrivileges" not in text
 
 
 # --------------------------------------------------------------------------- #
@@ -574,7 +615,14 @@ def test_render_unit_without_extra_paths(installer) -> None:
         prefix=Path("/o"), config_path=Path("/c"), state_dir=Path("/s"),
         deploy_root="", scan_roots="", run_user="student", python="python3",
     )
-    assert "ReadWritePaths=-%h -/o -/s" in text
+    line = [x for x in text.splitlines() if x.startswith("ReadWritePaths=")][0]
+    tokens = line.split("=", 1)[1].split()
+    assert tokens[0] == "-%h", line
+    for token in ("-/o", "-/s", "-/etc/systemd/system", "-/etc/sudoers.d",
+                  "-/usr/local/lib/syncoj"):
+        assert token in tokens, "%s 不在白名单里：%s" % (token, line)
+    # `--config-dir /` 这类误配不许把整个文件系统放开
+    assert "-/" not in tokens, line
 
 
 # --------------------------------------------------------------------------- #
@@ -709,7 +757,7 @@ def test_second_install_without_the_key_keeps_the_enroll_unit(
 
 
 def test_bootstrap_key_lands_where_the_config_says_it_is(
-    installer, workdir: Path
+    installer, workdir: Path, fake_accounts: Path
 ) -> None:
     """**密钥写在哪儿，配置里必须就指到哪儿。**
 

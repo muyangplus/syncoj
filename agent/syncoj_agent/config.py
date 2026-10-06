@@ -10,19 +10,24 @@
 from __future__ import annotations
 
 import configparser
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from .state import detect_desktop
+
+log = logging.getLogger(__name__)
 
 __all__ = [
     "AgentConfig",
     "ConfigError",
     "DEFAULT_INI",
     "WAITING_FILE_NAME",
+    "expand_for_user",
     "expand_placeholders",
+    "lookup_user_home",
 ]
 
 #: "已配对，但还没有含本人的场次"时写到桌面上的文件名。
@@ -55,23 +60,100 @@ def expand_placeholders(
     player_no: Optional[str] = None,
     contest_slug: Optional[str] = None,
     home: Optional[Path] = None,
+    user: Optional[str] = None,
 ) -> str:
     """展开路径模板。
 
     ``{desktop}`` / ``{home}`` 现在就能展开；``{player_no}`` / ``{contest_slug}``
     只有注册之后才知道 —— 展开不了的时候**原样保留**，由调用方在合适的时机
     再展开一次。保留而不是报错，是因为配置校验发生在注册之前。
+
+    ``user`` 说明"这些路径算在哪个账号头上"：给了它就按**那个账号**的家目录
+    （``pwd.getpwnam``）以及该家目录下的桌面来展开，而不是按当前进程的用户。
+    这一条是必须的 —— 注册运行（``--provision``）以 **root** 跑，
+    ``Path.home()`` 是 ``/root``，``{desktop}/{player_no}`` 于是被展开成
+    ``/root/桌面/<准考证号>``：目录不存在 → 校验失败 → 退出 2，而选手的桌面
+    根本不在这里。真机上就是这么"机器永远不注册"的。
+    账号查不到时**报错而不是退回当前用户**（见 :func:`_home_and_desktop`）。
     """
     result = text
-    if PLACEHOLDER_DESKTOP in result:
-        result = result.replace(PLACEHOLDER_DESKTOP, str(desktop or detect_desktop()))
-    if PLACEHOLDER_HOME in result:
-        result = result.replace(PLACEHOLDER_HOME, str(home or Path.home()))
+    if PLACEHOLDER_DESKTOP in result or PLACEHOLDER_HOME in result:
+        resolved_home, resolved_desktop = _home_and_desktop(user, home, desktop)
+        if PLACEHOLDER_DESKTOP in result:
+            result = result.replace(PLACEHOLDER_DESKTOP, str(resolved_desktop))
+        if PLACEHOLDER_HOME in result:
+            result = result.replace(PLACEHOLDER_HOME, str(resolved_home))
     if player_no and PLACEHOLDER_PLAYER_NO in result:
         result = result.replace(PLACEHOLDER_PLAYER_NO, player_no)
     if contest_slug and PLACEHOLDER_CONTEST_SLUG in result:
         result = result.replace(PLACEHOLDER_CONTEST_SLUG, contest_slug)
     return result
+
+
+def _pwd_home(user: str) -> Optional[Path]:
+    """``pwd.getpwnam(user).pw_dir``；查不到（或本平台没有 ``pwd``）返回 ``None``。
+
+    单独抽成函数是为了**可注入**：测试不该依赖真机器的 ``/etc/passwd``
+    （Windows 开发机上根本没有 ``pwd`` 模块）。
+    """
+    try:
+        import pwd
+    except ImportError:  # pragma: no cover - 开发机（Windows）
+        return None
+    try:
+        entry = pwd.getpwnam(user)
+    except (KeyError, OSError, ValueError):
+        return None
+    return Path(entry.pw_dir) if entry.pw_dir else None
+
+
+def lookup_user_home(user: Optional[str]) -> Optional[Path]:
+    """某个账号的家目录；账号为空或查不到返回 ``None``。"""
+    text = (user or "").strip()
+    if not text:
+        return None
+    return _pwd_home(text)
+
+
+def expand_for_user(text: str, user: Optional[str] = None) -> str:
+    """按**指定账号**的家目录/桌面展开 ``{home}`` / ``{desktop}``。
+
+    账号为空就是原来那套"按当前用户"的行为；指定了但查不到账号会抛
+    :class:`ConfigError` —— 见 :func:`_home_and_desktop`。
+    """
+    return expand_placeholders(text, user=user)
+
+
+def _home_and_desktop(
+    user: Optional[str],
+    home: Optional[Path],
+    desktop: Optional[Path],
+) -> "Tuple[Path, Path]":
+    """定出 ``{home}`` / ``{desktop}`` 各展开成什么。
+
+    桌面**在家目录下探测**：root 去探测只会得到 ``/root/桌面``，而
+    ``user-dirs.dirs`` 是**每个账号**自己的（有人把桌面挪到别处、有人用英文名）。
+
+    指定了账号却查不到它时**直接报错**，不退回当前用户：注册单元以 root 跑，
+    退回去就是 ``/root/...``，而那个目录在选手机器上不存在 —— 现场的表现是
+    "退出 2、journal 空"，比报一句"账号查不到"难查得多。
+    """
+    resolved_home = home
+    if resolved_home is None and user:
+        resolved_home = lookup_user_home(user)
+        if resolved_home is None:
+            raise ConfigError(
+                "找不到运行账号 %r 的家目录，无法解析路径模板里的 {home} / {desktop}。\n"
+                "  不能退回当前用户 —— 注册单元以 root 跑，退回去就等于把它们\n"
+                "  展开成 /root/...，而选手的家不在那里。\n"
+                "  请检查 agent.ini 的 run_user（或 --chown-to / --user 传的账号）"
+                "是否写错，或者那个账号是不是还没建。" % user
+            )
+    if resolved_home is None:
+        resolved_home = Path.home()
+    if desktop is None:
+        desktop = detect_desktop(resolved_home)
+    return resolved_home, desktop
 
 
 def credential_placeholders_in(text: str) -> List[str]:
@@ -88,6 +170,10 @@ verify_tls = true
 ca_file =
 
 [agent]
+# **运行账号**（安装器填）。路径模板里的 {home}/{desktop} 按**它**的家展开，
+# 而不是按"当前是谁在跑" —— 注册单元以 root 跑一次，按 root 的家展开会变成
+# /root/桌面/...，那台机器上不存在，注册直接失败。留空则退回当前用户。
+run_user =
 # 镜像内置的统一注册密钥文件（整间机房一份）。
 # **只有 root 读得到**，所以这条路径通常用不上 —— 真正干活的是装机时装的
 # syncoj-enroll.service（root 身份跑一次，把凭据写进 state_dir）。
@@ -151,14 +237,18 @@ to_stderr = false
 
 [upgrade]
 # 自更新模式：
-#   off   = 只上报"有新版本"，什么都不做（默认，考场推荐）
+#   apply = 下载 → 验签 → 原子切换软链并重启（**默认**）
 #   stage = 下载、验签、解包到独立目录，但不激活
-#   apply = 完整执行：解包后原子切换软链并重启
+#   off   = 只上报"有新版本"，什么都不做
 #
-# 默认关闭是刻意的 —— 静默地在考试机上升级 Agent 是高风险动作。
-# 更关键的是：Agent 必须装在版本化目录 + current 软链布局下（见 installer），
-# 否则 apply 无处可切，会直接失败。
-mode = off
+# 默认 apply 是**运维口径**决定的：机器铺开之后没人会一台台去点升级，而安全
+# 由签名兜底（没有公钥时 apply 会直接失败，不会"静默升级到不知道什么东西"）。
+# 考场上要关掉就显式写 off；安装器不会悄悄改机器上已经写死的值
+# （见 install.py 的 config_policy：默认 keep）。
+#
+# Agent 必须装在版本化目录 + current 软链布局下（见 installer），否则 apply
+# 无处可切、会直接失败。
+mode = apply
 # 安装根目录（installer 创建；手工部署时可留空）
 install_root = /opt/syncoj
 # 发布签名公钥。留空则任何升级都会被拒绝 —— 没有信任锚的签名毫无意义
@@ -182,6 +272,11 @@ class AgentConfig:
     verify_tls: bool = True
     ca_file: Optional[Path] = None
 
+    #: 运行账号（安装器写进 agent.ini）。记下来是为了让 ``{home}`` / ``{desktop}``
+    #: 的展开**只有一个来源**：注册单元以 root 跑、服务以选手账号跑，两边读同一份
+    #: 配置，都按这个账号的家去展开 —— 不依赖调用方记得传 ``--chown-to``。
+    run_user: str = ""
+
     #: 统一注册密钥文件（root 只读）。Agent 以选手身份跑时读不到它 ——
     #: 那种情况下由 syncoj-enroll.service 以 root 身份先换好凭据。
     #: **没有 enroll_code**：每选手注册码那条链路已被"机器永久绑定名单条目"取代。
@@ -190,6 +285,14 @@ class AgentConfig:
     )
     state_dir: Path = field(default_factory=lambda: Path("/var/lib/syncoj"))
     machine_id: str = ""
+
+    #: 权威机器身份文件（安装器以 root 写进配置目录，0644，选手改不动）。
+    #: Agent **优先**读它；读不到才退回 `state_dir/machine_uuid`（见
+    #: `state.resolve_machine_uuid`）。远程卸载的授权令牌绑的就是这个值，所以
+    #: 它的位置跟着配置文件所在的目录走，而不是写死 /etc/syncoj。
+    machine_uuid_file: Path = field(
+        default_factory=lambda: Path("/etc/syncoj/machine_uuid")
+    )
 
     #: 未配对时是否把配对码写到桌面（教师走过来读一眼）
     pairing_show_on_desktop: bool = True
@@ -210,8 +313,17 @@ class AgentConfig:
     log_to_stderr: bool = False
 
     # ---- 自更新 ----
-    #: off = 只报告不下载（默认）；stage = 下载验签解包但不激活；apply = 完整执行
-    upgrade_mode: str = "off"
+    #: apply = 下载验签后自动切换并重启（默认）；stage = 只下载验签不激活；
+    #: off = 完全不动。**默认 apply**：机器铺开之后没人会一台台点升级，
+    #: 安全由签名兜底（没配公钥时 apply 会直接失败，不会静默升到不明版本）。
+    upgrade_mode: str = "apply"
+    #: ``upgrade.mode`` 是不是**配置文件里真的写了**（内置模板的那份不算）。
+    #: 用来区分两种"apply 但没有公钥"：
+    #:
+    #: * 没人配过（模板默认）→ 警告一句、按 off 跑 —— 否则每个没打包发布公钥的
+    #:   镜像都会**起不来**，那比"升不了级"严重得多；
+    #: * 有人显式写了 apply → 那是配置错误（想开升级却没给信任锚），启动就报。
+    upgrade_mode_explicit: bool = False
     #: 安装根目录，内含 releases/<版本>/ 与 current 软链
     install_root: Path = field(default_factory=lambda: Path("/opt/syncoj"))
     #: 发布签名公钥（JSON）。缺失时任何升级都会被拒绝 —— 没有信任锚就没有签名
@@ -269,8 +381,20 @@ class AgentConfig:
             for root in self.scan_roots
         ]
 
-    def validate(self) -> None:
-        """检查配置自洽性。**不做网络请求**，便于离线自检。"""
+    def validate(self, for_provision: bool = False) -> None:
+        """检查配置自洽性。**不做网络请求**，便于离线自检。
+
+        ``for_provision=True`` 是**注册运行**（``--provision``，装机时由 root 的
+        一次性单元执行）专用的、**更窄**的校验集。注册只关心"服务端地址合法、
+        状态目录写得到、统一密钥读得到"，``scan.roots`` / ``deploy_root`` /
+        ``upgrade.*`` 一律跳过：它们与注册无关，而且模板里的 ``{home}`` /
+        ``{desktop}`` 是按运行账号展开的 —— 注册以 root 跑时会展开成
+        ``/root/...``，那台机器上当然不存在。真机就是这样退出 2、journal 里
+        一个字都没有的（见 main.py 里"校验失败必须打 stderr"）。
+
+        **服务路径那道守卫一点都不放松**（``for_provision`` 默认 ``False``）：
+        服务以运行账号跑，扫描目录不存在就该在启动时吵出来。
+        """
         problems: List[str] = []
 
         if not self.server_url:
@@ -284,6 +408,50 @@ class AgentConfig:
 
         if self.verify_tls and self.ca_file is not None and not self.ca_file.is_file():
             problems.append("ca_file 不存在: %s" % self.ca_file)
+
+        if for_provision:
+            # 注册该看的那几件事（而且**只看**这几件）
+            problems.extend(self._provision_problems())
+        else:
+            problems.extend(self._service_problems())
+
+        if problems:
+            raise ConfigError("配置有误:\n  - " + "\n  - ".join(problems))
+
+    def _provision_problems(self) -> List[str]:
+        """注册运行要检查的少数几件事（见 :meth:`validate`）。
+
+        **不碰选手目录**：``scan.roots`` / ``deploy_root`` 一个都不校验、也不
+        创建 —— 它们要等拿到准考证号之后才有意义，而且那时 Agent 已经以选手
+        身份在跑了。
+        """
+        problems: List[str] = []
+
+        problems.extend(_dir_writable_problems(self.state_dir, "state_dir"))
+
+        if self.credential_path.is_file():
+            # 已经注册过了。注册单元每次开机都会重跑，但它第一件事就是读回凭据
+            # （见 Agent.ensure_credential）—— 这时**不再需要**统一密钥。所以
+            # 不能因为"运维注册完就把密钥删了"（考场里很常见）让单元失败。
+            if not os.access(str(self.credential_path), os.R_OK):
+                problems.append("已注册但没有权限读回凭据: %s" % self.credential_path)
+        else:
+            key = self.bootstrap_key_file
+            if key is None:
+                problems.append("未配置 bootstrap_key_file，注册拿不到统一密钥")
+            elif not key.is_file():
+                problems.append(
+                    "统一密钥文件不存在: %s（注册只有这一条路，见 bootstrap.sh --help）"
+                    % key
+                )
+            elif not os.access(str(key), os.R_OK):
+                problems.append("统一密钥文件读不到: %s" % key)
+
+        return problems
+
+    def _service_problems(self) -> List[str]:
+        """常驻服务要检查的（扫描目录、下发目录、自更新……）。"""
+        problems: List[str] = []
 
         if not self.scan_roots:
             problems.append("scan.roots 至少要配置一个目录")
@@ -347,11 +515,22 @@ class AgentConfig:
             except (OSError, ValueError):
                 continue
 
-        if problems:
-            raise ConfigError("配置有误:\n  - " + "\n  - ".join(problems))
+        return problems
 
     @classmethod
-    def load(cls, path: Optional[Path] = None) -> "AgentConfig":
+    def load(
+        cls,
+        path: Optional[Path] = None,
+        expand_for_user: Optional[str] = None,
+    ) -> "AgentConfig":
+        """读配置。
+
+        ``expand_for_user`` 指定 ``{home}`` / ``{desktop}`` 按**哪个账号**展开
+        （注册运行以 root 跑时必须传"要交付的那个账号"，见
+        :func:`expand_placeholders`）。没传就看配置里的 ``run_user``，再没有就
+        按当前用户 —— 于是"跟谁的家"只有一个来源（agent.ini），调用方忘了传参
+        也不会退回 root。
+        """
         parser = configparser.ConfigParser()
         # 保留键名大小写不是必须的，但选项名一律小写更省心
         parser.optionxform = str.lower
@@ -364,25 +543,39 @@ class AgentConfig:
         else:
             parser.read_string(DEFAULT_INI)
 
+        run_user = (parser.get("agent", "run_user", fallback="") or "").strip()
+        # 优先级：命令行给的账号（--chown-to）> 配置里记的运行账号 > 当前用户
+        expand_as = (expand_for_user or "").strip() or run_user or None
+
         config = cls(
             server_url=(parser.get("server", "url", fallback="") or "").strip(),
             verify_tls=_as_bool(parser.get("server", "verify_tls", fallback="true"), True),
             ca_file=_opt_path(parser.get("server", "ca_file", fallback="")),
             bootstrap_key_file=_templated_path(
                 parser.get("agent", "bootstrap_key_file", fallback="/etc/syncoj/bootstrap.key")
-                or "/etc/syncoj/bootstrap.key"
+                or "/etc/syncoj/bootstrap.key",
+                user=expand_as,
             ),
+            run_user=run_user,
             state_dir=Path(
                 parser.get("agent", "state_dir", fallback="/var/lib/syncoj").strip()
                 or "/var/lib/syncoj"
             ),
             machine_id=(parser.get("agent", "machine_id", fallback="") or "").strip(),
-            # {desktop} 在这里就展开（靠探测）；{player_no} 要等注册后才展开
+            # 权威机器身份跟着**配置文件所在目录**走（安装器就写在它旁边）
+            machine_uuid_file=(
+                Path(path).parent / "machine_uuid"
+                if path is not None
+                else Path("/etc/syncoj/machine_uuid")
+            ),
+            # {desktop} 在这里就展开（按运行账号探测家目录与桌面）；
+            # {player_no} 要等注册后才展开
             deploy_root=_templated_path(
-                parser.get("agent", "deploy_root", fallback="{desktop}") or "{desktop}"
+                parser.get("agent", "deploy_root", fallback="{desktop}") or "{desktop}",
+                user=expand_as,
             ),
             scan_roots=[
-                Path(expand_placeholders(item))
+                Path(expand_placeholders(item, user=expand_as))
                 for item in _split_paths(parser.get("scan", "roots", fallback="") or "{desktop}/{player_no}")
             ],
             scan_prefix=(parser.get("scan", "prefix", fallback=PREFIX_NONE) or PREFIX_NONE).strip(),
@@ -397,13 +590,35 @@ class AgentConfig:
             pairing_file_name=(
                 parser.get("pairing", "file_name", fallback="配对码.txt") or "配对码.txt"
             ).strip(),
-            upgrade_mode=(parser.get("upgrade", "mode", fallback="off") or "off").strip().lower(),
+            upgrade_mode=(parser.get("upgrade", "mode", fallback="apply") or "apply").strip().lower(),
+            upgrade_mode_explicit=(
+                path is not None and parser.has_option("upgrade", "mode")
+            ),
             install_root=Path(
                 parser.get("upgrade", "install_root", fallback="/opt/syncoj").strip()
                 or "/opt/syncoj"
             ),
             release_public_key=_opt_path(parser.get("upgrade", "public_key", fallback="")),
         )
+
+        config.run_user = expand_as or ""
+
+        # 默认 apply 只是"想让机器能自动升级"；没有信任锚时它升不了，而**不能**
+        # 因为一个默认值让整台机器起不来 —— 那会让所有没打包发布公钥的镜像一起
+        # 失联。所以这里降级成 off 并吵一句。显式写了 mode=apply 却没配公钥是
+        # 另一回事（配置错误），留给 validate() 报出来。
+        if (
+            config.upgrade_mode != "off"
+            and config.release_public_key is None
+            and not config.upgrade_mode_explicit
+        ):
+            log.warning(
+                "upgrade.mode 用的是默认值 %s，但没配置 upgrade.public_key"
+                "（没有信任锚，无法验证发布包签名）—— 本次按 off 运行。"
+                "要启用自动升级：让安装包带上 release-key.pub.json，或显式指定 --public-key。",
+                config.upgrade_mode,
+            )
+            config.upgrade_mode = "off"
 
         _apply_env_overrides(config)
         config.state_dir = config.state_dir.expanduser()
@@ -415,9 +630,32 @@ def _opt_path(raw: Optional[str]) -> Optional[Path]:
     return Path(text).expanduser() if text else None
 
 
-def _templated_path(raw: str) -> Path:
-    """展开 ``{desktop}`` 与 ``~``，但**保留** ``{player_no}``。"""
-    return Path(expand_placeholders(raw.strip() or "{desktop}")).expanduser()
+def _dir_writable_problems(path: Path, label: str) -> List[str]:
+    """目录写不了时给出人能看懂的问题（目录还不存在不算错）。
+
+    注册运行必须能建出 ``state_dir`` 并把凭据写进去 —— 写不进去时最好在这里
+    就说清是哪个目录，而不是等到写的那一刻抛一句 OSError。
+    """
+    if not path.is_absolute():
+        return ["%s 必须是绝对路径: %s" % (label, path)]
+    probe = path
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    if not probe.exists():
+        return []
+    if os.access(str(probe), os.W_OK):
+        return []
+    if probe == path:
+        return ["%s 不可写: %s" % (label, path)]
+    return ["%s 无法创建（%s 不可写）: %s" % (label, probe, path)]
+
+
+def _templated_path(raw: str, user: Optional[str] = None) -> Path:
+    """展开 ``{desktop}`` / ``{home}`` 与 ``~``，但**保留** ``{player_no}``。
+
+    ``user`` 指定按谁的家展开（见 :func:`expand_placeholders`）。
+    """
+    return Path(expand_placeholders(raw.strip() or "{desktop}", user=user)).expanduser()
 
 
 def _split_paths(raw: Optional[str]) -> List[str]:
@@ -452,7 +690,12 @@ def _apply_env_overrides(config: AgentConfig) -> None:
         # 走和配置文件**同一条**模板展开路径。早先这里直接塞字符串进来，
         # 于是 validate() 会在 str 上调 .is_absolute() 直接崩掉 ——
         # 镜像预装时用环境变量注入恰恰是最常见的方式。
-        config.scan_roots = [Path(expand_placeholders(item)) for item in _split_paths(roots)]
+        # 展开账号跟着 config.run_user（镜像预装时的 {home}/{desktop} 也是
+        # 那个选手账号的家，不是装镜像那个人）。
+        config.scan_roots = [
+            Path(expand_placeholders(item, user=config.run_user))
+            for item in _split_paths(roots)
+        ]
 
     for env_name, attr in (("SYNCOJ_VERIFY_TLS", "verify_tls"), ("SYNCOJ_LOG_STDERR", "log_to_stderr")):
         if env_name in os.environ:

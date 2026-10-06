@@ -157,8 +157,13 @@ python3 /opt/syncoj/current/run_agent.py --config /etc/syncoj/agent.ini --pair-c
     └── p2/p2.cpp
 ```
 
-`{desktop}` 会自动探测：先读 `~/.config/user-dirs.dirs` 里的 `XDG_DESKTOP_DIR`，
-再依次试 `~/桌面`、`~/Desktop`、`~/desktop`。
+`{desktop}` 会自动探测：先读 `<运行账号的家>/.config/user-dirs.dirs` 里的
+`XDG_DESKTOP_DIR`，再依次试 `~/桌面`、`~/Desktop`、`~/desktop`。
+
+**`{desktop}` / `{home}` 一律按「运行账号」解析 —— 也就是跑安装的那个账号**
+（`[agent] run_user`，安装器会自动写进去），**与当前是谁在跑这个进程无关**：
+注册单元 `syncoj-agent-enroll.service` 以 root 跑，按当前进程的用户算就会得到
+`/root/桌面`，那台机器上不存在 —— 注册直接失败退出 2、journal 里还看不到原因。
 
 ### 改路径
 
@@ -166,13 +171,14 @@ python3 /opt/syncoj/current/run_agent.py --config /etc/syncoj/agent.ini --pair-c
 
 | 占位符 | 何时展开 | 展开成 |
 |---|---|---|
-| `{desktop}` | 立即 | 当前用户桌面（兼容「桌面」与 `Desktop`） |
-| `{home}` | 立即 | 当前用户家目录 |
+| `{desktop}` | 立即 | 运行账号的桌面（兼容「桌面」与 `Desktop`） |
+| `{home}` | 立即 | 运行账号的家目录 |
 | `{player_no}` | 注册后 | 准考证号 |
 | `{contest_slug}` | 注册后 | 场次标识 |
 
 ```ini
 [agent]
+run_user = student                       ; 路径模板按它解析（安装器自动填）
 deploy_root = {desktop}                  ; 或写死 /home/student/桌面
 
 [scan]

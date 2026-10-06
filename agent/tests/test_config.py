@@ -587,9 +587,12 @@ def test_default_ini_is_the_source_of_truth_for_the_runbook() -> None:
     # deploy_root 默认为桌面，且载入时就展开
     assert config.deploy_root.is_absolute()
     assert "{desktop}" not in str(config.deploy_root)
-    # 默认不启用自更新 —— 静默升级是高风险动作
-    assert "mode = off" in DEFAULT_INI
-    assert config.upgrade_mode == "off"
+    # 自更新默认 apply（模板里写的就是它）—— 机器铺开之后没人会一台台点升级
+    assert "mode = apply" in DEFAULT_INI
+    # 但这个内置默认**没有公钥**：那就升不了级，降级成 off 并吵一句，而不是
+    # 让每台没打包发布公钥的机器都起不来。
+    assert config.upgrade_mode == "off", "没有信任锚时应当自动降级，而不是拒绝启动"
+    assert config.upgrade_mode_explicit is False
 
 
 # --------------------------------------------------------------------------- #

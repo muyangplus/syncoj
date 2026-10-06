@@ -55,8 +55,9 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
-from typing import Iterable, List, NamedTuple, Optional, Tuple
+from typing import Dict, Iterable, List, NamedTuple, Optional, Tuple
 
 #: 本文件在仓库里的位置。安装器也会被拷进安装包/镜像，那时 ``parents[2]`` 不再
 #: 指向仓库 —— 所以凡是用到它的地方都要先判存在性，猜错只能退化成"没有这个默认值"，
@@ -86,6 +87,54 @@ BOOTSTRAP_KEY_FILENAME = "bootstrap.key"
 #: 某天升级会因为"公钥不见了"而整体失效，而那时没人会想到是删旧版本删出来的。
 PUBLIC_KEY_FILENAME = "release-key.pub.json"
 
+#: 权威机器身份：安装时由 root 写进配置目录（0644），卸载脚本拿它比对令牌。
+#: **不能用选手可写的状态目录当判据** —— 那样可以把别的机器泄漏的令牌搬来删本机。
+#: 状态目录里那份只是老版本装的机器的回退路径（Agent 读不到这个才退回去）。
+MACHINE_UUID_FILENAME = "machine_uuid"
+
+# --------------------------------------------------------------------------- #
+# 安装策略：发布包 / 装机台账可以带的三样东西
+# --------------------------------------------------------------------------- #
+#
+# 键名是**冻结的接口**（服务端那半按同样的名字产生），不要改。
+#
+# 为什么要有它：同一个包发给不同机器，要求可能不同 ——"这次是重装，包里的密钥
+# 必须覆盖机器上那把已吊销的" vs "这台机器是教师手工配过的，别动它"。把这些
+# 写进包/台账，装机时就有一个**明确、可复现**的答案，而不是靠人记着加参数。
+
+#: 机器上已有的注册密钥要不要被包内那把覆盖。
+POLICY_KEY_BOOTSTRAP_KEY = "bootstrap_key_policy"
+BOOTSTRAP_KEY_POLICY_KEEP = "keep"
+BOOTSTRAP_KEY_POLICY_REPLACE = "replace"
+#: 包内带了密钥时的默认：**替换**。现场就是被"旧的已吊销密钥挡住新的"坑到的 ——
+#: 教师勾了"携带密钥"，安装器却按"已有一份就不动"静默跳过，机器永远注册不上。
+DEFAULT_BOOTSTRAP_KEY_POLICY_WITH_BUNDLE = BOOTSTRAP_KEY_POLICY_REPLACE
+
+#: ``agent.ini`` 逐键三态。没提到的键一律 ``keep``。
+POLICY_KEY_CONFIG = "config_policy"
+CONFIG_POLICY_KEEP = "keep"
+CONFIG_POLICY_DEFAULT = "default"
+CONFIG_POLICY_FORCE = "force"
+CONFIG_POLICY_VALUES = (CONFIG_POLICY_KEEP, CONFIG_POLICY_DEFAULT, CONFIG_POLICY_FORCE)
+
+#: 自更新模式。默认 apply（下载 → 验签 → 切换 → 自动重启）。
+POLICY_KEY_UPGRADE_MODE = "upgrade_mode"
+UPGRADE_MODES = ("apply", "stage", "off")
+DEFAULT_UPGRADE_MODE = "apply"
+
+#: 包内策略文件的常规名字（顶层）。**也接受任何顶层 ``*.json`` 里的这三个键**：
+#: 服务端那半的容器格式未必就是这个名字，而"名字猜错 → 策略静默不生效"是最难
+#: 发现的一类集成事故。
+POLICY_JSON_FILENAME = "install_policy.json"
+
+#: "我们上次写进 ``agent.ini`` 的那份内容"快照。
+#: ``config_policy=default`` 靠它判断"这个键有没有被人改过"。
+CONFIG_SNAPSHOT_FILENAME = CONFIG_FILENAME + ".syncoj-default"
+
+#: 被替换下来的旧注册密钥备份前缀（同目录，0600 属主 root）。
+#: 覆盖一份共享密钥是不可逆的 —— 留一份比事后重新签发便宜。
+REPLACED_KEY_PREFIX = BOOTSTRAP_KEY_FILENAME + ".replaced-"
+
 #: 包内内嵌的服务端地址（``build_bundle.py --server-url`` 写的那个文件）。
 SERVER_URL_FILENAME = "server.json"
 
@@ -108,6 +157,20 @@ DEFAULT_BOOTSTRAP_KEY_FILE = REPO_ROOT / ".key" / BOOTSTRAP_KEY_FILENAME
 #: 为什么必须是独立单元而不是让 Agent 自己注册：Agent 以选手身份运行，
 #: 读不到 root 只读的密钥。注册这件事只能由 root 做一次，做完把凭据交给选手。
 ENROLL_UNIT_FILENAME = SERVICE_NAME + "-enroll.service"
+#: 注册失败后的重试策略。**有限次** —— 真机上见过"重启 249 次"把日志刷爆。
+#: 重试写在单元自己的 ExecStart 里（一个小循环），**不靠 Restart=**：
+#: Type=oneshot 配 Restart= 在各 systemd 版本上行为不一致，而循环在哪都能跑，
+#: 还能自己数清"试了几次"并把手工步骤打出来。
+#:
+#: 5 次 × 30 秒（约 2 分钟）是照着最常见的失败场景定的：机房同时开机十台时，
+#: 服务端的注册限速窗口通常就是几十秒级；原来 3×20（约 40 秒）对这个场景偏短，
+#: 会出现"其实再等 10 秒就好了，但单元已经放弃了"。
+#: **仍然不加 `.timer`**：失败后反复重试会把 journal 刷满，而"机器不出现"
+#: 本来就该让教师看一眼（回执/日志里给了 `reset-failed && start` 的手工步骤）。
+#: 将来若真需要无人值守自愈，用一个 ``OnUnitInactiveSec=10min`` 的 timer，
+#: 而不是把 oneshot 变成常驻。
+ENROLL_RETRIES = 5
+ENROLL_RETRY_DELAY_SECONDS = 30
 #: 安装根目录下与 Agent 运行期共享的布局常量，必须与 syncoj_agent/upgrade.py 一致
 RELEASES_DIR = "releases"
 CURRENT_LINK = "current"
@@ -136,8 +199,13 @@ BUNDLE_SHA_MARKER_FILENAME = ".syncoj-bundle-sha256"
 #: ``--prefix`` / ``--config-dir`` / ``--state-dir`` 都是可覆盖的，所以**不能**
 #: 因为路径对得上就删 —— 用户把它们指到别处时，宁可不卸也不能清人家的目录。
 UNINSTALL_PREFIX_MARKERS = (RELEASES_DIR, CURRENT_LINK, LAUNCHER_NAME)
-#: 配置目录里的凭据：统一注册密钥 + 升级信任锚。
-UNINSTALL_CONFIG_MARKERS = (CONFIG_FILENAME, BOOTSTRAP_KEY_FILENAME, PUBLIC_KEY_FILENAME)
+#: 配置目录里的凭据：统一注册密钥 + 升级信任锚（加上权威机器身份）。
+UNINSTALL_CONFIG_MARKERS = (
+    CONFIG_FILENAME,
+    BOOTSTRAP_KEY_FILENAME,
+    PUBLIC_KEY_FILENAME,
+    MACHINE_UUID_FILENAME,
+)
 
 #: 状态目录里记录"这个运行账号是本安装器创建的"的标记文件。
 #:
@@ -146,9 +214,6 @@ UNINSTALL_CONFIG_MARKERS = (CONFIG_FILENAME, BOOTSTRAP_KEY_FILENAME, PUBLIC_KEY_
 #: 机器没有这个文件（`--keep-state` 会把它留下，但这里只认文件内容）→ 一律不删。
 CREATED_USER_MARKER_FILENAME = ".syncoj-created-user"
 
-#: 家目录下"桌面"可能叫什么。顺序与 ``syncoj_agent/state.py::detect_desktop``
-#: 一致：先看 ``XDG_DESKTOP_DIR``，再看这几个实际存在的名字，都没有就按中文环境猜。
-DESKTOP_CANDIDATES = ("桌面", "Desktop", "desktop")
 #: 状态目录里的本机身份与日志。
 UNINSTALL_STATE_MARKERS = ("credential.json", "machine_uuid", "agent.log")
 
@@ -590,6 +655,126 @@ def canonical_text(nonce: str, url: str) -> str:
     return "%s\n%s\n%s" % (DISCOVERY_SIGNATURE_PREFIX, nonce, url)
 
 
+class InstallPolicy:
+    """发布包 / 装机台账带下来的安装策略（见上面那一组常量的说明）。
+
+    空串表示"这一项没指定"，由调用方按各自的默认值补上 —— 这样"包没说话"和
+    "包明确说 off"是两个不同的东西，而它们的行为确实不同。
+
+    刻意**不用 dataclass**：安装器是一个会被"按路径 import"（``spec_from_file_location``）
+    的单文件，而 dataclass 在处理字符串注解时会去 ``sys.modules`` 里找所属模块 ——
+    模块没登记进 ``sys.modules`` 时它会直接崩。一个只装三个值的类不值得冒这个险。
+    """
+
+    def __init__(
+        self,
+        bootstrap_key_policy: str = "",
+        config_policy: Optional[Dict[str, str]] = None,
+        upgrade_mode: str = "",
+        origin: str = "",
+    ) -> None:
+        #: keep / replace；"" = 没指定 → 包内带密钥时默认 replace
+        self.bootstrap_key_policy = bootstrap_key_policy
+        #: "section.key" -> keep / default / force；没提到的键按 keep
+        self.config_policy: Dict[str, str] = dict(config_policy or {})
+        #: apply / stage / off；"" = 没指定 → 默认 apply
+        self.upgrade_mode = upgrade_mode
+        #: 策略从哪儿来的（回执里要写清，否则现场问"这行为是谁定的"没法回答）
+        self.origin = origin
+
+    def key_policy_with_bundle(self, has_bundled: bool) -> str:
+        """包内**有**密钥时实际用哪条；没有密钥时这个策略无意义。"""
+        if not has_bundled:
+            return BOOTSTRAP_KEY_POLICY_KEEP
+        return self.bootstrap_key_policy or DEFAULT_BOOTSTRAP_KEY_POLICY_WITH_BUNDLE
+
+    def effective_upgrade_mode(self) -> str:
+        return self.upgrade_mode or DEFAULT_UPGRADE_MODE
+
+    def config_action(self, section: str, key: str) -> str:
+        """某个键该按哪一档处理（没提到就是 keep）。"""
+        return self.config_policy.get(
+            "%s.%s" % (section.lower(), key.lower()), CONFIG_POLICY_KEEP
+        )
+
+    def describe(self) -> str:
+        parts = []
+        if self.bootstrap_key_policy:
+            parts.append("%s=%s" % (POLICY_KEY_BOOTSTRAP_KEY, self.bootstrap_key_policy))
+        if self.upgrade_mode:
+            parts.append("%s=%s" % (POLICY_KEY_UPGRADE_MODE, self.upgrade_mode))
+        if self.config_policy:
+            parts.append(
+                "%s={%s}"
+                % (
+                    POLICY_KEY_CONFIG,
+                    ", ".join(
+                        "%s=%s" % (k, v) for k, v in sorted(self.config_policy.items())
+                    ),
+                )
+            )
+        return "；".join(parts) if parts else "（包与台账都没带策略）"
+
+
+def parse_install_policy(
+    mapping: object, report=None, origin: str = ""
+) -> InstallPolicy:
+    """把一份映射（包内 JSON / 台账）解析成 :class:`InstallPolicy`。
+
+    取值不认识时**不拦**：策略是"锦上添花"的东西，为它让整台机器装不上不值得。
+    但要说出来 —— 静默忽略一条写错的策略，表现就是"我明明写了 replace 却没生效"。
+    """
+    policy = InstallPolicy(origin=origin)
+    if not isinstance(mapping, dict):
+        return policy
+
+    def warn(message: str) -> None:
+        if report is not None:
+            report.warn(message)
+
+    raw_key_policy = mapping.get(POLICY_KEY_BOOTSTRAP_KEY)
+    if isinstance(raw_key_policy, str) and raw_key_policy.strip():
+        value = raw_key_policy.strip().lower()
+        if value in (BOOTSTRAP_KEY_POLICY_KEEP, BOOTSTRAP_KEY_POLICY_REPLACE):
+            policy.bootstrap_key_policy = value
+        else:
+            warn("安装策略里的 %s 不认识：%r（按默认处理）" % (POLICY_KEY_BOOTSTRAP_KEY, raw_key_policy))
+
+    raw_upgrade = mapping.get(POLICY_KEY_UPGRADE_MODE)
+    if isinstance(raw_upgrade, str) and raw_upgrade.strip():
+        value = raw_upgrade.strip().lower()
+        if value in UPGRADE_MODES:
+            policy.upgrade_mode = value
+        else:
+            warn("安装策略里的 %s 不认识：%r（按默认处理）" % (POLICY_KEY_UPGRADE_MODE, raw_upgrade))
+
+    raw_config = mapping.get(POLICY_KEY_CONFIG)
+    if isinstance(raw_config, dict):
+        for key, value in raw_config.items():
+            if not isinstance(value, str):
+                warn("安装策略里的 %s[%r] 不是字符串，忽略" % (POLICY_KEY_CONFIG, key))
+                continue
+            action = value.strip().lower()
+            if action not in CONFIG_POLICY_VALUES:
+                warn(
+                    "安装策略里的 %s[%r] 不认识：%r（该键按 keep 处理）"
+                    % (POLICY_KEY_CONFIG, key, value)
+                )
+                continue
+            text = str(key).strip().lower()
+            if "." not in text:
+                warn(
+                    "安装策略里的 %s 键必须是 section.key 形式：%r（已忽略）"
+                    % (POLICY_KEY_CONFIG, key)
+                )
+                continue
+            policy.config_policy[text] = action
+    elif raw_config is not None:
+        warn("安装策略里的 %s 不是对象，忽略" % POLICY_KEY_CONFIG)
+
+    return policy
+
+
 def build_probe(nonce: str, machine_id: str = "", min_bytes: int = DISCOVERY_MIN_PROBE_BYTES) -> bytes:
     """造探测报文，**带填充**凑到 ``min_bytes``。
 
@@ -767,54 +952,54 @@ class Installer:
         # 保留为字符串：这两个是路径模板，可能含 {desktop} / {player_no}
         self.scan_root = options.scan_root
         self.deploy_root = options.deploy_root
-        self.run_user = options.user
+        # 没显式给 --user 时用"跑安装的那个人"（见 default_run_user）。
+        # options.user 保持 None，用来区分"默认来的"与"人明确指定的"。
+        self.run_user = options.user or default_run_user()
         self.service_name = options.service_name
         self.unit_path = Path(options.unit_dir) / UNIT_FILENAME
         self.config_path = self.config_dir / CONFIG_FILENAME
 
-    # ---------------------------------------------------------------- #
-    # 运行账号 / 家目录
-    # ---------------------------------------------------------------- #
+        #: 机器上已有的统一密钥与包内附带的**不一致**时记下来（保留原有的、不覆盖，
+        #: 但要在完成回执里留一句 —— 见 `_report_bundled_key_conflict`）。
+        self.bootstrap_key_conflict = False
+        #: ``--from-server`` 时服务端台账给的 sha256。它一旦验过，安装包完整性
+        #: 就已经确认过了，``_verify_checksum`` 不该再警告"跳过校验"。
+        self.ledger_sha256 = ""
+        #: ``--from-server`` 拿到的装机台账（里面可能带安装策略）。
+        self.ledger: Optional[dict] = None
+        #: 这一次装机实际生效的安装策略（``run()`` 里定下来）。
+        self.install_policy = InstallPolicy()
+        #: 本次是否按策略替换过机器上的注册密钥（回执里要留一句）。
+        self.bootstrap_key_replaced = False
+        #: 配置落盘之后 ``upgrade.mode`` 实际是多少（回执里报这个，而不是"本来想写
+        #: 多少"—— 没有发布公钥时会自动降级成 off，回执必须和文件一致）。
+        self.effective_upgrade_mode: Optional[str] = None
+        #: 上面那个值是哪来的（策略 / 默认 / 没有公钥自动降级 …）
+        self.effective_upgrade_mode_origin = ""
 
-    @property
-    def home_dir(self) -> Optional[Path]:
-        """运行账号的家目录；查不到（非 POSIX / 账号不存在）时为 ``None``。"""
-        return _home_of(self.run_user)
+    @staticmethod
+    def _template_user_paths(raw: str) -> str:
+        """把配置里的 ``~`` 换成 ``{home}`` 占位符 —— **绝不按某个账号的家展开**。
 
-    @property
-    def desktop_dir(self) -> Optional[Path]:
-        """运行账号家目录下的桌面；查不到时为 ``None``。"""
-        home = self.home_dir
-        return _desktop_of(home) if home is not None else None
+        为什么安装时不固化成绝对路径：镜像预装时用户还没登录过、``~/Desktop``
+        可能还不存在，安装时探测就会固化成错的 ``~/桌面``；而 ``{desktop}`` /
+        ``{home}`` 由 Agent 在**运行时**按自己那个账号展开，永远是对的。
 
-    def _expand_user_paths(self, raw: str) -> str:
-        """把配置模板里的 ``{desktop}`` 与开头的 ``~`` 展开成**运行账号**的真实路径。
-
-        为什么要在安装时展开：``~`` 在这里会按"跑安装的人"（通常是 root）解释，
-        而 Agent 跑的是另一个账号 —— 留着 ``~`` 会指错人；``{desktop}`` 同理，
-        装完当场看一眼 ``agent.ini`` 就知道到底扫哪里，不用等 Agent 跑起来才知道。
-
-        ``{player_no}`` / ``{contest_slug}`` **保留**：它们要等注册之后才有值。
-        查不到运行账号的家目录时（非 POSIX 构建机）原样返回 —— 让 Agent 运行时
-        按自己那个账号展开，总比写死一个构建机路径强。
+        为什么 ``~`` 要换掉：它在安装器里会被解释成 **root 的家**（安装器以 root
+        跑），而 Agent 跑的是另一个账号 —— 这个坑从根上消掉，换成运行时的
+        ``{home}``。``{player_no}`` / ``{contest_slug}`` 原样保留。
         """
         if not raw:
             return raw
-        home = self.home_dir
-        desktop = self.desktop_dir
-        if home is None or desktop is None:
-            return raw
-
         parts: List[str] = []
         for item in raw.replace(",", "\n").splitlines():
             text = item.strip()
             if not text:
                 continue
             if text == "~":
-                text = str(home)
+                text = "{home}"
             elif text.startswith("~/"):
-                text = str(home / text[2:])
-            text = text.replace("{desktop}", str(desktop))
+                text = "{home}/" + text[2:]
             parts.append(text)
         return ", ".join(parts)
 
@@ -848,6 +1033,30 @@ class Installer:
 
     def preflight(self) -> None:
         self.report.section("检查环境")
+
+        # 运行账号：不显式给时 = "跑安装的那个人"。**以 root 跑 Agent 是拒绝的** ——
+        # 它会往选手桌面写 root 拥有的文件（学生改不了也删不掉）、`%h` 不再等于
+        # 选手桌面、还白白多一个提权面。所以这里不静默接受，要求显式指定；
+        # 显式 `--user root` 仍然允许（单用户机器上有人这么用），但要警告。
+        # dry-run 什么都没做，所以只警告不报错。
+        if self.run_user == "root":
+            if self.options.user:
+                self.report.warn(
+                    "显式把 Agent 运行账号定成了 root：它会往选手桌面写 root 拥有的"
+                    "文件（学生改不了也删不掉），而且是个没必要的提权面。除非这台"
+                    "机器只有一个用户，否则请传 --user <考试机上的账号>。"
+                )
+            elif self.report.dry_run:
+                self.report.warn(
+                    "检测到以 root 身份跑安装：真装时会被拒绝，请传 --user <考试机上的账号>。"
+                )
+            else:
+                raise InstallError(
+                    "不能把 Agent 运行账号默认成 root：它会往选手桌面写 root 拥有的"
+                    "文件（学生改不了也删不掉），而且是个没必要的提权面。\n"
+                    "  请显式指定考试机上的账号：sudo python3 install.py ... --user <账号>\n"
+                    "  （确实要用 root 就显式写 --user root —— 那会打一条警告。）"
+                )
 
         needs_root = not self.report.dry_run and not self.options.skip_user
         if needs_root and not _is_root():
@@ -934,6 +1143,37 @@ class Installer:
                 os.chmod(str(self.state_dir), 0o750)
             except (OSError, LookupError) as exc:
                 self.report.warn("设置状态目录属主失败（后续可能权限不足）: %s" % exc)
+                return
+            self._hand_over_state_dir()
+
+    def _hand_over_state_dir(self) -> None:
+        """把状态目录里**已有内容**的属主也交给运行账号。
+
+        换运行账号（旧的专用 ``syncoj`` → 跑安装的那个人）时必需：只改目录属主
+        的话，上一次注册留下的 ``credential.json``、哈希缓存、日志**还是上一个
+        账号的名字**，新账号照样读不到 —— 表现是"服务起来了但一直重新注册"，
+        或者"一写状态就 Permission denied"。
+        """
+        try:
+            entries = list(self.state_dir.rglob("*"))
+        except OSError as exc:  # pragma: no cover - 罕见
+            self.report.warn("读取状态目录内容失败：%s" % exc)
+            return
+
+        failed = []
+        for entry in entries:
+            if entry.is_symlink():
+                continue  # 不跟随符号链接改到目录外面去
+            try:
+                shutil.chown(str(entry), user=self.run_user)
+            except (OSError, LookupError):
+                failed.append(str(entry))
+
+        if failed:
+            self.report.warn(
+                "状态目录里有 %d 项无法改属主为 %s（后续可能权限不足）：%s"
+                % (len(failed), self.run_user, "、".join(failed[:3]))
+            )
 
     def fetch_bundle(self) -> Path:
         """把安装包弄到本地，返回路径。"""
@@ -1029,6 +1269,13 @@ class Installer:
                 "可能是传输损坏，也可能是中间有人改了包。" % (expected, actual)
             )
         self.report.note("sha256 校验通过: %s" % expected[:16])
+        # 记下"台账已经验过"：安装包完整性到此为止已经确认过了，后面
+        # `_verify_checksum` 不该再说"未提供 --sha256，跳过完整性校验" —— 那句话
+        # 在现场把教师看糊涂了（明明刚验过），还会让人以为每次都得手抄校验和。
+        self.ledger_sha256 = expected
+        # 台账里可能带安装策略（键名与服务端冻结的一致）。整份留着，
+        # 后面 `load_install_policy` 挑那三个键。
+        self.ledger = ledger
 
         self._verify_signature_if_possible(ledger, expected)
         return target
@@ -1291,6 +1538,16 @@ class Installer:
             )
 
     def _verify_checksum(self, bundle: Path) -> None:
+        if self.ledger_sha256:
+            # 包是从服务端台账下来的，而 `download_from_server` 已经拿台账里的
+            # sha256 逐字节对过了（也对过教师手抄的 --sha256）。这里**什么都不用
+            # 再说一遍**：以前会落进下面那条"未提供 --sha256，跳过完整性校验"，
+            # 而现场紧邻着"sha256 校验通过"——教师看到的结论是"这次装机没校验"，
+            # 于是每次都要手抄一份校验和。`--sha256` 真正的用武之地是**离线包**
+            # （没有台账可比的时候）。
+            self.report.skip("完整性已对照服务端台账校验过（sha256 %s）" % self.ledger_sha256[:16])
+            return
+
         expected = (self.options.sha256 or "").strip().lower()
         if not expected:
             self.report.warn(
@@ -1346,14 +1603,54 @@ class Installer:
     def write_config(self, version: str) -> None:
         self.report.section("写入配置")
 
-        if self.config_path.is_file() and not self.options.force_config:
-            # 教师很可能已经改过扫描目录。覆盖它是灾难性的。
-            self.report.skip("配置已存在，保持不变: %s" % self.config_path)
-            self.report.note("（如需重建请加 --force-config，会覆盖现有配置）")
-            return
+        got_upgrade_mode = self.install_policy.upgrade_mode or DEFAULT_UPGRADE_MODE
+        existing_text = None
+        if self.config_path.is_file():
+            try:
+                existing_text = self.config_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                self.report.warn("读不出已有的配置（%s），按重建处理" % exc)
+                existing_text = None
+
+        if existing_text is not None and not self.options.force_config:
+            # 教师很可能已经改过扫描目录。**默认一个字节都不动**（config_policy
+            # 全部 keep）—— 想改某个键，得由策略或 --force-config 明确说了算。
+            actions = self._config_policy_actions()
+            if not actions:
+                self.report.skip("配置已存在，保持不变: %s" % self.config_path)
+                self.report.note(
+                    "（如需重建请加 --force-config；包内 config_policy 也可以逐键指定 "
+                    "keep / default / force）"
+                )
+                # 回执要说"盘上实际是什么"，而不是"策略想写什么"
+                existing_values, _ = self._parse_ini_text(existing_text)
+                self.effective_upgrade_mode = existing_values.get("upgrade.mode")
+                self.effective_upgrade_mode_origin = "配置文件里现有的值"
+                # **内容一个字不改，但属主/权限必须跟当前运行账号对齐。**
+                # 运行账号可能换了（旧的专用 syncoj → 跑安装的那个人，或反过来），
+                # 而这份文件当初是 chown 给**上一个**账号的 0600 —— 不重设的话新账号
+                # 读不到自己的配置，服务里就是一个
+                # `PermissionError: '/etc/syncoj/agent.ini'` 然后无限重启。
+                self._restrict_config_to_run_user()
+                return
 
         server_url, origin = self.resolve_server_url(version)
         self.report.note("服务端地址: %s（%s）" % (server_url, origin))
+
+        public_key = self.install_public_key(version)
+        upgrade_mode, mode_origin = self.resolve_upgrade_mode()
+        if upgrade_mode != "off" and not public_key:
+            # 没有信任锚就验不了签名 —— 写 apply 只会让 Agent 启动时报"没配公钥"。
+            # 这里降级成 off 并说清怎么启用（比"写个升不了的模式"诚实）。
+            self.report.warn(
+                "这个包里没有发布公钥（release-key.pub.json），也没有 --public-key —— "
+                "没有信任锚就无法验证升级包签名，本次把 upgrade.mode 写成 off"
+                "（来源是%s）。放上发布公钥后重跑安装器即可启用。" % mode_origin
+            )
+            upgrade_mode, mode_origin = "off", "没有公钥，自动降级"
+
+        self.effective_upgrade_mode = upgrade_mode
+        self.effective_upgrade_mode_origin = mode_origin
 
         content = render_config(
             server_url=server_url,
@@ -1361,34 +1658,227 @@ class Installer:
             ca_file=self.options.ca_file or "",
             bootstrap_key_file=_posix(self.config_dir / BOOTSTRAP_KEY_FILENAME),
             state_dir=self.state_dir,
-            # deploy_root / scan_roots 是**字符串模板**，可能含 {desktop}/{player_no}。
-            # 这里先把 {desktop} 与开头的 ~ 按**运行账号**的家目录展开成真实路径
-            # （systemd 不认 ~，而且 ~ 会按 root 解释、指错人）；{player_no} 等
-            # 要等注册后才知道的占位符原样留下，由 Agent 运行时展开。
-            deploy_root=self._expand_user_paths(self.options.deploy_root),
-            scan_roots=self._expand_user_paths(self.options.scan_root),
+            # deploy_root / scan_roots 是**字符串模板**，可能含 {desktop}/{home}/
+            # {player_no}。安装时**只把 `~` 换成 `{home}`**，绝不动 `{desktop}`：
+            # 这些模板由 Agent 在运行时按自己那个账号展开（镜像预装时桌面可能还
+            # 不存在，安装时探测会固化成错的路径；而 `~` 在这里会被解释成 root 的
+            # 家）。systemd 不认 `~`，但单元里本来就不写这些路径。
+            deploy_root=self._template_user_paths(self.options.deploy_root),
+            scan_roots=self._template_user_paths(self.options.scan_root),
             scan_prefix=self.options.scan_prefix,
-            upgrade_mode=self.options.upgrade_mode,
+            upgrade_mode=upgrade_mode,
             install_root=self.prefix,
-            public_key=self.install_public_key(version),
+            public_key=public_key,
+            # 运行账号写进配置：{home} / {desktop} 的展开只有这一个来源，
+            # 注册单元（root）与服务（选手账号）读同一份配置得出同一个家目录
+            run_user=self.run_user,
         )
+
+        if existing_text is not None and not self.options.force_config:
+            # 逐键三态：只动策略点名、且确实该动的键，注释与其它键原样保留
+            merged, changed = self._merge_config_policy(existing_text, content)
+            if changed:
+                self.report.action(
+                    "按安装策略更新配置：%s" % "、".join(sorted(changed))
+                )
+                content = merged
+            else:
+                self.report.skip("策略点名的键都没有变化（都被人改过或没指定）")
+                content = existing_text
 
         if self.report.dry_run:
             self.report.plan("写入 %s" % self.config_path)
+            self.report.plan(
+                "同时保存一份「我们上次写的」快照 → %s（config_policy=default 靠它判断）"
+                % (self.config_dir / CONFIG_SNAPSHOT_FILENAME)
+            )
             return
 
-        self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.config_path.with_suffix(".ini.tmp")
-        # newline="\n" 是必须的：``write_text`` 默认会把 \n 翻译成当前平台的换行，
-        # 于是在 Windows 上生成的 agent.ini 是 CRLF。目标机是 Linux，那份配置里
-        # 每个值末尾都会多一个不可见的 \r。统一按 LF 写，产物与生成平台无关。
+        self._write_config_file(self.config_path, content)
+        self._restrict_config_to_run_user()
+        self._write_config_snapshot(content)
+        self.report.action("已写入 %s" % self.config_path)
+        if existing_text is None or self.options.force_config:
+            self.report.note(
+                "后续重装会以「上次由安装器写下的值」为基准判断哪些键还没被人改过 "
+                "（见 config_policy）"
+            )
+
+    def _write_config_file(self, path: Path, content: str) -> None:
+        """原子写入 + 0600。``newline="\\n"`` 必须在（目标机是 Linux）。"""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
         with tmp.open("w", encoding="utf-8", newline="\n") as _handle:
             _handle.write(content)
         # 临时文件先给 0600，避免在 replace 之前有一瞬间是宽权限
         os.chmod(str(tmp), 0o600)
-        os.replace(str(tmp), str(self.config_path))
-        self._restrict_config_to_run_user()
-        self.report.action("已写入 %s" % self.config_path)
+        os.replace(str(tmp), str(path))
+
+    def _write_config_snapshot(self, content: str) -> None:
+        """把**这次写进去的**内容存成快照，供下次 ``config_policy=default`` 判断
+        "这个键有没有被人改过"（快照缺失 → 按"人可能改过"处理，即保留）。"""
+        snapshot = self.config_dir / CONFIG_SNAPSHOT_FILENAME
+        try:
+            self._write_config_file(snapshot, content)
+        except OSError as exc:
+            self.report.warn(
+                "保存配置快照失败：%s（下次 default 档会按「可能被人改过」处理，即保留）"
+                % exc
+            )
+            return
+        self.report.note("已保存配置快照 %s" % snapshot)
+
+    def _config_policy_actions(self) -> "Dict[str, str]":
+        """策略里真正要处理的键（去掉 ``keep``）：``section.key`` -> default/force。"""
+        return {
+            key: action
+            for key, action in self.install_policy.config_policy.items()
+            if action != CONFIG_POLICY_KEEP
+        }
+
+    @staticmethod
+    def _parse_ini_text(text: str) -> "Tuple[dict, dict]":
+        """把 INI 文本解析成 ``(键值, 位置)``。
+
+        ``位置`` 用来把改动写回**原文件**（保留注释与顺序）。键名一律小写 ——
+        INI 的键名大小写不敏感，而策略里的键名是 ``section.key`` 这种小写形式。
+        """
+        import configparser
+
+        parser = configparser.ConfigParser()
+        parser.optionxform = str.lower
+        try:
+            parser.read_string(text)
+        except configparser.Error:
+            return {}, {}
+        values: Dict[str, str] = {}
+        positions: Dict[str, int] = {}
+        section = ""
+        for index, line in enumerate(text.splitlines()):
+            stripped = line.strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                section = stripped[1:-1].strip().lower()
+                continue
+            if not section or "=" not in stripped or stripped.startswith((";", "#")):
+                continue
+            key = stripped.split("=", 1)[0].strip().lower()
+            dotted = "%s.%s" % (section, key)
+            values[dotted] = parser.get(section, key, fallback="").strip()
+            positions.setdefault(dotted, index)
+        return values, positions
+
+    def _merge_config_policy(
+        self, existing_text: str, rendered: str
+    ) -> "Tuple[str, List[str]]":
+        """按策略把**新渲染的配置**里的值逐键合进**现有配置**。
+
+        返回 ``(最终文本, 实际改动的键)``。语义：
+
+        * ``keep``    —— 不碰（策略没提到的键一律是它）
+        * ``default`` —— 只更新"没人动过"的键：文件里没有这个键，或者它的值等于
+          快照里那份（= 上次由安装器写下的值）。快照缺失 → 当作"人可能改过" → 保留。
+        * ``force``   —— 无条件写成新值
+
+        **状态与凭据文件不在本方法的作用域里**（它们不走 agent.ini），这一条不设开关。
+        """
+        actions = self._config_policy_actions()
+        if not actions:
+            return existing_text, []
+
+        existing_values, positions = self._parse_ini_text(existing_text)
+        new_values, _ = self._parse_ini_text(rendered)
+        snapshot_path = self.config_dir / CONFIG_SNAPSHOT_FILENAME
+        snapshot_values: Dict[str, str] = {}
+        if snapshot_path.is_file():
+            try:
+                snapshot_values, _ = self._parse_ini_text(
+                    snapshot_path.read_text(encoding="utf-8")
+                )
+            except (OSError, UnicodeDecodeError):
+                snapshot_values = {}
+
+        changed: List[str] = []
+        updates: Dict[str, Tuple[str, str]] = {}  # dotted -> (section, value)
+        for dotted, action in actions.items():
+            section, _, key = dotted.partition(".")
+            if dotted not in new_values:
+                # 新配置里都没有这个键 —— 策略点名了一个不存在的键，说清楚
+                self.report.warn("安装策略点名的键在新配置里不存在：%s（已忽略）" % dotted)
+                continue
+            value = new_values[dotted]
+            if action == CONFIG_POLICY_FORCE:
+                pass
+            else:  # default
+                if dotted in existing_values and dotted not in snapshot_values:
+                    # 快照缺失（老机器）或这个键没写进过快照 → 按"人可能改过"处理
+                    continue
+                if (
+                    dotted in existing_values
+                    and dotted in snapshot_values
+                    and existing_values[dotted] != snapshot_values[dotted]
+                ):
+                    # 值被人改过 → 不覆盖（default 的全部意义所在）
+                    continue
+            if existing_values.get(dotted) == value and dotted in existing_values:
+                continue
+            updates[dotted] = (section, value)
+            changed.append(dotted)
+
+        if not updates:
+            return existing_text, []
+
+        lines = existing_text.splitlines()
+        appended: Dict[str, List[str]] = {}
+        for dotted, (section, value) in updates.items():
+            index = positions.get(dotted)
+            if index is not None:
+                original = lines[index]
+                prefix = original[: len(original) - len(original.lstrip())]
+                lines[index] = "%s%s = %s" % (prefix, dotted.split(".", 1)[1], value)
+            else:
+                appended.setdefault(section, []).append(
+                    "%s = %s" % (dotted.split(".", 1)[1], value)
+                )
+
+        text = "\n".join(lines)
+        if not text.endswith("\n"):
+            text += "\n"
+        for section, entries in appended.items():
+            if self._section_exists(text, section):
+                text = self._insert_into_section(text, section, entries)
+            else:
+                text += "\n[%s]\n%s\n" % (section, "\n".join(entries))
+        return text, changed
+
+    @staticmethod
+    def _section_exists(text: str, section: str) -> bool:
+        return any(
+            line.strip().lower() == "[%s]" % section for line in text.splitlines()
+        )
+
+    @staticmethod
+    def _insert_into_section(text: str, section: str, entries: "List[str]") -> str:
+        """把 ``entries`` 追加到该 section 的末尾（下一个 section 头之前）。"""
+        lines = text.splitlines()
+        header = "[%s]" % section
+        start = None
+        for index, line in enumerate(lines):
+            if line.strip().lower() == header.lower():
+                start = index
+                break
+        if start is None:  # pragma: no cover - 调用方刚判过
+            return text
+        end = len(lines)
+        for index in range(start + 1, len(lines)):
+            stripped = lines[index].strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                end = index
+                break
+        new_lines = lines[:end] + entries + lines[end:]
+        out = "\n".join(new_lines)
+        if not out.endswith("\n"):
+            out += "\n"
+        return out
 
     def resolve_server_url(self, version: str) -> "Tuple[str, str]":
         """定出 ``server.url``，返回 ``(地址, 这个地址是哪来的)``。
@@ -1502,7 +1992,8 @@ class Installer:
            （生产上这通常是运维自己发到 ``/etc/syncoj/`` 的那份）
         2. 安装包自带 ``release-key.pub.json`` —— 由 ``build_bundle.py`` 从仓库
            ``.key/`` 打进去的。复制到 ``<config-dir>/`` 并把配置指向这份副本
-        3. 都没有 → 空串 → 自更新保持关闭（``--upgrade-mode`` 默认就是 off）
+        3. 都没有 → 空串 → 没有信任锚，自更新装不起来（``upgrade.mode`` 写的是
+           apply，但 Agent 会在启动时报"没配公钥"——那是对的，别让它静默以为能升）
 
         第 2 步为什么要**复制出**版本目录，而不是直接指向包里的那份：版本目录
         （``releases/<版本>/``）是会被清理的，而公钥是信任锚 —— 指向它意味着某天
@@ -1531,6 +2022,131 @@ class Installer:
         self.report.action("已安装升级公钥 %s" % target)
         self.report.note("它是信任锚，随安装包一起来的 —— 不需要手工从服务端拷")
         return _posix(target)
+
+    def install_machine_uuid(self) -> str:
+        """把**权威机器身份**写进配置目录（0644 root:root），返回它的值。
+
+        为什么不能在状态目录里：那份是选手账号可写的，而卸载授权令牌拿它当判据
+        ——判据可写 = 可以把别的机器泄漏的令牌搬来删本机。身份由 root 写在
+        ``<config-dir>/machine_uuid``，Agent 优先读它、卸载脚本拿它比对令牌。
+
+        幂等：已存在且非空就原样留着 —— 重复装机不该换掉一台机器的身份。
+        """
+        target = self.config_dir / MACHINE_UUID_FILENAME
+        existing = ""
+        if target.is_file():
+            try:
+                existing = target.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeDecodeError):
+                existing = ""
+        if existing:
+            self.report.skip("机器身份已存在: %s" % target)
+            return existing
+
+        value = uuid.uuid4().hex
+        if self.report.dry_run:
+            self.report.plan("写入机器身份 %s（0644 root:root）" % target)
+            return value
+
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _write_text_file(target, value + "\n", 0o644)
+        except OSError as exc:
+            raise InstallError("写入机器身份失败 %s: %s" % (target, exc))
+        try:
+            shutil.chown(str(target), user="root", group="root")
+        except (OSError, LookupError) as exc:
+            self.report.warn("无法把 %s 的属主改为 root:root：%s" % (target, exc))
+        self.report.action("已写入机器身份 %s（0644 root:root）" % target)
+        return value
+
+    def _render_self_uninstall(self) -> str:
+        """把自卸载脚本里的 ``@@占位@@`` 换成这台机器的实际布局。"""
+        replacements = {
+            "@@HELPER_DIR@@": _posix(HELPER_DIR),
+            "@@PUBLIC_KEY@@": self.options.public_key
+            or _posix(self.config_dir / PUBLIC_KEY_FILENAME),
+            "@@MACHINE_UUID_FILE@@": _posix(self.config_dir / MACHINE_UUID_FILENAME),
+            "@@UNIT_DIR@@": _posix(Path(self.options.unit_dir)),
+            "@@UNIT_FILENAME@@": UNIT_FILENAME,
+            "@@ENROLL_UNIT_FILENAME@@": ENROLL_UNIT_FILENAME,
+            "@@PREFIX@@": _posix(self.prefix),
+            "@@CONFIG_DIR@@": _posix(self.config_dir),
+            "@@STATE_DIR@@": _posix(self.state_dir),
+            "@@SUDOERS_PATH@@": _posix(SUDOERS_PATH),
+        }
+        text = _SELF_UNINSTALL_SCRIPT
+        for key, value in replacements.items():
+            text = text.replace(key, value)
+        return text
+
+    def install_uninstall_helper(self) -> None:
+        """装"管理端授权 → 机器本地以 root 卸载"所需的辅助件。
+
+        产物（全部 root 拥有、选手改不动）：
+
+        * ``/usr/local/lib/syncoj/self_uninstall.sh``（0755）—— **固定路径**，
+          不在 ``current`` 软链下：sudo 的 NOPASSWD 白名单按字面路径匹配
+        * ``/usr/local/lib/syncoj/verify_uninstall_token.py``（0644）—— 独立、
+          零依赖的验签实现（不 import syncoj_agent：卸载时包可能正在被删）
+        * ``/etc/sudoers.d/syncoj-uninstall``（0440）—— 一行 NOPASSWD 规则；
+          **写入前必须过 ``visudo -c``**：半个 sudoers 文件会让 sudo 整体不可用。
+
+        权威机器身份由 :meth:`install_machine_uuid` 单独负责（它要更早落盘）。
+        """
+        self.report.section("远程卸载辅助件")
+        if not _is_posix_platform():
+            # 目标机是 Linux。开发机/构建机上没有 sudoers/systemd 那套东西，
+            # 硬写只会往 C:\usr\local\... 里塞文件 —— 跳过并如实说明。
+            self.report.note("非 POSIX 平台，跳过远程卸载辅助件（它们只对 Linux 有意义）")
+            return
+        if self.report.dry_run:
+            self.report.plan(
+                "安装 %s、%s 与 %s" % (SELF_UNINSTALL_PATH, VERIFY_TOKEN_PATH, SUDOERS_PATH)
+            )
+            return
+
+        try:
+            HELPER_DIR.mkdir(parents=True, exist_ok=True)
+            os.chmod(str(HELPER_DIR), 0o755)
+            _write_text_file(SELF_UNINSTALL_PATH, self._render_self_uninstall(), 0o755)
+            _write_text_file(VERIFY_TOKEN_PATH, _VERIFY_TOKEN_SCRIPT, 0o644)
+        except OSError as exc:
+            raise InstallError("写入自卸载辅助脚本失败：%s" % exc)
+
+        # sudoers 先落临时文件、过 visudo、再原子改名 —— 校验不通过就删掉临时文件
+        # 并让安装失败：一份半截的 sudoers 会让 sudo 整体不可用。
+        # 临时文件用 0600：0440 在 Windows 上会置只读位，挡住失败路径的 unlink。
+        tmp = SUDOERS_PATH.parent / (SUDOERS_PATH.name + ".tmp")
+        try:
+            _write_text_file(
+                tmp, render_uninstall_sudoers(self.run_user), 0o600
+            )
+        except OSError as exc:
+            raise InstallError("写入 sudoers 临时文件失败：%s" % exc)
+
+        lint = visudo_lint(tmp)
+        if lint is False:
+            _best_effort_unlink(tmp)
+            raise InstallError(
+                "sudoers 文件校验失败（visudo -c）：已放弃安装。\n"
+                "  **半个 sudoers 文件会让 sudo 整体不可用** —— 那比装不上严重得多。"
+            )
+        if lint is None:
+            self.report.warn(
+                "找不到 visudo，没能校验 sudoers 文件内容（如实说明：不是“校验过了”）"
+            )
+
+        try:
+            os.replace(str(tmp), str(SUDOERS_PATH))
+            os.chmod(str(SUDOERS_PATH), 0o440)
+        except OSError as exc:
+            raise InstallError("落盘 sudoers 文件失败：%s" % exc)
+
+        self.report.action(
+            "已安装远程卸载辅助件（%s + sudoers NOPASSWD）" % SELF_UNINSTALL_PATH
+        )
+        self.report.note("卸载脚本的路径必须在 current 软链之外，sudo 才匹配得上")
 
     def _restrict_config_to_run_user(self) -> None:
         """把配置文件交给**运行 Agent 的那个用户**，别人（包括 root 之外的所有人）读不到。
@@ -1581,6 +2197,8 @@ class Installer:
             scan_roots=self.options.scan_root,
             run_user=self.run_user,
             python=self.options.python or "/usr/bin/python3",
+            unit_dir=self.unit_path.parent,
+            helper_dir=HELPER_DIR,
         )
 
         existing = None
@@ -1617,6 +2235,10 @@ class Installer:
         没有密钥时**不留**这个单元：它会每次开机失败一次，把 journal 刷脏，
         而真正的问题是"这台机器没有密钥，注册不了"。装密钥之后再跑一遍安装器
         即可 —— 那时它会自己补上。
+
+        写完单元要**顺手 start 一次**（见 ``_activate_enroll_unit``）：只
+        ``enable`` 等于"登记下次开机再注册"，本轮装机不注册 —— 现场就是这么
+        变成"机器一直没注册上、而那个单元看起来从没跑过"的。
         """
         self.enroll_unit_path = self.unit_path.parent / ENROLL_UNIT_FILENAME
         self.report.section("注册单元")
@@ -1655,12 +2277,49 @@ class Installer:
                 _handle.write(content)
             self.report.action("已写入 %s" % self.enroll_unit_path)
 
-            if _which("systemctl"):
-                run(["systemctl", "daemon-reload"], check=False)
-                run(["systemctl", "enable", ENROLL_UNIT_FILENAME], check=False)
-                self.report.action("已启用开机注册")
-            else:
-                self.report.warn("找不到 systemctl，请手工启用 %s" % ENROLL_UNIT_FILENAME)
+        if not _which("systemctl"):
+            self.report.warn(
+                "找不到 systemctl，请手工启用并执行 %s" % ENROLL_UNIT_FILENAME
+            )
+            return
+        if self.report.dry_run:
+            self.report.plan("启用并执行 %s（现场把本机注册上）" % ENROLL_UNIT_FILENAME)
+            return
+
+        # 即使单元内容没变也要走这一步：上一次可能正好卡在 start 上（现场就是），
+        # 重跑安装器就是"把注册再试一次"的正常手段。
+        self._activate_enroll_unit()
+
+    def _activate_enroll_unit(self) -> None:
+        """``daemon-reload`` + ``enable`` + **立刻 start** 注册单元。
+
+        ``start`` 是这里的关键：``enable`` 只写了个"开机自启"的软链，本轮装机
+        不会去执行它。现场就栽在这儿 —— 机器一直没注册上，而 ``systemctl status``
+        里那个注册单元显示 ``inactive (dead)``，看起来"没事"（``Type=oneshot``
+        没执行过就是这个状态）。
+
+        装完顺手跑掉，凭据当场就有，Agent 一启动就能同步；失败也**如实报告**并
+        给出可手工复现的下一步，而不是只说一句"已启用"。
+        """
+        run(["systemctl", "daemon-reload"], check=False)
+        run(["systemctl", "enable", ENROLL_UNIT_FILENAME], check=False)
+        # 上次失败留下的 failed 状态并不挡 start，但清掉它日志更好读
+        run(["systemctl", "reset-failed", ENROLL_UNIT_FILENAME], check=False)
+        if run(["systemctl", "start", ENROLL_UNIT_FILENAME], check=False) == 0:
+            self.report.action(
+                "已启用并执行 %s（本机注册完成）" % ENROLL_UNIT_FILENAME
+            )
+            return
+
+        # 单元内部已经自己重试过几轮（见 render_enroll_unit），到这里就是真失败了。
+        self.report.warn("本机还没注册上：%s 执行失败" % ENROLL_UNIT_FILENAME)
+        self.report.note(
+            "看原因: journalctl -u %s -n 50 --no-pager" % ENROLL_UNIT_FILENAME
+        )
+        self.report.note(
+            "手工再来一次: systemctl reset-failed %s && systemctl start %s"
+            % (ENROLL_UNIT_FILENAME, ENROLL_UNIT_FILENAME)
+        )
 
     def _remove_enroll_unit(self) -> None:
         if not self.enroll_unit_path.is_file() or self.report.dry_run:
@@ -1707,6 +2366,137 @@ class Installer:
         self.report.action("已写入 %s（0600，属主 root）" % target)
         self.report.note("密钥能注册整间机房，所以只给 root 读 —— 不要放进 agent.ini")
         return True
+
+    def _read_bundled_policy(self, source: Optional[Path]) -> Optional[dict]:
+        """从**这次拿到的本地来源**顶层读安装策略 JSON。
+
+        找法刻意宽一点：先认 ``install_policy.json``，再认任何顶层 ``*.json`` ——
+        只挑那三个冻结的键，别的键一律不看。名字猜错会让策略**静默不生效**，
+        而那是这类集成最容易踩、又最难发现的坑。
+
+        与包内密钥一样：**只读本地来源，绝不为它联网**。
+        """
+        if source is None:
+            return None
+        path = Path(source)
+
+        if path.is_dir():
+            candidates = sorted(
+                [p for p in path.glob("*.json") if p.is_file()],
+                key=lambda p: (p.name != POLICY_JSON_FILENAME, p.name),
+            )
+            for candidate in candidates:
+                try:
+                    text = candidate.read_text(encoding="utf-8")
+                    data = json.loads(text)
+                except (OSError, UnicodeDecodeError, ValueError) as exc:
+                    self.report.warn("包内 %s 读不出来，忽略：%s" % (candidate, exc))
+                    continue
+                if isinstance(data, dict) and self._has_policy_keys(data):
+                    return data
+            return None
+
+        if not path.is_file():
+            return None
+
+        try:
+            with tarfile.open(str(path), mode="r:*") as archive:
+                members = [
+                    m
+                    for m in archive.getmembers()
+                    # 契约：tar 根目录下的 <名字>.json；`./` 前缀也认
+                    if m.isfile()
+                    and m.name.lstrip("./").count("/") == 0
+                    and m.name.endswith(".json")
+                ]
+                members.sort(key=lambda m: (m.name != POLICY_JSON_FILENAME, m.name))
+                for member in members:
+                    handle = archive.extractfile(member)
+                    if handle is None:  # pragma: no cover - 上面已确认是普通文件
+                        continue
+                    with handle:
+                        payload = handle.read(64 * 1024)
+                    try:
+                        data = json.loads(payload.decode("utf-8"))
+                    except (UnicodeDecodeError, ValueError) as exc:
+                        self.report.warn("包内 %s 不是合法 JSON，忽略：%s" % (member.name, exc))
+                        continue
+                    if isinstance(data, dict) and self._has_policy_keys(data):
+                        return data
+        except (tarfile.TarError, OSError) as exc:
+            self.report.warn("从安装包里读安装策略失败，忽略：%s" % exc)
+        return None
+
+    @staticmethod
+    def _has_policy_keys(data: dict) -> bool:
+        return any(
+            key in data
+            for key in (POLICY_KEY_BOOTSTRAP_KEY, POLICY_KEY_CONFIG, POLICY_KEY_UPGRADE_MODE)
+        )
+
+    def load_install_policy(self, source: Optional[Path]) -> InstallPolicy:
+        """定下这次装机生效的安装策略。
+
+        优先级（高 → 低）：**服务端台账 > 包内策略文件 > 模板默认**。
+
+        为什么台账优先：``--from-server`` 时台账是这台服务端**现在**的说法，
+        而包可能是几天前打的 —— 装的时候应该听服务端的。
+        """
+        from_bundle = self._read_bundled_policy(source)
+        from_ledger = self.ledger if isinstance(self.ledger, dict) else None
+
+        merged: dict = {}
+        origin_parts = []
+        if from_bundle:
+            merged.update(
+                {
+                    key: value
+                    for key, value in from_bundle.items()
+                    if key
+                    in (
+                        POLICY_KEY_BOOTSTRAP_KEY,
+                        POLICY_KEY_CONFIG,
+                        POLICY_KEY_UPGRADE_MODE,
+                    )
+                }
+            )
+            origin_parts.append("包内策略")
+        if from_ledger and self._has_policy_keys(from_ledger):
+            merged.update(
+                {
+                    key: value
+                    for key, value in from_ledger.items()
+                    if key
+                    in (
+                        POLICY_KEY_BOOTSTRAP_KEY,
+                        POLICY_KEY_CONFIG,
+                        POLICY_KEY_UPGRADE_MODE,
+                    )
+                }
+            )
+            origin_parts.append("服务端台账")
+
+        policy = parse_install_policy(
+            merged, report=self.report, origin=" + ".join(origin_parts)
+        )
+        if merged:
+            origin = "（%s）" % policy.origin if policy.origin else ""
+            self.report.note("安装策略%s：%s" % (origin, policy.describe()))
+        elif self.options.from_server and self.report.dry_run:
+            self.report.note("预览模式不联网，拿不到服务端台账 —— 安装策略按模板默认")
+        return policy
+
+    def resolve_upgrade_mode(self) -> "Tuple[str, str]":
+        """定下写进 ``agent.ini`` 的 ``upgrade.mode``，返回 ``(值, 来源)``。
+
+        优先级：``--upgrade-mode``（显式）> 包内/台账策略 > 默认 ``apply``。
+        显式参数用 ``None`` 当"没给" —— 否则"默认 off"与"人明确写 off"分不清。
+        """
+        if self.options.upgrade_mode:
+            return self.options.upgrade_mode, "--upgrade-mode"
+        if self.install_policy.upgrade_mode:
+            return self.install_policy.upgrade_mode, "安装策略"
+        return DEFAULT_UPGRADE_MODE, "默认"
 
     def _read_bundled_bootstrap_key(self, source: Optional[Path]) -> Optional[str]:
         """从**这次拿到的本地来源**里读包内附带的 ``bootstrap.key``；没有就 ``None``。
@@ -1798,6 +2588,136 @@ class Installer:
             return
         self.report.action("已删除 %s（解包残留，不能留在选手可读的版本目录里）" % stale)
 
+    def _replace_bootstrap_key(
+        self,
+        target: Path,
+        bundled_raw: str,
+        version: Optional[str],
+        source: Optional[Path],
+    ) -> None:
+        """按策略用**包内那把**覆盖机器上已有的注册密钥（先备份旧的）。
+
+        覆盖一份共享密钥是不可逆的 —— 留一份备份比事后重新签发便宜得多，
+        而且现场常常需要"拿旧的回去核对一下它为什么被吊销"。
+        """
+        self.report.section("统一注册密钥")
+        try:
+            existing = target.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeDecodeError):
+            existing = ""
+
+        if existing == bundled_raw:
+            # 两边一模一样：策略说 replace 也没有可换的，别制造噪音
+            self.report.skip("机器上的注册密钥与包内那把是同一把，无需替换")
+            self._drop_extracted_bootstrap_key(version)
+            return
+
+        if self.report.dry_run:
+            self.report.plan(
+                "备份旧密钥 → %s（0600 属主 root）" % self._replaced_key_backup_path(target)
+            )
+            self.report.plan("用包内附带的那把替换 %s（策略：replace）" % target)
+            self._drop_extracted_bootstrap_key(version)
+            return
+
+        fingerprint = (
+            hashlib.sha256(existing.encode("utf-8")).hexdigest()[:8] if existing else "?"
+        )
+        backup = self._backup_bootstrap_key(target)
+        message = "已替换机器上原有的注册密钥（旧的那把指纹 %s" % fingerprint
+        message += "；备份 %s）" % backup if backup else "；旧文件没留下备份）"
+        self.report.action(message)
+        self.bootstrap_key_replaced = True
+        self.report.note(
+            "依据安装策略（%s）：包内带了注册密钥时默认用包内这把覆盖机器上已有的"
+            % (self.install_policy.origin or "默认")
+        )
+        if not self._write_bootstrap_key(bundled_raw):
+            self.report.warn(
+                "替换没写成功 —— 机器上现在可能没有可用的注册密钥，请重跑安装器"
+            )
+        self._drop_extracted_bootstrap_key(version)
+
+    def _replaced_key_backup_path(self, target: Path) -> Path:
+        """备份路径：``bootstrap.key.replaced-<时间戳>``（同一秒再撞就加序号）。"""
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        candidate = target.with_name(REPLACED_KEY_PREFIX + stamp)
+        counter = 1
+        while candidate.exists():
+            candidate = target.with_name(REPLACED_KEY_PREFIX + "%s-%d" % (stamp, counter))
+            counter += 1
+        return candidate
+
+    def _backup_bootstrap_key(self, target: Path) -> Optional[Path]:
+        """把旧密钥复制成备份（0600 属主 root）。复制失败不拦装机，只警告。"""
+        backup = self._replaced_key_backup_path(target)
+        try:
+            data = target.read_bytes()
+        except OSError as exc:
+            self.report.warn("读旧密钥失败，跳过备份：%s" % exc)
+            return None
+        try:
+            fd = os.open(str(backup), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                os.write(fd, data)
+            finally:
+                os.close(fd)
+            try:
+                shutil.chown(str(backup), user="root", group="root")
+            except (OSError, LookupError):
+                pass
+        except OSError as exc:
+            self.report.warn("备份旧密钥失败（%s）：继续替换" % exc)
+            return None
+        return backup
+
+    def _report_bundled_key_conflict(
+        self, target: Path, source: Optional[Path], bundled_raw: Optional[str] = None
+    ) -> None:
+        """机器上已有一份密钥，而**包内附带的那份不一样**时，必须把冲突说出来。
+
+        为什么不能沉默：包内附带密钥这个功能要解决的场景就是"机器上躺着的那把
+        已经不能用了"（现场是被 ``revoke`` 吊销，注册返回
+        ``HTTP 403 bootstrap_key_revoked``）。而"已有一份就不覆盖"是**刻意**的
+        安全设计 —— 不能把教师手工放的那把悄悄换掉。两条都要：
+        **保留不覆盖，但把冲突与换法明确说出来**。
+
+        两边一致时一句话都不说：那是最常见的情况（同一批镜像重装），说了就是噪音。
+        """
+        bundled = (
+            bundled_raw
+            if bundled_raw is not None
+            else self._read_bundled_bootstrap_key(source)
+        )
+        if not bundled:
+            return
+        try:
+            existing = target.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeDecodeError):
+            existing = None
+        if existing == bundled:
+            return
+
+        self.bootstrap_key_conflict = True
+        message = (
+            "机器上已有一把统一注册密钥，与安装包内附带的**不是同一把**；"
+            "保留原有的，**没有覆盖**"
+        )
+        if self.report.dry_run:
+            self.report.plan(message)
+        else:
+            self.report.warn(message)
+        self.report.note(
+            "如果注册被服务端拒绝（例如 HTTP 403 bootstrap_key_revoked），"
+            "很可能就是原有的那把不能用了。换法二选一："
+        )
+        self.report.note(
+            "  1) 显式指定新密钥重跑：install.py --bootstrap-key <新密钥> ..."
+        )
+        self.report.note(
+            "  2) 先删掉旧的再重跑：rm %s（之后包内附带的那份会被写入）" % target
+        )
+
     def install_bootstrap_key(
         self, version: Optional[str] = None, source: Optional[Path] = None
     ) -> bool:
@@ -1840,8 +2760,17 @@ class Installer:
             self._drop_extracted_bootstrap_key(version)
             return written
 
-        # 2) 没给密钥 ≠ 没有密钥：上一次装机可能已经放好了一份
+        # 2) 没给密钥 ≠ 没有密钥：上一次装机可能已经放好了一份。
+        #    但**包内带了密钥**时要看策略（默认 replace）：现场就是被"旧的已吊销
+        #    密钥挡住新的"坑到的 —— 教师勾了"携带密钥"，机器却永远注册不上。
         if target.is_file():
+            bundled_raw = self._read_bundled_bootstrap_key(source)
+            policy = self.install_policy.key_policy_with_bundle(bool(bundled_raw))
+            if bundled_raw and policy == BOOTSTRAP_KEY_POLICY_REPLACE:
+                self._replace_bootstrap_key(target, bundled_raw, version, source)
+                return True
+            # 不覆盖（安全），但两边不一样时必须把冲突说出来
+            self._report_bundled_key_conflict(target, source, bundled_raw=bundled_raw)
             self._drop_extracted_bootstrap_key(version)
             return True
 
@@ -1940,7 +2869,14 @@ class Installer:
         self.ensure_user()
         self.ensure_dirs()
 
+        # 权威机器身份要在 Agent **第一次跑之前**写好：它会优先读这个而不是自己
+        # 生成状态目录那份，否则服务端看到的身份与卸载脚本比对的会是两个值。
+        self.install_machine_uuid()
+
         source = self.fetch_bundle()
+        # 安装策略要在动任何东西之前定下来：它决定注册密钥要不要覆盖机器上那把、
+        # agent.ini 的哪些键能更新、以及写进去的 upgrade.mode 是多少。
+        self.install_policy = self.load_install_policy(source)
         version = self.install_release(source)
         self.activate(version)
 
@@ -1958,6 +2894,7 @@ class Installer:
         self.write_config(version)
         self.install_unit(version)
         self.install_enroll_unit(has_bootstrap_key=has_bootstrap_key)
+        self.install_uninstall_helper()
         self.start_service(restarted=True)
 
         self.report.section("完成")
@@ -1967,7 +2904,36 @@ class Installer:
             self.report.note("共 %d 处改动" % self.report.changes)
             self.report.note("查看状态: systemctl status %s" % self.service_name)
             self.report.note("查看日志: journalctl -u %s -n 30" % self.service_name)
+        if self.install_policy.bootstrap_key_policy or self.install_policy.config_policy:
+            self.report.note("生效的安装策略：%s" % self.install_policy.describe())
+        mode, mode_origin = self.resolve_upgrade_mode()
+        self.report.note(
+            "自更新模式: %s（%s）"
+            % (
+                self.effective_upgrade_mode or mode,
+                self.effective_upgrade_mode_origin or mode_origin,
+            )
+        )
+        if self.bootstrap_key_replaced:
+            self.report.note(
+                "注意：机器上原有的注册密钥**已被包内那把替换**（备份就在配置目录里，"
+                "文件名带 .replaced- 前缀）。要回退就把它改回 bootstrap.key。"
+            )
+        if self.bootstrap_key_conflict:
+            self._note_conflict_in_receipt()
         return EXIT_OK
+
+    def _note_conflict_in_receipt(self) -> None:
+        """完成回执里再留一句"密钥冲突"。
+
+        这条警告出现在中间那一大段输出里，很容易被刷过去，而它的后果是
+        "装好了但注册不上"（服务端说密钥被吊销，看着像代码 bug）。
+        """
+        self.report.note(
+            "注意：机器上原有的统一注册密钥与包内附带的不一致，**没有被覆盖** "
+            "（见上面「统一注册密钥」一节）。若注册被拒，请显式重换："
+            "install.py --bootstrap-key <新密钥> ..."
+        )
 
     # ---------------------------------------------------------------- #
     # 卸载
@@ -2009,12 +2975,13 @@ class Installer:
         failed = False
         for did, bad in (
             self._uninstall_units(),
+            self._uninstall_remote_helper(),
             self._remove_tree(
                 self.prefix, "安装根目录", UNINSTALL_PREFIX_MARKERS
             ),
             self._remove_tree(
                 self.config_dir,
-                "配置目录（含统一注册密钥与升级信任锚）",
+                "配置目录（含统一注册密钥、升级信任锚与机器身份）",
                 UNINSTALL_CONFIG_MARKERS,
             ),
             self._uninstall_state(),
@@ -2197,6 +3164,57 @@ class Installer:
             self.report.action("已执行 systemctl daemon-reload")
         return removed, failed
 
+    def _uninstall_remote_helper(self) -> "Tuple[bool, bool]":
+        """删掉远程卸载的辅助件：sudoers 规则 + ``/usr/local/lib/syncoj/``。
+
+        机器身份（``<config-dir>/machine_uuid``）随配置目录一起删，不在这里重复。
+        幂等；辅助目录看起来不是我们的（缺那两个脚本）就跳过 —— 不能因为路径
+        同名就把别人的东西删了。
+        """
+        self.report.section("远程卸载辅助件")
+        removed = False
+        failed = False
+
+        if SUDOERS_PATH.is_file():
+            removed = True
+            if self.report.dry_run:
+                self.report.plan("删除 %s" % SUDOERS_PATH)
+            else:
+                try:
+                    SUDOERS_PATH.unlink()
+                    self.report.action("已删除 %s" % SUDOERS_PATH)
+                except OSError as exc:
+                    self.report.warn("删除 %s 失败：%s" % (SUDOERS_PATH, exc))
+                    failed = True
+        else:
+            self.report.skip("sudoers 规则不存在，跳过：%s" % SUDOERS_PATH)
+
+        if HELPER_DIR.is_dir():
+            ours = [
+                path
+                for path in (SELF_UNINSTALL_PATH, VERIFY_TOKEN_PATH)
+                if path.is_file()
+            ]
+            if not ours:
+                self.report.warn(
+                    "%s 看起来不是 SyncOJ 的辅助目录，为免误删已跳过" % HELPER_DIR
+                )
+            else:
+                removed = True
+                if self.report.dry_run:
+                    self.report.plan("删除 %s" % HELPER_DIR)
+                else:
+                    try:
+                        shutil.rmtree(str(HELPER_DIR))
+                        self.report.action("已删除 %s" % HELPER_DIR)
+                    except OSError as exc:
+                        self.report.warn("删除 %s 失败：%s" % (HELPER_DIR, exc))
+                        failed = True
+        else:
+            self.report.skip("辅助目录不存在，跳过：%s" % HELPER_DIR)
+
+        return removed, failed
+
     def _remove_user(self, created_user: Optional[str] = None) -> "Tuple[bool, bool]":
         """删运行账号，**只删本安装器建过的那个**；``--keep-user`` 仍然跳过。
 
@@ -2248,6 +3266,18 @@ class Installer:
 # --------------------------------------------------------------------------- #
 
 
+def _is_posix_platform() -> bool:
+    """目标机是不是 POSIX（Linux）。
+
+    远程卸载的辅助件（sudoers、以 root 跑的脚本）只对 Linux 有意义；开发机/
+    构建机是 Windows 时硬写只会往 ``C:\\usr\\local\\...`` 塞文件。
+
+    抽成函数是为了让测试能把它换成 True 去检查落盘产物 —— 直接改 ``os.name``
+    会把 ``pathlib`` 也带偏（Windows 上实例化 PosixPath 直接抛异常）。
+    """
+    return os.name == "posix"
+
+
 def _posix(path: Path) -> str:
     """把路径渲染成 POSIX 形式。
 
@@ -2257,6 +3287,38 @@ def _posix(path: Path) -> str:
     现场暴露。
     """
     return path.as_posix()
+
+
+def _best_effort_unlink(path: Path) -> None:
+    """删文件，失败也不抛（临时文件的失败路径专用）。
+
+    Windows 上只读位会挡住 ``unlink``，所以先把只读摘掉再删。
+    """
+    try:
+        os.chmod(str(path), 0o600)
+    except OSError:
+        pass
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def _write_text_file(path: Path, content: str, mode: int) -> None:
+    """按固定权限写一个文本文件。
+
+    **先建成目标权限再写内容**：这些文件里有 sudoers 规则和以 root 执行的脚本，
+    不能出现"先宽权限、之后再 chmod"的窗口。3.8 上 ``write_text`` 没有 ``newline``
+    参数，所以用 ``open``；``os.open(..., mode)`` 会被 umask 削，末尾再 chmod 一次钉死。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(str(path), "w", encoding="utf-8", newline="\n")
+    try:
+        os.chmod(str(path), mode)
+        handle.write(content)
+    finally:
+        handle.close()
+    os.chmod(str(path), mode)
 
 
 def render_config(
@@ -2271,6 +3333,7 @@ def render_config(
     upgrade_mode: str,
     install_root: Path,
     public_key: str,
+    run_user: str,
 ) -> str:
     """生成 agent.ini。
 
@@ -2284,6 +3347,10 @@ def render_config(
     它不再是"反正默认值就对"的东西 —— 自定义 ``--config-dir`` 时默认值
     ``/etc/syncoj/bootstrap.key`` 会指到一个空的路径，表现是"装完起不来、
     日志说找不到统一密钥"，而密钥明明就在旁边。
+
+    ``run_user`` 也**必须**写进去：``{home}`` / ``{desktop}`` 要按它展开，而
+    注册单元以 root 跑一次 —— 配置里没有这个账号时，展开只能按"当前是谁在跑"，
+    于是 root 会把桌面算成 ``/root/桌面``、校验失败退出 2，机器永远不注册。
     """
     return """\
 ; SyncOJ Agent 配置（由安装器生成）
@@ -2297,6 +3364,10 @@ verify_tls = {verify_tls}
 ca_file = {ca_file}
 
 [agent]
+; **运行账号**（安装时定下来的那个）。路径模板里的 {{home}} / {{desktop}}
+; 一律按**它的**家目录解析 —— 与"当前是谁在跑"无关：注册单元以 root 跑，
+; 按 root 的家解析会得到 /root/桌面/...，那台机器上不存在。
+run_user = {run_user}
 ; 统一注册密钥文件（整间机房一份），**root 只读**。
 ; 密钥的**内容**绝不写进本文件：agent.ini 的属主是选手账号，
 ; 学生读得到里面的每一个字节，而那把钥匙能注册整间机房。
@@ -2338,7 +3409,8 @@ file =
 to_stderr = false
 
 [upgrade]
-; off = 只上报不下载（考场推荐）；stage = 下载验签解包但不激活；apply = 完整执行
+; apply = 下载 → 验签 → 切换 → 自动重启（默认）；stage = 只下载验签不激活；
+; off = 完全不动（只在服务端看到"有新版本"，需要人工升级）
 mode = {upgrade_mode}
 install_root = {install_root}
 public_key = {public_key}
@@ -2347,6 +3419,7 @@ public_key = {public_key}
         verify_tls="true" if verify_tls else "false",
         ca_file=ca_file,
         bootstrap_key_file=bootstrap_key_file,
+        run_user=run_user,
         state_dir=_posix(state_dir),
         deploy_root=deploy_root,
         scan_roots=scan_roots,
@@ -2357,7 +3430,13 @@ public_key = {public_key}
     )
 
 
-def _writable_paths(prefix: Path, state_dir: Path) -> List[str]:
+def _writable_paths(
+    prefix: Path,
+    state_dir: Path,
+    config_dir: Path,
+    unit_dir: Path,
+    helper_dir: Path,
+) -> List[str]:
     """``ReadWritePaths=`` 该开哪些目录 —— 只列**确实有理由写**的，且一律带 ``-``。
 
     为什么每一条都带 ``-``：systemd 设沙箱时，``ReadWritePaths=`` 里只要有一条
@@ -2366,24 +3445,362 @@ def _writable_paths(prefix: Path, state_dir: Path) -> List[str]:
     的路径不存在时会被 systemd **跳过**。真机上就是这么炸的：单元里写了一条
     ``/home/student/code``，而那台机器上根本没有那个目录。
 
-    为什么只列这三个：
+    七条，各有各的理由：
 
     * ``%h`` —— systemd 展开成 ``User=`` 的家目录。Agent 以那个账号运行，桌面、
       配对码文件、下发落点都在它下面；不放开写权限，``ProtectSystem=strict``
       会把家目录也变成只读，表现是"服务起来了但什么都不传"。
     * 安装根目录 —— 自更新要往 ``releases/`` 里写。
     * 状态目录 —— 日志、凭据、哈希缓存。
+    * 配置目录 / 单元目录 / ``/etc/sudoers.d`` / 辅助脚本目录 —— 这四条**只**
+      为"管理端授权的远程卸载"服务（见下面"为什么不算提权"）。
+
+    ## 为什么这不算提权（四条系统目录）
+
+    这四条目录的属主与权限是 ``root:root`` + ``0755``（目录）/ ``0644``（文件），
+    **运行账号在 DAC 上根本写不进去** —— 放开挂载命名空间里的写权限，写盘的
+    权限还是由文件权限说了算。真正能用上它们的只有"验过管理端签名、并且被
+    ``sudoers`` 允许以 root 跑那一个固定脚本"的那条路：
+
+    * ``sudoers`` 那一行是**无参数、无通配符**的固定路径
+      （见 :func:`render_uninstall_sudoers`）；
+    * 令牌只走 stdin、签名由发布私钥产生，选手伪造不出来。
+
+    换句话说：一个普通选手账号即使知道这些路径可写，也没有任何一个入口能写到
+    它们 —— 而一旦"有人能随手改写系统目录"，那台机器早就已经失守了。
+
+    ## 为什么不用另外两条路
+
+    * **nsenter / 逃出沙箱**：那是往沙箱里开一条逃逸通道（``CAP_SYS_ADMIN`` +
+      宿主命名空间），而且依赖 util-linux 的版本与可用性 —— 为了删几个文件把
+      整个沙箱的意义削掉，不划算。
+    * **路径触发的 root 单元**：要求把令牌**落到磁盘**上再由 systemd 的 path
+      单元捡起来。而令牌的设计约束恰恰是"只在内存里、只走 stdin、不落盘"
+      （落盘就多一份可被复制/残留的授权凭证）。方向反了。
 
     刻意**不**列 ``deploy_root`` / ``scan.roots`` 的具体值：它们是可选配置、
     真机上可能不存在，而默认值都在 ``%h`` 之下（已经覆盖），多列一条就多一个
-    226 的机会。也刻意**不**列配置目录：Agent 只读它（写凭据的是
-    ``syncoj-agent-enroll`` 那个 root 单元），列成可写等于让选手账号能改
-    ``bootstrap.key`` / ``agent.ini``，那是安全降级。
+    226 的机会。
     """
-    writable = ["-%h", "-%s" % _posix(prefix), "-%s" % _posix(state_dir)]
-    # 去重但保持顺序（--prefix 与 --state-dir 被指到同一个目录时会出现重复）
+    writable = [
+        "-%h",
+        "-%s" % _posix(prefix),
+        "-%s" % _posix(state_dir),
+        # ---- 只为远程卸载开的四条（见上面"为什么不算提权"）----
+        "-%s" % _posix(config_dir),
+        "-%s" % _posix(unit_dir),
+        "-%s" % _posix(SUDOERS_PATH.parent),
+        "-%s" % _posix(helper_dir),
+    ]
+    # 去重但保持顺序（--prefix 与 --state-dir 被指到同一个目录时会出现重复），
+    # 并且丢掉"根目录"这一条：把 `/` 放进 ReadWritePaths= 等于把整个文件系统
+    # 放开。它只可能来自 `--config-dir /` 这类误配，宁可少一条。
     seen = set()
-    return [p for p in writable if not (p in seen or seen.add(p))]
+    unique = [p for p in writable if not (p in seen or seen.add(p))]
+    return [p for p in unique if p not in ("-/", "-")]
+
+
+# --------------------------------------------------------------------------- #
+# 远程卸载（管理端授权 → 机器本地执行）
+# --------------------------------------------------------------------------- #
+#
+# 授权模型：**服务端用发布私钥签一枚一次性令牌，机器本地用已有的升级信任锚
+# 验签，验过才以 root 删。** 令牌只有在教师点了按钮之后才存在（选手拿不到私钥，
+# 伪造不出来），并且绑本机 machine_uuid + 短有效期（15 分钟），搬不到别的机器。
+
+#: 自卸载脚本与验签脚本的固定目录。**必须在 ``current`` 软链之外**：sudo 的
+#: NOPASSWD 白名单按字面路径匹配、**不解析符号链接**，放在链接下等于白名单
+#: 永远匹配不上，整条授权链就是哑的。
+HELPER_DIR = Path("/usr/local/lib/syncoj")
+SELF_UNINSTALL_PATH = HELPER_DIR / "self_uninstall.sh"
+VERIFY_TOKEN_PATH = HELPER_DIR / "verify_uninstall_token.py"
+
+#: sudoers 规则（0440 root:root）：只允许运行账号免密执行**那一个固定路径**。
+SUDOERS_PATH = Path("/etc/sudoers.d/syncoj-uninstall")
+
+#: 一次性令牌的长度上限（服务端签出来的只有几百字节）。
+MAX_UNINSTALL_TOKEN_BYTES = 8 * 1024
+
+
+#: 验卸载令牌的脚本内容。**独立、零依赖、Python 3.8 可跑**。
+#:
+#: 刻意不 import syncoj_agent：执行它的那一刻 Agent 包可能正在被删（卸载就在删
+#: 它），而且"用要被删掉的东西验证自己能不能被删"是循环依赖。所以 RSA 验签
+#: 在这里重写了一遍 —— 与安装器自包含同一个先例。
+_VERIFY_TOKEN_SCRIPT = r'''#!/usr/bin/env python3
+"""验一枚远程卸载授权令牌（令牌从 **stdin** 读）。
+
+刻意不 import syncoj_agent：执行它的那一刻 Agent 包可能正在被删，而且"用要被
+删掉的东西验证自己能不能被删"是循环依赖。RSA 验签在这里独立重写了一遍。
+
+令牌只走 stdin（argv 会被 ps 看到）。通过 exit 0；任何不通过 exit 1，并往
+stderr 写一句人话（**不含令牌**）。
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import binascii
+import hashlib
+import hmac
+import json
+import sys
+import time
+
+KIND = "agent_uninstall"
+VERSION = 1
+MAX_TOKEN_BYTES = 8 * 1024
+SHA256_DIGEST_INFO_PREFIX = bytes.fromhex("3031300d060960864801650304020105000420")
+MIN_MODULUS_BITS = 2048
+
+
+class VerificationError(Exception):
+    pass
+
+
+def _b64url(text):
+    cleaned = text.strip().replace("+", "-").replace("/", "_")
+    padding = "=" * (-len(cleaned) % 4)
+    try:
+        return base64.urlsafe_b64decode(cleaned + padding)
+    except (binascii.Error, ValueError) as exc:
+        raise VerificationError("base64 解码失败: %s" % exc)
+
+
+def _load_public_key(path):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise VerificationError("读不到发布公钥 %s: %s" % (path, exc))
+    if not isinstance(data, dict):
+        raise VerificationError("发布公钥不是 JSON 对象: %s" % path)
+    if data.get("alg") not in (None, "RS256"):
+        raise VerificationError("不支持的算法: %r" % data.get("alg"))
+    try:
+        n = int.from_bytes(_b64url(str(data["n"])), "big")
+        e = int.from_bytes(_b64url(str(data["e"])), "big")
+    except KeyError as exc:
+        raise VerificationError("发布公钥缺少字段: %s" % exc)
+    if n.bit_length() < MIN_MODULUS_BITS:
+        raise VerificationError("发布公钥太短（%d 位）" % n.bit_length())
+    return n, e
+
+
+def _verify_signature(n, e, message, signature):
+    length = (n.bit_length() + 7) // 8
+    if len(signature) != length:
+        return False
+    value = int.from_bytes(signature, "big")
+    if value >= n:
+        return False
+    try:
+        recovered = pow(value, e, n)
+        encoded = recovered.to_bytes(length, "big")
+    except (ValueError, OverflowError):
+        return False
+    digest_info = SHA256_DIGEST_INFO_PREFIX + hashlib.sha256(message).digest()
+    padding_length = length - len(digest_info) - 3
+    if padding_length < 8:
+        return False
+    expected = b"\x00\x01" + b"\xff" * padding_length + b"\x00" + digest_info
+    return hmac.compare_digest(encoded, expected)
+
+
+def _read_text(path):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def check(token, public_key_path, machine_uuid_path, now=None):
+    signed, dot, signature_text = token.partition(".")
+    if not dot or not signed or not signature_text:
+        raise VerificationError("格式不是 payload.签名 两段")
+    signature = _b64url(signature_text)
+    n, e = _load_public_key(public_key_path)
+    if not _verify_signature(n, e, signed.encode("ascii"), signature):
+        raise VerificationError("签名验不过（不是这台服务端的发布私钥签的）")
+    try:
+        payload = json.loads(_b64url(signed).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise VerificationError("payload 不是合法 JSON: %s" % exc)
+    if not isinstance(payload, dict):
+        raise VerificationError("payload 不是对象")
+    if payload.get("v") != VERSION:
+        raise VerificationError("不支持的令牌版本: %r" % payload.get("v"))
+    if payload.get("kind") != KIND:
+        raise VerificationError("令牌种类不是 %s" % KIND)
+    local = _read_text(machine_uuid_path)
+    if not local:
+        raise VerificationError("读不到本机权威机器身份: %s" % machine_uuid_path)
+    if str(payload.get("machine_uuid") or "") != local:
+        raise VerificationError("令牌不是发给这台机器的")
+    expires_at = payload.get("expires_at")
+    if not isinstance(expires_at, int):
+        raise VerificationError("令牌缺少 expires_at")
+    current = time.time() if now is None else float(now)
+    if current >= expires_at:
+        raise VerificationError("令牌已过期")
+    return payload
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="验一枚远程卸载授权令牌（令牌从 stdin 读）"
+    )
+    parser.add_argument("--public-key", default="/etc/syncoj/release-key.pub.json")
+    parser.add_argument("--machine-uuid-file", default="/etc/syncoj/machine_uuid")
+    parser.add_argument("--now", type=float, default=None, help="当前 Unix 秒（测试用）")
+    args = parser.parse_args(argv)
+
+    raw = sys.stdin.buffer.read(MAX_TOKEN_BYTES + 1)
+    if len(raw) > MAX_TOKEN_BYTES:
+        print("卸载令牌过长，拒绝", file=sys.stderr)
+        return 1
+    token = raw.decode("ascii", "replace").strip()
+    if not token:
+        print("没有从 stdin 读到卸载令牌", file=sys.stderr)
+        return 1
+
+    try:
+        payload = check(token, args.public_key, args.machine_uuid_file, args.now)
+    except VerificationError as exc:
+        print("卸载令牌不通过：%s" % exc, file=sys.stderr)
+        return 1
+    print("卸载令牌通过（机器 %s）" % payload.get("machine_uuid"))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+#: 自卸载脚本内容。``@@大写占位@@`` 在安装时按实际布局替换（刻意不用 % 格式化：
+#: 脚本里到处是 shell 的 ``${}`` 与 python 的 ``%s``，用字符串替换最不容易伤到它们）。
+_SELF_UNINSTALL_SCRIPT = r'''#!/bin/sh
+# SyncOJ Agent 自卸载 —— **以 root 执行**，由管理端签署的一次性令牌授权。
+#
+# 为什么固定在 @@HELPER_DIR@@/ 而不是 current/ 下面：sudo 的 NOPASSWD 白名单
+# 按**字面路径**匹配、不解析符号链接；放在 current 软链下面白名单永远匹配不上。
+#
+# 令牌只走 stdin：不进 argv（ps 能看到）、不写文件、不进日志。
+#
+# 顺序有讲究：先 disable（**不要 --now**：脚本自己就跑在这个单元的 cgroup 里，
+# stop 会把自己杀掉），最后才删目录与辅助脚本。
+set -u
+
+VERIFY=@@HELPER_DIR@@/verify_uninstall_token.py
+PUBLIC_KEY=@@PUBLIC_KEY@@
+MACHINE_UUID=@@MACHINE_UUID_FILE@@
+UNIT_DIR=@@UNIT_DIR@@
+SERVICE=@@UNIT_FILENAME@@
+ENROLL_UNIT=@@ENROLL_UNIT_FILENAME@@
+PREFIX=@@PREFIX@@
+CONFIG_DIR=@@CONFIG_DIR@@
+STATE_DIR=@@STATE_DIR@@
+HELPER_DIR=@@HELPER_DIR@@
+SUDOERS=@@SUDOERS_PATH@@
+
+fail() { echo "$1" >&2; exit 1; }
+
+# 1) 从 stdin 读令牌，上限 8 KB
+TOKEN=$(head -c 8192 2>/dev/null) || TOKEN=""
+[ -n "$TOKEN" ] || fail "没有从 stdin 读到卸载令牌"
+
+# 2) 验签：签名 / kind / v / expires_at / machine_uuid 都过才继续
+printf '%s' "$TOKEN" | python3 -E -s "$VERIFY" \
+    --public-key "$PUBLIC_KEY" --machine-uuid-file "$MACHINE_UUID" \
+    || fail "卸载令牌校验失败，拒绝执行"
+TOKEN=""
+
+echo "==> 已获授权，开始卸载"
+
+# 3) 停用单元（best-effort：沙箱里 systemctl 可能连不上 D-Bus，真正保证
+#    "重启后不回来"的是下面删单元文件那一步）
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl disable "$SERVICE" >/dev/null 2>&1 || true
+    systemctl disable "$ENROLL_UNIT" >/dev/null 2>&1 || true
+fi
+
+failed=0
+remove_path() {
+    if [ -e "$1" ] || [ -L "$1" ]; then
+        if rm -rf "$1" 2>/dev/null; then
+            echo "  已删除 $1"
+        else
+            echo "  !! 删除失败 $1" >&2
+            failed=1
+        fi
+    else
+        echo "  = 不存在，跳过 $1"
+    fi
+}
+
+# 4) 单元文件与开机自启链接（直接删，不依赖 systemctl）
+#
+# **`*.wants/` 下的软链才是"重启之后不会再回来"的保证。**
+# 上面那两个 `systemctl disable` 只是 best-effort：脚本跑在 Agent 自己的
+# cgroup / mount namespace 里，systemctl 很可能连不上 D-Bus（D-Bus 走 AF_UNIX，
+# 而单元里 RestrictAddressFamilies=AF_INET AF_INET6 —— 这是刻意的，不放开），
+# 它失败是静默的。删掉软链之后，即使单元文件一时没删掉，开机也不会被拉起。
+#
+# 用 glob 是因为链接可能落在 multi-user.target.wants/ **之外**（比如装了图形化
+# 目标之后 systemd 会往 graphical.target.wants/ 里也放一份），而两个单元都要清。
+# 但**只按单元名匹配**：绝不整目录 rm（那会删掉别的服务）。
+remove_path "$UNIT_DIR/$SERVICE"
+remove_path "$UNIT_DIR/$ENROLL_UNIT"
+for link in "$UNIT_DIR"/*.wants/"$SERVICE" "$UNIT_DIR"/*.wants/"$ENROLL_UNIT"; do
+    remove_path "$link"
+done
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+
+# 5) 安装目录 / 配置目录 / 状态目录
+remove_path "$PREFIX"
+remove_path "$CONFIG_DIR"
+remove_path "$STATE_DIR"
+
+# 6) sudoers 规则与辅助脚本目录
+remove_path "$SUDOERS"
+remove_path "$HELPER_DIR"
+
+if [ "$failed" -ne 0 ]; then
+    fail "有项目删除失败。若失败的是 /etc 或 /opt 下的东西，多半是主单元的
+ProtectSystem=strict 只读挂载挡住了删除 —— 见 agent/packaging/install.py
+render_unit 的说明。"
+fi
+
+echo "==> 卸载完成"
+exit 0
+'''
+
+
+def render_uninstall_sudoers(run_user: str) -> str:
+    """sudoers 规则：**只**允许运行账号免密执行那一个固定路径的自卸载脚本。
+
+    一行、没有通配符 —— 通配符会让"白名单"变成"任何东西"。写入前必须过
+    :func:`visudo_lint`：半个 sudoers 文件会让 sudo 整体不可用。
+    """
+    return "%s ALL=(root) NOPASSWD: %s\n" % (run_user, _posix(SELF_UNINSTALL_PATH))
+
+
+def visudo_lint(path: Path) -> Optional[bool]:
+    """用 ``visudo -c -f`` 校验一份 sudoers 文件。
+
+    返回 ``True`` 通过、``False`` 不通过、``None`` 表示**没有 visudo 可校验**
+    （测试/构建机上常见）。``None`` 不是"通过"—— 调用方必须如实说"没校验"，
+    不能假装验过。
+    """
+    visudo = _which("visudo")
+    if not visudo:
+        return None
+    return run([visudo, "-c", "-f", str(path)], check=False) == 0
 
 
 def render_enroll_unit(
@@ -2402,11 +3819,15 @@ def render_enroll_unit(
     几个容易踩的点：
 
     * ``Type=oneshot`` + ``RemainAfterExit=no``：它只在开机时跑一次就好。
-      **必须**在 Agent 之前跑完（``Before=``）—— 否则 Agent 先起来，发现没有
-      凭据就报错退出，然后被 ``Restart=`` 拉起，日志里刷一堆没必要的失败。
-    * **不要 ``Restart=``**：注册失败的原因多半是服务端没起、密钥被吊销、
-      网还没通。无限重试只会把日志刷满，``systemctl status`` 里反而看不清原因。
-      开机一次失败不致命 —— 下次开机还会再试，而且密钥没换的话它本来就会再试。
+      要在 Agent 之前跑（``Before=``）—— 反过来的话 Agent 会先进入"等凭据"状态，
+      白白空转一轮轮询才注册上；虽然无害，但没必要。
+    * **有限重试，但别靠 ``Restart=``**：注册失败的原因多半是服务端没起、密钥被吊销、
+      网还没通，这些都值得再试两下。但必须有上限：无脑重试只会把日志刷满，
+      ``systemctl status`` 里反而看不清原因 —— 真机上见过"重启 249 次"打到
+      StartLimit 的场面。所以单元自己最多试 ``ENROLL_RETRIES`` 次，失败时用一句
+      可操作的话收尾（试了几次、``systemctl reset-failed`` 之后再手工 ``start``）。
+      一次开机失败不致命：下次开机还会再试（``WantedBy=multi-user.target``），
+      而 Agent 在凭据出现前只会安静地等。
     * ``chown-to`` 交给选手：写出来的凭据属主是 root，而读它的是选手。
       不交出去的话，表现是"服务起来了但一直重新注册"，很难联想到是属主问题 ——
       我们在 ``agent.ini`` 上已经踩过一次同样的坑。
@@ -2425,10 +3846,18 @@ RemainAfterExit=no
 User=root
 # 和 Agent 本体同一条启动路径：-E -s + run_agent.py。
 # 用同一份代码注册，才不会出现"装机时能注册、开机后认不出来"
-ExecStart=%(python)s -E -s %(prefix)s/%(current)s/%(launcher)s \\
-    --config %(config)s --provision --chown-to %(user)s
+#
+# 外面套一层 sh 是为了**有限重试**，不是为了别的：注册失败多半只是服务端还没起
+# 或网还没通，值得再试两下；但必须有上限 —— 见上面 docstring。这个循环故意写在
+# 单元自己的 ExecStart 里，而不是交给 systemd 的重启策略去接管：oneshot 在各
+# systemd 版本上行为不一致，而循环在哪都能跑，还能自己数清"试了几次"、把手工
+# 恢复的命令打出来。
+# （这段 shell 被单引号包着，所以里面不能再出现单引号。）
+ExecStart=/bin/sh -c 'attempt=1; while true; do %(python)s -E -s %(prefix)s/%(current)s/%(launcher)s --config %(config)s --provision --chown-to %(user)s && exit 0; if [ "$attempt" -ge %(retries)d ]; then echo "SyncOJ: 注册连续失败 $attempt 次，已达上限，不再重试。请检查 %(config)s 的 server_url、/etc/syncoj/bootstrap.key 和网络，然后手工再来一次：systemctl reset-failed %(enroll_unit)s; systemctl start %(enroll_unit)s（或者重跑 bootstrap.sh）。" >&2; exit 1; fi; echo "SyncOJ: 注册第 $attempt 次失败，%(delay)d 秒后重试（最多 %(retries)d 次）" >&2; attempt=$((attempt + 1)); sleep %(delay)d; done'
 StandardOutput=journal
 StandardError=journal
+# 几次尝试加上网络超时可能超过默认的 90s，显式放宽，别让 systemd 中途把它杀掉
+TimeoutStartSec=%(timeout)d
 # 注册会读 status dir 与 /etc，不需要写系统目录
 ProtectSystem=strict
 ProtectControlGroups=yes
@@ -2440,6 +3869,7 @@ ReadWritePaths=-%(state)s
 WantedBy=multi-user.target
 """ % {
         "service": UNIT_FILENAME,
+        "enroll_unit": ENROLL_UNIT_FILENAME,
         "python": python,
         "prefix": _posix(prefix),
         "current": CURRENT_LINK,
@@ -2447,6 +3877,9 @@ WantedBy=multi-user.target
         "config": _posix(config_path),
         "user": run_user,
         "state": _posix(state_dir),
+        "retries": ENROLL_RETRIES,
+        "delay": ENROLL_RETRY_DELAY_SECONDS,
+        "timeout": ENROLL_RETRY_DELAY_SECONDS * (ENROLL_RETRIES + 2) + 60,
     }
 
 
@@ -2458,6 +3891,8 @@ def render_unit(
     scan_roots: str,
     run_user: str,
     python: str,
+    unit_dir: Optional[Path] = None,
+    helper_dir: Optional[Path] = None,
 ) -> str:
     """生成 systemd 单元。
 
@@ -2482,8 +3917,18 @@ def render_unit(
     那里。默认值 ``{desktop}`` / ``{desktop}/{player_no}`` 都在 ``%h`` 之下，
     本来就被覆盖；写进来只会多一条可能踩雷的指令。参数保留只是为了调用方签名
     稳定（单元内容不再依赖它们）。
+
+    ``unit_dir`` / ``helper_dir`` 是给 ``ReadWritePaths=`` 用的（远程卸载要在
+    沙箱里删单元文件与辅助脚本，见 :func:`_writable_paths`）。不给就用默认值，
+    这样测试里只关心 Agent 本体的用例不必凑这两个参数。
     """
-    writable = _writable_paths(prefix, state_dir)
+    if unit_dir is None:
+        unit_dir = Path("/etc/systemd/system")
+    if helper_dir is None:
+        helper_dir = HELPER_DIR
+    writable = _writable_paths(
+        prefix, state_dir, config_path.parent, Path(unit_dir), Path(helper_dir)
+    )
 
     lines = [
         "[Unit]",
@@ -2533,8 +3978,15 @@ def render_unit(
         "",
         "# ---- 权限隔离 ----",
         "User=%s" % run_user,
-        "Group=%s" % run_user,
-        "NoNewPrivileges=yes",
+        # 刻意**不写 Group=**：systemd 会按 NSS 解析该账号的主组。写死
+        # `Group=<账号名>` 会在"主组与账号不同名"的账号上撞 217/GROUP。
+        #
+        # 刻意**不要 NoNewPrivileges=yes**：它会让 setuid 的 sudo 无法提权，
+        # `sudo -n /usr/local/lib/syncoj/self_uninstall.sh` 必然失败（报
+        # "effective uid is not 0"），管理端授权的远程卸载整条授权链就是死的。
+        # 服务以普通账号运行，**那个账号本人在本机同样能执行任何 setuid 程序**，
+        # 所以这一条对"防选手"没有增量价值。其余加固全部保留（ProtectSystem=strict、
+        # PrivateTmp、PrivateDevices、RestrictAddressFamilies、ProtectKernel* …）。
         "PrivateTmp=yes",
         "PrivateDevices=yes",
         # strict 把 /usr /etc /boot 等系统目录全部只读 —— 这才是它的价值
@@ -2645,59 +4097,14 @@ def default_run_user() -> str:
     家目录下的东西。安装器自己新建一个专用账号（``syncoj``）的话，它的家目录
     其实是状态目录 —— 读不到选手的桌面，表现是"服务起来了但扫描/下发全是空的"。
     而且专用账号还多出"卸载时可能误删人账号"的风险，见 :data:`CREATED_USER_MARKER_FILENAME`。
+
+    **以 root 跑安装时这里会算出 ``root``**：不静默接受，由 :meth:`Installer.preflight`
+    报错要求显式 ``--user``（显式写 ``--user root`` 才允许，并且会打一条警告）。
     """
     sudo_user = (os.environ.get("SUDO_USER") or "").strip()
     if sudo_user:
         return sudo_user
     return _current_user_name() or DEFAULT_RUN_USER
-
-
-def _home_of(user: str) -> Optional[Path]:
-    """某个系统账号的家目录；查不到（非 POSIX / 账号不存在）返回 None。"""
-    try:
-        import pwd
-    except ImportError:  # pragma: no cover - 非 POSIX
-        return None
-    try:
-        return Path(pwd.getpwnam(user).pw_dir)
-    except (KeyError, OSError):
-        return None
-
-
-def _desktop_from_xdg(home: Path) -> Optional[Path]:
-    """读 ``~/.config/user-dirs.dirs`` 里的 ``XDG_DESKTOP_DIR``（最权威）。"""
-    path = home / ".config" / "user-dirs.dirs"
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-    for line in text.splitlines():
-        line = line.strip()
-        if not line.startswith("XDG_DESKTOP_DIR"):
-            continue
-        _, _, value = line.partition("=")
-        value = value.strip().strip("\"'").replace("${HOME}", str(home)).replace("$HOME", str(home))
-        if value:
-            return Path(value)
-    return None
-
-
-def _desktop_of(home: Path) -> Path:
-    """某个账号家目录下的桌面。
-
-    与 ``syncoj_agent/state.py::detect_desktop`` 同一套顺序 —— 安装器**不能**
-    import 那段代码（单文件自包含，目标机上此刻还没有 Agent 包），所以刻意重写
-    一遍，与"安全解包"同一个先例。找不到实际存在的桌面时按中文环境猜 ``~/桌面``：
-    退回家目录会让 Agent 把整个家目录当成工作区扫。
-    """
-    from_xdg = _desktop_from_xdg(home)
-    if from_xdg is not None:
-        return from_xdg
-    for name in DESKTOP_CANDIDATES:
-        candidate = home / name
-        if candidate.is_dir():
-            return candidate
-    return home / "桌面"
 
 
 def _python_ok(python: str) -> bool:
@@ -2814,8 +4221,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="覆盖已存在的 agent.ini（默认保留教师的手工修改）")
 
     upgrade = parser.add_argument_group("自更新")
-    upgrade.add_argument("--upgrade-mode", default="off", choices=["off", "stage", "apply"],
-                         help="off=不自动升级（默认）")
+    upgrade.add_argument("--upgrade-mode", default=None, choices=["off", "stage", "apply"],
+                         help="apply=下载并自动切换（默认）、stage=只下载验签、off=不自动升级；"
+                              "显式给的值优先于包内/台账里的升级策略")
     upgrade.add_argument("--public-key", default="", help="发布签名公钥路径")
 
     layout = parser.add_argument_group("布局（测试与定制用）")
@@ -2826,11 +4234,12 @@ def build_parser() -> argparse.ArgumentParser:
     layout.add_argument("--service-name", default=SERVICE_NAME)
     layout.add_argument(
         "--user",
-        default=default_run_user(),
+        default=None,
         help=(
             "Agent 以哪个账号运行。**默认就是跑安装的那个人**（sudo 时为 SUDO_USER，"
-            "否则为当前用户）—— 因为选手桌面在他的家目录下。显式指定一个不存在的"
-            "系统账号时才会创建它；卸载只删这种“安装器建的”账号。"
+            "否则为当前用户）—— 因为选手桌面在他的家目录下；以 root 跑安装时必须"
+            "显式给出（拒绝默认成 root）。显式指定一个不存在的系统账号时才会创建"
+            "它；卸载只删这种“安装器建的”账号。"
         ),
     )
     layout.add_argument("--python", default="", help="Agent 使用的 python3 路径")

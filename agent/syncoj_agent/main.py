@@ -113,6 +113,50 @@ REDISCOVER_AFTER_FAILURES = 3
 #: 不用"启动成功"作为判据 —— 起得来但一 tick 就崩的版本同样必须回滚。
 HEALTHY_CYCLES_BEFORE_TRUST = 3
 
+#: 自卸载脚本的固定路径。**在 current 软链之外**：sudo 的 NOPASSWD 白名单按
+#: 字面路径匹配、不解析符号链接（见 install.py 的同名常量与注释）。
+SELF_UNINSTALL_PATH = "/usr/local/lib/syncoj/self_uninstall.sh"
+
+#: 一次性卸载令牌的长度上限（服务端签出来的只有几百字节）。
+MAX_UNINSTALL_TOKEN_BYTES = 8 * 1024
+
+#: 卸载执行失败后的重试间隔（秒）。**绝不每个 tick 都去撞 sudo**：失败可能是
+#: sudoers 没装好、令牌过期、脚本缺失，连着撞只会把日志刷爆、也烧 CPU。
+UNINSTALL_RETRY_SECONDS = 3600.0
+
+#: 等自卸载脚本跑完的上限（秒）。它要删目录、要调 systemctl，但不会太久。
+UNINSTALL_TIMEOUT_SECONDS = 120.0
+
+#: 注册单元的单元名（root 身份跑一次注册的那个）。Agent **永远不自己注册** ——
+#: 它以选手身份运行，读不到 root 只读的统一密钥；撞上去只会 PermissionError →
+#: 退出 → 被 systemd 反复重启（真机上就这么卡住过）。所以没凭据时它只等这个
+#: 单元把凭据放进来。
+ENROLL_UNIT_NAME = "syncoj-agent-enroll.service"
+
+#: 等注册凭据的轮询间隔（秒）。一分钟足够及时，也不会刷日志。
+REGISTRATION_POLL_SECONDS = 60.0
+
+
+def _run_uninstall_command(argv, stdin_bytes):
+    """真正执行 ``sudo -n <self_uninstall.sh>``：令牌**只走 stdin**。
+
+    返回 ``(returncode, stderr 摘要)``。做成模块级函数是为了让测试注入替身 ——
+    单元测试里不该真去碰 sudo 与 systemd。
+    """
+    try:
+        completed = subprocess.run(
+            argv,
+            input=stdin_bytes,
+            capture_output=True,
+            timeout=UNINSTALL_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, "自卸载脚本超时（%d 秒）" % UNINSTALL_TIMEOUT_SECONDS
+    except OSError as exc:
+        return 127, "无法执行自卸载脚本: %s" % exc
+    stderr = (completed.stderr or b"").decode("utf-8", "replace").strip()
+    return completed.returncode, stderr
+
 
 def join_report_path(prefix: str, rel_path: str) -> str:
     """拼出上报给服务端的路径。
@@ -144,6 +188,7 @@ def build_tick_payload(
     stats: Dict[str, object],
     completed_assets: Optional[List[int]] = None,
     scan_complete: bool = True,
+    release_public_key: bool = False,
 ):
     """构造 tick 请求体。
 
@@ -193,6 +238,10 @@ def build_tick_payload(
         # 本地已确认完整的下发资源。服务端据此把下发目标标为完成 ——
         # 由 Agent 显式上报，而不是让服务端从"partials 里没有它"去推断
         "completed_assets": list(completed_assets or []),
+        # 本机有没有可用的发布公钥（升级信任锚）。服务端据此决定"能不能下发
+        # 远程卸载授权"：没有公钥的机器一定验不了签，发了也是白发。
+        # 只报"在不在"，不含任何密钥内容。
+        "release_public_key": bool(release_public_key),
         "stats": final_stats,
     }
     return payload, oversize, errors
@@ -204,9 +253,11 @@ class Agent:
         self.config.state_dir.mkdir(parents=True, exist_ok=True)
 
         self.machine_id = resolve_machine_id(config.machine_id, config.state_dir)
-        #: 本机身份：首次运行时生成并持久化。比 /etc/machine-id 更适合当身份 ——
-        #: 克隆镜像没做通用化时 machine-id 是整批相同的
-        self.machine_uuid = resolve_machine_uuid(config.state_dir)
+        #: 本机身份：**优先读安装器写的权威那份**（<config-dir>/machine_uuid），
+        #: 读不到才退回状态目录里那份。远程卸载令牌绑的就是这个值。
+        self.machine_uuid = resolve_machine_uuid(
+            config.state_dir, config.machine_uuid_file
+        )
         #: 硬件指纹：快照还原后仍然不变，服务端靠它认回"原来那台机器"
         self.machine_fingerprint = resolve_machine_fingerprint()
         self.client = AgentClient(
@@ -242,6 +293,17 @@ class Agent:
         #: 上一轮结束时机器处于哪一态。**状态变化**时才报审计事件 ——
         #: 每轮都报会把事件通道刷满，而它本来是用来查异常的
         self._last_state: Optional[str] = None
+
+        #: 远程卸载：上一次失败的退避截止时刻（monotonic 秒）。**绝不每轮都去撞
+        #: sudo** —— 失败可能是 sudoers 没装好、令牌过期、脚本缺失，连着撞只会刷日志。
+        self._uninstall_blocked_until = 0.0
+        #: 上一次失败的摘要（进 tick 的 stats.last_error；**绝不含令牌**）。
+        self._last_error: Optional[str] = None
+        #: 执行卸载命令的 runner：``(argv, stdin_bytes) -> (returncode, stderr)``。
+        #: 默认真的跑 `sudo -n`；测试里换成假的，不碰 sudo 与 systemd。
+        self._run_uninstall = _run_uninstall_command
+        #: "还没注册凭据、在等注册单元"这条日志只说一次（别的每轮轮询不刷屏）
+        self._registration_logged = False
 
     # ---------------------------------------------------------------- #
     # 生命周期
@@ -318,14 +380,25 @@ class Agent:
     # 扫描
     # ---------------------------------------------------------------- #
 
-    def _ensure_credential(self) -> Credential:
+    def _ensure_credential(self) -> Optional[Credential]:
         return self.ensure_credential()
 
-    def ensure_credential(self) -> Credential:
-        """确保手上有一份可用凭据；没有就注册。
+    def ensure_credential(self, *, allow_enroll: bool = False) -> Optional[Credential]:
+        """确保手上有一份可用凭据；没有就返回 ``None``（或按参数去注册）。
+
+        **常驻服务永不自己注册**（``allow_enroll=False``，默认）：注册密钥是 root
+        只读的，注册由 root 的 ``syncoj-agent-enroll.service`` 做一次。Agent 以
+        选手身份跑，读不到密钥 —— 去撞它只会 ``PermissionError`` → 抛异常 → 退出
+        → 被 systemd 反复重启，而**注册单元从来没被跑过**（真机上就是这么卡住的）。
+        所以没凭据时返回 ``None``，由 :meth:`_wait_for_credential` 进入"等凭据"这个
+        **正常状态**。
+
+        ``--provision``（root 跑的那条路）传 ``allow_enroll=True`` —— 它才是唯一
+        会注册的地方，缺密钥/读不到密钥在那里仍然是错误（那时它是 root，读不到
+        就是真的配置错了）。
 
         公开名字（无下划线）是因为 ``--provision`` 也要用它 —— 装机时的 root
-        一次性单元与常驻循环**必须走同一条注册路径**，否则"装机时能注册、
+        一次性单元与常驻循环**必须走同一条凭据读取路径**，否则"装机时能注册、
         开机后认不出来"这类问题会以最难查的方式出现。
         """
         if self._credential is not None:
@@ -348,6 +421,9 @@ class Agent:
                 log.info("使用已保存的凭据：选手 %s @ %s", stored.player_no, stored.contest_slug)
             return stored
 
+        if not allow_enroll:
+            return None
+
         return self._enroll()
 
     def _enroll(self) -> Credential:
@@ -365,16 +441,16 @@ class Agent:
                 "  这台机器还没有注册过，而注册只有这一条路 —— 需要镜像里那份\n"
                 "  root 只读的统一密钥（在服务端用 syncoj-server bootstrap-key issue 签发）：\n"
                 "    sudo install -m 0600 -o root -g root <密钥文件> %s\n"
-                "  装好之后重启 syncoj-enroll.service（它以 root 身份跑一次注册）。"
-                % (key_path, key_path)
+                "  装好之后重启 %s（它以 root 身份跑一次注册）。"
+                % (key_path, key_path, ENROLL_UNIT_NAME)
             )
         if not bootstrap_key:
             raise ConfigError(
                 "统一密钥文件 %s 存在但读不出来。\n"
                 "Agent 以选手身份运行，读不到 root 只读的文件 —— 这是**设计如此**：\n"
                 "密钥能注册整间机房，不该躺在学生读得到的地方。\n"
-                "请交给装机时的 syncoj-enroll.service 去注册。"
-                % key_path
+                "请交给装机时的 %s 去注册。"
+                % (key_path, ENROLL_UNIT_NAME)
             )
 
         hostname = socket.gethostname()
@@ -616,9 +692,24 @@ class Agent:
         self._show_state_files(credential)
 
     def _forget_credential(self, reason: str) -> None:
-        """凭据失效时清空本地凭据，下一轮会走重新注册。"""
-        log.warning("凭据失效（%s），将尝试重新注册", reason)
+        """凭据被服务端拒绝时清空本地凭据，**回到"等注册"状态**。
+
+        **服务不会自己重新注册**：注册密钥是 root 只读的，注册只由
+        :data:`ENROLL_UNIT_NAME` 那条 root 一次性单元做（见
+        :meth:`ensure_credential`）。所以清掉之后的下一步是把那个单元再跑一次
+        —— 它每次开机都会跑（``WantedBy=multi-user.target``），也可以马上手工
+        触发。日志里必须说清这一步，否则现场只看到"凭据失效"，然后机器一直不出现。
+        """
+        log.warning(
+            "凭据被服务端拒绝（%s），已清除本地凭据，回到等待注册状态。\n"
+            "  Agent 自己不会重新注册（注册密钥 root 只读）；请让注册单元再跑一次：\n"
+            "  systemctl reset-failed %s; systemctl start %s（下次开机也会自动重试）",
+            reason,
+            ENROLL_UNIT_NAME,
+            ENROLL_UNIT_NAME,
+        )
         self._credential = None
+        self._registration_logged = False
         self.client.set_token(None)
         self._roots_ready = False
         self._roots = []
@@ -664,12 +755,17 @@ class Agent:
             stats={
                 "disk_free": _disk_free(self.config.state_dir),
                 "queue": len(self._pending_events),
+                # 上一次失败的摘要（比如按管理端授权卸载失败的原因）。**绝不含
+                # 令牌** —— 令牌是一次 root 删除的凭据，不进任何上报字段。
+                "last_error": self._last_error,
             },
             # 上一轮下载完成的结果在这里回报。差一轮无所谓 —— 而且服务端在收到
             # 回报前会继续下发该作业，Agent 会走 "内容已一致" 的跳过分支并再次
             # 上报，这恰好让"回报丢失"能自愈。
             completed_assets=self._completed_assets,
             scan_complete=scan_complete,
+            # 服务端据此决定"能不能发远程卸载授权"：没有信任锚的机器一定验不了签
+            release_public_key=self._has_release_public_key(),
         )
 
     # ---------------------------------------------------------------- #
@@ -792,6 +888,78 @@ class Agent:
         except SignatureError as exc:
             log.error("发布公钥格式不合法 %s: %s", path, exc)
             return None
+
+    def _has_release_public_key(self) -> bool:
+        """本机有没有可用的发布公钥（升级信任锚）。
+
+        每次心跳重新看一眼，而不是复用启动时那份：文件是安装器放的，但运维也
+        可能后补 —— 早期报 False 会让服务端不发卸载授权，教师那边看到的是
+        "点了没反应"。这里**静默**判定（`_load_release_public_key` 会打日志，
+        那是启动期该做的事，心跳里每轮打一条就把 journal 刷爆了）。
+        """
+        path = self.config.release_public_key
+        if path is None:
+            return False
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            RSAPublicKey.from_dict(data)
+        except (OSError, ValueError, SignatureError, AttributeError):
+            return False
+        return True
+
+    def _handle_uninstall_token(self, token: str) -> bool:
+        """收到一次性卸载授权：交给自卸载脚本，成功就退出。返回是否已执行卸载。
+
+        **令牌只走 stdin**：不进 argv（ps 能看到）、不写文件、不进日志、不进
+        ``last_error``。失败要退避 —— 失败原因多半是 sudoers/令牌/脚本的问题，
+        每轮都撞一次 sudo 只会把日志刷爆。
+        """
+        now = time.monotonic()
+        if now < self._uninstall_blocked_until:
+            log.debug(
+                "卸载授权还在退避窗口内，跳过（还有 %.0f 秒）",
+                self._uninstall_blocked_until - now,
+            )
+            return False
+
+        payload = token.encode("utf-8")
+        if len(payload) > MAX_UNINSTALL_TOKEN_BYTES:
+            # 连长度都不对，不用去撞 sudo；但仍要退避，否则每轮都会走到这里
+            log.warning("卸载授权令牌过长（%d 字节），拒绝执行", len(payload))
+            self._uninstall_blocked_until = now + UNINSTALL_RETRY_SECONDS
+            self._last_error = "按管理端授权卸载失败：令牌过长"
+            self._emit("error", "uninstall_failed", self._last_error)
+            return False
+
+        argv = ["sudo", "-n", SELF_UNINSTALL_PATH]
+        try:
+            returncode, stderr = self._run_uninstall(argv, payload)
+        except Exception as exc:  # pragma: no cover - 注入的 runner 不该抛
+            returncode, stderr = 127, "执行卸载脚本失败: %s" % exc
+
+        if returncode == 0:
+            # 单元是 Restart=on-failure，exit 0 不会被再拉起来。
+            log.warning("已按管理端授权卸载，本机 Agent 将退出")
+            self._last_error = None
+            self._stop = True
+            return True
+
+        summary = self._redact(" ".join((stderr or "").split()), token)[:200]
+        if not summary:
+            summary = "退出码 %d" % returncode
+        message = "按管理端授权卸载失败：%s" % summary
+        log.error("%s（%.0f 秒后再试）", message, UNINSTALL_RETRY_SECONDS)
+        self._uninstall_blocked_until = now + UNINSTALL_RETRY_SECONDS
+        self._last_error = message
+        self._emit("error", "uninstall_failed", message)
+        return False
+
+    @staticmethod
+    def _redact(text: str, secret: str) -> str:
+        """把不该出现的令牌从文本里抹掉（底层命令万一把 stdin 回显出来时兜底）。"""
+        if secret and secret in text:
+            return text.replace(secret, "<token>")
+        return text
 
     def _guard_boot(self) -> bool:
         """启动守卫。返回 True 表示刚完成回滚，调用方应当退出让 systemd 重启。
@@ -1041,6 +1209,10 @@ class Agent:
     def cycle(self) -> float:
         """执行一轮，返回下次执行前的等待秒数。"""
         credential = self._ensure_credential()
+        if credential is None:
+            # 还没注册：**等 root 的注册单元**，不退出、不联网、不刷日志。
+            return self._wait_for_credential()
+        self._registration_logged = False
 
         # 未配对 / 没有场次：这台机器没有准考证号，算不出扫描目录，扫出来的东西
         # 也没法归属到任何人。它这一轮唯一该做的就是心跳一下、顺便问一句状态变了没有。
@@ -1102,6 +1274,14 @@ class Agent:
         if isinstance(remote_config, dict):
             self.policy = merge_policy(remote_config)
 
+        # 管理端授权的一次性卸载：本地验签 + 执行成功就直接退出（exit 0，
+        # 单元是 Restart=on-failure 所以不会被再拉起来）。放在下载/上传之前 ——
+        # 都要卸载了，没必要再搬文件。令牌只活在本地变量里，不进 argv/日志/上报。
+        token = tick.get("uninstall_token")
+        if isinstance(token, str) and token.strip():
+            if self._handle_uninstall_token(token.strip()):
+                return 0.0
+
         jobs = tick.get("deploy_jobs") or []
         need_upload = tick.get("need_upload") or []
 
@@ -1128,6 +1308,36 @@ class Agent:
 
         next_tick = int(tick.get("next_tick_seconds") or self.config.scan_interval)
         return float(max(5, min(next_tick, 3600)))
+
+    def _wait_for_credential(self) -> float:
+        """还没注册：等 root 的注册单元把凭据放进来。**这是正常状态，不是错误。**
+
+        **设计如此**：统一注册密钥是 root 只读的，注册由 ``syncoj-agent-enroll.service``
+        （root 身份跑一次）完成；Agent 以选手身份运行，读不到密钥，也不该自己注册。
+        真机事故就是这里搞反了：服务去撞密钥 → PermissionError → 抛 ConfigError →
+        exit 1 → 被 systemd 反复重启，5 次后撞上 StartLimit 罢手，而**注册单元从来
+        没被跑过**，于是机器永远不出现。
+
+        所以这里：不退出、不联网、不刷日志（只第一次说清下一步），每
+        :data:`REGISTRATION_POLL_SECONDS` 秒看一眼凭据是否出现 —— 出现了下一轮
+        就照常同步。
+        """
+        if not self._registration_logged:
+            self._registration_logged = True
+            log.warning(
+                "这台机器还没有注册凭据，等待 %s 完成注册（每 %.0f 秒检查一次）。\n"
+                "  **这是设计如此**：统一注册密钥是 root 只读的，注册由 root 的 %s\n"
+                "  完成一次；Agent 以选手身份运行，读不到密钥，也不该自己注册。\n"
+                "  若一直等不到：`systemctl status %s` 看注册结果，必要时\n"
+                "  `systemctl reset-failed %s && systemctl start %s` 手工再来一次。",
+                ENROLL_UNIT_NAME,
+                REGISTRATION_POLL_SECONDS,
+                ENROLL_UNIT_NAME,
+                ENROLL_UNIT_NAME,
+                ENROLL_UNIT_NAME,
+                ENROLL_UNIT_NAME,
+            )
+        return REGISTRATION_POLL_SECONDS
 
     # ---------------------------------------------------------------- #
     # 常驻
@@ -1367,6 +1577,26 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _provision_hint(config: Optional[AgentConfig] = None) -> str:
+    """``--provision`` 失败时统一给的"下一步"。
+
+    现场最贵的成本不是失败本身，而是**失败了却一个字都没有**（退出 2、journal
+    空白，只能靠猜）。所以这条提示宁可啰嗦：说清去看哪个文件、怎么手工重试。
+    """
+    key = "/etc/syncoj/bootstrap.key"
+    if config is not None and config.bootstrap_key_file is not None:
+        key = str(config.bootstrap_key_file)
+    return (
+        "下一步：检查 agent.ini 的 run_user 与 server.url，确认 %s 存在且 root 可读；"
+        "改完手工重试：systemctl reset-failed %s; systemctl start %s"
+        % (key, ENROLL_UNIT_NAME, ENROLL_UNIT_NAME)
+    )
+
+
+def _print_provision_hint(config: Optional[AgentConfig] = None) -> None:
+    print(_provision_hint(config), file=sys.stderr)
+
+
 def _run_provision(args, config: AgentConfig, agent: "Agent") -> int:
     """只注册、拿凭据就退出。供装机时的 root 一次性单元调用。
 
@@ -1378,20 +1608,28 @@ def _run_provision(args, config: AgentConfig, agent: "Agent") -> int:
     而读它们的是选手 —— 不交出去的话，服务起来了但读不到凭据，
     表现是"一直重新注册"，很难联想到是属主问题。这两件事我们已经在安装器的
     配置文件上踩过一次。
+
+    这条路上**任何**失败都带 "下一步"（见 :func:`_provision_hint`）：
+    它以 root 一次性单元的身份在 journal 里留痕，是排障时唯一能看到的线索。
     """
     try:
-        agent.ensure_credential()
+        agent.ensure_credential(allow_enroll=True)
     except RateLimited as exc:
         # 限速不是失败 —— 凭据没拿到，但再等一会儿就行。装机时同时开机的机器
         # 可能正好把注册限速顶满，报"失败"会让教师以为装机装坏了。
+        # 报出来的等待时间与 run_forever 用**同一个上界**（MAX_BACKOFF）：
+        # 服务端写错一个数量级（比如 86400）不该让运维按它的数字去等。
+        wait = min(float(exc.retry_after), MAX_BACKOFF) if exc.retry_after > 0 else MAX_BACKOFF
         print(
-            "注册被限速（%.0f 秒后可重试）：%s" % (exc.retry_after or MAX_BACKOFF, exc),
+            "注册被限速（%.0f 秒后可重试）：%s" % (wait, exc),
             file=sys.stderr,
         )
+        _print_provision_hint(config)
         return 1
     except (AgentError, ConfigError) as exc:
         log.error("注册失败：%s", exc)
         print("注册失败：%s" % exc, file=sys.stderr)
+        _print_provision_hint(config)
         return 1
     finally:
         agent.client.close()
@@ -1402,6 +1640,7 @@ def _run_provision(args, config: AgentConfig, agent: "Agent") -> int:
     credential = load_credential(config.credential_path)
     if credential is None:
         print("注册似乎成功了，但没有读回凭据 —— 请检查状态目录权限。", file=sys.stderr)
+        _print_provision_hint(config)
         return 1
     if credential.state == STATE_UNCLAIMED:
         print("已注册，等待配对。配对码：%s" % credential.pair_code)
@@ -1443,19 +1682,34 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
 
     try:
-        config = AgentConfig.load(Path(args.config) if args.config else None)
+        config = AgentConfig.load(
+            Path(args.config) if args.config else None,
+            # 注册以 **root** 跑，而 {home}/{desktop} 得按"要交给的那个账号"展开
+            # —— 否则会展开成 /root/桌面/...，那台机器上不存在。没给
+            # --chown-to 时退回 agent.ini 里记的 run_user（见 AgentConfig.load）。
+            expand_for_user=args.chown_to,
+        )
     except ConfigError as exc:
         print("配置错误：%s" % exc, file=sys.stderr)
+        if args.provision:
+            _print_provision_hint()
         return 2
 
     setup_logging(config, verbose=args.verbose)
 
     try:
-        config.validate()
+        config.validate(for_provision=args.provision)
     except ConfigError as exc:
         log.error("%s", exc)
-        if args.check or args.verbose:
-            print("配置校验失败：%s" % exc, file=sys.stderr)
+        # **无条件**打到 stderr，而且**只打一遍**（异常里已经带了"配置有误"，
+        # 再包一层前缀会变成"配置校验失败：配置有误：……"）。
+        #
+        # 为什么不加条件：日志文件以运行账号的身份写，而注册单元以 root 跑
+        # —— 不出现在 stderr 就等于 journal 里一个字都没有。现场就是
+        # "退出码 2、systemctl status 只有 systemd 自己那几行"，比错误本身贵得多。
+        print(str(exc), file=sys.stderr)
+        if args.provision:
+            _print_provision_hint(config)
         return 2
 
     if args.dump_config:
@@ -1483,6 +1737,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     except ConfigError as exc:
         log.error("%s", exc)
         print("启动失败：%s" % exc, file=sys.stderr)
+        if args.provision:
+            _print_provision_hint(config)
         return 2
 
     if args.pair_code:

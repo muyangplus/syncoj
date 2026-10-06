@@ -52,6 +52,8 @@ def unit_of(installer_module, **overrides) -> str:
         scan_roots="/home/student/code,/srv/other",
         run_user="noi",
         python="/usr/bin/python3",
+        unit_dir=Path("/etc/systemd/system"),
+        helper_dir=Path("/usr/local/lib/syncoj"),
     )
     args.update(overrides)
     return installer_module.render_unit(**args)
@@ -95,9 +97,36 @@ def test_只看路径指令_每条要么带减号要么是存在的目录(instal
 def test_白名单只有带减号的_家目录与安装器自建目录(installer_module) -> None:
     text = unit_of(installer_module)
     lines = [line for line in text.splitlines() if line.startswith("ReadWritePaths=")]
-    assert lines == ["ReadWritePaths=-%h -/opt/syncoj -/var/lib/syncoj"], lines
+    assert lines == [
+        "ReadWritePaths=-%h -/opt/syncoj -/var/lib/syncoj "
+        "-/etc/syncoj -/etc/systemd/system -/etc/sudoers.d -/usr/local/lib/syncoj"
+    ], lines
     # 单元里不能出现字面量 `~`（systemd 不展开它）
     assert "~" not in text
+
+
+def test_远程卸载那四条都是带减号的可写目录(installer_module) -> None:
+    """**(a) 变体的核心**：sudo 出来的 root 子进程在**同一个 mount namespace** 里，
+    不放开这四条，删 ``/etc/syncoj`` / 单元文件 / ``sudoers`` / 辅助脚本全是 ``EROFS``。
+
+    每一条都必须带 `-`：这些目录在真机上不一定存在（比如没装远程辅助件的机器），
+    而 ``ReadWritePaths=`` 里一条不存在的路径就会 226，整个服务起不来。
+    """
+    text = unit_of(installer_module)
+    line = [x for x in text.splitlines() if x.startswith("ReadWritePaths=")][0]
+
+    for path in (
+        "/etc/syncoj",  # 配置目录：卸载要删 agent.ini / bootstrap.key / machine_uuid
+        "/etc/systemd/system",  # 单元目录：卸载要删两个 .service 与 *.wants 软链
+        "/etc/sudoers.d",  # sudoers 规则
+        "/usr/local/lib/syncoj",  # 自卸载脚本 + 验签脚本
+    ):
+        assert "-%s" % path in line, "%s 没有被放开写权限：%s" % (path, line)
+        assert " %s" % path not in line, "%-不带的 %s 会在目录不存在时 226" % (path, path)
+
+    # 去重逻辑保持：一个路径只能出现一次
+    tokens = line.split("=", 1)[1].split()
+    assert len(tokens) == len(set(tokens)), tokens
 
 
 def test_不写死选手的代码目录与桌面目录(installer_module) -> None:
@@ -115,7 +144,33 @@ def test_不写死选手的代码目录与桌面目录(installer_module) -> None
 def test_单元里的运行账号就是解析出来的那个(installer_module) -> None:
     text = unit_of(installer_module, run_user="noi")
     assert "User=noi" in text
-    assert "Group=noi" in text
+    # **刻意不写 Group=**：systemd 按 NSS 解析主组；写死 Group=<账号名> 会在
+    # "主组与账号不同名"的账号上撞 217/GROUP。
+    assert "Group=" not in text
+
+
+def test_没有_NoNewPrivileges_但其它加固都还在(installer_module) -> None:
+    """``NoNewPrivileges=yes`` 会让 setuid 的 sudo 无法提权 —— 管理端授权的远程
+    卸载（``sudo -n self_uninstall.sh``）整条链就是死的。服务以普通账号运行，
+    那个账号本人在本机同样能跑任何 setuid 程序，所以这一条对"防选手"没有增量
+    价值。其余加固必须保留。"""
+    text = unit_of(installer_module)
+
+    assert "NoNewPrivileges" not in text
+    for hardening in (
+        "ProtectSystem=strict",
+        "PrivateTmp=yes",
+        "PrivateDevices=yes",
+        "ProtectKernelTunables=yes",
+        "ProtectKernelModules=yes",
+        "ProtectControlGroups=yes",
+        "RestrictSUIDSGID=yes",
+        "RestrictNamespaces=yes",
+        "RestrictRealtime=yes",
+        "RestrictAddressFamilies=AF_INET AF_INET6",
+        "LockPersonality=yes",
+    ):
+        assert hardening in text, hardening
 
 
 def test_重启上限在_Unit_段(installer_module) -> None:
@@ -134,6 +189,47 @@ def test_注册单元的路径白名单也带减号(installer_module) -> None:
     text = enroll_unit_of(installer_module)
     assert "ReadWritePaths=-/var/lib/syncoj" in text
     assert "ReadWritePaths=/var/lib/syncoj" not in text
+
+
+def test_不放开_AF_UNIX(installer_module) -> None:
+    """**刻意不放开 AF_UNIX** —— 那正是 D-Bus / systemctl 的传输层。
+
+    自卸载脚本里的 ``systemctl disable`` 只是 best-effort（连不上 D-Bus 时
+    静默失败）；真正保证"重启后不回来"的是删 ``*.wants/`` 软链那一步。
+    谁要是为了"让 systemctl 能跑"顺手把 AF_UNIX 加回来，这条就红。
+    """
+    text = unit_of(installer_module)
+
+    assert "RestrictAddressFamilies=AF_INET AF_INET6" in text
+    assert "AF_UNIX" not in text
+
+
+def test_sudoers_白名单是无参数的固定路径(installer_module) -> None:
+    """sudoers 那一行一旦带上参数或通配符，"白名单"就变成"任何东西"。"""
+    line = installer_module.render_uninstall_sudoers("noi")
+
+    assert line == "noi ALL=(root) NOPASSWD: /usr/local/lib/syncoj/self_uninstall.sh\n"
+    for forbidden in ("*", "?", "ALL", "/bin/sh", "sudoers.d"):
+        assert forbidden not in line.replace("noi ALL=(root)", "")
+
+
+def test_自卸载脚本用_glob_删掉两个单元的开机自启软链(installer_module) -> None:
+    """**这才是"卸载之后重启不会回来"的保证。**
+
+    ``systemctl disable`` 在沙箱里可能连不上 D-Bus（AF_UNIX 是关着的），失败还是
+    静默的；所以脚本必须**自己**把 ``*.wants/`` 下的软链删掉，而且两个单元
+    （Agent 本体 + 注册单元）都要删、要覆盖任何一个 target 的 wants 目录。
+
+    但只能按单元名匹配 —— 整目录 rm 会连带删掉别人的服务。
+    """
+    text = installer_module._SELF_UNINSTALL_SCRIPT
+
+    assert '"$UNIT_DIR"/*.wants/"$SERVICE"' in text, "没有 glob 掉本体的自启软链"
+    assert '"$UNIT_DIR"/*.wants/"$ENROLL_UNIT"' in text, "没有 glob 掉注册单元的自启软链"
+    assert "multi-user.target.wants/$SERVICE" not in text, "写死 target 会漏掉别的 wants 目录"
+    # 绝不允许整目录删除（那会删掉同机别的服务）
+    assert 'rm -rf "$UNIT_DIR"' not in text
+    assert '"$UNIT_DIR"/*.wants/*' not in text
 
 
 def test_自愈策略是_on_failure_而不是_always(installer_module) -> None:

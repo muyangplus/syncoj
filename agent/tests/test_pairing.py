@@ -197,6 +197,32 @@ def run_rounds(agent: Agent, rounds: int = 1) -> List[float]:
     return delays
 
 
+def provision(config: AgentConfig, server: FakeServer) -> Agent:
+    """模拟装机时 **root 的注册单元**：``--provision``。
+
+    这是**唯一**会注册的地方（见 ``Agent.ensure_credential`` 的 docstring）：
+    统一密钥是 root 只读的，常驻服务以选手身份跑、读不到它、也不该去撞它。
+    所以凡是"这台机器已经有凭据"的用例，都要先像真机那样注册一次。
+    """
+    agent = make_agent(config)
+    attach(agent, server)
+    agent.ensure_credential(allow_enroll=True)
+    agent.client.close()
+    return agent
+
+
+def service(config: AgentConfig, server: FakeServer) -> Agent:
+    """常驻服务那条路：只读磁盘上的凭据，**绝不自己注册**。"""
+    agent = make_agent(config)
+    attach(agent, server)
+    return agent
+
+
+class ProvisionArgs:
+    """``_run_provision`` 需要的命令行参数（只有 ``--chown-to``）。"""
+
+    chown_to = None
+
 def pair_code_file(config: AgentConfig) -> Path:
     return config.deploy_root / config.pairing_file_name
 
@@ -286,8 +312,9 @@ def test_unclaimed_machine_shows_the_pair_code(agent_config: AgentConfig) -> Non
     日志要 journalctl 才看得到，而教师是走到机器前看屏幕的 ——
     桌面上一个「配对码.txt」是他最可能看见的东西。
     """
-    agent = make_agent(agent_config)
-    server = attach(agent, FakeServer())
+    server = FakeServer()
+    provision(agent_config, server)  # 装机时 root 的注册单元做的那一次
+    agent = service(agent_config, server)
 
     run_rounds(agent, 1)
 
@@ -296,7 +323,7 @@ def test_unclaimed_machine_shows_the_pair_code(agent_config: AgentConfig) -> Non
     text = path.read_text(encoding="utf-8")
     assert "482913" in text
     assert "配对" in text
-    assert server.enroll_calls, "应该注册过一次"
+    assert server.enroll_calls, "装机时应该注册过一次"
 
 
 def test_unclaimed_machine_never_scans(agent_config: AgentConfig) -> None:
@@ -304,8 +331,9 @@ def test_unclaimed_machine_never_scans(agent_config: AgentConfig) -> None:
 
     收上去的相对路径没法归属到任何人，只会污染台账。
     """
-    agent = make_agent(agent_config)
-    server = attach(agent, FakeServer())
+    server = FakeServer()
+    provision(agent_config, server)
+    agent = service(agent_config, server)
 
     run_rounds(agent, 2)
 
@@ -324,13 +352,15 @@ def test_unclaimed_machine_does_not_re_enroll_every_round(
 
     反复重新注册会让服务端每次换一个新配对码，教师刚在机器上读到的那个立刻
     失效 —— 表现是"配对码怎么输都不对"，而日志里刷满注册记录。
+    新契约下服务**根本不注册**：注册只发生在装机那一次（``--provision``）。
     """
-    agent = make_agent(agent_config)
-    server = attach(agent, FakeServer())
+    server = FakeServer()
+    provision(agent_config, server)
+    agent = service(agent_config, server)
 
     run_rounds(agent, 4)
 
-    assert len(server.enroll_calls) == 1, "未配对的机器只能注册一次"
+    assert len(server.enroll_calls) == 1, "注册只该发生在装机那一次"
     assert len(server.tick_calls) == 4
     # 凭据必须留在磁盘上：丢了它就等于下一轮从"没有凭据"重新开始
     credential = load_credential(agent_config.credential_path)
@@ -349,10 +379,10 @@ def test_unclaimed_machine_does_not_re_enroll_after_a_restart(
     配对码，教师手上那个永远对不上。
     """
     server = FakeServer()
+    provision(agent_config, server)
 
     for _ in range(3):
-        agent = make_agent(agent_config)
-        attach(agent, server)
+        agent = service(agent_config, server)  # 重启三次
         agent.cycle()
 
     assert len(server.enroll_calls) == 1, "重启之后重新注册了"
@@ -363,8 +393,9 @@ def test_unclaimed_machine_follows_the_server_tick_pace(
     agent_config: AgentConfig,
 ) -> None:
     """节奏由服务端决定，Agent 不得自行决定。"""
-    agent = make_agent(agent_config)
-    server = attach(agent, FakeServer())
+    server = FakeServer()
+    provision(agent_config, server)
+    agent = service(agent_config, server)
     server.tick_response["next_tick_seconds"] = 23
 
     delays = run_rounds(agent, 1)
@@ -377,8 +408,9 @@ def test_pair_code_refresh_from_tick_is_written_out(agent_config: AgentConfig) -
 
     不接住它的话，桌面上一直是那个已经作废的码。
     """
-    agent = make_agent(agent_config)
-    server = attach(agent, FakeServer())
+    server = FakeServer()
+    provision(agent_config, server)
+    agent = service(agent_config, server)
     server.tick_response["pair_code"] = "999000"
 
     run_rounds(agent, 1)
@@ -399,8 +431,9 @@ def test_missing_pair_code_file_is_not_an_error(agent_config: AgentConfig) -> No
 def test_desktop_showing_can_be_turned_off(agent_config: AgentConfig) -> None:
     """考点规定桌面必须干净时，关掉它不该影响别的行为。"""
     agent_config.pairing_show_on_desktop = False
-    agent = make_agent(agent_config)
-    server = attach(agent, FakeServer())
+    server = FakeServer()
+    provision(agent_config, server)
+    agent = service(agent_config, server)
 
     run_rounds(agent, 1)
 
@@ -466,8 +499,9 @@ def test_waiting_machine_writes_the_reason_to_the_desktop(
 
     写下去的必须是**服务端给的原话** —— 客户端不知道原因，只有服务端知道。
     """
-    agent = make_agent(agent_config)
-    server = attach(agent, make_waiting_server())
+    server = make_waiting_server()
+    provision(agent_config, server)
+    agent = service(agent_config, server)
 
     run_rounds(agent, 2)
 
@@ -480,8 +514,9 @@ def test_waiting_machine_writes_the_reason_to_the_desktop(
 
 
 def test_waiting_machine_does_not_scan(agent_config: AgentConfig) -> None:
-    agent = make_agent(agent_config)
-    server = attach(agent, make_waiting_server())
+    server = make_waiting_server()
+    provision(agent_config, server)
+    agent = service(agent_config, server)
 
     run_rounds(agent, 2)
 
@@ -494,8 +529,9 @@ def test_waiting_state_is_reported_once_not_every_round(
     agent_config: AgentConfig,
 ) -> None:
     """事件通道是给"出事了"用的，每轮报一条会把它刷满。"""
-    agent = make_agent(agent_config)
-    server = attach(agent, make_waiting_server())
+    server = make_waiting_server()
+    provision(agent_config, server)
+    agent = service(agent_config, server)
 
     run_rounds(agent, 5)
 
@@ -510,13 +546,14 @@ def test_waiting_machine_clears_a_stale_pair_code_file(
 
     留着它会让人以为还没配对 —— 下一个人走过来看见就会去问老师，白折腾一轮。
     """
-    agent = make_agent(agent_config)
+    server = make_waiting_server()
+    provision(agent_config, server)
+    agent = service(agent_config, server)
     # 先造出"上一轮还是未配对"的现场
     agent.clear_waiting_file()
     pair_code_file(agent_config).parent.mkdir(parents=True, exist_ok=True)
     pair_code_file(agent_config).write_text("老配对码 482913", encoding="utf-8")
 
-    attach(agent, make_waiting_server())
     run_rounds(agent, 1)
 
     assert not pair_code_file(agent_config).exists()
@@ -550,11 +587,12 @@ def make_ready_server() -> FakeServer:
 
 def test_ready_machine_clears_both_notice_files(agent_config: AgentConfig) -> None:
     """配对成功、拿到场次之后，桌面上那两个提示文件都必须自动消失。"""
-    agent = make_agent(agent_config)
+    server = make_ready_server()
+    provision(agent_config, server)
+    agent = service(agent_config, server)
     pair_code_file(agent_config).write_text("482913", encoding="utf-8")
     waiting_file(agent_config).write_text("等待场次", encoding="utf-8")
 
-    attach(agent, make_ready_server())
     run_rounds(agent, 1)
 
     assert not pair_code_file(agent_config).exists()
@@ -572,8 +610,9 @@ def test_ready_machine_scans_and_lists_files(agent_config: AgentConfig) -> None:
     (code / "p1").mkdir(parents=True, exist_ok=True)
     (code / "p1" / "p1.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
 
-    agent = make_agent(agent_config)
-    server = attach(agent, make_ready_server())
+    server = make_ready_server()
+    provision(agent_config, server)
+    agent = service(agent_config, server)
 
     run_rounds(agent, 1)
 
@@ -591,8 +630,9 @@ def test_ready_machine_that_is_unbound_again_falls_back_to_waiting(
 
     它必须退回"安静等待"，而不是先进指数退避、再当成凭据坏了去重新注册。
     """
-    agent = make_agent(agent_config)
-    server = attach(agent, make_ready_server())
+    server = make_ready_server()
+    provision(agent_config, server)
+    agent = service(agent_config, server)
     # 第一轮正常，之后服务端改口说"这个人已经不在这场里了"
     server.tick_response.update(
         {"claimed": True, "bound": False, "pair_code": None, "reason": "还没有包含你的场次"}
@@ -627,8 +667,9 @@ def test_403_on_tick_does_not_re_enroll(agent_config: AgentConfig) -> None:
     403 的意思是"凭据有效，但还没有配对/无权访问"。把它当成凭据坏了去重新注册，
     会让服务端每次换一个新配对码 —— 教师刚读到的那个当场失效。
     """
-    agent = make_agent(agent_config)
-    server = attach(agent, FakeServer())
+    server = FakeServer()
+    provision(agent_config, server)
+    agent = service(agent_config, server)
     server.tick_error = unbound_error()
 
     run_rounds(agent, 3)
@@ -642,8 +683,9 @@ def test_403_on_tick_does_not_re_enroll(agent_config: AgentConfig) -> None:
 
 def test_403_on_tick_keeps_showing_the_pair_code(agent_config: AgentConfig) -> None:
     """403 之后仍然要把配对码摆在桌面上 —— 那正是教师接下来要用的东西。"""
-    agent = make_agent(agent_config)
-    server = attach(agent, FakeServer())
+    server = FakeServer()
+    provision(agent_config, server)
+    agent = service(agent_config, server)
     server.tick_error = unbound_error()
 
     run_rounds(agent, 2)
@@ -660,8 +702,9 @@ def test_403_pairing_required_behaves_like_machine_unbound(
 
     分支判断只能看 ``code``，不能看 ``detail`` —— 否则改一次文案就会静默失效。
     """
-    agent = make_agent(agent_config)
-    server = attach(agent, FakeServer())
+    server = FakeServer()
+    provision(agent_config, server)
+    agent = service(agent_config, server)
     server.tick_error = unbound_error("pairing_required")
 
     run_rounds(agent, 2)
@@ -676,8 +719,9 @@ def test_unknown_403_code_still_does_not_re_enroll(agent_config: AgentConfig) ->
     §0.2 是照状态码定性的：403 = 凭据有效。把凭据扔掉去换一个新的，是这里
     唯一会造成实际损失的"猜错"（配对码失效），所以宁可什么都不做。
     """
-    agent = make_agent(agent_config)
-    server = attach(agent, FakeServer())
+    server = FakeServer()
+    provision(agent_config, server)
+    agent = service(agent_config, server)
     server.tick_error = UnboundError("403 无权限", status=403, code="forbidden")
 
     run_rounds(agent, 2)
@@ -687,38 +731,54 @@ def test_unknown_403_code_still_does_not_re_enroll(agent_config: AgentConfig) ->
     assert credential is not None and credential.token == "tok-1"
 
 
-def test_401_clears_the_token_and_re_enrolls(agent_config: AgentConfig) -> None:
-    """401 才是"凭据本身无效" —— 这时候必须清掉本地凭据重新注册。
+def test_401_clears_the_token_and_waits_for_a_new_registration(
+    agent_config: AgentConfig,
+) -> None:
+    """401 才是"凭据本身无效" —— 必须清掉本地凭据。
 
-    整个流程里**只有**这一种情况该重新注册。
+    但**服务不会自己重新注册**（统一密钥是 root 只读的，它读不到）：清掉之后
+    它进入"等注册"状态，由 root 的注册单元（下次开机，或手工 start）再来一次。
+    这一条守的就是真机事故：以前服务会去撞密钥 → 异常 → 退出 → 被 systemd
+    反复重启，而注册单元从来没被跑过。
     """
-    agent = make_agent(agent_config)
-    server = attach(agent, FakeServer())
-    server.enroll_response.update({"claimed": True, "bound": False, "pair_code": None})
+    from syncoj_agent.main import REGISTRATION_POLL_SECONDS
+
+    server = FakeServer()
+    provision(agent_config, server)  # 装机时注册过一次
+    agent = service(agent_config, server)
     server.tick_error = AuthError(
         "tick 失败（HTTP 401 unauthorized）凭据无效", status=401, code="unauthorized"
     )
-    # 401 只错一次：错的是那个 token，重新注册拿到新 token 之后就该恢复正常
     server.tick_error_times = 1
 
-    run_rounds(agent, 2)
+    delays = run_rounds(agent, 2)
 
-    # 第 1 轮 tick 401 -> 清凭据；第 2 轮重新注册 -> 得到新 token
-    assert len(server.enroll_calls) == 2, "401 之后必须重新注册一次"
-    assert server.token == "tok-1"
+    assert delays == [30.0, REGISTRATION_POLL_SECONDS], (
+        "401 之后应当进入「等注册」的慢轮询，而不是退出或自己重注册"
+    )
+    assert len(server.enroll_calls) == 1, "服务不许自己注册"
+    assert not agent_config.credential_path.exists(), "失效的凭据必须清掉"
 
 
 def test_re_enroll_after_401_uses_the_same_machine_uuid(
     agent_config: AgentConfig,
 ) -> None:
-    """重新注册靠 ``machine_uuid`` 认回同一台机器（这是快照还原后的自愈路径）。"""
-    agent = make_agent(agent_config)
-    server = attach(agent, FakeServer())
+    """重新注册靠 ``machine_uuid`` 认回同一台机器（这是快照还原后的自愈路径）。
+
+    新契约下"重新注册"= 再跑一次注册单元（``--provision``），所以这里手工模拟
+    第二次注册 —— 它必须带上和第一次一样的 machine_uuid。
+    """
+    server = FakeServer()
+    provision(agent_config, server)
+    agent = service(agent_config, server)
     server.tick_error = AuthError("401", status=401, code="token_expired")
-    # 只错一次：第二次注册要成功，否则测的是"一直 401"而不是"401 之后会重新注册"
     server.tick_error_times = 1
 
-    run_rounds(agent, 2)
+    run_rounds(agent, 1)
+    assert not agent_config.credential_path.exists()
+
+    # 注册单元再来一次（真机上由 systemd 拉起：开机，或手工 start）
+    provision(agent_config, server)
 
     uuids = {call.get("machine_uuid") for call in server.enroll_calls}
     assert len(server.enroll_calls) == 2
@@ -732,7 +792,7 @@ def test_enroll_always_carries_the_fingerprint_when_available(
     agent.machine_fingerprint = "4c4c4544-0031-3010-8043-b7c04f4d4432"
     server = attach(agent, FakeServer())
 
-    run_rounds(agent, 1)
+    agent.ensure_credential(allow_enroll=True)  # 装机那条路
 
     assert server.enroll_calls[0]["machine_fingerprint"] == agent.machine_fingerprint
     assert server.enroll_calls[0]["machine_uuid"] == agent.machine_uuid
@@ -743,7 +803,7 @@ def test_enroll_never_sends_enroll_code(agent_config: AgentConfig) -> None:
     agent = make_agent(agent_config)
     server = attach(agent, FakeServer())
 
-    run_rounds(agent, 1)
+    agent.ensure_credential(allow_enroll=True)  # 装机那条路
 
     assert "enroll_code" not in server.enroll_calls[0]
     assert set(server.enroll_calls[0]) >= {
@@ -759,15 +819,22 @@ def test_enroll_never_sends_enroll_code(agent_config: AgentConfig) -> None:
 # --------------------------------------------------------------------------- #
 # 密钥错、限速
 # --------------------------------------------------------------------------- #
+#
+# 这些错误现在只可能出现在**注册那条路**（``--provision``）上：常驻服务根本
+# 不注册，所以它连密钥都不会去读。有限重试由注册单元自己兜（见
+# ``install.render_enroll_unit``），Agent 这边一次只撞一次、把话说清楚就退出。
 
 
-def test_bootstrap_key_rejection_stops_hammering(agent_config: AgentConfig) -> None:
-    """密钥不对是**部署问题**，重试解决不了。
+def test_bootstrap_key_rejection_fails_provision_without_hammering(
+    agent_config: AgentConfig, capsys
+) -> None:
+    """密钥不对是**部署问题**：一次 ``--provision`` 只撞一次。
 
-    这里不断言"完全不重试"（那会让运维换完密钥还得逐台重启），而是断言它退到
-    最慢的节奏：MAX_BACKOFF。
+    以前是在服务循环里指数退避重试 —— 而现在服务压根不注册，重试是注册单元的
+    事（有限次 + 打出手工步骤）。这里守住"一次注册只撞一次"，否则注册单元里
+    再套一层循环会让退出码与日志都变得没法读。
     """
-    from syncoj_agent.main import MAX_BACKOFF
+    from syncoj_agent.main import _run_provision
 
     agent = make_agent(agent_config)
     server = attach(agent, FakeServer())
@@ -777,18 +844,22 @@ def test_bootstrap_key_rejection_stops_hammering(agent_config: AgentConfig) -> N
         code="bootstrap_key_revoked",
     )
 
-    delays = run_rounds(agent, 3)
+    code = _run_provision(ProvisionArgs(), agent_config, agent)
 
-    assert delays == [MAX_BACKOFF] * 3
-    # 密钥错时必须留一条人看得见的事件。注意它**送不出去** —— /events 需要
-    # 凭据，而我们手里恰好没有可用的，所以它只会堆在本地队列里，等密钥修好
-    # 之后随第一轮成功上报一起发上去。
-    pending = [event["category"] for event in agent._pending_events]
-    assert pending.count("bootstrap_key_rejected") >= 1
+    assert code == 1
+    assert len(server.enroll_calls) == 1, "一次注册只撞一次，不许自己重试刷屏"
+    err = capsys.readouterr().err
+    assert "已吊销" in err
+    # 失败必须带"下一步怎么办"（现场最贵的成本是"失败了却一个字都没有"）
+    assert "systemctl start syncoj-agent-enroll.service" in err
 
 
-def test_rate_limit_is_honoured(agent_config: AgentConfig) -> None:
-    """429 的退避节奏由服务端决定 —— 它才知道限速窗口有多长。"""
+def test_rate_limit_is_reported_by_provision(
+    agent_config: AgentConfig, capsys
+) -> None:
+    """429 的等待时间由服务端决定，但要**如实报出来**，并让它可重试。"""
+    from syncoj_agent.main import _run_provision
+
     agent = make_agent(agent_config)
     server = attach(agent, FakeServer())
     server.enroll_error = RateLimited(
@@ -798,14 +869,17 @@ def test_rate_limit_is_honoured(agent_config: AgentConfig) -> None:
         retry_after=17,
     )
 
-    delays = run_rounds(agent, 2)
+    code = _run_provision(ProvisionArgs(), agent_config, agent)
 
-    assert delays == [17.0, 17.0]
+    assert code == 1, "限速不是成功，但也绝不是「装坏了」"
+    assert len(server.enroll_calls) == 1
+    err = capsys.readouterr().err
+    assert "17" in err and "限速" in err
 
 
-def test_absurd_rate_limit_is_capped_locally(agent_config: AgentConfig) -> None:
-    """服务端写错一个数量级（比如 86400）不该让整间机房停摆一整天。"""
-    from syncoj_agent.main import MAX_BACKOFF
+def test_absurd_rate_limit_is_capped_locally(agent_config: AgentConfig, capsys) -> None:
+    """服务端写错一个数量级（比如 86400）不该让运维按它的数字去等。"""
+    from syncoj_agent.main import MAX_BACKOFF, _run_provision
 
     agent = make_agent(agent_config)
     server = attach(agent, FakeServer())
@@ -813,9 +887,12 @@ def test_absurd_rate_limit_is_capped_locally(agent_config: AgentConfig) -> None:
         "429", status=429, code="rate_limited", retry_after=86400
     )
 
-    delays = run_rounds(agent, 1)
+    code = _run_provision(ProvisionArgs(), agent_config, agent)
 
-    assert delays == [MAX_BACKOFF]
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "%.0f" % MAX_BACKOFF in err, "报出来的等待时间没有本地封顶：%s" % err
+    assert "86400" not in err
 
 
 # --------------------------------------------------------------------------- #
@@ -828,17 +905,18 @@ def test_missing_bootstrap_key_gives_an_actionable_error(
 ) -> None:
     """没有密钥时要说清"下一步该做什么"，而不是笼统地"注册失败"。"""
     from syncoj_agent.config import ConfigError
+    from syncoj_agent.main import ENROLL_UNIT_NAME
 
     agent = make_agent(agent_config)
     agent_config.bootstrap_key_file = workdir / "nowhere.key"
     agent = Agent(agent_config)
 
     with pytest.raises(ConfigError) as excinfo:
-        agent.ensure_credential()
+        agent.ensure_credential(allow_enroll=True)
 
     message = str(excinfo.value)
     assert "统一密钥" in message
-    assert "syncoj-enroll.service" in message
+    assert ENROLL_UNIT_NAME in message
     assert "enroll_code" not in message, "已经不存在这条路了，别再提它"
 
 
@@ -851,8 +929,6 @@ def test_unreadable_bootstrap_key_explains_root_only(
     的能力交出去。
     """
     agent = make_agent(agent_config)
-    key_path = workdir / "bootstrap.key"
-    key_path.write_text("SECRET\n", encoding="utf-8")
 
     # 模拟"文件在但读不到"：read_bootstrap_key 返回空串
     import syncoj_agent.main as main_module
@@ -863,7 +939,7 @@ def test_unreadable_bootstrap_key_explains_root_only(
         from syncoj_agent.config import ConfigError
 
         with pytest.raises(ConfigError) as excinfo:
-            agent.ensure_credential()
+            agent.ensure_credential(allow_enroll=True)
         assert "root" in str(excinfo.value)
     finally:
         main_module.read_bootstrap_key = original  # type: ignore[assignment]
@@ -872,14 +948,29 @@ def test_unreadable_bootstrap_key_explains_root_only(
 def test_credential_from_another_server_is_not_reused(
     agent_config: AgentConfig,
 ) -> None:
-    """换服务端之后旧凭据必须失效 —— 否则会拿着 A 的 token 去问 B。"""
+    """换服务端之后旧凭据必须失效 —— 否则会拿着 A 的 token 去问 B。
+
+    新契约下服务**不会自己重新注册**：它退回"等注册"，由注册单元（``--provision``）
+    再换一份属于现在这个服务端的凭据。
+    """
+    from syncoj_agent.main import REGISTRATION_POLL_SECONDS
+
     save_credential(
         agent_config.credential_path,
         Credential(token="stale", server_url="https://other.example", claimed=True),
     )
-    agent = make_agent(agent_config)
-    server = attach(agent, FakeServer())
+    server = FakeServer()
+    agent = service(agent_config, server)
 
-    run_rounds(agent, 1)
+    delays = run_rounds(agent, 1)
 
-    assert len(server.enroll_calls) == 1, "换了服务端必须重新注册"
+    assert server.enroll_calls == [], "服务不许自己注册"
+    assert server.tick_calls == [], "没有可用凭据就不该 tick"
+    assert delays == [REGISTRATION_POLL_SECONDS]
+
+    # 注册单元再来一次之后，凭据属于当前这个服务端
+    provision(agent_config, server)
+    credential = load_credential(agent_config.credential_path)
+    assert credential is not None
+    assert credential.server_url == agent_config.base_url
+    assert len(server.enroll_calls) == 1

@@ -55,6 +55,18 @@ def all_text(collected) -> str:
     return "\n".join(message for _tag, message in collected)
 
 
+def read_ini_values(path: Path) -> dict:
+    """把 agent.ini 的 `键 = 值` 读成字典（注释与分节行跳过）。"""
+    values = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith((";", "#")) or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        values[key.strip()] = value.strip()
+    return values
+
+
 # --------------------------------------------------------------------------- #
 # 默认账号怎么定
 # --------------------------------------------------------------------------- #
@@ -78,10 +90,71 @@ def test_都取不到才兜底(installer_module, monkeypatch) -> None:
     assert installer_module.default_run_user() == installer_module.DEFAULT_RUN_USER
 
 
-def test_命令行默认值就是跑安装的人(installer_module, monkeypatch) -> None:
+def test_不显式指定时由_Installer_解析默认账号(
+    installer_module, workdir: Path, monkeypatch
+) -> None:
+    """parser 留 ``None``：要能区分"默认来的"与"人明确指定的"（root 判定用它）。"""
     monkeypatch.setenv("SUDO_USER", "noi")
     options = installer_module.build_parser().parse_args([])
-    assert options.user == "noi"
+    assert options.user is None
+
+    instance = make_installer(installer_module, workdir)
+    assert instance.run_user == "noi"
+
+
+def test_以_root_跑安装且没指定账号时拒绝(
+    installer_module, workdir: Path, monkeypatch
+) -> None:
+    """默认会算成 root —— 不静默接受：Agent 以 root 跑会往选手桌面写 root 的文件、
+    `%h` 也不再是选手桌面，而且是个没必要的提权面。"""
+    monkeypatch.delenv("SUDO_USER", raising=False)
+    monkeypatch.setattr(installer_module, "_current_user_name", lambda: "root")
+    instance = make_installer(installer_module, workdir)
+    assert instance.run_user == "root"
+
+    with pytest.raises(installer_module.InstallError) as exc:
+        instance.preflight()
+
+    assert "--user" in str(exc.value)
+    assert "root" in str(exc.value)
+
+
+def test_以_root_跑预览只警告不报错(
+    installer_module, workdir: Path, monkeypatch
+) -> None:
+    """dry-run 什么都没做，不该直接失败 —— 但要说清真装会被拒。"""
+    monkeypatch.delenv("SUDO_USER", raising=False)
+    monkeypatch.setattr(installer_module, "_current_user_name", lambda: "root")
+    source = workdir / "agentdir"
+    (source / "syncoj_agent").mkdir(parents=True)
+    instance = make_installer(
+        installer_module,
+        workdir,
+        ["--dry-run", "--skip-python-check", "--from-dir", str(source)],
+    )
+    messages = collect(instance)
+
+    instance.preflight()
+
+    assert "以 root 身份跑安装" in all_text(messages)
+
+
+def test_显式_user_root_允许但要警告(
+    installer_module, workdir: Path, monkeypatch
+) -> None:
+    source = workdir / "agentdir"
+    (source / "syncoj_agent").mkdir(parents=True)
+    instance = make_installer(
+        installer_module,
+        workdir,
+        ["--dry-run", "--skip-python-check", "--user", "root", "--from-dir", str(source)],
+    )
+    messages = collect(instance)
+
+    instance.preflight()
+
+    assert instance.run_user == "root"
+    assert "定成了 root" in all_text(messages)
 
 
 # --------------------------------------------------------------------------- #
@@ -181,95 +254,115 @@ def test_运行账号不存在时不硬改属主(installer_module, workdir: Path
 
 
 # --------------------------------------------------------------------------- #
-# 家目录 / 桌面的展开
+# 配置里的路径模板：安装时只换占位符，绝不固化
 # --------------------------------------------------------------------------- #
 
 
-def test_SUDO_USER_的家目录用来展开桌面(
-    installer_module, workdir: Path, monkeypatch
-) -> None:
-    home = workdir / "home" / "noi"
-    (home / "Desktop").mkdir(parents=True)
-    monkeypatch.setenv("SUDO_USER", "noi")
-    monkeypatch.setattr(installer_module, "_current_user_name", lambda: "root")
-    monkeypatch.setattr(installer_module, "_home_of", lambda user: home)
-
-    assert installer_module.default_run_user() == "noi"
-    instance = make_installer(installer_module, workdir)
-    assert instance.run_user == "noi"
-
-    expanded = instance._expand_user_paths("~/Desktop,{desktop}/{player_no}")
-    assert expanded == "%s, %s/{player_no}" % (home / "Desktop", home / "Desktop")
-
-
-def test_展开同时兼容中文桌面与_xdg(
-    installer_module, workdir: Path, monkeypatch
-) -> None:
-    home = workdir / "home" / "noi"
-    (home / "桌面").mkdir(parents=True)
-    monkeypatch.setattr(installer_module, "_home_of", lambda user: home)
+def test_波浪号换成_home_占位符(installer_module, workdir: Path) -> None:
+    """``~`` 在安装器里会被解释成 **root 的家** —— 换成 ``{home}`` 从根上消掉它。"""
     instance = make_installer(installer_module, workdir, ["--user", "noi"])
 
-    assert instance._expand_user_paths("{desktop}") == str(home / "桌面")
+    assert instance._template_user_paths("~/Desktop") == "{home}/Desktop"
+    assert instance._template_user_paths("~") == "{home}"
+    assert instance._template_user_paths("~/code, {home}/x") == "{home}/code, {home}/x"
 
 
-def test_探测不出桌面时按家目录下的桌面猜(
+def test_desktop_模板保持原样(installer_module, workdir: Path) -> None:
+    """**不在安装时展开 ``{desktop}``**：镜像预装时用户还没登录过、桌面可能还不
+    存在，装的时候探测会固化成错的 ``~/桌面``；运行时展开永远是对的。"""
+    instance = make_installer(installer_module, workdir, ["--user", "noi"])
+
+    assert instance._template_user_paths("{desktop}/{player_no}") == "{desktop}/{player_no}"
+    assert instance._template_user_paths("/srv/code") == "/srv/code"
+
+
+def test_写进_agent_ini_的是模板而不是绝对路径(
+    installer_module, workdir: Path
+) -> None:
+    instance = make_installer(
+        installer_module,
+        workdir,
+        [
+            "--user", "noi",
+            "--server", "https://10.0.0.1:8443",
+            "--deploy-root", "{desktop}",
+            "--scan-root", "~/Desktop/{player_no}",
+        ],
+    )
+
+    instance.write_config("1.0.0")
+
+    values = read_ini_values(workdir / "etc" / "agent.ini")
+    assert values["deploy_root"] == "{desktop}"
+    assert values["roots"] == "{home}/Desktop/{player_no}"
+    assert "~" not in values["deploy_root"]
+    assert "~" not in values["roots"]
+    # 运行账号必须进配置：{home}/{desktop} 的展开只认它 —— 注册单元以 root 跑，
+    # 没有这一项就只能按"当前是谁在跑"展开，root 会把它算成 /root/桌面。
+    assert values["run_user"] == "noi"
+
+
+# --------------------------------------------------------------------------- #
+# 换运行账号之后：属主/权限要跟着新账号（真机 PermissionError 的根因）
+# --------------------------------------------------------------------------- #
+
+
+def test_状态目录已有内容的属主也交给运行账号(
     installer_module, workdir: Path, monkeypatch
 ) -> None:
-    """家目录里没有任何桌面目录时：猜 ``~/桌面``，**绝不能**写死别的路径。
+    """只改目录属主不够 —— 里面已有的凭据/缓存/日志还是**上一个账号**的名字。"""
+    state = workdir / "state"
+    state.mkdir()
+    credential = state / "credential.json"
+    credential.write_text("{}", encoding="utf-8")
 
-    退回家目录（或写死一个 ``/home/student/...``）都会让 Agent 扫错地方 ——
-    前者把整个家目录当工作区，后者在真机上根本不存在。
+    instance = make_installer(installer_module, workdir, ["--user", "noi"])
+    chowns = []
+    monkeypatch.setattr(
+        installer_module.shutil,
+        "chown",
+        lambda path, user=None, group=None: chowns.append((str(path), user)),
+    )
+    monkeypatch.setattr(installer_module, "_user_exists", lambda name: name == "noi")
+
+    instance.ensure_dirs()
+
+    assert (str(state), "noi") in chowns, chowns
+    assert (str(credential), "noi") in chowns, chowns
+
+
+def test_已有配置的属主也会跟运行账号对齐(
+    installer_module, workdir: Path, monkeypatch
+) -> None:
+    """现场：旧安装（专用 syncoj）留下的 ``agent.ini`` 是 0600 属 syncoj 的；
+    单元已改成以 ``noi`` 运行 → 服务一直
+    ``PermissionError: '/etc/syncoj/agent.ini'`` 然后无限重启。
+
+    重跑安装器**不动内容**（教师的手工修改要保住），但属主必须交给新账号。
     """
-    home = workdir / "home" / "noi"
-    home.mkdir(parents=True)
-    monkeypatch.setattr(installer_module, "_home_of", lambda user: home)
-    instance = make_installer(installer_module, workdir, ["--user", "noi"])
+    etc = workdir / "etc"
+    etc.mkdir()
+    config_path = etc / "agent.ini"
+    original = "[server]\nurl = http://old.invalid\n"
+    config_path.write_text(original, encoding="utf-8")
 
-    assert instance._expand_user_paths("{desktop}") == str(home / "桌面")
-
-
-def test_展开不出来时保留模板而不是写死构建机路径(
-    installer_module, workdir: Path, monkeypatch
-) -> None:
-    monkeypatch.setattr(installer_module, "_home_of", lambda user: None)
-    instance = make_installer(installer_module, workdir, ["--user", "ghost"])
-
-    assert instance._expand_user_paths("{desktop}/{player_no}") == "{desktop}/{player_no}"
-    assert instance._expand_user_paths("~/x") == "~/x"
-
-
-def test_写进_agent_ini_的是展开后的绝对路径(
-    installer_module, workdir: Path, monkeypatch
-) -> None:
-    home = workdir / "home" / "noi"
-    (home / "Desktop").mkdir(parents=True)
-    monkeypatch.setattr(installer_module, "_home_of", lambda user: home)
     instance = make_installer(
         installer_module,
         workdir,
         ["--user", "noi", "--server", "https://10.0.0.1:8443"],
     )
+    chowns = []
+    monkeypatch.setattr(
+        installer_module.shutil,
+        "chown",
+        lambda path, user=None, group=None: chowns.append((str(path), user)),
+    )
+    monkeypatch.setattr(installer_module.os, "chmod", lambda path, mode: None)
 
     instance.write_config("1.0.0")
 
-    text = (workdir / "etc" / "agent.ini").read_text(encoding="utf-8")
-    assert str(home / "Desktop") in text
-
-    # 只看**配置项的值**：注释里解释 {desktop} 的用法是应该留的
-    values = {}
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith((";", "#")) or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        values[key.strip()] = value.strip()
-    assert values["deploy_root"] == str(home / "Desktop")
-    assert values["roots"].startswith(str(home / "Desktop"))
-    assert "{desktop}" not in values["deploy_root"]
-    assert "{desktop}" not in values["roots"]
-    assert "~" not in values["deploy_root"]
-    assert "~" not in values["roots"]
+    assert (str(config_path), "noi") in chowns, chowns
+    assert config_path.read_text(encoding="utf-8") == original, "内容被改了"
 
 
 # --------------------------------------------------------------------------- #
@@ -353,3 +446,80 @@ def test_keep_user_仍然跳过(installer_module, workdir: Path, monkeypatch) ->
 
     assert (did, bad) == (False, False)
     assert calls == []
+
+
+# --------------------------------------------------------------------------- #
+# 装完注册单元必须**就地跑一次**
+# --------------------------------------------------------------------------- #
+#
+# 真机事故：`enable` 只写了"开机自启"的软链，本轮装机根本不会执行它 ——
+# `systemctl status syncoj-agent-enroll.service` 显示 `inactive (dead)`，看起来
+# "没事"，而机器一直没注册上。装完顺手跑一次，凭据当场就有。
+
+
+def test_装完注册单元就地_start_一次(installer_module, workdir: Path, monkeypatch) -> None:
+    calls = []
+    stub_run(monkeypatch, installer_module, calls)
+    monkeypatch.setattr(installer_module, "_which", lambda name: "/bin/systemctl")
+    instance = make_installer(installer_module, workdir, ["--user", "noi"])
+    messages = collect(instance)
+
+    instance.install_enroll_unit(True)
+
+    unit = installer_module.ENROLL_UNIT_FILENAME
+    flat = [list(cmd) for cmd in calls]
+    assert ["systemctl", "daemon-reload"] in flat
+    assert ["systemctl", "enable", unit] in flat
+    assert ["systemctl", "reset-failed", unit] in flat, "要先清掉上次的 failed 状态"
+    assert ["systemctl", "start", unit] in flat, "装完必须就地跑一次注册单元"
+    # start 必须在 enable 之后：反过来的话这次装机仍然没注册
+    assert flat.index(["systemctl", "enable", unit]) < flat.index(["systemctl", "start", unit])
+    # 成功时要如实说"注册完成"，不能只说"已启用"
+    assert "已启用并执行" in all_text(messages)
+
+
+def test_重复跑安装器也会再_start_一次(installer_module, workdir: Path, monkeypatch) -> None:
+    """单元内容没变 ≠ 注册成功过。重跑安装器是"把注册再试一次"的正常手段。
+
+    现场就是这么恢复的：单元文件早就在，缺的只是那一次 start。
+    """
+    calls = []
+    stub_run(monkeypatch, installer_module, calls)
+    monkeypatch.setattr(installer_module, "_which", lambda name: "/bin/systemctl")
+    instance = make_installer(installer_module, workdir, ["--user", "noi"])
+
+    instance.install_enroll_unit(True)
+    calls.clear()
+
+    instance.install_enroll_unit(True)  # 内容一致 → 跳过写文件，但**不能**跳过 start
+
+    unit = installer_module.ENROLL_UNIT_FILENAME
+    assert ["systemctl", "start", unit] in [list(cmd) for cmd in calls], calls
+
+
+def test_注册失败时如实报告并给手工步骤(installer_module, workdir: Path, monkeypatch) -> None:
+    """``systemctl start`` 失败就**不许**说"已注册"。
+
+    只说"已启用"的话，现场看到的是"服务起来了但没数据"，而真正的原因（注册
+    单元执行失败）藏在 journal 里，没人会想到去看。
+    """
+    calls = []
+
+    def fake_run(cmd, check=True):
+        calls.append(list(cmd))
+        return 1 if list(cmd)[:2] == ["systemctl", "start"] else 0
+
+    monkeypatch.setattr(installer_module, "run", fake_run)
+    monkeypatch.setattr(installer_module, "_which", lambda name: "/bin/systemctl")
+    instance = make_installer(installer_module, workdir, ["--user", "noi"])
+    messages = collect(instance)
+
+    instance.install_enroll_unit(True)
+
+    text = all_text(messages)
+    assert "还没注册上" in text, text
+    assert "journalctl" in text, "要告诉人去看哪儿"
+    assert "reset-failed" in text and "systemctl start" in text, (
+        "要给出能直接抄的手工步骤：%s" % text
+    )
+    assert "已启用并执行" not in text, "失败了就不能说注册完成"

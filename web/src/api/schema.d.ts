@@ -370,6 +370,49 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/contests/{contest_id}/assets/{asset_id}/text": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Asset Text
+         * @description 读出一个纯文本资产的正文，供界面在线上编辑。
+         *
+         *     列表页那个 ``AssetOut.editable`` 只看元数据（不读盘）。这里是**真判**：
+         *     扩展名、体积、以及最要紧的那一条 —— 字节必须能按 UTF-8 解出来。
+         *
+         *     解不出来一律 400 而不是"尽力显示"：一份乱码在对话框里看起来也有内容，
+         *     教师在上面改两笔再保存，就等于用半截正确的字节覆盖掉原来那份文件，
+         *     而原始字节是拿不回来的。
+         */
+        get: operations["get_asset_text_api_v1_admin_contests__contest_id__assets__asset_id__text_get"];
+        /**
+         * Save Asset Text
+         * @description 用新正文换掉一个纯文本资产的内容，**同一个 asset id**。
+         *
+         *     资产是内容寻址的（一行只有 ``sha256`` + ``size``），所以"改内容"就是换掉
+         *     这两列，指向它的下发任务与目标一行都不用动。
+         *
+         *     但只换这两列是不够的：``services/deploy.py`` 的 tick 按 ``pending/ready``
+         *     取作业、并按**当前**的 ``asset.sha256`` 组装 job —— 已经 ``done`` 的目标
+         *     不会再被下发。不重排的话，选手页显示的是新正文、机器上躺着的还是旧文件，
+         *     而界面上一切正常，没人会发现。重排时**必须把续传偏移一起清零**：
+         *     拿旧文件的偏移去续新文件，拼出来的是一份永远校验不过的文件。
+         *
+         *     **审计**：这条路径改的是已经发出去的东西，事后必须查得到 —— 哪个场次、
+         *     哪个文件、从哪一版改到哪一版、影响了多少台。所以每次都要写一条 info 事件。
+         */
+        put: operations["save_asset_text_api_v1_admin_contests__contest_id__assets__asset_id__text_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/contests/{contest_id}/deploys": {
         parameters: {
             query?: never;
@@ -1918,6 +1961,11 @@ export interface components {
             contest_id: number;
             /** Created At */
             created_at: string;
+            /**
+             * Editable
+             * @default false
+             */
+            editable: boolean;
             /** Filename */
             filename: string;
             /** Id */
@@ -1941,6 +1989,24 @@ export interface components {
         AssetRenameIn: {
             /** Filename */
             filename: string;
+        };
+        /**
+         * AssetTextEditIn
+         * @description 在线改正文。**只有内容**，文件名不在这个入口里。
+         *
+         *     改名是"换标签"（内容按 sha256 存，改名不碰内容），改正文是"换内容"；
+         *     合成一个入口的话，"到底改的是哪一个"就没法从回执里说清 —— 而这两件事
+         *     对已经落到机器上的文件、对未完成的下发目标，后果完全不同。
+         *
+         *     ``content`` 的 200000 字上限与「新建文本文件」那条**逐字一致**：同一个
+         *     对话框写出来的东西，不该因为走新建还是走编辑而撞上两条不同的规则。
+         */
+        AssetTextEditIn: {
+            /**
+             * Content
+             * @description 文本内容（UTF-8；换行统一成 LF）
+             */
+            content: string;
         };
         /**
          * AssetTextIn
@@ -1969,6 +2035,36 @@ export interface components {
              * @default testdata
              */
             kind: string;
+        };
+        /**
+         * AssetTextOut
+         * @description 一个可在线编辑的纯文本资产的正文。
+         *
+         *     回显 ``filename`` 是因为对话框要用它写标题（"编辑 须知.txt"）——
+         *     调用方手上可能只有一个 asset id。
+         */
+        AssetTextOut: {
+            /** Content */
+            content: string;
+            /** Filename */
+            filename: string;
+        };
+        /**
+         * AssetTextSavedOut
+         * @description 在线改正文的回执。
+         *
+         *     ``asset`` 是**改后**的那一份（sha256 / size 都变了），界面拿它刷新行。
+         *     ``requeued`` 是被重新排队（``done`` → ``pending``）的机器台数 ——
+         *     已经落地的文件不会自己变成新的，只有重排之后机器才会在下一轮 tick
+         *     拿到新字节；这个数字是教师确认"改动已经推进下去"的唯一依据。
+         */
+        AssetTextSavedOut: {
+            asset: components["schemas"]["AssetOut"];
+            /**
+             * Requeued
+             * @default 0
+             */
+            requeued: number;
         };
         /**
          * BindByCodeIn
@@ -4292,6 +4388,74 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AssetOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_asset_text_api_v1_admin_contests__contest_id__assets__asset_id__text_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contest_id: number;
+                asset_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetTextOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    save_asset_text_api_v1_admin_contests__contest_id__assets__asset_id__text_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contest_id: number;
+                asset_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AssetTextEditIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetTextSavedOut"];
                 };
             };
             /** @description Validation Error */

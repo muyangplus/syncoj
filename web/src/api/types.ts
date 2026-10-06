@@ -63,6 +63,12 @@ export type EventOut = S['EventOut']
 export type AssetOut = S['AssetOut']
 /** 只改显示名。内容是按 sha256 存的，改名不触碰到内容。 */
 export type AssetRenameIn = S['AssetRenameIn']
+/** 一个可在线编辑的纯文本资产的正文（GET 读）。回显 `filename` 给对话框写标题。 */
+export type AssetTextOut = S['AssetTextOut']
+/** 在线改正文。只有内容 —— 文件名不在这个入口里（改名是另一个动作）。 */
+export type AssetTextEditIn = S['AssetTextEditIn']
+/** 改正文的回执：`asset` 是改后的那一份，`requeued` 是被重排的机器台数。 */
+export type AssetTextSavedOut = S['AssetTextSavedOut']
 export type DeployCreate = S['DeployCreate']
 export type DeployTaskOut = S['DeployTaskOut']
 export type DeployTargetOut = S['DeployTargetOut']

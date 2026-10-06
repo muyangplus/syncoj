@@ -2,8 +2,8 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 
-import { assetApi, deployApi, playerApi, problemApi } from '@/api'
-import type { AssetOut, DeployTaskOut, PlayerOut, ProblemOut } from '@/api/types'
+import { assetApi, deployApi, playerApi } from '@/api'
+import type { AssetOut, DeployTaskOut, PlayerOut } from '@/api/types'
 import DataTable from '@/components/DataTable.vue'
 import FormDialog from '@/components/FormDialog.vue'
 import HelpTip from '@/components/HelpTip.vue'
@@ -62,32 +62,25 @@ async function refreshAll(): Promise<void> {
 }
 
 // --------------------------------------------------------------------------- //
-// 下拉选项：选手与题目
+// 下拉选项：选手
 //
-// 它们只用来填"下发给谁 / 按哪道题"两个选择框，不进表格，所以不值得各起一个
-// `useList`；而且它们拉不到时不该把主列表也弄成错误状态 —— 主列表自己会报它的问题。
+// 只用来填"下发给谁"这个选择框，不进表格，所以不值得另起一个 `useList`；
+// 而且它拉不到时不该把主列表也弄成错误状态 —— 主列表自己会报它的问题。
 // --------------------------------------------------------------------------- //
 
 const players = ref<PlayerOut[]>([])
-const problems = ref<ProblemOut[]>([])
 
 async function loadOptions(): Promise<void> {
   const contestId = contest.currentId
   if (!contestId) {
     players.value = []
-    problems.value = []
     return
   }
   try {
-    const [playerPage, problemPage] = await Promise.all([
-      playerApi.list(contestId, { limit: 500 }),
-      problemApi.list(contestId, { limit: 500 }),
-    ])
+    const playerPage = await playerApi.list(contestId, { limit: 500 })
     players.value = playerPage.items
-    problems.value = problemPage.items
   } catch {
     players.value = []
-    problems.value = []
   }
 }
 
@@ -166,8 +159,29 @@ const NOTICE_FILENAME = 'NOTICE.md'
 const textDialog = ref(false)
 const textForm = reactive({ filename: '', content: '' })
 
+/**
+ * 这个对话框服务的三种事。
+ *
+ * 「新建」「写公告」「改已有资产的正文」共用同一份表单 —— 复制成三份的话，
+ * "内容可以为空"这类规则迟早只在其中一份里改，而它们本来就是同一个动作
+ * （写一段文字、存成一份下发文件）。区别只有：标题、预填的文件名、提交时打哪个接口。
+ */
+type TextMode = 'create' | 'notice' | 'edit'
+const textMode = ref<TextMode>('create')
+
+/** 正在改的那一条（`edit` 模式才有）。提交时要拿它的 id 去打 PUT。 */
+const textTarget = ref<AssetOut | null>(null)
+
+/** 打开时先 GET 一次正文，那一次请求也要占着确认按钮，不然能连点两次。 */
+const textLoading = ref(false)
+
 /** 标题与提示都跟着文件名走：它是不是考场公告，看的就是这个名字。 */
 const textIsNotice = computed(() => textForm.filename.trim() === NOTICE_FILENAME)
+
+const textTitle = computed(() => {
+  if (textMode.value === 'edit') return `编辑 ${textTarget.value?.filename ?? '文件'}`
+  return textIsNotice.value ? '写考场公告' : '新建文本文件'
+})
 
 /**
  * 两个入口共用一个对话框，区别只有预填的文件名。
@@ -175,7 +189,9 @@ const textIsNotice = computed(() => textForm.filename.trim() === NOTICE_FILENAME
  * 复制成两份表单的话，"内容可以为空"这类规则迟早只在其中一份里改 ——
  * 而它们本来就该是同一个动作。
  */
-function openTextDialog(filename = ''): void {
+function openTextDialog(mode: TextMode, filename = ''): void {
+  textMode.value = mode
+  textTarget.value = null
   textForm.filename = filename
   textForm.content = ''
   // 「写考场公告」把用途预置成「须知」：kind 决定它落到机器上的目标目录，
@@ -185,8 +201,76 @@ function openTextDialog(filename = ''): void {
   textDialog.value = true
 }
 
+/**
+ * 编辑一条已有的纯文本资产。
+ *
+ * 只有服务端说 `editable` 的那些才有这个入口（判据在服务端，前端不按扩展名
+ * 自己猜）。正文必须**先读回来**再让教师改：对话框里空着就是空文件，而"打开
+ * 一份空表单、改两笔、保存"会把一份好好的文件覆盖成半截。
+ */
+async function openEditTextDialog(asset: AssetOut): Promise<void> {
+  const contestId = contest.currentId
+  if (!contestId) return
+  textMode.value = 'edit'
+  textTarget.value = asset
+  textForm.filename = asset.filename
+  textForm.content = ''
+  // 用途不在这个入口里：换用途等于换它落到机器上的目标目录，那是另一个动作。
+  // 这里跟着资产把它带进对话框只是为了让下拉显示的不是一个假值。
+  uploadKind.value = asset.kind
+  textDialog.value = true
+  // 从这一刻起确认按钮就该是按不动的 —— 正文还没到，点下去存的是一份空文件
+  textLoading.value = true
+  try {
+    const text = await assetApi.getText(contestId, asset.id)
+    textForm.content = text.content
+  } catch {
+    // 错误提示由统一的数据层弹；这里只把对话框收掉，避免它停在一份空表单上，
+    // 让人以为"这个文件就是空的"
+    textDialog.value = false
+    textTarget.value = null
+  } finally {
+    textLoading.value = false
+  }
+}
+
+/**
+ * 保存一条已有的资产：同一个对话框、同一个提交按钮，分叉只在最后那一步 ——
+ * 这条走 PUT（返回 `AssetTextSavedOut`，比新建多一个"重排了多少台"）。
+ */
+const saveText = useMutation(
+  async () => {
+    const contestId = contest.currentId
+    if (!contestId) throw new Error('还没有选场次')
+    const asset = textTarget.value
+    if (!asset) throw new Error('没有选中文件')
+    // 服务端的上限是**字节**（1 MB），不是字符数：中文一个字三字节，
+    // 用 content.length 拦等于把上限放成三倍，于是点了保存才被拒。
+    // 这个数与服务端的 `_TEXT_MAX_BYTES` 对齐 —— 它比「新建文本文件」的
+    // 200000 字符上限宽，保证在界面上新建出来的正文都还能改。
+    if (new TextEncoder().encode(textForm.content).length > 1024 * 1024) {
+      throw new Error('正文超过 1 MB 的上限，请改完在本地重新上传')
+    }
+    return assetApi.saveText(contestId, asset.id, textForm.content)
+  },
+  {
+    success: ({ asset, requeued }) =>
+      // 只有真重排了才提台数：硬报"重新排队给 0 台机器"会让教师以为出错了
+      requeued > 0 ? `已保存，并重新排队给 ${requeued} 台机器` : `已保存「${asset.filename}」`,
+    onDone: async () => {
+      textDialog.value = false
+      textTarget.value = null
+      await assets.reload()
+    },
+  },
+)
+
 const createText = useMutation(
   async () => {
+    // 编辑走 saveText 那条 PUT。这里挡一道不是多疑：两条路共用一个对话框，
+    // 少这一步的话，将来有人忘了给编辑模式加上分支，就会静默地**新建**一条
+    // 同名资产（而不是改掉原来那条），界面上看起来一切正常。
+    if (textMode.value === 'edit') throw new Error('这是一条已有的文件，请走保存')
     const contestId = contest.currentId
     if (!contestId) throw new Error('还没有选场次')
     const filename = textForm.filename.trim()
@@ -305,8 +389,11 @@ const createDialog = ref(false)
  * 下发是给谁的）。
  *
  * 默认值是**空串，也就是桌面根目录**：最常见的一次下发是题面 zip + 样例 zip，
- * 它们就该直接躺在桌面上，选手双击解压就能看。只有"按题分发的附件"才需要
- * `{player_no}/<题目名>` —— 那种情况选了题目会自动填上。
+ * 它们就该直接躺在桌面上，选手双击解压就能看。
+ *
+ * 要按题分发时，教师自己把 `{player_no}/<题目名>` 填进来 —— 服务端**只认
+ * `{player_no}` 这一个占位符**，别的 `{...}` 会被明确拒绝，不会偷偷变成一个
+ * 目录名。界面不替他拼：拼错了（题目名改过、目录想换个层级）比手打更难发现。
  *
  * agent 侧的 `deploy_root` 默认就是桌面，所以这里的相对路径从桌面往下写。
  */
@@ -315,7 +402,6 @@ const form = reactive({
   targetKind: 'all' as 'all' | 'player' | 'group',
   playerIds: [] as number[],
   targetGroup: '',
-  problemIdent: '',
   destDir: '',
   mode: 'overwrite' as 'overwrite' | 'skip_exist',
 })
@@ -331,22 +417,13 @@ const destPreview = computed(() => {
   return form.destDir.trim().replace(/\{player_no\}/g, probe) || '（桌面根目录）'
 })
 
-/** 选题时自动把题目名拼进目标目录 —— 教师不用手打。 */
-function applyProblem(ident: string): void {
-  form.problemIdent = ident
-  // 选了题目 = 按题分发（附件放该选手的题目目录下）；
-  // 不选 = 通用资料（题面 zip、样例 zip、须知），直接放桌面根目录
-  form.destDir = ident ? `{player_no}/${ident}` : ''
-}
-
 function openCreate(asset?: AssetOut): void {
   form.assetId = asset?.id
   form.targetKind = 'all'
   form.playerIds = []
   form.targetGroup = groups.value[0] ?? ''
   // 默认落到**桌面根目录** —— 题面 zip、样例 zip、须知这类东西就该直接摆在
-  // 桌面上。要按题分发附件时，选中题目会自动改成 `{player_no}/<题目名>`。
-  form.problemIdent = ''
+  // 桌面上。要按题分发附件时，教师自己填 `{player_no}/<题目名>`。
   form.destDir = ''
   form.mode = 'overwrite'
   createDialog.value = true
@@ -486,8 +563,8 @@ function targetKindLabel(kind: string): string {
         <el-option v-for="kind in KIND_PRESETS" :key="kind" :label="kind" :value="kind" />
       </el-select>
       <el-button size="small" :loading="upload.pending.value" @click="pickFile">上传文件</el-button>
-      <el-button size="small" @click="openTextDialog()">新建文本文件</el-button>
-      <el-button size="small" @click="openTextDialog(NOTICE_FILENAME)">写考场公告</el-button>
+      <el-button size="small" @click="openTextDialog('create')">新建文本文件</el-button>
+      <el-button size="small" @click="openTextDialog('notice', NOTICE_FILENAME)">写考场公告</el-button>
       <el-button
         size="small"
         type="primary"
@@ -559,8 +636,19 @@ function targetKindLabel(kind: string): string {
           </template>
         </el-table-column>
 
-        <el-table-column label="操作" width="170" fixed="right">
+        <!-- 只有服务端说 `editable` 的文件才给这个入口。前端不按扩展名自己判断：
+             两处规则必然分叉，分叉那天的表现是"给了按钮、点下去报错"。 -->
+        <el-table-column label="操作" width="210" fixed="right">
           <template #default="{ row }">
+            <el-button
+              v-if="row.editable"
+              link
+              type="primary"
+              size="small"
+              @click="openEditTextDialog(row)"
+            >
+              编辑
+            </el-button>
             <el-button link type="primary" size="small" @click="openCreate(row)">下发</el-button>
             <el-button link type="primary" size="small" @click="openRename(row)">改名</el-button>
             <el-button link type="danger" size="small" @click="askRemoveAsset(row)">删除</el-button>
@@ -773,34 +861,16 @@ function targetKindLabel(kind: string): string {
           </el-select>
         </el-form-item>
 
-        <el-form-item label="所属题目">
-          <el-select
-            v-model="form.problemIdent"
-            placeholder="可选：选了就按题分发到该选手的题目目录"
-            clearable
-            style="width: 100%"
-            @change="applyProblem"
-          >
-            <el-option
-              v-for="problem in problems"
-              :key="problem.id"
-              :label="problem.title ? `${problem.title}（${problem.ident}）` : problem.ident"
-              :value="problem.ident"
-            />
-          </el-select>
-          <div class="page-hint">
-            通用资料（题面 zip、样例 zip、须知）<strong>不用选</strong>，留空即落到桌面根目录。
-          </div>
-        </el-form-item>
-
         <el-form-item label="目标目录">
           <el-input
             v-model="form.destDir"
             placeholder="留空 = 桌面根目录；{player_no}/题目名 = 该选手的题目目录"
           />
           <div class="page-hint">
-            <strong>留空就是桌面根目录</strong>；按题分发填
-            <code>{player_no}/&lt;题目名&gt;</code>，选了题目会自动填好。
+            <strong>留空就是桌面根目录</strong>；按题分发就自己填
+            <code>{player_no}/&lt;题目名&gt;</code>。
+            这里<strong>只认 <code>{player_no}</code> 这一个占位符</strong>，
+            别的 <code>{...}</code> 会被直接拒绝（不会展开，只会变成一个怪目录名）。
             <br />
             <strong>实际落点预览：</strong>
             <code>{{ destPreview }}</code>
@@ -841,17 +911,17 @@ function targetKindLabel(kind: string): string {
     </el-alert>
     </FormDialog>
 
-    <!-- 「新建文本文件」与「写考场公告」共用这一个对话框，区别只有预填的文件名 -->
+    <!-- 「新建文本文件」「写考场公告」「编辑已有文件」共用这一个对话框 -->
     <FormDialog
       v-model="textDialog"
-      :title="textIsNotice ? '写考场公告' : '新建文本文件'"
-      :submitting="createText.pending.value"
-      :disabled="!textForm.filename.trim()"
-      confirm-text="创建"
-      @submit="createText.run(undefined)"
+      :title="textTitle"
+      :submitting="createText.pending.value || saveText.pending.value"
+      :disabled="textLoading || !textForm.filename.trim()"
+      :confirm-text="textMode === 'edit' ? '保存' : '创建'"
+      @submit="textMode === 'edit' ? saveText.run(undefined) : createText.run(undefined)"
     >
       <el-alert
-        v-if="textIsNotice"
+        v-if="textIsNotice && textMode !== 'edit'"
         type="info"
         :closable="false"
         show-icon
@@ -862,13 +932,36 @@ function targetKindLabel(kind: string): string {
         </template>
       </el-alert>
 
+      <el-alert
+        v-if="textMode === 'edit'"
+        type="warning"
+        :closable="false"
+        show-icon
+        style="margin-bottom: 14px"
+      >
+        <template #title>改的是已经发出去的那一份</template>
+        <template #default>
+          保存后会用新正文替换原文件，已经下发完成的机器会被重新排队、再领一次。
+          <br />
+          已经落到机器上的那份不会自己变 —— 要它变，机器得再下载一遍。
+        </template>
+      </el-alert>
+
       <el-form label-width="90px">
         <el-form-item label="文件名" required>
-          <el-input v-model="textForm.filename" placeholder="例如 须知.txt" maxlength="255" />
+          <el-input
+            v-model="textForm.filename"
+            placeholder="例如 须知.txt"
+            maxlength="255"
+            :disabled="textMode === 'edit'"
+          />
+          <div v-if="textMode === 'edit'" class="page-hint">
+            文件名不在这里改 —— 它是机器上的落地名字，改名会连带影响没下完的任务。
+          </div>
         </el-form-item>
 
         <el-form-item label="用途">
-          <el-select v-model="uploadKind" style="width: 100%">
+          <el-select v-model="uploadKind" :disabled="textMode === 'edit'" style="width: 100%">
             <el-option v-for="kind in KIND_PRESETS" :key="kind" :label="kind" :value="kind" />
           </el-select>
         </el-form-item>

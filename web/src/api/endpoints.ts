@@ -106,6 +106,15 @@ export const paths = {
   contestAssets: (contestId: number) => `${ADMIN}/contests/${contestId}/assets`,
   /** 直接写一个纯文本资产（`须知.txt`、`NOTICE.md`…）。返回与上传同一个 `AssetOut`。 */
   contestAssetsText: (contestId: number) => `${ADMIN}/contests/${contestId}/assets/text`,
+  /**
+   * 某个资产的正文：GET 读、PUT 覆盖。
+   *
+   * 同一个路径两个方法，因为它们是同一份东西的两种访问方式（读出来填进对话框、
+   * 改完写回去）。能不能改由服务端给的 `AssetOut.editable` 决定 —— 前端不按
+   * 扩展名自己判断，两处规则必然分叉。
+   */
+  assetText: (contestId: number, assetId: number) =>
+    `${ADMIN}/contests/${contestId}/assets/${assetId}/text`,
   asset: (assetId: number) => `${ADMIN}/assets/${assetId}`,
   contestDeploys: (contestId: number) => `${ADMIN}/contests/${contestId}/deploys`,
   deploy: (taskId: number) => `${ADMIN}/deploys/${taskId}`,

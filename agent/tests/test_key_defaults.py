@@ -92,7 +92,8 @@ def test_explicit_value_beats_every_default(installer, monkeypatch) -> None:
 def test_explicit_file_is_read(installer, workdir: Path, monkeypatch) -> None:
     monkeypatch.setattr(installer, "DEFAULT_BOOTSTRAP_KEY_FILE", Path("nope/missing"))
     path = workdir / "given.key"
-    path.write_text("FROM-FILE\n", encoding="utf-8", newline="\n")
+    with path.open("w", encoding="utf-8", newline="\n") as _handle:
+        _handle.write("FROM-FILE\n")
 
     options = installer.build_parser().parse_args(["--bootstrap-key-file", str(path)])
     assert installer.resolve_bootstrap_key(options, key_readme(installer)) == "FROM-FILE"
@@ -115,7 +116,8 @@ def test_empty_key_file_means_no_key(installer, workdir: Path, monkeypatch) -> N
     """空文件不能让空串被当成密钥写进机器 —— 那会让注册单元带着一个空值开机。"""
     monkeypatch.setattr(installer, "DEFAULT_BOOTSTRAP_KEY_FILE", Path("nope/missing"))
     path = workdir / "empty.key"
-    path.write_text("\n  \n", encoding="utf-8", newline="\n")
+    with path.open("w", encoding="utf-8", newline="\n") as _handle:
+        _handle.write("\n \n")
 
     options = installer.build_parser().parse_args(["--bootstrap-key-file", str(path)])
     assert installer.resolve_bootstrap_key(options, key_readme(installer)) is None
@@ -130,7 +132,8 @@ def test_checkout_default_is_used_when_nothing_is_passed(
     shell 历史、屏幕、jump host 日志里的密钥是要收拾的）。
     """
     path = workdir / "bootstrap.key"
-    path.write_text("FROM-CHECKOUT\n", encoding="utf-8", newline="\n")
+    with path.open("w", encoding="utf-8", newline="\n") as _handle:
+        _handle.write("FROM-CHECKOUT\n")
     monkeypatch.setattr(installer, "DEFAULT_BOOTSTRAP_KEY_FILE", path)
 
     options = installer.build_parser().parse_args([])
@@ -158,11 +161,8 @@ def test_production_without_a_checkout_behaves_exactly_as_before(
 
 def fake_public_key(workdir: Path) -> Path:
     path = workdir / "release-key.pub.json"
-    path.write_text(
-        '{\n  "algorithm": "RSA",\n  "n": "00",\n  "e": "10001",\n  "key_id": "test-key"\n}\n',
-        encoding="utf-8",
-        newline="\n",
-    )
+    with path.open("w", encoding="utf-8", newline="\n") as _handle:
+        _handle.write('{\n "algorithm": "RSA",\n "n": "00",\n "e": "10001",\n "key_id": "test-key"\n}\n')
     return path
 
 

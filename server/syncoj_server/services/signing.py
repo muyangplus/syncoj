@@ -398,8 +398,5 @@ def write_public_key_json(path: Path, key: SigningKey) -> None:
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(key.public_key_dict(), indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-        newline="\n",
-    )
+    with path.open("w", encoding="utf-8", newline="\n") as _handle:
+        _handle.write(json.dumps(key.public_key_dict(), indent=2, ensure_ascii=False) + "\n")

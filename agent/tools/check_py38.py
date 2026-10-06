@@ -201,6 +201,27 @@ def check_tree(
                                 "%s.%s 在 3.8 中不存在（3.9+ API）" % (top, alias.name),
                             )
                         )
+        elif isinstance(node, ast.Call):
+            # `Path.read_text/write_text` 的 `newline=` 参数是 **3.10** 才加的。
+            # 这一类"参数级"的不兼容比"名字级"的更阴：语法过、名字也有，只有在 3.8 上
+            # 真跑才炸 —— 而它恰恰炸在装机写配置那一步（真机上就是这么发生的：
+            # `TypeError: write_text() got an unexpected keyword argument 'newline'`，
+            # 机器已经装了一半）。3.8 上要控制换行就用 `path.open("w", newline="\n")`。
+            func = node.func
+            if (
+                isinstance(func, ast.Attribute)
+                and func.attr in ("read_text", "write_text")
+                and any(keyword.arg == "newline" for keyword in node.keywords)
+            ):
+                issues.append(
+                    Issue(
+                        path,
+                        node.lineno,
+                        "api",
+                        "%s(..., newline=…) 的 newline 参数是 3.10 才加的，"
+                        "3.8 上会 TypeError；改用 open(newline=…)" % func.attr,
+                    )
+                )
         elif isinstance(node, ast.Attribute):
             for obj_hint, name in ATTRS_ADDED_AFTER_38:
                 if node.attr != name:

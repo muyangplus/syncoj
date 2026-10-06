@@ -37,11 +37,14 @@ def make(installer_module, workdir: Path):
         release = Path(options.prefix) / "releases" / version
         release.mkdir(parents=True, exist_ok=True)
         if server_json is not None:
-            (release / "server.json").write_text(server_json, encoding="utf-8", newline="\n")
+            # 3.8 上 write_text 没有 newline 参数（3.10 才加），用 open
+            with (release / "server.json").open("w", encoding="utf-8", newline="\n") as handle:
+                handle.write(server_json)
         if public_key:
-            (release / installer_module.PUBLIC_KEY_FILENAME).write_text(
-                json.dumps({"n": "12345", "e": "65537"}), encoding="utf-8", newline="\n"
-            )
+            with (release / installer_module.PUBLIC_KEY_FILENAME).open(
+                "w", encoding="utf-8", newline="\n"
+            ) as handle:
+                handle.write(json.dumps({"n": "12345", "e": "65537"}))
         return instance
 
     return factory

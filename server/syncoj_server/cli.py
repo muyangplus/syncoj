@@ -751,7 +751,8 @@ def _cmd_bootstrap_key(args: argparse.Namespace) -> int:
                 # 先建成 0600 再写内容，避免有一瞬间是宽权限。
                 target.touch(mode=0o600, exist_ok=True)
                 target.chmod(0o600)
-                target.write_text(raw + "\n", encoding="utf-8", newline="\n")
+                with target.open("w", encoding="utf-8", newline="\n") as _handle:
+                    _handle.write(raw + "\n")
             except OSError as exc:
                 print("错误：写入 %s 失败：%s" % (target, exc), file=sys.stderr)
                 return 1

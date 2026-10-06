@@ -58,9 +58,16 @@ DIAGNOSTICS_TIMEOUT_SECONDS = 15
 #:
 #: ``RemoteDisconnected`` 同时是 ``ConnectionResetError`` 与 ``BadStatusLine`` 的
 #: 子类，列全只是为了可读：谁看代码都能一眼看出这里要挡哪几类。
+#:
+#: ``ConnectionAbortedError`` 是**同一类竞态在 Windows 上的表现**（WinError 10053）：
+#: 复用一条对端已经关掉的连接时，Linux 上 h11 报 ``RemoteDisconnected``，
+#: Windows 上直接是"主机中的软件中止了一个已建立的连接"。跨端回归测试
+#: （``server/tests/test_e2e_agent.py`` 里那条 keep-alive 用例）会在 Windows 上
+#: 走到这条路 —— 不带上它，那条用例在开发机上是红的、目标机上才是绿的。
 RETRYABLE_CONNECTION_ERRORS = (
     http.client.RemoteDisconnected,
     ConnectionResetError,
+    ConnectionAbortedError,
     http.client.BadStatusLine,
     http.client.IncompleteRead,
 )

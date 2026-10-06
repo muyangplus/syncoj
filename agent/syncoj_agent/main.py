@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from . import __version__
+from . import diagnostics
 from . import discovery
 from .client import (
     AgentClient,
@@ -145,6 +146,26 @@ REGISTRATION_POLL_SECONDS = 60.0
 #: 在本地日志里说明（运维要查全量在那儿查）。
 SCAN_MISSING_MAX = 5
 
+# --- 诊断回传（定期把现场留给服务端）--------------------------------------- #
+#
+# 机器一旦离线就什么都抓不到了，所以要在**健康的时候**就把现场留下：出事时
+# 管理端看到的至少是"最后一份"。触发节奏三条：
+#
+# * 健康时每 10 分钟一份（``reason="periodic"``）；
+# * 出错立即补一份（``reason="error"``），但两次之间至少隔 60 秒 —— 一次故障
+#   里连着十轮失败，不该刷十份包（服务端也就只允 60 秒一份）；
+# * 服务端在 tick 里下 ``diagnostics_request=true``（管理端的按钮）→ 一份
+#   ``reason="manual"``。
+#
+# 上传失败**绝不影响心跳**（只记 DEBUG，连续多次才 WARNING），见
+# :meth:`Agent._maybe_send_diagnostics`。
+DIAGNOSTICS_PERIOD_SECONDS = 600.0
+DIAGNOSTICS_MIN_INTERVAL_SECONDS = 60.0
+#: 连续失败到第几个周期才去催"出错包"
+DIAGNOSTICS_ERROR_CONSECUTIVE_FAILURES = 2
+#: 上传连续失败到第几次才升到 WARNING（之后每 10 次再提一次，避免刷屏）
+DIAGNOSTICS_WARN_AFTER_FAILURES = 3
+
 #: **整轮看门狗**的下限（秒）。
 #:
 #: 真正的保命符：任何一次阻塞调用（socket 读、文件系统、网络盘上的 ``os.utime``）
@@ -251,6 +272,24 @@ def _read_desktop_text(path: Path) -> Optional[str]:
         return path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return None
+
+
+def _as_int_or_none(value) -> Optional[int]:
+    """把服务端给的数收成 int；给不出就 ``None``（诊断包里原样体现"不知道"）。"""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _current_user() -> str:
+    """当前进程的用户名（诊断包里报"Agent 以谁在跑"）。拿不到就空串。"""
+    try:
+        import getpass
+
+        return getpass.getuser()
+    except Exception:  # pragma: no cover - 极端环境下取不到
+        return ""
 
 
 def _scan_missing_for_payload(raw) -> List[str]:
@@ -412,6 +451,22 @@ class Agent:
             WATCHDOG_MIN_SECONDS, float(config.request_timeout) * 3
         )
         self._watchdog_active = False
+        # ---- 诊断回传 ----
+        #: 上一次**尝试**上传的时刻（成功、被限速、失败都算）。周期与最小间隔
+        #: 都看它，所以"发失败"不会变成每轮都撞。
+        self._diag_last_attempt = 0.0
+        #: 攒着的"立即补一份"请求：``"manual"`` 或 ``"error"``（manual 优先）
+        self._diag_pending: Optional[str] = None
+        #: 连续上传失败次数（成功或 429 清零）
+        self._diag_failures = 0
+        #: 给诊断包用的几个计数（tick 次数、最近一次错误、服务端给的下一轮间隔）
+        self._diag_tick_count = 0
+        self._diag_last_error: Optional[str] = None
+        self._diag_next_tick: Optional[int] = None
+        #: 连续失败的轮数（诊断包的 tick.consecutive_failures，也是"出错补一份"的判据）
+        self._consecutive_failures = 0
+        #: 时钟可注入（测试推进时间，不用真等 10 分钟）
+        self._monotonic = time.monotonic
 
     # ---------------------------------------------------------------- #
     # 生命周期
@@ -1277,6 +1332,9 @@ class Agent:
         except (UpgradeError, AgentError) as exc:
             log.error("升级包处理失败: %s", exc)
             self._emit("warning", "upgrade_failed", "升级 %s 失败：%s" % (version, exc))
+            # 升级失败是典型的"必须留现场"：下一轮就把诊断包补上（受 60 秒
+            # 最小间隔约束），管理端不必等机器彻底离线才发现。
+            self.request_diagnostics("error")
             return
 
         log.info("版本 %s 已暂存到 %s", manifest.version, install_root)
@@ -1322,6 +1380,7 @@ class Agent:
         except UpgradeError as exc:
             log.error("激活版本 %s 失败: %s", manifest.version, exc)
             self._emit("error", "upgrade_activate_failed", "激活失败：%s" % exc)
+            self.request_diagnostics("error")
             return
 
         log.warning(
@@ -1336,6 +1395,88 @@ class Agent:
         # 由 systemd 的 Restart=always 拉起新版本 —— 不需要我们自己调 systemctl，
         # 那会要求额外的 polkit 授权，平白扩大 Agent 的权限面
         self._restart_requested = True
+
+    # ---------------------------------------------------------------- #
+    # 诊断回传
+    # ---------------------------------------------------------------- #
+
+    def request_diagnostics(self, reason: str = "manual") -> None:
+        """记下"下次有机会就补一份"。``manual``（管理端按钮）优先于 ``error``。"""
+        if reason == "manual" or self._diag_pending is None:
+            self._diag_pending = reason
+
+    def _diagnostics_reason_now(self) -> Optional[str]:
+        """现在该不该传、以什么理由。返回 ``None`` 表示还不到时候。"""
+        now = self._monotonic()
+        if self._diag_pending:
+            # 立即补一份，但仍要守住 60 秒最小间隔（服务端也只允 60 秒一份）。
+            # 守住的方式是**留着这个请求**，下一轮再看 —— 不是丢掉它。
+            if now - self._diag_last_attempt >= DIAGNOSTICS_MIN_INTERVAL_SECONDS:
+                return self._diag_pending
+            return None
+        if now - self._diag_last_attempt >= DIAGNOSTICS_PERIOD_SECONDS:
+            return "periodic"
+        return None
+
+    def _build_diagnostics(self, reason: str) -> bytes:
+        bundle = diagnostics.build_bundle(
+            version=__version__,
+            reason=reason,
+            state=(
+                self._credential.state if self._credential is not None else STATE_UNCLAIMED
+            ),
+            machine_id=self.machine_id,
+            machine_uuid=self.machine_uuid,
+            hostname=socket.gethostname(),
+            run_user=self.config.run_user or _current_user(),
+            os_info=describe_os(),
+            tick={
+                "count": self._diag_tick_count,
+                "last_error": self._diag_last_error,
+                "consecutive_failures": self._consecutive_failures,
+                "next_tick_seconds": self._diag_next_tick,
+            },
+            policy=self.policy,
+            config=self.config,
+            log_path=self.config.resolved_log_file,
+        )
+        blob, dropped = diagnostics.encode_bundle(bundle)
+        if dropped:
+            log.debug("诊断包超过上限，已丢掉日志尾部（其余字段照常上报）")
+        return blob
+
+    def _maybe_send_diagnostics(self) -> None:
+        """一个"顺便"的动作：该传就传一份。
+
+        **绝不抛异常、绝不影响心跳**：它失败只记 DEBUG（连续多次才 WARNING），
+        而且超时只有 15 秒。做不成这件事的唯一后果就是"管理端少看到一份现场"。
+        """
+        try:
+            reason = self._diagnostics_reason_now()
+            if reason is None:
+                return
+            blob = self._build_diagnostics(reason)
+            self._diag_last_attempt = self._monotonic()
+            if self._diag_pending == reason:
+                self._diag_pending = None
+            self.client.upload_diagnostics(blob)
+            self._diag_failures = 0
+            log.debug("诊断包已上传（%s，%d 字节）", reason, len(blob))
+        except RateLimited as exc:
+            # 服务端限速 = "这次没传成"，不是错误：不重试、不报错，下一轮自然再来
+            self._diag_last_attempt = self._monotonic()
+            self._diag_failures = 0
+            log.debug("诊断包被服务端限速，这次没传成（下一轮再试）：%s", exc)
+        except Exception as exc:
+            self._diag_last_attempt = self._monotonic()
+            self._diag_failures += 1
+            if self._diag_failures == DIAGNOSTICS_WARN_AFTER_FAILURES or (
+                self._diag_failures > DIAGNOSTICS_WARN_AFTER_FAILURES
+                and self._diag_failures % 10 == 0
+            ):
+                log.warning("诊断包连续 %d 次没传出去（不影响心跳）：%s", self._diag_failures, exc)
+            else:
+                log.debug("诊断包没传出去（不影响心跳）：%s", exc)
 
     @contextmanager
     def _watchdog_paused(self):
@@ -1496,6 +1637,16 @@ class Agent:
         # 必须在 tick 之后、下载之前清 —— 下载新产生的完成项属于下一轮。
         del self._completed_assets[:]
 
+        # 诊断包需要的几个计数：tick 成功一轮、服务端给的下一轮间隔、最近一次错误
+        self._diag_tick_count += 1
+        self._diag_last_error = self._last_error
+        self._diag_next_tick = _as_int_or_none(tick.get("next_tick_seconds"))
+        if tick.get("diagnostics_request"):
+            # 管理端按了"抓一份现场"：下一轮循环里就发（受 60 秒最小间隔约束，
+            # 到点了立刻发 —— 请求会一直留着，不会被丢掉）
+            log.info("服务端要求回传一份诊断包（manual）")
+            self.request_diagnostics("manual")
+
         remote_state = state_from_payload(tick)
         if remote_state != STATE_READY:
             # 服务端说我们已经不能干活了（被解绑 / 场次里没有这个人 / 场次结束了）。
@@ -1644,9 +1795,11 @@ class Agent:
             # 调用都不能让心跳停摆超过 watchdog_seconds —— 现场那次卡在一次 socket
             # 读上 34 分钟，就是没有被兜住。
             self._watchdog_active = arm_watchdog(self.watchdog_seconds)
+            round_ok = False
             try:
                 delay = self.cycle()
                 self._backoff = 0.0
+                round_ok = True
             except RoundTimeout as exc:
                 # 看门狗掐掉这一轮：**不退出进程**，把话说清楚后照常进入下一轮。
                 # 下一次心跳用短一点的间隔，别让教师等满一个周期才知道出过事。
@@ -1704,6 +1857,19 @@ class Agent:
                 if self._watchdog_active:
                     disarm_watchdog()
                     self._watchdog_active = False
+                # 连续失败计数（诊断包的 tick.consecutive_failures，也是"出错补
+                # 一份现场"的判据）。成功一轮就清零。
+                self._consecutive_failures = 0 if round_ok else self._consecutive_failures + 1
+
+            # 连续失败攒到阈值 → 攒一份"出错包"（不是立刻发：60 秒最小间隔由
+            # `_maybe_send_diagnostics` 守）。这里只记"该发"，发不发得出去不影响
+            # 下面这一轮的等待。
+            if self._consecutive_failures >= DIAGNOSTICS_ERROR_CONSECUTIVE_FAILURES:
+                self.request_diagnostics("error")
+
+            # 诊断回传是**旁路**：该发就发一份，失败只记 DEBUG。
+            # 放在 `_sleep` 之前：它成功与否都不影响这一轮的节奏。
+            self._maybe_send_diagnostics()
 
             self._sleep(delay)
 

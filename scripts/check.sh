@@ -74,15 +74,23 @@ step "Python 3.8 兼容门禁（Agent 必须能跑在 NOI Linux 的 Python 3.8 �
 # 任何用到它的测试都会在 setup 阶段报 "fixture 'tmp_path' not found"，
 # 而报错看起来像"测试写错了"，不像"脚本禁掉了标准夹具"。收临时目录用
 # --basetemp 就够了，不需要把整个插件关掉。
+#
+# basetemp 与两个 conftest 自己的 workdir 根**必须是不同的目录**。它们曾经是
+# 同一个（`.pytest-tmp/{agent,server}` 既是 basetemp、又是 workdir 的家），于是
+# pytest 在第一次用到 `tmp_path` 时会**清空整个 basetemp** —— 而那时里面已经有
+# 本次会话里别的测试留下的临时目录，其中 `state/agent.log` 还被日志处理器占着。
+# 表现是 Windows 上一串 "PermissionError: 另一个程序正在使用此文件"，指向
+# 一个跟被测代码毫无关系的文件。所以 basetemp 单独放 `.pytest-tmp/basetemp/`。
 PYTEST_TMP="$REPO_ROOT/.pytest-tmp"
-mkdir -p "$PYTEST_TMP"
+PYTEST_BASE="$PYTEST_TMP/basetemp"
+mkdir -p "$PYTEST_BASE"
 
 step "Agent 测试"
-(cd agent && "$PYTHON" -m pytest -p no:cacheprovider --basetemp="$PYTEST_TMP/agent")
+(cd agent && "$PYTHON" -m pytest -p no:cacheprovider --basetemp="$PYTEST_BASE/agent")
 
 step "服务端测试（含协议契约测试与端到端集成测试）"
 (cd server && PYTHONPATH="$REPO_ROOT/server" "$PYTHON" -m pytest \
-  -p no:cacheprovider --basetemp="$PYTEST_TMP/server")
+  -p no:cacheprovider --basetemp="$PYTEST_BASE/server")
 
 step "OpenAPI 与前端类型是否同步"
 # 服务端 schema 改了但 web/openapi.json 没重新生成时，这里会拦住。

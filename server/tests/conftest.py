@@ -28,6 +28,43 @@ ADMIN_USER = "admin"
 ADMIN_PASSWORD = "correct-horse-battery"
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _basetemp_must_not_be_our_workdir_root(pytestconfig) -> None:
+    """``--basetemp`` 不能和这个文件里的 ``TMP_ROOT`` 是同一个目录（也不能互相包含）。
+
+    踩过一次，而且现象极具误导性：basetemp 曾经就是 ``.pytest-tmp`` 本身，而
+    ``workdir`` 直接把临时目录建在它里面 —— 于是 pytest 在**第一次**用到
+    ``tmp_path`` 时会清空整个 basetemp，把本次会话里已经在用的临时目录一起删掉。
+    那些目录里有日志文件被处理器占着（Windows 上删不掉），报出来是一串
+
+        PermissionError: [WinError 32] 另一个程序正在使用此文件
+
+    指向一个跟被测代码毫无关系的文件，而且只在某些测试**顺序**下出现。
+
+    读的是命令行给的 ``--basetemp``，不是 ``tmp_path_factory.getbasetemp()``：
+    后者会在夹具里**建目录**，而它的父目录不存在时抛的是
+    ``FileNotFoundError`` —— 一个关于路径、与被测代码毫无关系的报错。
+    """
+    given = getattr(pytestconfig.option, "basetemp", None)
+    if not given:
+        return  # 没给 --basetemp 就落在系统临时目录里，不可能和我们撞
+    base = Path(given).resolve()
+    ours = TMP_ROOT.resolve()
+    # 危险的是**basetemp 把 TMP_ROOT 包住**（或者就等于它）：pytest 清空 basetemp
+    # 时会把 TMP_ROOT 连同里面正在用的临时目录一起删掉。
+    # 反过来（basetemp 落在 TMP_ROOT 里面，比如 .pytest-tmp/basetemp/server）是安全的 ——
+    # 清空只动它自己那一棵。这个方向我一开始写反了，代价是整个服务端套件
+    # 596 条全部 setup 失败。
+    dangerous = base == ours or base in ours.parents
+    assert not dangerous, (
+        "--basetemp（%s）把 TMP_ROOT（%s）包住了，或者就等于它。\n"
+        "pytest 会清空 basetemp，于是这里正在用的临时目录会被一起删掉；\n"
+        "表现是 Windows 上删文件失败引发的 PermissionError。\n"
+        "请在 scripts/check.sh 里把 basetemp 指到 .pytest-tmp/basetemp/ 这类独立目录。"
+        % (base, ours)
+    )
+
+
 @pytest.fixture(autouse=True)
 def isolated_key_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """把密钥目录钉在临时目录里，**每个测试一个**。
@@ -181,6 +218,10 @@ def settings(workdir: Path, isolated_key_dir: Path) -> Settings:
     # 显式依赖 isolated_key_dir：保证环境变量在 Settings() 构造**之前**就位
     config = Settings()
     config.data_root = workdir / "data"
+    # 默认关掉局域网发现。开着的话每个进入 lifespan 的测试都会去绑 UDP 端口 ——
+    # 而测试进程里同时活着的 app 不止一个，于是"端口被占"的警告会刷满日志，
+    # 真正测发现的那几条反而淹在里面。要测它的用 test_discovery.py 自己开。
+    config.discovery_enabled = False
     return config
 
 

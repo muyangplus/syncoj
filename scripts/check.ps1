@@ -69,13 +69,19 @@ Assert-Ok "check_py38 server/"
 # 任何用到它的测试都会在 setup 阶段报 "fixture 'tmp_path' not found"，
 # 而报错看起来像"测试写错了"，不像"脚本禁掉了标准夹具"。收临时目录用
 # --basetemp 就够了，不需要把整个插件关掉。
+#
+# basetemp 与两个 conftest 自己的 workdir 根**必须是不同的目录**：它们曾经是
+# 同一个，于是 pytest 在第一次用到 `tmp_path` 时会清空整个 basetemp —— 那时里面
+# 已经有本次会话里别的测试留下的临时目录，其中 `state/agent.log` 还被日志处理器
+# 占着。表现是 Windows 上一串 "PermissionError: 另一个程序正在使用此文件"。
 $pytestTmp = Join-Path $repoRoot ".pytest-tmp"
-New-Item -ItemType Directory -Force -Path $pytestTmp | Out-Null
+$pytestBase = Join-Path $pytestTmp "basetemp"
+New-Item -ItemType Directory -Force -Path $pytestBase | Out-Null
 
 Step "Agent 测试"
 Push-Location agent
 try {
-    & $Python -m pytest -p no:cacheprovider "--basetemp=$pytestTmp\agent"
+    & $Python -m pytest -p no:cacheprovider "--basetemp=$pytestBase\agent"
     Assert-Ok "agent pytest"
 } finally {
     Pop-Location
@@ -85,7 +91,7 @@ Step "服务端测试（含协议契约测试与端到端集成测试）"
 Push-Location server
 try {
     $env:PYTHONPATH = Join-Path $repoRoot "server"
-    & $Python -m pytest -p no:cacheprovider "--basetemp=$pytestTmp\server"
+    & $Python -m pytest -p no:cacheprovider "--basetemp=$pytestBase\server"
     Assert-Ok "server pytest"
 } finally {
     Remove-Item Env:\PYTHONPATH -ErrorAction SilentlyContinue

@@ -101,24 +101,16 @@ foreach ($script in Get-ChildItem (Join-Path $repoRoot "scripts\*.ps1")) {
 }
 
 Step "Agent 测试"
-Push-Location agent
-try {
-    & $Python -m pytest -p no:cacheprovider "--basetemp=$pytestBase\agent"
-    Assert-Ok "agent pytest"
-} finally {
-    Pop-Location
-}
+# 按文件并行跑（server/tools/parallel_tests.py，零依赖）：服务端那套串行要 40 分钟，
+# 而它慢在"每个用例都造一次真 app + 真库 + 真 HTTP"，不在测试逻辑本身 ——
+# 按文件分片就能把核用起来。worker 数用 SYNCOJ_TEST_JOBS 覆盖（默认 min(核数, 8)）。
+$jobs = if ($env:SYNCOJ_TEST_JOBS) { $env:SYNCOJ_TEST_JOBS } else { "8" }
+& $Python (Join-Path $repoRoot "server\tools\parallel_tests.py") --root agent --jobs $jobs
+Assert-Ok "agent pytest"
 
 Step "服务端测试（含协议契约测试与端到端集成测试）"
-Push-Location server
-try {
-    $env:PYTHONPATH = Join-Path $repoRoot "server"
-    & $Python -m pytest -p no:cacheprovider "--basetemp=$pytestBase\server"
-    Assert-Ok "server pytest"
-} finally {
-    Remove-Item Env:\PYTHONPATH -ErrorAction SilentlyContinue
-    Pop-Location
-}
+& $Python (Join-Path $repoRoot "server\tools\parallel_tests.py") --root server --jobs $jobs
+Assert-Ok "server pytest"
 
 Step "OpenAPI 与前端类型是否同步"
 # 服务端 schema 改了但 web/openapi.json 没重新生成时，这里会拦住。

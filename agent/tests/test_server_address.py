@@ -18,8 +18,6 @@ AGENT_ROOT = Path(__file__).resolve().parents[1]
 if str(AGENT_ROOT) not in sys.path:
     sys.path.insert(0, str(AGENT_ROOT))
 
-from syncoj_agent import discovery  # noqa: E402
-
 
 @pytest.fixture()
 def make(installer_module, workdir: Path):
@@ -50,14 +48,16 @@ def make(installer_module, workdir: Path):
     return factory
 
 
-def allow_discovery(monkeypatch, outcome):
+def allow_discovery(monkeypatch, installer_module, outcome):
     """把"有可用公钥"和"发现的结果"一起钉住。
 
+    安装器现在**自包含**实现了发现（单文件自举时 import 不到 syncoj_agent），
+    所以补丁打在安装器模块自己的 ``load_public_key`` / ``discover`` 上。
     夹具里那份 ``{"n":"12345"}`` 不是合法 RSA 公钥，真的走一遍 `load_public_key`
     会得到 None，于是发现这条路根本不成立 —— 而用例想测的是优先级。
     """
-    monkeypatch.setattr(discovery, "load_public_key", lambda path: object())
-    monkeypatch.setattr(discovery, "discover", lambda *a, **k: outcome)
+    monkeypatch.setattr(installer_module, "load_public_key", lambda path: object())
+    monkeypatch.setattr(installer_module, "discover", lambda *a, **k: outcome)
 
 
 # --------------------------------------------------------------------------- #
@@ -108,9 +108,9 @@ def test_包内地址收尾斜杠被抹掉(make) -> None:
         "[]",
     ],
 )
-def test_包内地址不像话就当没有(make, monkeypatch, payload) -> None:
+def test_包内地址不像话就当没有(make, monkeypatch, installer_module, payload) -> None:
     """坏数据要**跳过并继续往下找**，不是崩掉，也不是硬着头皮用。"""
-    allow_discovery(monkeypatch, discovery.DiscoveryOutcome(None, []))
+    allow_discovery(monkeypatch, installer_module, installer_module.DiscoveryOutcome(None, []))
     instance = make(server_json=payload)
 
     url, origin = instance.resolve_server_url("1.0.0")
@@ -128,10 +128,11 @@ def instance_module_default(instance) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def test_包内没地址时用发现到的(make, monkeypatch) -> None:
+def test_包内没地址时用发现到的(make, monkeypatch, installer_module) -> None:
     allow_discovery(
         monkeypatch,
-        discovery.DiscoveryOutcome("http://10.0.0.7:8000", ["http://10.0.0.7:8000"]),
+        installer_module,
+        installer_module.DiscoveryOutcome("http://10.0.0.7:8000", ["http://10.0.0.7:8000"]),
     )
     instance = make()
 
@@ -141,7 +142,7 @@ def test_包内没地址时用发现到的(make, monkeypatch) -> None:
     assert "发现" in origin
 
 
-def test_没有公钥就完全不问(make, monkeypatch) -> None:
+def test_没有公钥就完全不问(make, monkeypatch, installer_module) -> None:
     """没有公钥就分不出"服务端"和"随便一个应答者"，那就不该往局域网上喊。
 
     与"没有密钥就不升级"同一个默认。
@@ -152,7 +153,7 @@ def test_没有公钥就完全不问(make, monkeypatch) -> None:
         called.append(args)
         raise AssertionError("没有公钥时不该发探测")
 
-    monkeypatch.setattr(discovery, "discover", boom)
+    monkeypatch.setattr(installer_module, "discover", boom)
     instance = make(public_key=False)
 
     url, origin = instance.resolve_server_url("1.0.0")
@@ -161,11 +162,12 @@ def test_没有公钥就完全不问(make, monkeypatch) -> None:
     assert "默认值" in origin
 
 
-def test_歧义时不猜_退回默认并说明(make, monkeypatch) -> None:
+def test_歧义时不猜_退回默认并说明(make, monkeypatch, installer_module) -> None:
     """两个服务端都回了应答。猜错的表现是"交上去了但成绩是空的"，且现场看不出来。"""
     allow_discovery(
         monkeypatch,
-        discovery.DiscoveryOutcome(
+        installer_module,
+        installer_module.DiscoveryOutcome(
             None, ["http://10.0.0.5:8000", "http://10.0.0.6:8000"]
         ),
     )
@@ -180,11 +182,11 @@ def test_歧义时不猜_退回默认并说明(make, monkeypatch) -> None:
     assert any("多个服务端" in message for message in warnings), warnings
 
 
-def test_no_discover_跳过发现(make, monkeypatch) -> None:
+def test_no_discover_跳过发现(make, monkeypatch, installer_module) -> None:
     def boom(*args, **kwargs):  # pragma: no cover
         raise AssertionError("--no-discover 时不该发探测")
 
-    monkeypatch.setattr(discovery, "discover", boom)
+    monkeypatch.setattr(installer_module, "discover", boom)
     instance = make(argv=["--no-discover"])
     warnings = []
     instance.report.warn = lambda message: warnings.append(message)
@@ -196,17 +198,19 @@ def test_no_discover_跳过发现(make, monkeypatch) -> None:
     assert any("no-discover" in message for message in warnings), warnings
 
 
-def test_discover_address_直接问指定地址(make, monkeypatch) -> None:
+def test_discover_address_直接问指定地址(make, monkeypatch, installer_module) -> None:
     """有些交换机禁广播 —— 那时教师至少能填一个地址让它直接问。"""
     seen = {}
 
-    monkeypatch.setattr(discovery, "load_public_key", lambda path: object())
+    monkeypatch.setattr(installer_module, "load_public_key", lambda path: object())
 
     def fake_discover(public_key, **kwargs):
         seen.update(kwargs)
-        return discovery.DiscoveryOutcome("http://10.0.0.7:8000", ["http://10.0.0.7:8000"])
+        return installer_module.DiscoveryOutcome(
+            "http://10.0.0.7:8000", ["http://10.0.0.7:8000"]
+        )
 
-    monkeypatch.setattr(discovery, "discover", fake_discover)
+    monkeypatch.setattr(installer_module, "discover", fake_discover)
     instance = make(argv=["--discover-address", "10.0.0.7", "--discover-timeout", "0.4"])
 
     instance.resolve_server_url("1.0.0")
@@ -220,13 +224,17 @@ def test_discover_address_直接问指定地址(make, monkeypatch) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_都没找到时必须警告说清后果(make, monkeypatch) -> None:
+def test_都没找到时必须警告说清后果(make, monkeypatch, installer_module) -> None:
     """出厂默认是 127.0.0.1 —— 把它当真，50 台机器会各自连自己。
 
     所以这条警告必须同时说清**用了什么值**和**会出什么事**，否则现场只会看到
     "注册不上"，然后去查网络、查密钥、查服务端日志，就是不会想到配置文件里那行。
     """
-    monkeypatch.setattr(discovery, "discover", lambda *a, **k: discovery.DiscoveryOutcome(None, []))
+    monkeypatch.setattr(
+        installer_module,
+        "discover",
+        lambda *a, **k: installer_module.DiscoveryOutcome(None, []),
+    )
     instance = make()
     warnings = []
     instance.report.warn = lambda message: warnings.append(message)
@@ -278,7 +286,7 @@ def test_内嵌地址与实际写进配置的一致(make, installer_module) -> N
 
     assert rendered["server_url"] == "http://10.0.0.5:8000"
 
-def test_公钥读不出来就不发现(make, monkeypatch) -> None:
+def test_公钥读不出来就不发现(make, monkeypatch, installer_module) -> None:
     """分不清"服务端"和"随便一个应答者"时，不猜。"""
     called = []
 
@@ -286,8 +294,8 @@ def test_公钥读不出来就不发现(make, monkeypatch) -> None:
         called.append(args)
         raise AssertionError("公钥读不出来时不该发探测")
 
-    monkeypatch.setattr(discovery, "load_public_key", lambda path: None)
-    monkeypatch.setattr(discovery, "discover", boom)
+    monkeypatch.setattr(installer_module, "load_public_key", lambda path: None)
+    monkeypatch.setattr(installer_module, "discover", boom)
     instance = make()
 
     url, origin = instance.resolve_server_url("1.0.0")

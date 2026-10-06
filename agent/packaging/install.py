@@ -38,18 +38,25 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import hashlib
+import hmac
 import json
+import logging
 import os
+import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path, PurePosixPath
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, NamedTuple, Optional, Tuple
 
 #: 本文件在仓库里的位置。安装器也会被拷进安装包/镜像，那时 ``parents[2]`` 不再
 #: 指向仓库 —— 所以凡是用到它的地方都要先判存在性，猜错只能退化成"没有这个默认值"，
@@ -114,6 +121,15 @@ EXPECTED_TOP_LEVEL = "syncoj_agent"
 LAUNCHER_NAME = "run_agent.py"
 MAX_EXTRACTED_BYTES = 512 * 1024 * 1024
 MAX_MEMBERS = 20000
+
+#: 卸载时用来判断"这个目录看起来是不是 SyncOJ 装出来的"的标记。
+#: ``--prefix`` / ``--config-dir`` / ``--state-dir`` 都是可覆盖的，所以**不能**
+#: 因为路径对得上就删 —— 用户把它们指到别处时，宁可不卸也不能清人家的目录。
+UNINSTALL_PREFIX_MARKERS = (RELEASES_DIR, CURRENT_LINK, LAUNCHER_NAME)
+#: 配置目录里的凭据：统一注册密钥 + 升级信任锚。
+UNINSTALL_CONFIG_MARKERS = (CONFIG_FILENAME, BOOTSTRAP_KEY_FILENAME, PUBLIC_KEY_FILENAME)
+#: 状态目录里的本机身份与日志。
+UNINSTALL_STATE_MARKERS = ("credential.json", "machine_uuid", "agent.log")
 
 
 class InstallError(Exception):
@@ -307,6 +323,371 @@ def _decode_signature(text: str) -> Optional[bytes]:
         return base64.urlsafe_b64decode(cleaned + "=" * (-len(cleaned) % 4))
     except (binascii.Error, ValueError):
         return None
+
+
+# --------------------------------------------------------------------------- #
+# 发布公钥解析与 RSA 验签（刻意自包含，与"安全解包"同一个理由）
+# --------------------------------------------------------------------------- #
+#
+# ``bootstrap.sh`` 下发给目标机的**只有 install.py 一个文件**（落点形如
+# ``/tmp/syncoj-bootstrap.XXXX/``）。那一刻机器上既没有 ``syncoj_agent`` 包、
+# 也没解包过任何东西 —— 所以安装器里**任何** ``from syncoj_agent import ...``
+# 都必然 ModuleNotFoundError，而现场表现是"装到一半就炸"。
+#
+# 还有一条更硬的安全底线：**绝不能先把包解开、把解出来的目录加进 sys.path，
+# 再 import 来验签**。那等于拿一份尚未验证的包里的代码去验证它自己，验签白做。
+# 验签实现只能来自安装器自身（或机器上已经装好的旧版本）—— 这里选前者。
+#
+# 下面是对 ``syncoj_agent/rsa.py`` 与 ``syncoj_agent/discovery.py`` 相关部分的
+# **独立重写**，行为保持一致：两份实现互为交叉验证，任何一份被改坏，另一份仍然
+# 拦得住。
+
+#: RFC 8017 §9.2 的 SHA-256 DigestInfo 前缀（含外层 SEQUENCE）。
+#: 结构：SEQUENCE(30 31) SEQUENCE(30 0d) OID(06 09 60 86 48 01 65 03 04 02 01)
+#:       NULL(05 00) OCTET STRING(04 20)
+PKCS1_SHA256_DIGEST_INFO_PREFIX = bytes.fromhex("3031300d060960864801650304020105000420")
+
+#: RSA 模数的最小位数，低于它直接拒绝。与 syncoj_agent/rsa.py 一致。
+MIN_MODULUS_BITS = 2048
+
+
+class SignatureError(Exception):
+    """公钥格式不合法。签名不匹配属于正常结果，用返回值 False 表达。"""
+
+
+def _unb64(text: str) -> bytes:
+    """解码 base64url（容忍缺少的填充与标准 base64 的 +/）。"""
+    cleaned = str(text).strip().replace("+", "-").replace("/", "_")
+    padding = "=" * (-len(cleaned) % 4)
+    try:
+        return base64.urlsafe_b64decode(cleaned + padding)
+    except (binascii.Error, ValueError) as exc:
+        raise SignatureError("base64 解码失败: %s" % exc)
+
+
+class RSAPublicKey:
+    """只够验签用的 RSA 公钥（验证只需要 n、e）。"""
+
+    __slots__ = ("n", "e", "key_id")
+
+    def __init__(self, n: int, e: int, key_id: str = "") -> None:
+        if n <= 0:
+            raise SignatureError("模数必须为正整数")
+        if e < 3 or e % 2 == 0:
+            raise SignatureError("公钥指数必须是大于等于 3 的奇数")
+        if n.bit_length() < MIN_MODULUS_BITS:
+            raise SignatureError(
+                "模数只有 %d 位，低于安全下限 %d 位" % (n.bit_length(), MIN_MODULUS_BITS)
+            )
+        self.n = n
+        self.e = e
+        self.key_id = key_id
+
+    @property
+    def byte_length(self) -> int:
+        """模数的字节长度，即合法签名的长度。"""
+        return (self.n.bit_length() + 7) // 8
+
+    @classmethod
+    def from_dict(cls, data) -> "RSAPublicKey":
+        if not isinstance(data, dict):
+            raise SignatureError("公钥必须是 JSON 对象")
+        alg = data.get("alg")
+        if alg not in (None, "RS256"):
+            raise SignatureError("不支持的算法: %r" % alg)
+        try:
+            n = int.from_bytes(_unb64(data["n"]), "big")
+            e = int.from_bytes(_unb64(data["e"]), "big")
+        except KeyError as exc:
+            raise SignatureError("公钥缺少字段: %s" % exc)
+        return cls(n=n, e=e, key_id=str(data.get("key_id", "")))
+
+
+def load_public_key(path) -> Optional["RSAPublicKey"]:
+    """读发布公钥；读不出来返回 ``None``（调用方按"不能验"处理）。
+
+    与 ``syncoj_agent.discovery.load_public_key`` 行为一致：刻意不区分"文件不存在"
+    和"内容不合法" —— 两种情况的调用方动作一样（不发现 / 跳过验签）。
+    """
+    if path is None:
+        return None
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        return RSAPublicKey.from_dict(json.loads(text))
+    except (ValueError, SignatureError):
+        return None
+
+
+def expected_encoded_message(byte_length: int, message: bytes) -> bytes:
+    """按 RFC 8017 §9.2 构造 EMSA-PKCS1-v1_5 编码。"""
+    digest_info = PKCS1_SHA256_DIGEST_INFO_PREFIX + hashlib.sha256(message).digest()
+    padding_length = byte_length - len(digest_info) - 3
+    if padding_length < 8:
+        raise SignatureError("模数太短，容不下 PKCS#1 v1.5 填充")
+    return b"\x00\x01" + b"\xff" * padding_length + b"\x00" + digest_info
+
+
+def verify_pkcs1v15_sha256(
+    public_key: "RSAPublicKey",
+    message: bytes,
+    signature: bytes,
+) -> bool:
+    """验证签名。任何异常情况都返回 ``False``，不抛异常。
+
+    严格按 RFC 8017 §8.2.2 **逐字节重建再整体比对** —— 不解析、不容忍、不留余量。
+    宽松校验正是 PKCS#1 v1.5 历史上多次被伪造打穿的入口。
+    """
+    if not isinstance(message, (bytes, bytearray)):
+        return False
+    if not isinstance(signature, (bytes, bytearray)):
+        return False
+
+    length = public_key.byte_length
+    # 长度必须精确匹配。容忍短签名（左填充 0）是经典的历史漏洞
+    if len(signature) != length:
+        return False
+
+    s = int.from_bytes(signature, "big")
+    # s 必须落在 [0, n)。s >= n 会让模幂结果产生歧义
+    if s >= public_key.n:
+        return False
+
+    try:
+        recovered = pow(s, public_key.e, public_key.n)
+        encoded = recovered.to_bytes(length, "big")
+        expected = expected_encoded_message(length, bytes(message))
+    except (ValueError, OverflowError, SignatureError):
+        return False
+
+    return hmac.compare_digest(encoded, expected)
+
+
+# --------------------------------------------------------------------------- #
+# 局域网发现（客户端，同样刻意自包含）
+# --------------------------------------------------------------------------- #
+#
+# 安装器只在两处用得上它：``--from-server`` 没给地址时，以及写配置时包里没内嵌
+# 地址。原来的实现 import 了 ``syncoj_agent.discovery``，同样会在"单文件安装器"
+# 这个真实上下文里直接炸掉。
+#
+# 这里只重写**客户端**那一半：探测、验签、不猜歧义。协议常量必须与服务端
+# ``syncoj_server/services/discovery.py`` 保持一致（互通性由两边各自的测试盯着）。
+
+#: 探测报文的魔数与版本。
+DISCOVERY_MAGIC = "syncoj"
+DISCOVERY_PROTOCOL_VERSION = 1
+DISCOVERY_MIN_PROBE_BYTES = 640
+DISCOVERY_PORT = 45871
+#: 探测文本前缀（与服务端共用一个字面量，跨协议隔离）。
+DISCOVERY_SIGNATURE_PREFIX = "syncoj-discovery-v1"
+#: 等应答的默认秒数。局域网往返是个位数毫秒。
+DISCOVERY_TIMEOUT_SECONDS = 1.5
+#: 一次最多看几个应答（防"被应答淹没"的上界，不是答案数量）。
+DISCOVERY_MAX_REPLIES = 16
+
+
+#: 与原 ``syncoj_agent.discovery`` 保持同样的诊断输出（没配 handler 时走
+#: logging 的 lastResort，直接进 stderr）。现场排查靠它区分"没人应答"与
+#: "有人应答但验签没过"。
+log = logging.getLogger(__name__)
+
+
+class DiscoveryOutcome(NamedTuple):
+    """一次探测的结果。
+
+    ``url`` 只有**恰好一个**验过签的答案时才非空。``candidates`` 用来解释为什么
+    没定下来（两个服务端 = 歧义；空 = 没人应答）。
+    """
+
+    url: Optional[str]
+    candidates: List[str]
+
+    @property
+    def ambiguous(self) -> bool:
+        return len(self.candidates) > 1
+
+    def explain(self) -> str:
+        if self.url:
+            return "找到服务端：%s" % self.url
+        if self.ambiguous:
+            return "局域网里有多个服务端都回了应答（%s）—— 需要显式指定地址" % (
+                "、".join(self.candidates)
+            )
+        return "局域网里没有服务端应答"
+
+
+def canonical_text(nonce: str, url: str) -> str:
+    """要被签名的那段文本。**与服务端逐字节一致**。"""
+    return "%s\n%s\n%s" % (DISCOVERY_SIGNATURE_PREFIX, nonce, url)
+
+
+def build_probe(nonce: str, machine_id: str = "", min_bytes: int = DISCOVERY_MIN_PROBE_BYTES) -> bytes:
+    """造探测报文，**带填充**凑到 ``min_bytes``。
+
+    填充是协议的一部分：服务端立了一条"应答不得大于探测"的规矩来避免自己变成
+    放大器，太短的探测它直接不理。
+    """
+    payload = {
+        "syncoj": DISCOVERY_MAGIC,
+        "v": DISCOVERY_PROTOCOL_VERSION,
+        "nonce": nonce,
+        "machine_id": machine_id,
+    }
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    if len(raw) < min_bytes:
+        payload["pad"] = "0" * max(0, min_bytes - len(raw) - 12)
+        raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    while len(raw) < min_bytes:
+        payload["pad"] = str(payload.get("pad", "")) + "0" * (min_bytes - len(raw))
+        raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    return raw
+
+
+def broadcast_targets() -> List[str]:
+    """往哪些地址喊。
+
+    永远包含受限广播 ``255.255.255.255``。此外**在 Linux 上**从 ``/proc/net/route``
+    读出各接口的子网广播地址 —— 有些考场的内网没有默认路由，受限广播不一定出得去。
+    读不到（Windows、或被限制）时静默跳过：那不是错误。
+    """
+    targets = ["255.255.255.255"]
+    try:
+        with open("/proc/net/route", "r", encoding="ascii") as handle:
+            lines = handle.read().splitlines()[1:]
+    except OSError:
+        return targets
+
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 8:
+            continue
+        try:
+            # 这两列是**小端**十六进制（内核按内存里的字节序直接打印）
+            destination = int(fields[1], 16)
+            mask = int(fields[7], 16)
+        except ValueError:
+            continue
+        if mask == 0:
+            continue  # 默认路由：它的"广播地址"没有意义
+        network = destination & mask
+        broadcast = network | (~mask & 0xFFFFFFFF)
+        target = socket.inet_ntoa(broadcast.to_bytes(4, "big"))
+        if target not in targets:
+            targets.append(target)
+    return targets
+
+
+def machine_id_hint() -> str:
+    """探测里带的主机名，纯为服务端日志好读。读不到就空着。"""
+    try:
+        return socket.gethostname()[:64]
+    except OSError:  # pragma: no cover
+        return ""
+
+
+def parse_discovery_reply(raw: bytes, nonce: str, public_key: "RSAPublicKey") -> Optional[str]:
+    """验一个应答；通过就返回它宣称的地址，否则 ``None``。
+
+    四道都要过：能解析、随机数对得上、地址像样、**签名验得过**。少任何一道，
+    这个应答都不能用来决定"把注册密钥发给谁"。
+    """
+    if len(raw) > 4096:  # pragma: no cover - 防御性
+        return None
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("syncoj") != DISCOVERY_MAGIC:
+        return None
+    if payload.get("v") != DISCOVERY_PROTOCOL_VERSION:
+        return None
+    if payload.get("nonce") != nonce:
+        # 重放：别人录下上一次的应答原样发过来，随机数就对不上了
+        log.debug("发现应答的随机数对不上，忽略（可能是重放）")
+        return None
+    url = payload.get("url")
+    if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+        return None
+    signature = _decode_signature(str(payload.get("sig") or ""))
+    if signature is None:
+        return None
+    if not verify_pkcs1v15_sha256(
+        public_key, canonical_text(nonce, url).encode("utf-8"), signature
+    ):
+        # 这是整套东西存在的理由：局域网里任何人想冒充服务端，都签不出这一段
+        log.warning("发现应答的签名验不过，忽略：%s", url)
+        return None
+    return url.rstrip("/")
+
+
+def discover(
+    public_key: Optional["RSAPublicKey"],
+    *,
+    port: int = DISCOVERY_PORT,
+    timeout: float = DISCOVERY_TIMEOUT_SECONDS,
+    machine_id: str = "",
+    targets: Optional[List[str]] = None,
+) -> DiscoveryOutcome:
+    """在局域网里找服务端。**不抛异常**，找不到就返回空结果。
+
+    ``public_key`` 为 ``None``（机器上没装发布公钥）时直接返回空 —— 没有公钥就
+    无法分辨"服务端"和"局域网里随便一个应答者"，那就不猜。
+    """
+    if public_key is None:
+        log.info("没有发布公钥，跳过局域网发现（无法验证应答来源）")
+        return DiscoveryOutcome(None, [])
+
+    nonce = secrets.token_hex(16)
+    probe = build_probe(nonce, machine_id=machine_id)
+    destinations = list(targets) if targets else broadcast_targets()
+    seen = {}  # type: dict
+    deadline = time.monotonic() + max(0.05, timeout)
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("", 0))
+        sent = 0
+        for target in destinations:
+            try:
+                sock.sendto(probe, (target, port))
+                sent += 1
+            except OSError as exc:
+                # 某个网段的广播发不出去很正常（没有到那个网段的路由），
+                # 继续试下一个；全都发不出去才需要报出来。
+                log.debug("向 %s 发探测失败：%s", target, exc)
+        if not sent:
+            log.warning(
+                "局域网发现：没有一个地址能发出去（试过 %s）", ", ".join(destinations)
+            )
+            return DiscoveryOutcome(None, [])
+
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or len(seen) >= DISCOVERY_MAX_REPLIES:
+                break
+            sock.settimeout(remaining)
+            try:
+                raw, _peer = sock.recvfrom(4096)
+            except socket.timeout:
+                break
+            except OSError as exc:  # pragma: no cover - 网卡没了之类
+                log.warning("局域网发现：收应答失败：%s", exc)
+                break
+            url = parse_discovery_reply(raw, nonce, public_key)
+            if url:
+                seen[url] = seen.get(url, 0) + 1
+    finally:
+        sock.close()
+
+    candidates = sorted(seen)
+    if len(candidates) == 1:
+        return DiscoveryOutcome(candidates[0], candidates)
+    return DiscoveryOutcome(None, candidates)
 
 
 class Installer:
@@ -511,15 +892,13 @@ class Installer:
         if self.options.server:
             return self.options.server.rstrip("/")
         if self.options.public_key:
-            from syncoj_agent import discovery
-
-            key = discovery.load_public_key(self.options.public_key)
+            key = load_public_key(self.options.public_key)
             if key is None:
                 raise InstallError("--public-key 读不出来: %s" % self.options.public_key)
-            outcome = discovery.discover(
+            outcome = discover(
                 key,
                 timeout=self.options.discover_timeout,
-                machine_id=discovery.machine_id_hint(),
+                machine_id=machine_id_hint(),
             )
             if outcome.url:
                 return outcome.url
@@ -575,10 +954,7 @@ class Installer:
         if not signature:
             self.report.warn("服务端没给签名，跳过验签（机器上有公钥却用不上）")
             return
-        from syncoj_agent import discovery
-        from syncoj_agent.rsa import verify_pkcs1v15_sha256
-
-        key = discovery.load_public_key(key_path)
+        key = load_public_key(key_path)
         if key is None:
             self.report.warn("发布公钥读不出来（%s），跳过验签" % key_path)
             return
@@ -836,9 +1212,7 @@ class Installer:
         if not public_key_path.is_file():
             return None, "机器上没有发布公钥，无法验证应答来源"
 
-        from syncoj_agent import discovery  # 延迟 import：只有这条路才用得上
-
-        key = discovery.load_public_key(public_key_path)
+        key = load_public_key(public_key_path)
         if key is None:
             return None, "发布公钥读不出来"
 
@@ -849,10 +1223,10 @@ class Installer:
         targets = None
         if self.options.discover_address:
             targets = [self.options.discover_address]
-        outcome = discovery.discover(
+        outcome = discover(
             key,
             timeout=self.options.discover_timeout,
-            machine_id=discovery.machine_id_hint(),
+            machine_id=machine_id_hint(),
             targets=targets,
         )
         if outcome.url:
@@ -1041,31 +1415,13 @@ class Installer:
         except OSError as exc:
             self.report.warn("删除注册单元失败：%s" % exc)
 
-    def install_bootstrap_key(self) -> bool:
-        """把统一密钥文件放到配置目录，**0600 且属主 root**。
+    def _write_bootstrap_key(self, raw: str) -> bool:
+        """把统一密钥内容落成 ``<config-dir>/bootstrap.key``，0600 且属主 root。
 
-        密钥由教师在服务端签发（``syncoj-server bootstrap-key issue``），
-        装机时用 ``--bootstrap-key`` 传进来。它放在这里而不是 agent.ini 里，
-        原因是那个文件 chown 给了选手账号 —— 学生读得到里面的每一个字节。
-
-        返回值是"这台机器现在有没有可用的密钥"，**不是**"这次有没有写"：
-        重复执行安装器时通常不会再传一遍密钥（那是个一眼都不该多看的秘密），
-        如果这里返回 False，``install_enroll_unit`` 就会把上一次装好的
-        开机注册单元删掉 —— 表现是"什么都没改，但下次开机不再注册了"。
+        **先建成 0600 再写内容**：反过来的话，从"文件出现"到"chmod 收紧"之间会
+        有一瞬间是宽权限，而这份密钥能注册整间机房。返回 False 表示没写成功。
         """
         target = self.config_dir / BOOTSTRAP_KEY_FILENAME
-        raw = (self.options.bootstrap_key or "").strip()
-
-        if not raw:
-            # 没给密钥 ≠ 没有密钥：上一次装机可能已经放好了一份
-            return target.is_file()
-
-        self.report.section("统一注册密钥")
-
-        if self.report.dry_run:
-            self.report.plan("写入 %s（0600，属主 root）" % target)
-            return True
-
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             # 先建成 0600 再写内容，避免有一瞬间是宽权限
@@ -1093,6 +1449,116 @@ class Installer:
         self.report.action("已写入 %s（0600，属主 root）" % target)
         self.report.note("密钥能注册整间机房，所以只给 root 读 —— 不要放进 agent.ini")
         return True
+
+    def _bundled_bootstrap_key_path(self, version: Optional[str]) -> Optional[Path]:
+        """安装包根目录附带的 ``bootstrap.key`` 会落在哪里；没有就 ``None``。
+
+        打包时（``build_bundle.py``）它是 tar 的**顶层**成员，与 ``syncoj_agent/``、
+        ``run_agent.py`` 同级。解包进 ``releases/<版本>/`` 之后就在版本目录根部；
+        ``--from-dir`` 是把整个目录复制进版本目录，所以同一条路也覆盖它。
+        """
+        if not version:
+            return None
+        return self.prefix / RELEASES_DIR / version / BOOTSTRAP_KEY_FILENAME
+
+    def _drop_bundled_bootstrap_key(self, bundled: Optional[Path]) -> None:
+        """把随包走的那份密钥从**版本目录**里清掉。
+
+        ``releases/<版本>/`` 对选手账号可读，而这份密钥能注册整间机房 ——
+        它没有理由留在那儿。选"写完就删"而不是"先挪到 config_dir 再解包其余部分"，
+        是因为解包在 ``install_release`` 里、与写密钥分处两步；最后统一清理还能覆盖
+        **"机器上已经有密钥、包里这份根本没被用上"** 那个容易漏掉的情形。
+        """
+        if bundled is None or not bundled.is_file():
+            return
+        if self.report.dry_run:
+            self.report.plan(
+                "删除包内附带的 %s（不能留在选手可读的版本目录里）" % bundled
+            )
+            return
+        try:
+            bundled.unlink()
+        except OSError as exc:
+            self.report.warn(
+                "包内附带的密钥删不掉：%s（它留在 %s，选手账号读得到）" % (exc, bundled)
+            )
+            return
+        self.report.action("已删除包内附带的 %s（不能留在选手可读的版本目录里）" % bundled)
+
+    def install_bootstrap_key(self, version: Optional[str] = None) -> bool:
+        """把统一密钥放到配置目录，**0600 且属主 root**。
+
+        密钥由教师在服务端签发（``syncoj-server bootstrap-key issue``）。三个来源，
+        按优先级：
+
+        1. ``--bootstrap-key`` / ``--bootstrap-key-file`` 显式给的（最高）；
+        2. 目标机上已经存在的 ``<config-dir>/bootstrap.key``（重复装机时的常态）；
+        3. **安装包根目录里附带的 ``bootstrap.key``** —— 打包时从仓库 ``.key/``
+           打进去的，用来支持"离线包自带注册凭证"。
+
+        **安全底线：密钥只能来自这三个本地来源，绝不允许为了它去访问网络**
+        （比如"问服务端要一把"）。那等于任何人只要连得到服务端就能拿到注册凭证，
+        这把密钥"只随镜像走、不随网络流动"的设计就白做了。
+
+        它放在 ``<config-dir>/`` 而不是 ``agent.ini`` 里，原因是那个文件 chown 给了
+        选手账号 —— 学生读得到里面的每一个字节。
+
+        返回值是"这台机器现在有没有可用的密钥"，**不是**"这次有没有写"：
+        重复执行安装器时通常不会再传一遍密钥（那是个一眼都不该多看的秘密），
+        如果这里返回 False，``install_enroll_unit`` 就会把上一次装好的
+        开机注册单元删掉 —— 表现是"什么都没改，但下次开机不再注册了"。
+        """
+        target = self.config_dir / BOOTSTRAP_KEY_FILENAME
+        bundled = self._bundled_bootstrap_key_path(version)
+        raw = (self.options.bootstrap_key or "").strip()
+
+        # 1) 显式给的（明文 --bootstrap-key，或 --bootstrap-key-file 的内容）
+        if raw:
+            self.report.section("统一注册密钥")
+            if self.report.dry_run:
+                self.report.plan("写入 %s（0600，属主 root）" % target)
+                self._drop_bundled_bootstrap_key(bundled)
+                return True
+            written = self._write_bootstrap_key(raw)
+            self._drop_bundled_bootstrap_key(bundled)
+            return written
+
+        # 2) 没给密钥 ≠ 没有密钥：上一次装机可能已经放好了一份
+        if target.is_file():
+            self._drop_bundled_bootstrap_key(bundled)
+            return True
+
+        # 3) 安装包根目录里附带的那份（同样是**本地**来源，绝不联网去要）
+        bundled_raw = ""
+        if bundled is not None and bundled.is_file():
+            try:
+                bundled_raw = bundled.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeDecodeError) as exc:
+                self.report.warn("安装包内附带的 %s 读不出来，忽略：%s" % (bundled, exc))
+
+        if not bundled_raw:
+            # 包内没有（或读不出来）→ 与从前一样：这台机器没有密钥。
+            # 但空文件同样不该留在选手可读的版本目录里。
+            self._drop_bundled_bootstrap_key(bundled)
+            return False
+
+        self.report.section("统一注册密钥")
+        if self.report.dry_run:
+            self.report.plan("使用安装包内附带的统一注册密钥（版本 %s 附带）" % version)
+            self.report.plan("写入 %s（0600，属主 root）" % target)
+            self._drop_bundled_bootstrap_key(bundled)
+            return True
+
+        self.report.action("使用安装包内附带的统一注册密钥（版本 %s 附带）" % version)
+        self.report.note(
+            "它等于一张“能注册进这台服务端”的通行证 —— "
+            "这个包不要给选手、不要放在学生读得到的地方"
+        )
+        written = self._write_bootstrap_key(bundled_raw)
+        # 无论写成功与否都清掉版本目录里那份：它在那里对选手账号可读，
+        # 留着的危害比"这次没装上密钥"大得多（后者重跑一次就能补）。
+        self._drop_bundled_bootstrap_key(bundled)
+        return written
 
     def check_identity_leftovers(self) -> None:
         """建镜像时：状态目录里不该有凭据/身份文件。
@@ -1161,7 +1627,7 @@ class Installer:
 
         # 注意这个返回值是"这台机器现在有没有可用的密钥"，不是"这次有没有写" ——
         # 重复执行安装器时通常不会再传一遍密钥，见 install_bootstrap_key
-        has_bootstrap_key = self.install_bootstrap_key()
+        has_bootstrap_key = self.install_bootstrap_key(version)
 
         self.write_config(version)
         self.install_unit(version)
@@ -1176,6 +1642,260 @@ class Installer:
             self.report.note("查看状态: systemctl status %s" % self.service_name)
             self.report.note("查看日志: journalctl -u %s -n 50" % self.service_name)
         return EXIT_OK
+
+    # ---------------------------------------------------------------- #
+    # 卸载
+    # ---------------------------------------------------------------- #
+
+    def uninstall(self) -> int:
+        """把安装器装到这台机器上的东西**按顺序**卸掉，返回退出码。
+
+        ## 它会删掉哪些凭据（这是"卸载必须 --yes"的全部理由）
+
+        * ``<config-dir>/bootstrap.key`` —— **统一注册密钥**：一张"能注册进这台
+          服务端"的通行证。它泄露 = 别人能把任意一台机器注册进来。
+        * ``<config-dir>/release-key.pub.json`` —— 升级信任锚（本身不是秘密，
+          但删掉之后自更新会整体失效）。
+        * ``<state-dir>/credential.json``、``machine_uuid`` —— 本机身份与长期
+          凭据，也就是这台机器在服务端那边的"户口"。
+
+        所以默认删除是**不可逆**的：不看一眼就删掉，事后只能重新走一遍注册。
+
+        ## 明确不动的东西
+
+        选手桌面上的下发文件、``/tmp`` 下的临时目录、运行用户的家目录都不属于
+        Agent 本身 —— 一个卸载工具顺手删掉学生的作业是灾难性的，所以它们都不在
+        删除范围内（结尾会把这几条再明说一遍）。
+
+        ## 幂等
+
+        没装过的机器照样返回成功，并明确说"什么都没做" —— 卸载脚本被重复执行
+        是常态（重装之前先清一遍），它不该在那时变成一条错误。
+        """
+        self.report.section("卸载 SyncOJ Agent")
+        self._require_uninstall_confirmation()
+
+        removed = False
+        failed = False
+        for did, bad in (
+            self._uninstall_units(),
+            self._remove_tree(
+                self.prefix, "安装根目录", UNINSTALL_PREFIX_MARKERS
+            ),
+            self._remove_tree(
+                self.config_dir,
+                "配置目录（含统一注册密钥与升级信任锚）",
+                UNINSTALL_CONFIG_MARKERS,
+            ),
+            self._uninstall_state(),
+            self._remove_user(),
+        ):
+            removed = removed or did
+            failed = failed or bad
+
+        self.report.section("卸载结果")
+        if not removed:
+            # 幂等：没装过也**成功**，而且必须明说，否则现场会以为"是不是卡住了"
+            self.report.note("这台机器上没有装 Agent，什么都没做")
+        elif self.report.dry_run:
+            self.report.note("以上为将要卸载的内容（--dry-run，未做任何改动）")
+        else:
+            self.report.note("已按上面列出的每一项卸载完毕")
+
+        if removed:
+            # 这两份就是"卸载必须 --yes"的全部理由：删掉之后只能重新注册/配信任锚
+            self.report.note(
+                "这条卸载路径涉及两份凭据：%s（统一注册密钥）、%s（升级信任锚）"
+                % (
+                    self.config_dir / BOOTSTRAP_KEY_FILENAME,
+                    self.config_dir / PUBLIC_KEY_FILENAME,
+                )
+            )
+            if not self.options.keep_state:
+                self.report.note(
+                    "以及本机身份与长期凭据：%s/credential.json、machine_uuid"
+                    % _posix(self.state_dir)
+                )
+        self.report.note(
+            "明确未动：选手桌面上的下发文件、/tmp 下的临时目录、运行用户的家目录"
+            "都不属于 Agent 本身，未删除。"
+        )
+        if self.report.dry_run:
+            self.report.note("以上为计划，未做任何改动（--dry-run）")
+        return EXIT_ERROR if failed else EXIT_OK
+
+    def _require_uninstall_confirmation(self) -> None:
+        """卸载前的确认：非交互必须 ``--yes``，交互要把名字原样打一遍。
+
+        ``curl … | sh -s -- --uninstall`` 这种管道里 stdin 不是终端（``input``
+        会立刻 EOF），所以**必须**要求 ``--yes``；否则一台机器可能在没人看着的
+        时候被拆掉，而删掉的凭据是恢复不了的。
+
+        交互时的规矩跟仓库里"结构性删除要打名字"（服务端 ``require_confirm``）
+        一致：不是问"是否确定"，而是**把名字打一遍** —— "是"会被手指肌肉记忆点掉。
+        """
+        if self.report.dry_run:
+            self.report.note("预览模式：只列出将会停止/删除哪些单元与路径，不做任何改动")
+            return
+        if self.options.yes:
+            self.report.note("已确认（--yes）")
+            return
+        if not sys.stdin.isatty():
+            raise InstallError(
+                "卸载是**不可逆**操作：会删掉本机凭据（统一注册密钥、本机身份），"
+                "删掉之后只能重新注册。当前 stdin 不是终端，无法交互确认 ——\n"
+                "  这是不可逆操作，确认请显式加 --yes：\n"
+                "  sudo python3 install.py --uninstall --yes"
+            )
+        # 交互：把名字原样打一遍（见上面 docstring）
+        self.report.note(
+            "这将删除 Agent、配置目录（含统一注册密钥）与状态目录（含本机凭据）。"
+        )
+        try:
+            answer = input(
+                "要卸载的是 Agent「%s」，请把它原样输一遍再确认（输入别的会取消）: "
+                % self.service_name
+            )
+        except EOFError:
+            raise InstallError("读不到确认输入，已取消，未做任何改动")
+        if answer.strip() != self.service_name:
+            raise InstallError("确认不匹配，已取消，未做任何改动")
+        self.report.note("已确认（手工输入 %s）" % self.service_name)
+
+    @staticmethod
+    def _marker_present(directory: Path, marker: str) -> bool:
+        candidate = directory / marker
+        # is_symlink 也要看：``current`` 是符号链接，断链时 exists() 会给 False
+        return candidate.exists() or candidate.is_symlink()
+
+    def _looks_like_sync_oj(self, path: Path, markers: "Tuple[str, ...]") -> bool:
+        """这个目录看起来是不是 SyncOJ 装出来的？
+
+        空目录算"是" —— 删掉一个空目录没有任何信息损失。非空但不能确认时
+        **一律跳过**：``--prefix`` 是用户可覆盖的，把它指到别处时宁可不卸，
+        也不能因为"路径长得对"就把人家的目录清了。
+        """
+        if not path.is_dir():
+            return False
+        try:
+            entries = list(path.iterdir())
+        except OSError:
+            return False
+        if not entries:
+            return True
+        return any(self._marker_present(path, marker) for marker in markers)
+
+    def _remove_tree(
+        self, path: Path, label: str, markers: "Tuple[str, ...]"
+    ) -> "Tuple[bool, bool]":
+        """删掉一个安装器建的目录。返回 ``(是否删了/会删, 是否出错)``。"""
+        self.report.section("删除%s" % label)
+        if not path.exists() and not path.is_symlink():
+            self.report.skip("%s不存在，跳过：%s" % (label, path))
+            return False, False
+        if not self._looks_like_sync_oj(path, markers):
+            self.report.warn(
+                "%s 看起来不是 SyncOJ 的安装（缺少 %s 之类的标记），"
+                "为免误删已跳过：%s" % (label, " / ".join(markers), path)
+            )
+            return False, False
+        if self.report.dry_run:
+            self.report.plan("删除 %s" % path)
+            return True, False
+        try:
+            shutil.rmtree(str(path))
+        except OSError as exc:
+            self.report.warn("删除 %s 失败：%s" % (path, exc))
+            return False, True
+        self.report.action("已删除 %s" % path)
+        return True, False
+
+    def _uninstall_state(self) -> "Tuple[bool, bool]":
+        """状态目录：本机凭据与日志都在这里，``--keep-state`` 可以留下它。"""
+        if self.options.keep_state:
+            self.report.section("状态目录")
+            self.report.skip("保留状态目录 %s（--keep-state）" % self.state_dir)
+            self.report.note("日志也在这里；要复盘请先把它拷走")
+            return False, False
+        return self._remove_tree(
+            self.state_dir, "状态目录（含本机凭据与日志）", UNINSTALL_STATE_MARKERS
+        )
+
+    def _uninstall_units(self) -> "Tuple[bool, bool]":
+        """停掉并删掉两个单元：Agent 本体与"以 root 注册一次"的那个。
+
+        单元名一律从 ``UNIT_FILENAME`` / ``ENROLL_UNIT_FILENAME`` 派生（就是
+        ``unit_path.name``），不写死字符串 —— 改名时漏掉一处，现场表现是
+        "卸载说删了，可开机还在跑"。
+        """
+        self.report.section("停止并删除 systemd 单元")
+        units = [
+            self.unit_path,  # syncoj-agent.service
+            self.unit_path.parent / ENROLL_UNIT_FILENAME,  # syncoj-agent-enroll.service
+        ]
+        removed = False
+        failed = False
+        for unit in units:
+            if not unit.is_file():
+                self.report.skip("单元不存在，跳过：%s" % unit)
+                continue
+            removed = True
+            if self.report.dry_run:
+                self.report.plan("systemctl disable --now %s" % unit.name)
+                self.report.plan("删除 %s" % unit)
+                continue
+            if _which("systemctl"):
+                result = run(["systemctl", "disable", "--now", unit.name], check=False)
+                if result == 0:
+                    self.report.action("已停止并禁用 %s" % unit.name)
+                else:
+                    self.report.warn(
+                        "systemctl disable --now %s 失败（退出码 %s），继续删单元文件"
+                        % (unit.name, result)
+                    )
+            else:
+                self.report.warn("找不到 systemctl，跳过停止/禁用，直接删单元文件")
+            try:
+                unit.unlink()
+            except OSError as exc:
+                self.report.warn("删除 %s 失败：%s" % (unit, exc))
+                failed = True
+                continue
+            self.report.action("已删除 %s" % unit)
+        if removed and not self.report.dry_run and _which("systemctl"):
+            run(["systemctl", "daemon-reload"], check=False)
+            self.report.action("已执行 systemctl daemon-reload")
+        return removed, failed
+
+    def _remove_user(self) -> "Tuple[bool, bool]":
+        """删掉运行用户，``--keep-user`` 跳过。
+
+        **刻意不用 ``userdel -r``**：安装时那个用户是 ``--no-create-home`` 建的，
+        而它的 home-dir 恰好被设成了状态目录 —— ``-r`` 会把状态目录（含日志，
+        可能还有凭据）一起删掉。而且"这个家目录到底是不是安装器建的"在这里
+        无从确认，删别人的数据是不可逆的。
+        """
+        self.report.section("运行用户")
+        if self.options.keep_user:
+            self.report.skip("保留运行用户 %s（--keep-user）" % self.run_user)
+            return False, False
+        if not _user_exists(self.run_user):
+            self.report.skip("运行用户不存在，跳过：%s" % self.run_user)
+            return False, False
+        if self.report.dry_run:
+            self.report.plan(
+                "删除运行用户 %s（**不删**家目录：无法确认那份家目录是安装器建的）"
+                % self.run_user
+            )
+            return True, False
+        result = run(["userdel", self.run_user], check=False)
+        if result != 0:
+            self.report.warn(
+                "删除运行用户 %s 失败（退出码 %s），请手工处理" % (self.run_user, result)
+            )
+            return True, True
+        self.report.action("已删除运行用户 %s（未动家目录）" % self.run_user)
+        return True, False
 
 
 # --------------------------------------------------------------------------- #
@@ -1654,6 +2374,27 @@ def build_parser() -> argparse.ArgumentParser:
     behaviour.add_argument("--skip-user", action="store_true", help="不创建系统用户")
     behaviour.add_argument("--skip-service", action="store_true", help="不碰 systemd")
     behaviour.add_argument("--skip-python-check", action="store_true")
+
+    removal = parser.add_argument_group("卸载")
+    removal.add_argument(
+        "--uninstall",
+        action="store_true",
+        help=(
+            "卸载 Agent：停掉并删除两个 systemd 单元，删除安装/配置/状态目录，"
+            "最后删除运行用户。默认**全卸**（不可逆，会删掉本机凭据）。"
+        ),
+    )
+    removal.add_argument(
+        "--yes",
+        action="store_true",
+        help="确认卸载。stdin 不是终端（比如 curl | sh）时**必须**显式加上。",
+    )
+    removal.add_argument("--keep-user", action="store_true", help="卸载时保留运行用户")
+    removal.add_argument(
+        "--keep-state",
+        action="store_true",
+        help="卸载时保留状态目录（日志也在这里，要复盘就先拷贝）",
+    )
     return parser
 
 
@@ -1662,6 +2403,10 @@ def resolve_bootstrap_key(options: argparse.Namespace, report: Reporter) -> Opti
 
     优先级：``--bootstrap-key``（明文，最高）> ``--bootstrap-key-file`` >
     ``<仓库>/.key/bootstrap.key``（存在才用）> 没有。
+
+    这里只解决**显式/仓库**来源；机器上已有的那份与安装包内附带的
+    ``bootstrap.key`` 由 :meth:`Installer.install_bootstrap_key` 接着往下找，
+    整体顺序是"显式 > 机器上已有 > 包内附带"，且**全部都是本地来源**。
 
     最后那条默认值是这次改动里唯一"行为变了"的地方，所以它有两个约束：
     直接传明文仍然完全优先；不在源码仓库里跑（安装器被拷进镜像/安装包之后
@@ -1704,6 +2449,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         return EXIT_OK
 
     report = Reporter(dry_run=args.dry_run, quiet=args.quiet)
+
+    if args.uninstall:
+        installer = Installer(args, report)
+        try:
+            return installer.uninstall()
+        except InstallError as exc:
+            print("\n卸载失败：%s" % exc, file=sys.stderr)
+            return EXIT_ERROR
+        except KeyboardInterrupt:  # pragma: no cover
+            print("\n已中断", file=sys.stderr)
+            return EXIT_ERROR
+
     args.bootstrap_key = resolve_bootstrap_key(args, report)
     installer = Installer(args, report)
 

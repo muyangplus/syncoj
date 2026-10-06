@@ -8,7 +8,6 @@ import { fileApi, playerApi } from '@/api'
 import type { PlayerOut, SourceFileOut } from '@/api/types'
 import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
 import DataTable from '@/components/DataTable.vue'
-import HelpTip from '@/components/HelpTip.vue'
 import PageShell from '@/components/PageShell.vue'
 import { useList } from '@/composables/useList'
 import { useMutation } from '@/composables/useMutation'
@@ -279,17 +278,11 @@ const scopeLabel = computed(() => {
 <template>
   <PageShell
     title="代码台账"
-    hint="收上来的选手代码，同名文件只留最新版本。"
     :error="list.error.value"
-    error-action="代码台账取不到时，成绩与交付判断都不可信。"
+    error-action="先重试；还不行就检查服务端。"
     retryable
     @retry="list.reload"
   >
-    <template #hint>
-      <HelpTip>
-        修订号随内容变化 +1；迟到的旧版本会被服务端拒绝。
-      </HelpTip>
-    </template>
     <template #toolbar>
       <el-select
         v-model="playerFilter"
@@ -375,7 +368,6 @@ const scopeLabel = computed(() => {
       <el-tag v-if="problems.loose" size="small" type="warning" effect="plain">
         本页有文件没归到任何题目
       </el-tag>
-      <span class="muted">「归属」由题目清单里的「代码路径」模式决定，改模式立刻生效。</span>
     </div>
 
     <DataTable
@@ -401,12 +393,7 @@ const scopeLabel = computed(() => {
         <el-table-column label="归属" width="100">
           <template #default="{ row }">
             <el-tag v-if="row.problem" size="small" effect="plain">{{ row.problem }}</el-tag>
-            <el-tooltip
-              v-else
-              content="没有题目认领这条路径。文件收上来了，只是不算到某道题头上。"
-            >
-              <el-tag size="small" type="warning" effect="plain">未归类</el-tag>
-            </el-tooltip>
+            <el-tag v-else size="small" type="warning" effect="plain">未归类</el-tag>
           </template>
         </el-table-column>
 
@@ -428,9 +415,7 @@ const scopeLabel = computed(() => {
 
         <el-table-column label="修订" width="70" align="right">
           <template #default="{ row }">
-            <el-tooltip content="内容变化次数。修订号是丢弃迟到旧版本的依据。">
-              <span>#{{ row.revision }}</span>
-            </el-tooltip>
+            <span>#{{ row.revision }}</span>
           </template>
         </el-table-column>
 
@@ -486,16 +471,11 @@ const scopeLabel = computed(() => {
 
       <template #empty>
         <p>还没有回收任何代码。</p>
-        <p class="page-hint">一直空着说明机器没在线或没配对。</p>
         <el-button type="primary" size="small" style="margin-top: 12px" @click="router.push({ name: 'overview' })">
           去看选手状态
         </el-button>
       </template>
     </DataTable>
-
-    <p v-if="list.total.value > rows.length" class="page-hint" style="margin-top: 8px">
-      搜索与归题筛选只作用在本页 —— 要缩小范围请用选手筛选。
-    </p>
 
     <!-- 看代码正文 -->
     <el-dialog v-model="viewerOpen" :title="viewerTitle" width="760px">

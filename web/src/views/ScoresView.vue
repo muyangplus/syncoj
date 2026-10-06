@@ -6,7 +6,6 @@ import type { JudgeRunOut, JudgeScanOut, ScoreCellOut, ScoreRowOut } from '@/api
 import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
 import DataTable from '@/components/DataTable.vue'
 import FormDialog from '@/components/FormDialog.vue'
-import HelpTip from '@/components/HelpTip.vue'
 import PageShell from '@/components/PageShell.vue'
 import { useList } from '@/composables/useList'
 import { useMutation } from '@/composables/useMutation'
@@ -419,17 +418,11 @@ function runStatusLabel(parseStatus: string): string {
 <template>
   <PageShell
     title="成绩"
-    hint="点矩阵里的格子可手工录分或修正。"
     :error="error"
-    error-action="矩阵取不到时不要手工录分 —— 会重复记。"
+    error-action="先重试；还不行就先别手工录分。"
     retryable
     @retry="reloadMatrix"
   >
-    <template #hint>
-      <HelpTip>
-        手工录的分永久保留，自动扫描不会覆盖它。
-      </HelpTip>
-    </template>
     <template #toolbar>
       <el-button size="small" :loading="rescan.pending.value" @click="rescan.run(undefined)">
         立即重扫
@@ -456,8 +449,6 @@ function runStatusLabel(parseStatus: string): string {
         <ul v-if="scanErrors.length" class="scan-errors">
           <li v-for="(item, index) in scanErrors" :key="index">{{ item }}</li>
         </ul>
-        <div v-else class="page-hint">没有读取层面的错误。</div>
-        <div class="page-hint">「未变化」是这次没重新解析；「跳过」是目录里没有可用结果。</div>
       </template>
     </el-alert>
 
@@ -518,7 +509,7 @@ function runStatusLabel(parseStatus: string): string {
             {{ item.row.player_no }} / {{ item.cell.problem }}
           </el-tag>
           <span v-if="pendingCells.length > 20" class="muted">
-            只差评测器出结果，也可以直接点格子手工录分。
+            也可以直接点格子手工录分。
           </span>
         </div>
       </template>
@@ -533,7 +524,7 @@ function runStatusLabel(parseStatus: string): string {
       style="margin-bottom: 12px"
     >
       <template #title>
-        有 {{ missingCells.length }} 格还没收到代码（登记过的题目）
+        有 {{ missingCells.length }} 格还没收到代码
       </template>
       <template #default>
         <div class="unparsed-list">
@@ -547,7 +538,7 @@ function runStatusLabel(parseStatus: string): string {
             {{ item.row.player_no }} / {{ item.cell.problem }}
           </el-tag>
           <span v-if="missingCells.length > 20" class="muted">
-            模式配错也会显示成没交，可在「题目清单 → 路径试算」确认。
+            可在「题目清单 → 路径试算」确认。
           </span>
         </div>
       </template>
@@ -590,7 +581,6 @@ function runStatusLabel(parseStatus: string): string {
             size="small"
             type="warning"
             effect="plain"
-            title="只在评测结果里出现过，没在题目清单里登记"
           >
             未登记
           </el-tag>
@@ -654,7 +644,7 @@ function runStatusLabel(parseStatus: string): string {
         </div>
       </div>
 
-      <p class="page-hint">点「补录」可手工判分。</p>
+      <p class="cell-sub">点「补录」可手工判分。</p>
 
       <DataTable
         :rows="runs.rows.value"
@@ -748,13 +738,6 @@ function runStatusLabel(parseStatus: string): string {
           可到下面「评测记录」按「未解析」筛出同类记录。
         </template>
       </el-alert>
-
-      <el-alert
-        type="info"
-        :closable="false"
-        show-icon
-        title="要恢复自动扫描，点「清除这一格」。"
-      />
 
       <template #footer-prepend>
         <el-button

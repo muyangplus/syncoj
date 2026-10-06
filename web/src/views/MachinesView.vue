@@ -13,7 +13,6 @@ import type {
 import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
 import DataTable from '@/components/DataTable.vue'
 import FormDialog from '@/components/FormDialog.vue'
-import HelpTip from '@/components/HelpTip.vue'
 import PageShell from '@/components/PageShell.vue'
 import RosterPersonPicker from '@/components/RosterPersonPicker.vue'
 import { useList } from '@/composables/useList'
@@ -280,19 +279,11 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
 <template>
   <PageShell
     title="机器配对"
-    hint="点某一行的「配给…」，把机器认领给名单里的某个人。"
     :error="pending.error.value"
-    error-action="待配对列表取不到时，先别急着动密钥。"
+    error-action="先重试；还不行就先别动密钥。"
     retryable
     @retry="pending.reload"
   >
-    <template #hint>
-      <!-- 一段话把"这两个不是一回事"说完就够了；写成三段反而没人看（第一版就是那样） -->
-      <HelpTip>
-        <strong>配对码</strong>管"这台机器前面站着的是谁"，
-        <strong>统一注册密钥</strong>管"这台机器能不能注册"（在右上角「装机设置」里）。
-      </HelpTip>
-    </template>
     <template #toolbar>
       <el-button size="small" :loading="pending.loading.value" @click="pending.reload">
         刷新
@@ -329,12 +320,6 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
       </template>
       <template #default>
         <span class="mono">{{ alert.fingerprint }}</span><br />
-        <template v-if="alert.bound_count > 0">
-          <strong>建议逐台确认配对，别用「从列表里配对」批量点。</strong>
-        </template>
-        <template v-else>
-          配对之后要留意：快照还原的「按指纹认回原机器」可能认错机器。
-        </template>
       </template>
     </el-alert>
 
@@ -342,10 +327,6 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
       这里只留一句说明，不再放常驻表单：教师到现场先要看的是"有哪几台机器等我认领"，
       而表单要求他先选人、再回想是哪台机器 —— 顺序反了。配对动作在表格每一行里。
     -->
-    <p class="page-hint" style="margin-top: 0">
-      配对码是<strong>服务端发给那台机器</strong>的六位数字，限时 30 分钟、用一次即废。
-    </p>
-
     <div class="list-head">
       <h3 class="section-title">
         待配对的机器
@@ -444,7 +425,7 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
           那句在"镜像里忘了放密钥"时是误导：教师会一直等，而机器永远不会出现。
         -->
         <p class="cell-sub">
-          机器开机注册后就会出现在这里；一直没出现，查两件事：镜像里有没有统一密钥、它连不连得上服务端。
+          一直没出现，查两件事：镜像里有没有统一密钥、它连不连得上服务端。
         </p>
         <el-button type="primary" size="small" style="margin-top: 12px" @click="settingsOpen = true">
           去装机设置
@@ -458,9 +439,6 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
       两者平铺在同一页，教师的第一反应就是"这里有两套密钥体系？"。
     -->
     <el-drawer v-model="settingsOpen" title="装机设置：统一注册密钥" size="880px">
-      <p class="page-hint" style="margin-top: 0">
-        这是<strong>装 Agent 之前</strong>的事：把它烤进镜像，机器开机注册时用它换一枚自己的凭据。
-      </p>
       <el-button type="primary" size="small" style="margin-bottom: 12px" @click="issueOpen = true">
         签发一把
       </el-button>
@@ -535,7 +513,7 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
       </template>
 
       <template #empty>
-        <p>装整间机房就签发一把，装机时用 <code>--bootstrap-key</code> 传给安装器。</p>
+        <p>装机时用 <code>--bootstrap-key</code> 传给安装器。</p>
         <el-button type="primary" size="small" @click="issueOpen = true">签发一把</el-button>
       </template>
       </DataTable>
@@ -582,23 +560,23 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
         </el-form-item>
         <el-form-item label="有效天数">
           <el-input-number v-model="issueDays" :min="1" :max="3650" :controls="false" />
-          <span class="page-hint" style="margin-left: 8px">留空表示长期有效</span>
+          <span class="cell-sub" style="margin-left: 8px">留空表示长期有效</span>
         </el-form-item>
       </el-form>
       <el-alert type="warning" :closable="false" show-icon title="明文只会显示这一次">
-        库里只存哈希。丢了就重新签发一把，然后把旧的吊销。
+        丢了就重新签发一把，然后把旧的吊销。
       </el-alert>
     </FormDialog>
 
     <el-dialog v-model="keyDialog" title="统一密钥（只显示这一次）" width="640px">
       <el-alert type="warning" :closable="false" show-icon style="margin-bottom: 12px">
         <template #title>现在抄下来 —— 关掉这个窗口就再也看不到明文了</template>
-        <template #default>库里只存哈希。丢了就重新签发一把，然后把旧的吊销。</template>
+        <template #default>丢了就重新签发一把，然后把旧的吊销。</template>
       </el-alert>
 
       <div class="key-box mono">{{ issuedKey?.key }}</div>
 
-      <div class="page-hint" style="margin-top: 12px">
+      <div class="cell-sub" style="margin-top: 12px">
         装机时这样用（它会被写成 <code>/etc/syncoj/bootstrap.key</code>，0600、属主 root）：
         <pre class="cmd">python3 install.py --bundle ./syncoj-agent-x.tar.gz \
     --server https://10.0.0.1:8443 \
@@ -615,7 +593,7 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
       已经由"点了那一行"表达；要更强的证明就走工具栏的「按码配对」（那个必须输码）。
     -->
     <el-dialog v-model="bindOpen" title="把机器配给谁" width="580px">
-      <p class="page-hint" style="margin-top: 0">
+      <p class="cell-sub" style="margin-top: 0">
         机器：<span class="mono">{{ bindTarget?.hostname || bindTarget?.machine_id || '—' }}</span>
         <template v-if="bindTarget">
           · 配对码{{ pairCodeLeft(bindTarget).text }}
@@ -625,7 +603,6 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
         v-model="bindEntryId"
         :default-roster-id="contest.current?.default_roster_id ?? null"
       />
-      <p class="page-hint">配对是<strong>永久</strong>的：绑的是名单里的人，之后换场次不用再配。</p>
       <template #footer>
         <el-button @click="bindOpen = false">取消</el-button>
         <el-button
@@ -656,7 +633,6 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
         v-model="pairEntryId"
         :default-roster-id="contest.current?.default_roster_id ?? null"
       />
-      <p class="page-hint">码限时 30 分钟、用一次即废。</p>
       <template #footer>
         <el-button @click="byCodeOpen = false">取消</el-button>
         <el-button

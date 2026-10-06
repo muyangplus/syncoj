@@ -9,7 +9,6 @@ import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
 import ContestCreateDialog from '@/components/ContestCreateDialog.vue'
 import ContestSettingsDialog from '@/components/ContestSettingsDialog.vue'
 import DataTable from '@/components/DataTable.vue'
-import HelpTip from '@/components/HelpTip.vue'
 import PageShell from '@/components/PageShell.vue'
 import ProblemManageDialog from '@/components/ProblemManageDialog.vue'
 import { useList } from '@/composables/useList'
@@ -179,16 +178,11 @@ function clearDetail(count: number): string {
 <template>
   <PageShell
     title="场次管理"
-    hint="这里的操作只动被点的那一场。"
     :error="list.error.value"
-    error-action="服务端可能没在跑，或登录已过期。"
+    error-action="先重试；还不行就检查服务端或重新登录。"
     retryable
     @retry="refreshAll"
   >
-    <template #hint>
-      <HelpTip>选手、代码、下发任务、成绩都按场次隔离。</HelpTip>
-    </template>
-
     <template #toolbar>
       <el-button size="small" :loading="list.loading.value" @click="refreshAll">
         刷新
@@ -326,7 +320,7 @@ function clearDetail(count: number): string {
       </template>
 
       <template #empty>
-        <p>还没有任何场次，先建一个再导入选手。</p>
+        <p>还没有任何场次</p>
         <el-button type="primary" style="margin-top: 12px" @click="createVisible = true">
           新建第一个场次
         </el-button>

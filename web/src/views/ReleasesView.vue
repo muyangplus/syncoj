@@ -370,9 +370,6 @@ const editSave = useMutation(
     <div class="page-header">
       <div>
         <h2 class="page-title">Agent 发布</h2>
-        <p class="page-hint">
-          <strong>上传不等于铺开。</strong>必须点「铺开」，考试机才看得到这个版本。
-        </p>
       </div>
       <div class="toolbar">
         <el-button size="small" :loading="loading" @click="refresh">刷新</el-button>
@@ -389,7 +386,6 @@ const editSave = useMutation(
     >
       <template #default>
         <div class="error-actions">
-          <span>升级状态取不到时，别急着铺开新版本 —— 哪台机器升了、升到哪个版本都会对不上。</span>
           <el-button size="small" type="primary" plain @click="refresh">重试</el-button>
         </div>
       </template>
@@ -410,25 +406,21 @@ const editSave = useMutation(
         <span class="blocked-title">服务端没有配置发布签名私钥 —— 自更新功能整体关闭</span>
       </template>
 
-      <p class="page-hint">没有私钥就签不出包，现在升级不了任何一台机器。</p>
-
       <el-descriptions :column="1" size="small" border style="margin-top: 12px">
         <el-descriptions-item label="第一步：生成密钥对">
           <span class="mono">
             python -m syncoj_server.cli genkey --out /etc/syncoj/release-key.pem
           </span>
-          （私钥留在服务端，公钥默认落在同目录的 .pub.json）
         </el-descriptions-item>
         <el-descriptions-item label="第二步：服务端指向私钥">
           <span class="mono">SYNCOJ_RELEASE_KEY=/etc/syncoj/release-key.pem</span>
-          ，然后重启服务端；本页会跟着变成可用状态
+          ，然后重启服务端
         </el-descriptions-item>
         <el-descriptions-item label="第三步：分发公钥">
           把公钥放到每台考试机的
           <span class="mono">/etc/syncoj/release-key.pub.json</span>
           ，并在 agent.ini 的 <span class="mono">[upgrade]</span> 段写
-          <span class="mono">public_key =</span> 指向它 —— 少这一步机器会验签失败，
-          表现和"没升级"一模一样
+          <span class="mono">public_key =</span> 指向它
         </el-descriptions-item>
         <el-descriptions-item v-if="status?.error" label="当前错误">
           <span class="mono">{{ status.error }}</span>
@@ -457,23 +449,14 @@ const editSave = useMutation(
         </el-button>
       </div>
 
-      <p class="page-hint">
-        打出来的包直接进版本历史，但<strong>仍然是「未铺开」—— 要再点「铺开」，机器才拿得到。</strong>
+      <p v-if="versionDrifts" class="cell-sub warn-hint">
+        版本号和源码里写的不一致，服务端会拒绝
       </p>
-
-      <p v-if="versionDrifts" class="page-hint warn-hint">
-        提交的版本号和源码里写的
-        <span class="mono">{{ source?.version }}</span>
-        不一致，服务端会拒绝；两边改成一样再提交。
+      <p v-else-if="versionExists" class="cell-sub warn-hint">
+        历史里已有这个版本号
       </p>
-      <p v-else-if="versionExists" class="page-hint warn-hint">
-        历史里已经有 {{ buildVersion.trim() }}：未铺开的同名版本会被覆盖，
-        正在铺开的要先「撤回」。
-      </p>
-
-      <p v-if="trustAnchorMissing" class="page-hint warn-hint">
-        本机没有要内嵌进包里的发布公钥（<span class="mono">.key/release-key.pub.json</span>），
-        服务端会拒绝构建；跑一次 <span class="mono">syncoj-server init</span> 生成它。
+      <p v-if="trustAnchorMissing" class="cell-sub warn-hint">
+        本机缺发布公钥，构建会被拒
       </p>
 
       <!--
@@ -484,22 +467,14 @@ const editSave = useMutation(
       -->
       <div class="key-option">
         <el-checkbox v-model="includeBootstrapKey" :disabled="!canBuild">
-          附带统一注册密钥（装完即可注册，不用手工拷）
+          附带统一注册密钥
         </el-checkbox>
-        <p v-if="includeBootstrapKey" class="page-hint key-warning">
-          这个包从此等于一张「能注册进这台服务端」的通行证 ——
-          任何能打开装机页的人都能下载它。只在确认局域网里没有外人时用；<strong>用完/发完就吊销这把密钥</strong>，或者换一个不带密钥的版本铺开。
-          <br />
-          服务端会在构建这一刻<strong>现场签发一把新密钥</strong>（库里照旧只存哈希），
-          标签是「随版本 {{ buildVersion.trim() || source?.version }} 附带」，
-          所以它和别的版本互不影响，可以单独吊销。
-        </p>
       </div>
     </el-card>
 
     <el-card v-else-if="signingReady && source && !source.available" shadow="never" class="section">
       <template #header><span>发布当前版本</span></template>
-      <p class="page-hint" style="margin: 0">
+      <p class="cell-sub" style="margin: 0">
         {{ source.reason }}
       </p>
     </el-card>
@@ -514,14 +489,13 @@ const editSave = useMutation(
           选择安装包并上传
         </el-button>
       </div>
-      <p class="page-hint">上传后服务端会用私钥签名，但<strong>传完仍是「未铺开」</strong>。</p>
-      <p v-if="status?.key_id" class="page-hint">
+      <p v-if="status?.key_id" class="cell-sub">
         当前用于签名的密钥：<span class="mono">{{ status.key_id }}</span>
       </p>
     </el-card>
 
     <el-card v-if="activeRelease" shadow="never" class="section">
-      <template #header><span>当前铺开版本（Agent 现在能拿到的就是它）</span></template>
+      <template #header><span>当前铺开版本</span></template>
       <div class="active-box">
         <div>
           <div class="active-version">{{ activeRelease.version }}</div>
@@ -540,8 +514,6 @@ const editSave = useMutation(
           撤回
         </el-button>
       </div>
-      <p class="page-hint">客户端按 <code>upgrade.mode</code> 行动：<code>off</code> 只记录不下载；<code>stage</code> 下载并验签但不激活；<code>apply</code> 才切换并重启。</p>
-
       <!--
         给空机器的安装命令。**只发已铺开的版本**（与升级同一个判据），所以它必须
         出现在这块"当前铺开版本"卡片里 —— 没铺开就没有可安装的东西。
@@ -553,22 +525,14 @@ const editSave = useMutation(
           <code class="install-command">{{ installCommand }}</code>
           <el-button size="small" @click="copyText(installCommand, '安装命令')">复制</el-button>
         </div>
-        <p class="page-hint" style="margin-bottom: 0">
-          这条命令会从服务端取安装器与 <span class="mono">{{ activeRelease.version }}</span>
-          的包，并<strong>对照服务端台账校验 sha256</strong>。
-        </p>
       </template>
-      <p v-else class="page-hint warn-hint">
-        这台服务端报不出自己对外的地址，所以给不出安装命令 ——
-        配好 <span class="mono">SYNCOJ_PUBLIC_URL</span> 再回来看。
+      <p v-else class="cell-sub warn-hint">
+        报不出对外地址，给不出安装命令 —— 先配 SYNCOJ_PUBLIC_URL。
       </p>
     </el-card>
 
     <el-card v-else-if="signingReady && !loading" shadow="never" class="section">
       <template #header><span>当前没有铺开任何版本</span></template>
-      <p class="page-hint" style="margin: 0">
-        Agent 现在不会被提供任何升级包。上传一个版本再点「铺开」，它才会开始下发。
-      </p>
     </el-card>
 
     <el-card shadow="never">
@@ -694,11 +658,7 @@ const editSave = useMutation(
         </template>
       </el-table>
 
-      <p class="page-hint">铺开中 {{ rolledOutCount }} 个，已撤回 {{ yankedCount }} 个。「删除」删的是发布记录，不是已经装到机器上的程序。</p>
-      <p class="page-hint key-warning">
-        附带过密钥的版本会一直标着那一把 —— 密钥已吊销也留着标记；「吊销密钥」只吊销那把钥匙，
-        <strong>不会动版本记录</strong>。
-      </p>
+      <p class="cell-sub">铺开中 {{ rolledOutCount }} 个，已撤回 {{ yankedCount }} 个。「删除」删的是发布记录，不是已经装到机器上的程序。</p>
     </el-card>
 
     <el-dialog v-model="editVisible" :title="`编辑版本 ${editForm.version} 的备注`" width="520px">
@@ -709,7 +669,6 @@ const editSave = useMutation(
         maxlength="2000"
         placeholder="例如：修复了扫描目录不存在时的崩溃"
       />
-      <p class="page-hint">备注不参与签名 —— 改它不会让已铺开的版本失效。</p>
       <template #footer>
         <el-button @click="editVisible = false">取消</el-button>
         <el-button type="primary" :loading="editSave.pending.value" @click="editSave.run(undefined)">

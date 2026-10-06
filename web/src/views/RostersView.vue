@@ -13,7 +13,6 @@ import type {
 import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
 import DataTable from '@/components/DataTable.vue'
 import FormDialog from '@/components/FormDialog.vue'
-import HelpTip from '@/components/HelpTip.vue'
 import PageShell from '@/components/PageShell.vue'
 import { useList } from '@/composables/useList'
 import { useMutation } from '@/composables/useMutation'
@@ -546,12 +545,6 @@ async function applyToContest(prune: boolean): Promise<void> {
   }
 }
 
-const applyHasChanges = computed(() => {
-  const report = applyReport.value
-  if (!report) return false
-  return Boolean(report.created || report.updated || report.pruned || report.protected?.length)
-})
-
 /**
  * 换名单时把关键词清掉。
  *
@@ -566,17 +559,11 @@ watch(selectedRosterId, () => {
 <template>
   <PageShell
     title="名单库"
-    hint="改名单不会影响已经应用过的场次，要显式点「应用」。"
     :error="rosters.error.value"
-    error-action="名单取不到时，先别新建 —— 可能只是没连上。"
+    error-action="先重试；还不行就先别新建名单。"
     retryable
     @retry="rosters.reload"
   >
-    <template #hint>
-      <HelpTip>
-        机器配对绑的也是名单里的<strong>人</strong>，不是某一场比赛的选手。
-      </HelpTip>
-    </template>
     <template #toolbar>
       <el-button size="small" :loading="rosters.loading.value" @click="rosters.reload">刷新</el-button>
       <el-button size="small" type="primary" @click="openCreate">新建名单</el-button>
@@ -749,13 +736,6 @@ watch(selectedRosterId, () => {
       </template>
     </DataTable>
 
-    <p v-if="entries.total.value > entries.rows.value.length" class="page-hint" style="margin-top: 8px">
-      本页 {{ entries.rows.value.length }} 条，共 {{ entries.total.value }} 条。
-      <template v-if="keyword.trim() && visibleEntries.length !== entries.rows.value.length">
-        关键词筛选只作用在本页（服务端的名单条目接口没有关键词参数）。
-      </template>
-    </p>
-
     <!-- 新建 / 编辑名单：名称与备注是同一次 PATCH，所以放在同一个表单里 -->
     <FormDialog
       v-model="formOpen"
@@ -777,7 +757,6 @@ watch(selectedRosterId, () => {
           />
         </el-form-item>
       </el-form>
-      <p class="page-hint">名称必须唯一，重名会被服务端拒绝。</p>
     </FormDialog>
 
     <!-- 编辑单条：编号、姓名、座位、分组都在这里改，不用删了重加 -->
@@ -803,7 +782,6 @@ watch(selectedRosterId, () => {
           <el-input v-model="entryGroup" maxlength="64" placeholder="可留空" />
         </el-form-item>
       </el-form>
-      <p class="page-hint">改编号前先确认改的是哪一场：<strong>已经应用过的场次不会跟着变</strong>。</p>
     </FormDialog>
 
     <!-- 粘贴导入：解析结果先给教师看一眼，有问题的行会被跳过 -->
@@ -815,11 +793,6 @@ watch(selectedRosterId, () => {
     >
       <el-alert type="info" :closable="false" show-icon style="margin-bottom: 12px">
         <template #title>每行一名选手，用逗号、制表符或空格分隔</template>
-        <template #default>
-          <code>编号,姓名,座位,分组</code> —— 只有编号是必填的，其余可留空。
-          <br />
-          <strong>相同编号会更新已有条目</strong>，所以名单可以反复导。
-        </template>
       </el-alert>
 
       <el-input
@@ -930,18 +903,8 @@ watch(selectedRosterId, () => {
           </template>
           <template #default>
             <div class="mono">{{ applyReport.protected.join('、') }}</div>
-            <div class="page-hint">
-              确实要清人，请到「选手」里逐个处理。
-            </div>
           </template>
         </el-alert>
-
-        <p v-else-if="!applyHasChanges" class="page-hint" style="margin-top: 14px">
-          这份名单里的人在场次里都已经有了，姓名座位也没有变化。
-          <template v-if="applyReport.kept">
-            场次里还有 {{ applyReport.kept }} 人不在名单里，按本次的设置保留着。
-          </template>
-        </p>
       </template>
 
       <template #footer>

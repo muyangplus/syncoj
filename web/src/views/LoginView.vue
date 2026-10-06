@@ -83,10 +83,6 @@ onMounted(() => {
           登录
         </el-button>
       </el-form>
-
-      <p class="hint">
-        首次部署请先运行 <code>syncoj-server init</code> 创建管理员账号。
-      </p>
     </el-card>
   </div>
 </template>

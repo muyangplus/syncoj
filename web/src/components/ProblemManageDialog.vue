@@ -7,7 +7,6 @@ import type { ProblemMatchOut, ProblemOut, ProblemUpsert } from '@/api/types'
 import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
 import DataTable from '@/components/DataTable.vue'
 import FormDialog from '@/components/FormDialog.vue'
-import HelpTip from '@/components/HelpTip.vue'
 import { useList } from '@/composables/useList'
 import { useMutation } from '@/composables/useMutation'
 import { parsePasteLines } from '@/utils/paste'
@@ -300,14 +299,6 @@ const problemCount = computed(() => problems.total.value)
   <el-dialog v-model="visible" title="题目清单" width="920px" :close-on-click-modal="false">
     <el-alert type="info" :closable="false" show-icon style="margin-bottom: 12px">
       <template #title>题目标识同时是目录名、代码文件名与成绩矩阵的列名</template>
-      <template #default>
-        不能带 <code>/</code>、<code>..</code> 这类字符；顺序决定成绩矩阵的列序。
-        「代码路径」<HelpTip>
-          按题目覆盖的 glob 模式，留空即用默认值 <code>{ident}/**</code>。
-          <code>*</code> 不跨 <code>/</code>，<code>**</code> 跨，
-          <code>?</code> 单字符，<code>[abc]</code> 字符类。
-        </HelpTip>
-      </template>
     </el-alert>
 
     <div class="list-head">
@@ -409,9 +400,6 @@ const problemCount = computed(() => problems.total.value)
           </span>
         </template>
       </div>
-      <div class="page-hint">
-        这是服务端算出来的结果，拿不准就在这里试。
-      </div>
     </div>
 
     <div class="add-section">
@@ -455,9 +443,6 @@ const problemCount = computed(() => problems.total.value)
       >
         登记 {{ validRows.length }} 道
       </el-button>
-      <span class="page-hint" style="margin-left: 10px">
-        相同标识会更新已有题目，所以这份清单可以反复导。
-      </span>
     </div>
 
     <!-- 编辑单条：标识（会同步成目录名与矩阵列名）、标题、顺序、代码路径 -->
@@ -478,7 +463,6 @@ const problemCount = computed(() => problems.total.value)
         </el-form-item>
         <el-form-item label="顺序">
           <el-input-number v-model="editOrder" :min="0" :max="9999" controls-position="right" />
-          <span class="page-hint" style="margin-left: 8px">决定成绩矩阵的列序</span>
         </el-form-item>
         <el-form-item label="代码路径">
           <el-input
@@ -489,7 +473,6 @@ const problemCount = computed(() => problems.total.value)
           />
         </el-form-item>
       </el-form>
-      <p class="page-hint">改标识<strong>不会</strong>改已有成绩记录的列名；拿不准就先用「路径试算」验一遍。</p>
     </FormDialog>
 
     <!--

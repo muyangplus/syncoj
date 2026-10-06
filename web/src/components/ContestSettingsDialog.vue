@@ -149,10 +149,6 @@ async function submit(): Promise<void> {
 
       <el-form-item label="标识">
         <el-input :model-value="contest?.slug ?? ''" disabled />
-        <div class="page-hint">
-          标识已经固定在磁盘路径（<code>source/&lt;标识&gt;/…</code>）与评测器配置里，所以这里只读。
-          要删掉整场请回列表页用「删除」。
-        </div>
       </el-form-item>
 
       <el-form-item label="状态">
@@ -164,9 +160,6 @@ async function submit(): Promise<void> {
             :value="item.value"
           />
         </el-select>
-        <div class="page-hint">
-          「已封榜」停止下发新文件但仍然收卷。
-        </div>
       </el-form-item>
 
       <el-form-item label="开考时间">
@@ -187,8 +180,8 @@ async function submit(): Promise<void> {
           clearable
           style="width: 100%"
         />
-        <div class="page-hint">
-          <strong>留空 = 不限制</strong>；到结束时间后机器不再接收代码（心跳与题面照常）。
+        <div class="cell-sub">
+          <strong>留空 = 不限制</strong>
         </div>
       </el-form-item>
 
@@ -218,10 +211,10 @@ async function submit(): Promise<void> {
           >
             按这份名单补人
           </el-button>
-          <span class="page-hint">只补人、不删人</span>
+          <span class="cell-sub">只补人、不删人</span>
         </div>
-        <div v-if="applyReceipt" class="page-hint apply-receipt">{{ applyReceipt }}</div>
-        <div v-if="contest?.player_count" class="page-hint">
+        <div v-if="applyReceipt" class="cell-sub apply-receipt">{{ applyReceipt }}</div>
+        <div v-if="contest?.player_count" class="cell-sub">
           这场现在有 {{ contest.player_count }} 名选手。
         </div>
       </el-form-item>

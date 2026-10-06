@@ -8,7 +8,6 @@ import type { AgentRuntimeOut, PlayerOut, ScoreMatrixOut } from '@/api/types'
 import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
 import DataTable from '@/components/DataTable.vue'
 import FormDialog from '@/components/FormDialog.vue'
-import HelpTip from '@/components/HelpTip.vue'
 import PageShell from '@/components/PageShell.vue'
 import PlayerImportDialog from '@/components/PlayerImportDialog.vue'
 import RosterPersonPicker from '@/components/RosterPersonPicker.vue'
@@ -429,24 +428,17 @@ function handleCommand(
 <template>
   <PageShell
     title="选手状态"
-    hint="本页内离线、交题落后的人排在最前面。"
     :error="list.error.value"
-    error-action="名单取不到时，下面显示的在线情况不完整。"
+    error-action="先重试；还不行就检查服务端。"
     retryable
     @retry="list.reload"
   >
-    <template #hint>
-      <HelpTip>
-        每 5 秒自动刷新；在线与否由服务端按超时判定。
-      </HelpTip>
-    </template>
-
     <template #sub>
       <!--
         这一行是**服务端级**的：它数的是整个库里所有场次的机器。与下面那排
         "本场次"的卡片口径不同，所以必须分开写，不能让两个数字混在一处。
       -->
-      <p v-if="health" class="page-hint">
+      <p v-if="health" class="cell-sub">
         <span class="status-dot" :class="health.ok ? 'online' : 'offline'" />
         服务端{{ health.ok ? '正常' : '异常' }} · 全库机器 {{ health.agents_online }} /
         {{ health.agents_total }} 台在线 · 数据目录 <code>{{ health.data_root }}</code>
@@ -663,12 +655,8 @@ function handleCommand(
             </el-button>
             <el-button size="small" @click="importVisible = true">导入选手</el-button>
           </div>
-          <p v-if="rosterReceipt" class="page-hint">{{ rosterReceipt }}</p>
-          <p v-else-if="!contest.current?.default_roster_id" class="page-hint">
-            还没有默认名单？去「名单库」建一份，再回来补人。
-          </p>
         </template>
-        <template v-else>本页没有匹配的选手（搜索只作用在本页）</template>
+        <template v-else>本页没有匹配的选手</template>
       </template>
     </DataTable>
 
@@ -701,9 +689,6 @@ function handleCommand(
       </el-form>
       <el-alert type="info" :closable="false" show-icon>
         <template #title>改了考号，磁盘上的旧目录不会改名</template>
-        <template #default>
-          已有代码留在 <code>source/&lt;场次&gt;/&lt;考号&gt;/…</code> 不动。
-        </template>
       </el-alert>
     </FormDialog>
 
@@ -744,7 +729,6 @@ function handleCommand(
       confirm-text="改派"
       @submit="rebind.run(undefined)"
     >
-      <p class="page-hint">凭据不用动、不用重启，下一轮心跳就换人。</p>
       <RosterPersonPicker
         v-model="rebindEntryId"
         :default-roster-id="contest.current?.default_roster_id ?? null"

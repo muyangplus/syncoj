@@ -6,7 +6,6 @@ import { GLOBAL_CONFIRM } from '@/api/endpoints'
 import type { EventOut } from '@/api/types'
 import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
 import DataTable from '@/components/DataTable.vue'
-import HelpTip from '@/components/HelpTip.vue'
 import PageShell from '@/components/PageShell.vue'
 import { useList } from '@/composables/useList'
 import { useMutation } from '@/composables/useMutation'
@@ -114,14 +113,6 @@ const rows = computed(() => {
       .toLowerCase()
       .includes(needle),
   )
-})
-
-/** 范围说明，清空对话框与提示里共用 —— 一处定义，不给出两套说法。 */
-const scopeLabel = computed(() => {
-  if (scope.value === 'contest') {
-    return contest.current ? `当前场次 ${contest.current.slug}` : '当前场次（还没选场次）'
-  }
-  return '全部场次（含不属于任何场次的全局告警）'
 })
 
 function levelType(level: string): 'info' | 'warning' | 'danger' {
@@ -258,16 +249,10 @@ const clearCountHint = computed(() => {
   <PageShell
     title="审计日志"
     :error="list.error.value"
-    error-action="日志取不到时，别用筛选条件去推断发生过什么。"
+    error-action="先重试；还不行就检查服务端。"
     retryable
     @retry="list.reload"
   >
-    <template #hint>
-      <HelpTip>
-        只增不改；默认「全部」才看得到配对前的全局告警。
-      </HelpTip>
-    </template>
-
     <template #toolbar>
       <el-radio-group v-model="scope" size="small">
         <el-radio-button value="all">全部</el-radio-button>
@@ -305,8 +290,6 @@ const clearCountHint = computed(() => {
       <el-button size="small" :loading="list.loading.value" @click="list.reload">刷新</el-button>
       <el-button size="small" type="danger" plain @click="openClear">清空日志</el-button>
     </template>
-
-    <p class="page-hint" style="margin-bottom: 8px">范围：{{ scopeLabel }}。</p>
 
     <DataTable
       :rows="rows"
@@ -371,15 +354,6 @@ const clearCountHint = computed(() => {
           </template>
         </el-table-column>
       </template>
-
-      <template #empty>
-        <p v-if="scope === 'contest' && !contest.currentId">还没选场次。</p>
-        <template v-else>
-          <p class="page-hint">
-            这个范围里还没有审计事件；刚注册的机器看不到时请把范围切回「全部」。
-          </p>
-        </template>
-      </template>
     </DataTable>
 
     <!--
@@ -404,9 +378,6 @@ const clearCountHint = computed(() => {
             <el-radio value="all">全部场次</el-radio>
             <el-radio value="contest" :disabled="!contest.currentId">当前场次</el-radio>
           </el-radio-group>
-          <div class="muted">
-            全部场次 = 所有场次的日志 + 不属于任何场次的全局告警（统一密钥注册、克隆指纹）。
-          </div>
         </el-form-item>
 
         <el-form-item label="级别范围">

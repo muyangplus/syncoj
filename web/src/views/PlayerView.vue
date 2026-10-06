@@ -258,7 +258,7 @@ const matchedLabel = computed(() =>
 const failureHint = computed(() => {
   if (!failure.value) return ''
   if (!failure.value.machine) {
-    return '网络或服务端一时不通，点「重试」；一直不行就找监考老师。'
+    return '点「重试」；一直不行就找监考老师。'
   }
   // **不要在兜底提示里替服务端下诊断。** 这里原来是"这台机器还没匹配到你的场次"，
   // 而上面那条告警可能是"还没注册上来"或"没配对"——同一台机器被说了两遍、还说岔了。
@@ -336,7 +336,6 @@ function assetState(status: string): { label: string; type: 'success' | 'info' |
         -->
         <el-card v-if="fallbackOpen" shadow="never" class="block">
           <h2 class="block-title">手动查（兜底）</h2>
-          <p class="page-hint">这台机器自动识别不出来时用：填上你的场次和考号，点「查看」。</p>
           <div class="query-row">
             <el-input
               v-model="fallback.contest"
@@ -400,11 +399,11 @@ function assetState(status: string): { label: string; type: 'success' | 'info' |
                 </span>
               </div>
             </div>
-            <p v-if="hasWindow" class="page-hint">
+            <p v-if="hasWindow" class="cell-sub">
               开考 <strong class="mono">{{ windowText(context.contest.starts_at) }}</strong>
               · 结束 <strong class="mono">{{ windowText(context.contest.ends_at) }}</strong>
             </p>
-            <p v-if="serverClock" class="page-hint">
+            <p v-if="serverClock" class="cell-sub">
               服务端时间 <strong class="mono">{{ serverClock }}</strong><template v-if="clockSkew"> · {{ clockSkew }}</template>
             </p>
           </el-card>

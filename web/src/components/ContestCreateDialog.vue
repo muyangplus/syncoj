@@ -153,10 +153,6 @@ async function submit(): Promise<void> {
           placeholder="留空则从名称自动生成"
           @input="slugTouched = true"
         />
-        <div class="page-hint">
-          用于服务端目录名（<code>source/&lt;标识&gt;/…</code>）。
-          <strong>创建后不建议改动。</strong>
-        </div>
       </el-form-item>
 
       <el-form-item label="状态">
@@ -186,9 +182,8 @@ async function submit(): Promise<void> {
           clearable
           style="width: 100%"
         />
-        <div class="page-hint">
+        <div class="cell-sub">
           <strong>留空 = 不限制</strong>，只填一个也合法。
-          到结束时间之后机器不再接收代码（心跳与题面照常）。
         </div>
       </el-form-item>
 
@@ -206,10 +201,6 @@ async function submit(): Promise<void> {
             :value="roster.id"
           />
         </el-select>
-        <div class="page-hint">
-          只是个预设：创建后到「名单库」点一次「应用」才会把选手落到这个场次。
-          <span v-if="!rosters.length">还没有名单，可以先去「名单库」建一份。</span>
-        </div>
       </el-form-item>
 
       <el-form-item label="备注">
@@ -219,10 +210,6 @@ async function submit(): Promise<void> {
 
     <el-alert type="info" :closable="false" show-icon>
       <template #title>建好还有两步</template>
-      <template #default>
-        ① 把选手落到这场（导入，或从「名单库」应用一份）
-        ② 让机器注册上来（签发统一密钥）
-      </template>
     </el-alert>
   </FormDialog>
 </template>

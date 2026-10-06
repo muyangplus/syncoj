@@ -14,7 +14,7 @@ import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from fastapi import (
     APIRouter,
@@ -75,6 +75,9 @@ from ..schemas import (
     AssetTextIn,
     AssetTextOut,
     AssetTextSavedOut,
+    AssetZipPasswordIn,
+    AssetZipPasswordOut,
+    AssetZipPasswordSavedOut,
     BootstrapKeyIssueIn,
     BootstrapKeyIssuedOut,
     BootstrapKeyOut,
@@ -138,7 +141,7 @@ from ..security import (
     new_token,
     verify_password,
 )
-from ..services import discovery, enrollment, matching, packaging, rosters
+from ..services import discovery, enrollment, matching, packaging, rosters, zipcrypto
 from ..services.deploy import validate_dest_template
 from ..services.signing import parse_version
 from ..storage import BlobTooLarge, HashMismatch
@@ -2665,36 +2668,60 @@ def _validate_asset_filename(name: str) -> str:
 
 
 def _create_asset(
-    ctx: AppContext, contest_id: int, *, sha256: str, size: int, filename: str, kind: str
+    ctx: AppContext,
+    contest_id: int,
+    *,
+    sha256: str,
+    size: int,
+    filename: str,
+    kind: str,
+    session: Optional[Session] = None,
 ) -> AssetOut:
     """登记一个资产，内容已经在 blob 库里。
 
     抽出来是因为现在有两条创建路（上传文件、直接写文本），而"同名同内容就复用"
     这条判据必须一致 —— 各写一遍的话，一条会去重、另一条会造出两份一模一样的资产，
     界面上看起来就是"我明明只发了一次"。
+
+    ``session`` 是给调用方**用自己的事务**用的：zip 打密码那一步要把 zip 资产与
+    ``password.txt`` 一起改掉，各开一个会话的话 SQLite 上会互相锁，而且一半成功
+    一半失败时没人能回滚。不给 session 就自己开一个短会话，上传与新建文本走的
+    都是那条路。
     """
-    with ctx.db.session() as session:
-        contest = session.get(Contest, contest_id)
-        if contest is None:
-            raise HTTPException(status_code=404, detail="场次不存在")
-
-        existing = session.execute(
-            select(Asset).where(
-                Asset.contest_id == contest_id,
-                Asset.sha256 == sha256,
-                Asset.filename == filename,
-            )
-        ).scalar_one_or_none()
-        if existing is not None:
-            return _asset_out(existing)
-
-        asset = Asset(
-            contest_id=contest_id, sha256=sha256, size=size,
-            filename=filename, kind=kind[:32],
+    if session is not None:
+        return _create_asset_row(
+            session, contest_id, sha256=sha256, size=size, filename=filename, kind=kind
         )
-        session.add(asset)
-        session.flush()
-        return _asset_out(asset)
+    with ctx.db.session() as own:
+        return _create_asset_row(
+            own, contest_id, sha256=sha256, size=size, filename=filename, kind=kind
+        )
+
+
+def _create_asset_row(
+    session: Session, contest_id: int, *, sha256: str, size: int, filename: str, kind: str
+) -> AssetOut:
+    contest = session.get(Contest, contest_id)
+    if contest is None:
+        raise HTTPException(status_code=404, detail="场次不存在")
+
+    existing = session.execute(
+        select(Asset).where(
+            Asset.contest_id == contest_id,
+            Asset.sha256 == sha256,
+            Asset.filename == filename,
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return _asset_out(existing)
+
+    asset = Asset(
+        contest_id=contest_id, sha256=sha256, size=size,
+        filename=filename, kind=kind[:32],
+    )
+    session.add(asset)
+    session.flush()
+    return _asset_out(asset)
 
 
 @router.post("/contests/{contest_id}/assets", response_model=AssetOut)
@@ -2977,6 +3004,62 @@ def _pending_target_counts(session, contest_id: int) -> Dict[int, int]:
     return {asset_id: int(count) for asset_id, count in rows}
 
 
+def _pending_targets(session: Session, asset_id: int) -> int:
+    """一个资产还有几个下发目标没落地（``pending`` / ``ready``）。
+
+    与 :func:`_pending_target_counts` 是同一个判据的单资产版本：列表页用前者
+    一次算完一屏，改内容/改名这类单资产动作要的就是这一个数。
+    """
+    pending = session.execute(
+        select(func.count(DeployTarget.id))
+        .join(DeployTask, DeployTarget.task_id == DeployTask.id)
+        .where(
+            DeployTask.asset_id == asset_id,
+            DeployTarget.status.in_(ACTIVE_DEPLOY_STATUSES),
+        )
+    ).scalar_one()
+    return int(pending or 0)
+
+
+def _requeue_done_targets(session: Session, asset_id: int) -> int:
+    """把已经 ``done`` 的下发目标改回 ``pending``，返回被重排的台数。
+
+    "换了内容"必须重排：``services/deploy.py`` 的 tick 按**当前**的
+    ``asset.sha256`` 组装 job、且只取 ``pending/ready`` 的目标，所以不重排的话
+    选手页显示的是新内容、机器上躺着的还是旧文件，而界面上一切正常。
+
+    重排时**必须把续传偏移一起清零**：拿旧文件的偏移去续新文件，拼出来的是一份
+    永远校验不过的文件。还没落地（``pending``/``ready``）的目标不动 —— 它们本来
+    就等着领作业，顺手清零等于让一台下到一半的机器从头发一遍。
+
+    这个函数被"在线改正文"与"zip 打密码/改密码"共用：两处各写一遍的话，
+    迟早有一处忘了清零偏移，而那种坏文件要到选手解压时才会被发现。
+    """
+    requeued = 0
+    tasks: Dict[int, DeployTask] = {}
+    for target, task in session.execute(
+        select(DeployTarget, DeployTask)
+        .join(DeployTask, DeployTarget.task_id == DeployTask.id)
+        .where(
+            DeployTask.asset_id == asset_id,
+            DeployTarget.status == DeployStatus.DONE,
+        )
+    ).all():
+        target.status = DeployStatus.PENDING
+        target.bytes_done = 0
+        target.updated_at = utcnow()
+        requeued += 1
+        tasks[int(task.id)] = task
+
+    # 任务状态是目标状态的聚合缓存（`_derive_task_status`），读的时候会重算，
+    # 但**写**的路径上有两处按它判断：取消接口会看它是不是 done。留在 done
+    # 会让"刚被重排的任务"报"任务已完成，无法取消"。
+    for task in tasks.values():
+        if task.status != DeployStatus.CANCELLED:
+            task.status = DeployStatus.PENDING
+    return requeued
+
+
 @router.get(
     "/contests/{contest_id}/assets/{asset_id}/text", response_model=AssetTextOut
 )
@@ -3043,30 +3126,7 @@ def save_asset_text(
         asset.sha256 = sha256
         asset.size = size
 
-        requeued = 0
-        tasks: Dict[int, DeployTask] = {}
-        for target, task in session.execute(
-            select(DeployTarget, DeployTask)
-            .join(DeployTask, DeployTarget.task_id == DeployTask.id)
-            .where(
-                DeployTask.asset_id == asset_id,
-                DeployTarget.status == DeployStatus.DONE,
-            )
-        ).all():
-            target.status = DeployStatus.PENDING
-            # 旧文件的字节数对新文件毫无意义：不清零的话下一轮会拿着这个偏移
-            # 去续传，落出来是一份坏文件。
-            target.bytes_done = 0
-            target.updated_at = utcnow()
-            requeued += 1
-            tasks[int(task.id)] = task
-
-        # 任务状态是目标状态的聚合缓存（`_derive_task_status`），读的时候会重算，
-        # 但**写**的路径上有两处按它判断：取消接口会看它是不是 done。留在 done
-        # 会让"刚被重排的任务"报"任务已完成，无法取消"。
-        for task in tasks.values():
-            if task.status != DeployStatus.CANCELLED:
-                task.status = DeployStatus.PENDING
+        requeued = _requeue_done_targets(session, asset_id)
 
         session.add(
             EventLog(
@@ -3079,19 +3139,343 @@ def save_asset_text(
         )
         session.flush()
 
-        pending = session.execute(
-            select(func.count(DeployTarget.id))
-            .join(DeployTask, DeployTarget.task_id == DeployTask.id)
-            .where(
-                DeployTask.asset_id == asset_id,
-                DeployTarget.status.in_(ACTIVE_DEPLOY_STATUSES),
-            )
-        ).scalar_one()
+        pending = _pending_targets(session, asset_id)
         log.info(
             "在线改正文：场次 %d 的「%s」sha %s → %s，重排 %d 台",
             contest_id, asset.filename, old_sha[:8], sha256[:8], requeued,
         )
-        return AssetTextSavedOut(asset=_asset_out(asset, int(pending or 0)), requeued=requeued)
+        return AssetTextSavedOut(asset=_asset_out(asset, pending), requeued=requeued)
+
+
+# --------------------------------------------------------------------------- #
+# zip 打密码 / 改密码 / 生成随机密码（InfoZIP 传统加密）
+#
+# 为什么是 ZipCrypto 而不是 AES-256：学生机器上是 Archive Manager
+# （GNOME file-roller），AES-256 的 zip 它打不开（除非另外装了 p7zip），
+# 传统加密的 zip 会弹框要密码。**它是弱加密** —— 已知明文攻击可破，
+# 测试数据又几乎全是已知结构。所以这里的定位是"挡得住随手翻看，挡不住有心人"，
+# 页面上与错误文案里都不许写成"安全加密"。
+# --------------------------------------------------------------------------- #
+
+#: 密码文件的固定名字。**就叫 password.txt**（用户拍板的写法），不追加 zip 名字 ——
+#: 一场考试可能有好几个 zip，多出来的 `题面.password.txt` 反而更难念给学生听。
+PASSWORD_FILENAME = "password.txt"
+
+#: 密码文件按哪个"用途"落地。它是一份给选手读的说明，所以走「须知」。
+#: 这个字段在服务端只影响列表里显示的中文名，不影响落点（落点由下发任务的
+#: `dest_dir` 决定）。
+PASSWORD_ASSET_KIND = "须知"
+
+
+def _password_created_at() -> str:
+    """password.txt 里的"生成时间"（服务端本地时间，写给人看）。
+
+    抽成函数是为了测试能钉住它：正文里带时间，而"同名同内容就复用"要求同一时刻
+    的两次调用得到**逐字节一致**的正文 —— 测试不该靠"跑得快"去赌没跨过分钟边界。
+    """
+    return datetime.now().strftime("%Y-%m-%d %H:%M")
+
+
+def _password_file_text(zip_filename: str, password: str, created_at: str) -> str:
+    """password.txt 的正文，自解释到"捡到这张纸也知道它是哪来的"。
+
+    三行都有用：哪份包的密码（一场考试可能有多个 zip）、密码本身、什么时候生成的
+    （事后核对"这份是不是我最后改的那一版"）。
+    """
+    return (
+        "文件：%s\n"
+        "密码：%s\n"
+        "生成时间：%s（服务端时间）\n"
+        % (zip_filename, password, created_at)
+    )
+
+
+def _open_asset_blob(ctx: AppContext, asset: Asset):
+    """打开资产内容；读不到就是 404（与在线改正文那条路同一个说法）。"""
+    try:
+        return ctx.blobs.open(asset.sha256)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="「%s」的内容已经不在服务端存储里了（%s）" % (asset.filename, exc),
+        )
+
+
+def _probe_asset_zip(ctx: AppContext, asset: Asset) -> bool:
+    """这个资产是不是 zip、里面有没有加密成员；不是 zip 就 400。
+
+    只读 zip 的目录与标志位（见 ``zipcrypto.probe_encrypted``），**不解压、
+    不解密任何成员**：教师点一下按钮，不该把几百 MB 的题面从磁盘上拖一遍。
+    """
+    with _open_asset_blob(ctx, asset) as handle:
+        try:
+            return zipcrypto.probe_encrypted(handle)
+        except zipcrypto.NotAZipError:
+            raise ApiError(
+                400,
+                "asset_not_zip",
+                "「%s」不是能识别的 zip 压缩包 —— 这个动作只对 zip 有意义"
+                % asset.filename,
+            )
+
+
+def _rewrite_asset_zip(
+    ctx: AppContext,
+    asset: Asset,
+    *,
+    new_password: str,
+    old_password: Optional[str],
+) -> Tuple[str, int]:
+    """把资产里的 zip 用新密码重新打包，返回 ``(sha256, size)``。
+
+    重新打包写进一个临时文件，全部成功之后才交给内容寻址存储 —— 任何一步失败
+    （旧密码不对、不是 zip、超过体积上限）都不会碰到原来那份 blob。"旧密码错时
+    资产一个字节都没动"这条判据靠的就是这个顺序，不是靠调用方自觉。
+    """
+    new_pwd = new_password.encode("utf-8")
+    old_pwd = old_password.encode("utf-8") if old_password else None
+    with _open_asset_blob(ctx, asset) as source:
+        with tempfile.TemporaryFile() as buffer:
+            try:
+                zipcrypto.rewrite_zip(
+                    source, buffer, new_password=new_pwd, old_password=old_pwd
+                )
+            except zipcrypto.PasswordRequiredError:
+                # 这个分支只有"先探测时以为没加密、真读的时候发现成员是加密的"
+                # 才走得到 —— 预先那条检查（见 set_asset_zip_password）会先给出一句
+                # 更有用的提示（旧密码在 password.txt 里）。文案刻意与那句不同：
+                # 两句一样的话，测试就分不清"预检查有没有生效"。
+                raise ApiError(
+                    400,
+                    "zip_password_required",
+                    "「%s」里还有加密成员，但没给能解开它的旧密码" % asset.filename,
+                )
+            except zipcrypto.BadPasswordError:
+                raise ApiError(
+                    400,
+                    "zip_password_wrong",
+                    "旧密码不对，「%s」没有被改动" % asset.filename,
+                )
+            except zipcrypto.NotAZipError:
+                raise ApiError(
+                    400,
+                    "asset_not_zip",
+                    "「%s」不是能识别的 zip 压缩包" % asset.filename,
+                )
+            except zipcrypto.UnsupportedCompressionError as exc:
+                raise ApiError(
+                    400,
+                    "zip_password_failed",
+                    "「%s」里有不能重新打包的成员（%s）" % (asset.filename, exc),
+                )
+            except zipcrypto.ZipCryptoError as exc:
+                raise ApiError(
+                    400,
+                    "zip_password_failed",
+                    "重新打包「%s」失败（%s）" % (asset.filename, exc),
+                )
+            buffer.seek(0)
+            try:
+                return ctx.blobs.put_stream(
+                    buffer, max_bytes=ctx.settings.max_asset_size
+                )
+            except BlobTooLarge as exc:  # pragma: no cover - 由 2 GB 上限兜着
+                raise HTTPException(status_code=413, detail=str(exc))
+
+
+def _upsert_password_asset(
+    ctx: AppContext,
+    session: Session,
+    contest_id: int,
+    *,
+    zip_asset: Asset,
+    password: str,
+) -> Tuple[AssetOut, int]:
+    """写/更新那份 ``password.txt``，返回 ``(资产, 它自己被重排的台数)``。
+
+    同名但内容不同时**选"更新"而不是"新建一条"**，理由是这个文件名是**单件**
+    语义：教室里要做的事永远是"把**当前**这份密码发下去"。走 ``_create_asset``
+    的"内容不同就新建"那条路的话，每改一次密码就会多出一条 password.txt，
+    列表上很快躺着三五条同名文件，而教师没有任何依据判断哪一条是最新的 ——
+    发错的那一次，学生打开包时看到的是"密码不对"，现场没人能立刻反应过来。
+
+    "更新"走的是与「在线改正文」**同一套**语义：同一个 asset id 换
+    ``sha256``/``size``，并把已经下发完成（``done``）的目标重排回 ``pending``。
+    这样"以前收过这份密码的机器"会在下一轮 tick 自动拿到新的那一份，而不是
+    守着一份过期密码。同名同内容（sha256 相同）时直接复用，一个字节都不写。
+
+    新造那一条时走 ``_create_asset``（「新建文本资产」的公共入口），
+    不另发明一套下发机制。
+    """
+    content = _normalize_text_content(
+        _password_file_text(zip_asset.filename, password, _password_created_at())
+    )
+    sha256, size = ctx.blobs.put_bytes(content.encode("utf-8"))
+
+    existing = (
+        session.execute(
+            select(Asset)
+            .where(Asset.contest_id == contest_id, Asset.filename == PASSWORD_FILENAME)
+            # 去重是按「名字 + 内容」做的，手工上传过同名文件才可能出现不止一条。
+            # 取 id 最大的那条当"当前这份"，至少是确定的、可解释的。
+            .order_by(Asset.id.desc())
+        )
+        .scalars()
+        .first()
+    )
+
+    if existing is None:
+        return (
+            _create_asset(
+                ctx,
+                contest_id,
+                sha256=sha256,
+                size=size,
+                filename=PASSWORD_FILENAME,
+                kind=PASSWORD_ASSET_KIND,
+                session=session,
+            ),
+            0,
+        )
+
+    if existing.sha256 == sha256:
+        return _asset_out(existing, _pending_targets(session, existing.id)), 0
+
+    existing.sha256 = sha256
+    existing.size = size
+    requeued = _requeue_done_targets(session, existing.id)
+    session.flush()
+    return _asset_out(existing, _pending_targets(session, existing.id)), requeued
+
+
+@router.get(
+    "/contests/{contest_id}/assets/{asset_id}/zip-password",
+    response_model=AssetZipPasswordOut,
+)
+def get_asset_zip_password(
+    contest_id: int,
+    asset_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> AssetZipPasswordOut:
+    """这个 zip 现在有没有密码。
+
+    判据是标志位（读 zip 目录，不读成员正文）。不是 zip 一律 400 而不是回
+    ``encrypted=false``：后者会让界面给一个非 zip 文件也画上「密码」按钮，
+    点下去必然失败，而那时教师已经在输密码了。
+    """
+    with ctx.db.session() as session:
+        asset = _contest_asset(session, contest_id, asset_id)
+        return AssetZipPasswordOut(
+            encrypted=_probe_asset_zip(ctx, asset), filename=asset.filename
+        )
+
+
+@router.post(
+    "/contests/{contest_id}/assets/{asset_id}/zip-password",
+    response_model=AssetZipPasswordSavedOut,
+)
+def set_asset_zip_password(
+    contest_id: int,
+    asset_id: int,
+    payload: AssetZipPasswordIn,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> AssetZipPasswordSavedOut:
+    """给 zip 打密码 / 改密码，并同步写一份 ``password.txt``。
+
+    **这个密码是弱加密**：InfoZIP 传统加密（ZipCrypto）只挡得住随手翻看，
+    挡不住有心人 —— 选它是因为学生机上的 Archive Manager 只认这一种
+    （AES-256 的 zip 它打不开）。界面文案与这里的口径必须一致，不许写"安全加密"。
+
+    **服务端不另外保存密码明文**：密码只写进 ``password.txt`` 那份文本资产，
+    没有新增的密码列/表。因此"密码丢了"的答案就是"去「文件下发」页读
+    password.txt" —— 它是普通文本资产，教师随时能读回来、能看到、能再发一遍。
+    审计事件里也刻意不写密码，否则等于多存了一份明文。
+
+    改内容的语义与「在线改正文」完全一致（同一套 ``_requeue_done_targets``）：
+    同一个 asset id 换 ``sha256``/``size``、把已经 ``done`` 的目标重排回
+    ``pending`` 并清零续传偏移、写一条审计事件。区别只是"新内容"不是一段文本，
+    而是"用新密码重新打包的 zip"。
+    """
+    with ctx.db.session() as session:
+        asset = _contest_asset(session, contest_id, asset_id)
+        encrypted = _probe_asset_zip(ctx, asset)
+
+        if payload.generate:
+            # 服务端生成：字符集去掉易混字符，用 secrets（见 zipcrypto）。
+            password = zipcrypto.generate_password()
+        else:
+            password = payload.password or ""
+        if not password:
+            raise ApiError(
+                400,
+                "zip_password_missing",
+                "请给一个新密码，或者让服务端生成一个",
+            )
+
+        old_password = payload.old_password
+        if encrypted and not old_password:
+            raise ApiError(
+                400,
+                "zip_password_required",
+                "「%s」已经有密码了，改密码要先给旧密码（旧密码在之前那份 password.txt 里）"
+                % asset.filename,
+            )
+        if not encrypted:
+            # 明文包不需要旧密码。教师顺手填了一个也只是习惯 —— 静默忽略比
+            # 报错更符合意图，但绝不能让它参与任何判断。
+            old_password = None
+
+        old_sha = asset.sha256
+        sha256, size = _rewrite_asset_zip(
+            ctx, asset, new_password=password, old_password=old_password
+        )
+        asset.sha256 = sha256
+        asset.size = size
+
+        requeued = _requeue_done_targets(session, asset.id)
+        password_asset, password_requeued = _upsert_password_asset(
+            ctx, session, contest_id, zip_asset=asset, password=password
+        )
+
+        session.add(
+            EventLog(
+                level="info",
+                category="asset_zip_password",
+                contest_id=contest_id,
+                message="给场次 %d 的「%s」重新打包了 zip（sha %s → %s），"
+                "重新排队 %d 台机器；同步写好密码文件 password.txt"
+                "（资产 #%d，重排 %d 台）"
+                % (
+                    contest_id,
+                    asset.filename,
+                    old_sha[:8],
+                    sha256[:8],
+                    requeued,
+                    password_asset.id,
+                    password_requeued,
+                ),
+            )
+        )
+        session.flush()
+
+        pending = _pending_targets(session, asset.id)
+        log.info(
+            "zip 打密码：场次 %d 的「%s」sha %s → %s（重排 %d 台），password.txt=#%d",
+            contest_id,
+            asset.filename,
+            old_sha[:8],
+            sha256[:8],
+            requeued,
+            password_asset.id,
+        )
+        return AssetZipPasswordSavedOut(
+            asset=_asset_out(asset, pending),
+            password=password,
+            password_asset=password_asset,
+            requeued=requeued,
+        )
 
 
 @router.patch("/assets/{asset_id}", response_model=AssetOut)

@@ -69,6 +69,12 @@ export type AssetTextOut = S['AssetTextOut']
 export type AssetTextEditIn = S['AssetTextEditIn']
 /** 改正文的回执：`asset` 是改后的那一份，`requeued` 是被重排的机器台数。 */
 export type AssetTextSavedOut = S['AssetTextSavedOut']
+/** zip 的加密状态。GET 只读标志位（不解压、不解密）—— 不是 zip 会拿到 400。 */
+export type AssetZipPasswordOut = S['AssetZipPasswordOut']
+/** 给 zip 打密码/改密码。已经加密时必须给 `old_password`。 */
+export type AssetZipPasswordIn = S['AssetZipPasswordIn']
+/** 回执：新密码、重新打包后的资产、以及同步写好的 password.txt。 */
+export type AssetZipPasswordSavedOut = S['AssetZipPasswordSavedOut']
 export type DeployCreate = S['DeployCreate']
 export type DeployTaskOut = S['DeployTaskOut']
 export type DeployTargetOut = S['DeployTargetOut']

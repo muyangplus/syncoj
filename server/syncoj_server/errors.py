@@ -126,6 +126,16 @@ ERROR_CODES = {
     #: 两者都是 400 而不是 422：请求体本身没问题，不合格的是**服务端手上那一份**。
     "asset_not_editable": "这个文件不能在线上改正文（只支持文本文件，且不超过 512 KB）",
     "asset_not_utf8": "这个文件的字节不是合法的 UTF-8 文本",
+    #: zip 加密（InfoZIP 传统加密）那一组。
+    #:
+    #: 文案里**刻意不提"安全"**：ZipCrypto 是弱加密，已知明文攻击能破，只能说
+    #: "挡得住随手翻看"。页面上那句诚实的话（见 DeploysView.vue）如果和这里的
+    #: 口径不一致，教师就会高估它提供的保护。
+    "asset_not_zip": "这个文件不是能识别的 zip 压缩包",
+    "zip_password_missing": "请给一个新密码，或者让服务端生成一个",
+    "zip_password_required": "这个包已经有密码了，改密码要先给旧密码",
+    "zip_password_wrong": "旧密码不对，这个包没有被改动",
+    "zip_password_failed": "重新打包这个 zip 失败",
     "release_not_signed": "服务端没有配置发布签名私钥，无法提供升级",
     "release_trust_anchor_missing": "本机没有要内嵌进包里的发布公钥，打出的包机器验不了签名",
     "release_source_missing": "本机没有可用于构建的 Agent 源码",

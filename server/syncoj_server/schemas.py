@@ -823,6 +823,52 @@ class AssetTextSavedOut(_Base):
     requeued: int = 0
 
 
+class AssetZipPasswordOut(_Base):
+    """一个 zip 资产的加密状态（只读探测）。
+
+    ``encrypted`` 由服务端读 zip 的标志位算出来（不解压、不解密任何成员）。
+    ``filename`` 回显是因为对话框要用它写标题与密码文件的正文。
+    """
+
+    encrypted: bool
+    filename: str
+
+
+class AssetZipPasswordIn(_Base):
+    """给 zip 打密码 / 改密码。
+
+    * ``password``：新密码。不给就让服务端生成一个（``generate=true``）。
+    * ``generate``：让服务端用 ``secrets`` 生成一个不含易混字符的随机密码。
+    * ``old_password``：**已经在加密状态时必填**。资产是按内容寻址的（``sha256``
+      决定内容），服务端手上只有加密后的字节，没有旧密码就读不出来、也就改不了。
+      密码**不会被服务端单独保存**：它只活在 ``password.txt`` 这份文本资产里
+      （见 ``api/admin.py`` 的 ``set_asset_zip_password``）。
+    """
+
+    password: Optional[str] = Field(default=None, max_length=128)
+    generate: bool = False
+    old_password: Optional[str] = Field(default=None, max_length=128)
+
+
+class AssetZipPasswordSavedOut(_Base):
+    """打密码 / 改密码的回执。
+
+    * ``asset``：重新打包后的 zip（同一个 asset id，``sha256``/``size`` 变了）。
+    * ``password``：这次生效的密码（生成的或教师给的）—— 界面要立刻显示给教师
+      抄下来。这是它**唯一**一次被回显：之后想再查只能去读 ``password.txt``。
+    * ``password_asset``：同步写好的 ``password.txt`` 文本资产。下发它仍然是
+      教师自己的动作（没有"考试开始时自动下发"那套机制），这里只是把入口指出来。
+    * ``requeued``：**zip 这一个资产**被重排的机器台数（``done`` → ``pending``）。
+      ``password.txt`` 自己如果已经发出去过，也会被重排（同一套"改内容"语义），
+      但不计入这个数字 —— 界面那句"包已重新排队给 N 台机器"说的是包。
+    """
+
+    asset: AssetOut
+    password: str
+    password_asset: AssetOut
+    requeued: int = 0
+
+
 class DeployCreate(_Base):
     """创建下发任务。
 

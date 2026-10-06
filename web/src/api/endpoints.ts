@@ -115,6 +115,18 @@ export const paths = {
    */
   assetText: (contestId: number, assetId: number) =>
     `${ADMIN}/contests/${contestId}/assets/${assetId}/text`,
+  /**
+   * 某个 zip 资产的加密状态（GET）与打密码/改密码（POST）。
+   *
+   * 同一个路径两个方法，和 `assetText` 一样。GET 只读 zip 的标志位（不解压、
+   * 不解密任何成员）；POST 重新打包同一个 asset id，并同步写一份 password.txt。
+   *
+   * 用的是 InfoZIP 传统加密（ZipCrypto）：学生机上的 Archive Manager 只认这一种。
+   * 它是**弱加密** —— 挡得住随手翻看，挡不住有心人。界面文案必须按这个口径写，
+   * 不许出现"安全加密"。
+   */
+  assetZipPassword: (contestId: number, assetId: number) =>
+    `${ADMIN}/contests/${contestId}/assets/${assetId}/zip-password`,
   asset: (assetId: number) => `${ADMIN}/assets/${assetId}`,
   contestDeploys: (contestId: number) => `${ADMIN}/contests/${contestId}/deploys`,
   deploy: (taskId: number) => `${ADMIN}/deploys/${taskId}`,

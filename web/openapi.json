@@ -450,6 +450,91 @@
         "title": "AssetTextSavedOut",
         "type": "object"
       },
+      "AssetZipPasswordIn": {
+        "additionalProperties": false,
+        "description": "给 zip 打密码 / 改密码。\n\n* ``password``：新密码。不给就让服务端生成一个（``generate=true``）。\n* ``generate``：让服务端用 ``secrets`` 生成一个不含易混字符的随机密码。\n* ``old_password``：**已经在加密状态时必填**。资产是按内容寻址的（``sha256``\n  决定内容），服务端手上只有加密后的字节，没有旧密码就读不出来、也就改不了。\n  密码**不会被服务端单独保存**：它只活在 ``password.txt`` 这份文本资产里\n  （见 ``api/admin.py`` 的 ``set_asset_zip_password``）。",
+        "properties": {
+          "generate": {
+            "default": false,
+            "title": "Generate",
+            "type": "boolean"
+          },
+          "old_password": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Old Password"
+          },
+          "password": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Password"
+          }
+        },
+        "title": "AssetZipPasswordIn",
+        "type": "object"
+      },
+      "AssetZipPasswordOut": {
+        "additionalProperties": false,
+        "description": "一个 zip 资产的加密状态（只读探测）。\n\n``encrypted`` 由服务端读 zip 的标志位算出来（不解压、不解密任何成员）。\n``filename`` 回显是因为对话框要用它写标题与密码文件的正文。",
+        "properties": {
+          "encrypted": {
+            "title": "Encrypted",
+            "type": "boolean"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          }
+        },
+        "required": [
+          "encrypted",
+          "filename"
+        ],
+        "title": "AssetZipPasswordOut",
+        "type": "object"
+      },
+      "AssetZipPasswordSavedOut": {
+        "additionalProperties": false,
+        "description": "打密码 / 改密码的回执。\n\n* ``asset``：重新打包后的 zip（同一个 asset id，``sha256``/``size`` 变了）。\n* ``password``：这次生效的密码（生成的或教师给的）—— 界面要立刻显示给教师\n  抄下来。这是它**唯一**一次被回显：之后想再查只能去读 ``password.txt``。\n* ``password_asset``：同步写好的 ``password.txt`` 文本资产。下发它仍然是\n  教师自己的动作（没有\"考试开始时自动下发\"那套机制），这里只是把入口指出来。\n* ``requeued``：**zip 这一个资产**被重排的机器台数（``done`` → ``pending``）。\n  ``password.txt`` 自己如果已经发出去过，也会被重排（同一套\"改内容\"语义），\n  但不计入这个数字 —— 界面那句\"包已重新排队给 N 台机器\"说的是包。",
+        "properties": {
+          "asset": {
+            "$ref": "#/components/schemas/AssetOut"
+          },
+          "password": {
+            "title": "Password",
+            "type": "string"
+          },
+          "password_asset": {
+            "$ref": "#/components/schemas/AssetOut"
+          },
+          "requeued": {
+            "default": 0,
+            "title": "Requeued",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "asset",
+          "password",
+          "password_asset"
+        ],
+        "title": "AssetZipPasswordSavedOut",
+        "type": "object"
+      },
       "BindByCodeIn": {
         "additionalProperties": false,
         "description": "用配对码配对：机器上显示什么，教师就输什么。",
@@ -5387,6 +5472,118 @@
           }
         },
         "summary": "Save Asset Text",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/contests/{contest_id}/assets/{asset_id}/zip-password": {
+      "get": {
+        "description": "这个 zip 现在有没有密码。\n\n判据是标志位（读 zip 目录，不读成员正文）。不是 zip 一律 400 而不是回\n``encrypted=false``：后者会让界面给一个非 zip 文件也画上「密码」按钮，\n点下去必然失败，而那时教师已经在输密码了。",
+        "operationId": "get_asset_zip_password_api_v1_admin_contests__contest_id__assets__asset_id__zip_password_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "asset_id",
+            "required": true,
+            "schema": {
+              "title": "Asset Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetZipPasswordOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Asset Zip Password",
+        "tags": [
+          "admin"
+        ]
+      },
+      "post": {
+        "description": "给 zip 打密码 / 改密码，并同步写一份 ``password.txt``。\n\n**这个密码是弱加密**：InfoZIP 传统加密（ZipCrypto）只挡得住随手翻看，\n挡不住有心人 —— 选它是因为学生机上的 Archive Manager 只认这一种\n（AES-256 的 zip 它打不开）。界面文案与这里的口径必须一致，不许写\"安全加密\"。\n\n**服务端不另外保存密码明文**：密码只写进 ``password.txt`` 那份文本资产，\n没有新增的密码列/表。因此\"密码丢了\"的答案就是\"去「文件下发」页读\npassword.txt\" —— 它是普通文本资产，教师随时能读回来、能看到、能再发一遍。\n审计事件里也刻意不写密码，否则等于多存了一份明文。\n\n改内容的语义与「在线改正文」完全一致（同一套 ``_requeue_done_targets``）：\n同一个 asset id 换 ``sha256``/``size``、把已经 ``done`` 的目标重排回\n``pending`` 并清零续传偏移、写一条审计事件。区别只是\"新内容\"不是一段文本，\n而是\"用新密码重新打包的 zip\"。",
+        "operationId": "set_asset_zip_password_api_v1_admin_contests__contest_id__assets__asset_id__zip_password_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "asset_id",
+            "required": true,
+            "schema": {
+              "title": "Asset Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssetZipPasswordIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetZipPasswordSavedOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Asset Zip Password",
         "tags": [
           "admin"
         ]

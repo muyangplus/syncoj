@@ -4,7 +4,16 @@ import { request } from './client'
 import { listPage, softRemoveItem } from './crud'
 import type { ListParams } from './crud'
 import { paths } from './endpoints'
-import type { AssetOut, AssetRenameIn, AssetTextEditIn, AssetTextOut, AssetTextSavedOut } from './types'
+import type {
+  AssetOut,
+  AssetRenameIn,
+  AssetTextEditIn,
+  AssetTextOut,
+  AssetTextSavedOut,
+  AssetZipPasswordIn,
+  AssetZipPasswordOut,
+  AssetZipPasswordSavedOut,
+} from './types'
 
 export const assetApi = {
   list: (
@@ -70,4 +79,30 @@ export const assetApi = {
 
   /** 软删除（墓碑）。已经落到选手机器上的文件不会撤回。 */
   remove: (assetId: number) => softRemoveItem(paths.asset(assetId)),
+
+  /**
+   * 这个 zip 现在有没有密码。
+   *
+   * 只读 zip 的标志位（服务端不解压、不解密任何成员）。不是 zip 的文件会拿到
+   * 400 `asset_not_zip`，所以界面应当在**打开对话框之前**先问一次 —— 否则会出现
+   * "弹出密码框、输完才说这不是 zip"。
+   */
+  getZipPassword: (contestId: number, assetId: number) =>
+    request<AssetZipPasswordOut>(paths.assetZipPassword(contestId, assetId)),
+
+  /**
+   * 给 zip 打密码 / 改密码（InfoZIP 传统加密，学生机上的 Archive Manager 认这一种）。
+   *
+   * 已经加密的包必须给 `old_password`（旧密码就在之前那份 password.txt 里）；
+   * `generate=true` 时服务端用 `secrets` 生成一个不含易混字符的随机密码。
+   * 回执里的 `password` 是**唯一一次**回显 —— 之后想再查只能读
+   * `password_asset` 那份 password.txt（服务端不另存密码）。
+   *
+   * **这是弱加密**：挡得住随手翻看，挡不住有心人。别把它当成保护机密数据的手段。
+   */
+  setZipPassword: (contestId: number, assetId: number, payload: AssetZipPasswordIn) =>
+    request<AssetZipPasswordSavedOut>(paths.assetZipPassword(contestId, assetId), {
+      method: 'POST',
+      body: payload,
+    }),
 }

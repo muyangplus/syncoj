@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
-import { ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 
 import { assetApi, deployApi, playerApi } from '@/api'
-import type { AssetOut, DeployTaskOut, PlayerOut } from '@/api/types'
+import type { AssetOut, AssetZipPasswordOut, DeployTaskOut, PlayerOut } from '@/api/types'
 import DataTable from '@/components/DataTable.vue'
 import FormDialog from '@/components/FormDialog.vue'
 import HelpTip from '@/components/HelpTip.vue'
@@ -172,6 +172,15 @@ const textMode = ref<TextMode>('create')
 /** 正在改的那一条（`edit` 模式才有）。提交时要拿它的 id 去打 PUT。 */
 const textTarget = ref<AssetOut | null>(null)
 
+/**
+ * 当前这一条能不能在线上改正文（服务端算的 `AssetOut.editable`）。
+ *
+ * 编辑对话框现在也承担**改名**，而改名对所有资产都成立；只有正文那一栏跟着这个
+ * 布尔显示。前端不按扩展名自己判断 —— 两处规则必然分叉，分叉那天的表现是
+ * "给了输入框、点保存报错"。
+ */
+const textEditable = ref(true)
+
 /** 打开时先 GET 一次正文，那一次请求也要占着确认按钮，不然能连点两次。 */
 const textLoading = ref(false)
 
@@ -192,6 +201,8 @@ const textTitle = computed(() => {
 function openTextDialog(mode: TextMode, filename = ''): void {
   textMode.value = mode
   textTarget.value = null
+  // 新建/写公告都是文本入口，正文那一栏一定要显示
+  textEditable.value = true
   textForm.filename = filename
   textForm.content = ''
   // 「写考场公告」把用途预置成「须知」：kind 决定它落到机器上的目标目录，
@@ -202,11 +213,14 @@ function openTextDialog(mode: TextMode, filename = ''): void {
 }
 
 /**
- * 编辑一条已有的纯文本资产。
+ * 打开一条已有资产的编辑对话框。
  *
- * 只有服务端说 `editable` 的那些才有这个入口（判据在服务端，前端不按扩展名
- * 自己猜）。正文必须**先读回来**再让教师改：对话框里空着就是空文件，而"打开
- * 一份空表单、改两笔、保存"会把一份好好的文件覆盖成半截。
+ * 「编辑」现在承担两件事：**改文件名**（所有资产都有这个入口 —— 表格操作列那个
+ * 独立的「改名」已经并进来了），以及在服务端说 `editable` 时改正文。
+ *
+ * 正文必须**先读回来**再让教师改：对话框里空着就是空文件，而"打开一份空表单、
+ * 改两笔、保存"会把一份好好的文件覆盖成半截。不是文本的文件（zip、pdf…）
+ * 连 GET 都不发 —— 服务端一定会 400，那是白跑一趟。
  */
 async function openEditTextDialog(asset: AssetOut): Promise<void> {
   const contestId = contest.currentId
@@ -215,18 +229,20 @@ async function openEditTextDialog(asset: AssetOut): Promise<void> {
   textTarget.value = asset
   textForm.filename = asset.filename
   textForm.content = ''
+  textEditable.value = asset.editable
   // 用途不在这个入口里：换用途等于换它落到机器上的目标目录，那是另一个动作。
   // 这里跟着资产把它带进对话框只是为了让下拉显示的不是一个假值。
   uploadKind.value = asset.kind
   textDialog.value = true
+  if (!asset.editable) return
   // 从这一刻起确认按钮就该是按不动的 —— 正文还没到，点下去存的是一份空文件
   textLoading.value = true
   try {
     const text = await assetApi.getText(contestId, asset.id)
     textForm.content = text.content
-  } catch {
-    // 错误提示由统一的数据层弹；这里只把对话框收掉，避免它停在一份空表单上，
-    // 让人以为"这个文件就是空的"
+  } catch (error) {
+    ElMessage.error((error as Error).message)
+    // 把对话框收掉，避免它停在一份空表单上，让人以为"这个文件就是空的"
     textDialog.value = false
     textTarget.value = null
   } finally {
@@ -235,8 +251,27 @@ async function openEditTextDialog(asset: AssetOut): Promise<void> {
 }
 
 /**
- * 保存一条已有的资产：同一个对话框、同一个提交按钮，分叉只在最后那一步 ——
- * 这条走 PUT（返回 `AssetTextSavedOut`，比新建多一个"重排了多少台"）。
+ * 编辑模式下有没有实质改动。
+ *
+ * 不能改正文的文件只提供改名，所以"名字没变"时确认按钮就该是灰的 —— 否则教师
+ * 点了一次保存，拿到的是"文件名没有变化"这种他无法理解的报错。
+ */
+const textDirty = computed(() => {
+  const asset = textTarget.value
+  if (textMode.value !== 'edit' || !asset) return true
+  if (textForm.filename.trim() !== asset.filename) return true
+  return textEditable.value
+})
+
+/**
+ * 保存一条已有的资产：同一个对话框、同一个提交按钮，分叉在"要不要写正文"那一步。
+ *
+ * 「改名」与「改正文」是服务端两个入口（`PATCH /assets/{id}` 与 `PUT .../text`），
+ * 所以这里按需依次调用：名字变了先改名（它是换标签，失败率最低、也应该最先做完），
+ * 然后才是正文。顺序反过来会出现"正文已经存成新的、改名却因为重名被拒"这种
+ * 半截状态。
+ *
+ * 不能改正文的资产（zip、pdf…）只走改名那一步。
  */
 const saveText = useMutation(
   async () => {
@@ -244,6 +279,23 @@ const saveText = useMutation(
     if (!contestId) throw new Error('还没有选场次')
     const asset = textTarget.value
     if (!asset) throw new Error('没有选中文件')
+    const name = textForm.filename.trim()
+    if (!name) throw new Error('文件名不能为空')
+    // 服务端会按路径段的规则校验，这里先挡一次明显的错，省一个来回
+    if (name.includes('/') || name.includes('\\')) {
+      throw new Error('文件名不能包含斜杠 —— 它只是一个文件名，不是路径')
+    }
+
+    let renamedAsset: AssetOut | null = null
+    if (name !== asset.filename) {
+      renamedAsset = await assetApi.rename(asset.id, { filename: name })
+    }
+
+    if (!textEditable.value) {
+      if (!renamedAsset) throw new Error('文件名没有变化')
+      return { asset: renamedAsset, requeued: 0, renamed: true, contentSaved: false }
+    }
+
     // 服务端的上限是**字节**（1 MB），不是字符数：中文一个字三字节，
     // 用 content.length 拦等于把上限放成三倍，于是点了保存才被拒。
     // 这个数与服务端的 `_TEXT_MAX_BYTES` 对齐 —— 它比「新建文本文件」的
@@ -251,12 +303,27 @@ const saveText = useMutation(
     if (new TextEncoder().encode(textForm.content).length > 1024 * 1024) {
       throw new Error('正文超过 1 MB 的上限，请改完在本地重新上传')
     }
-    return assetApi.saveText(contestId, asset.id, textForm.content)
+    const saved = await assetApi.saveText(contestId, asset.id, textForm.content)
+    return {
+      asset: saved.asset,
+      requeued: saved.requeued,
+      renamed: renamedAsset !== null,
+      contentSaved: true,
+    }
   },
   {
-    success: ({ asset, requeued }) =>
+    success: ({ asset, requeued, renamed, contentSaved }) => {
+      // 只是改了名：这句要写清"已经落地的那份不受影响"，否则教师会以为改名能
+      // 修正发出去的文件
+      if (!contentSaved) {
+        return `已改名为「${asset.filename}」。内容没动，已经落到机器上的那份不受影响；还没下完的任务会按新名字落地`
+      }
+      const verb = renamed ? '已改名并保存' : '已保存'
       // 只有真重排了才提台数：硬报"重新排队给 0 台机器"会让教师以为出错了
-      requeued > 0 ? `已保存，并重新排队给 ${requeued} 台机器` : `已保存「${asset.filename}」`,
+      return requeued > 0
+        ? `${verb}「${asset.filename}」，并重新排队给 ${requeued} 台机器`
+        : `${verb}「${asset.filename}」`
+    },
     onDone: async () => {
       textDialog.value = false
       textTarget.value = null
@@ -307,48 +374,111 @@ const createText = useMutation(
 )
 
 // --------------------------------------------------------------------------- //
-// 资产：改名与删除
+// 资产：zip 密码（打密码 / 改密码 / 生成随机密码）
+//
+// 用的是 InfoZIP 传统加密（ZipCrypto），因为学生机器上的 Archive Manager 只认
+// 这一种：AES-256 的 zip 它打不开（除非另外装了 p7zip），传统加密的会弹框要密码。
+//
+// **它是弱加密**：已知明文攻击可以破，题面/样例这种已知结构的数据更是如此。
+// 所以这里（以及对话框里）的定位是"挡得住随手翻看，挡不住有心人"，不许出现
+// "安全加密"这类说法 —— 那会给教师一种它并不提供的保证。
+//
+// 密码不存在服务端：它只活在同步生成的 password.txt 里。回执里那句"请自己抄
+// 下来"不是客套 —— 对话框关掉之后，能找回它的地方就只有那份文件。
 // --------------------------------------------------------------------------- //
 
-const renameOpen = ref(false)
-const renameTarget = ref<AssetOut | null>(null)
-const renameName = ref('')
+const zipDialog = ref(false)
+const zipTarget = ref<AssetOut | null>(null)
+const zipStatus = ref<AssetZipPasswordOut | null>(null)
+const zipLoading = ref(false)
+const zipForm = reactive({ password: '', oldPassword: '', generate: false })
 
-function openRename(asset: AssetOut): void {
-  renameTarget.value = asset
-  renameName.value = asset.filename
-  renameOpen.value = true
+/** 只有 .zip 的行才给「密码」入口；真正的判据在服务端（不是 zip 就 400）。 */
+function isZipName(name: string): boolean {
+  return name.toLowerCase().endsWith('.zip')
+}
+
+function toggleGeneratePassword(): void {
+  zipForm.generate = !zipForm.generate
+  // 切到"生成"就把手填的清掉，避免提交时看不出到底用了哪一个
+  if (zipForm.generate) zipForm.password = ''
 }
 
 /**
- * 改名只是换标签。
+ * 打开密码对话框前先问一次状态。
  *
- * 内容是按 sha256 存的内容寻址对象，改名不碰内容；已经落到选手机器上的文件
- * 也早就落地了，不受影响。但**未完成**的下发任务会按新名字落地 —— 不说这句
- * 的话，教师会以为改名能修正已经发出去的文件。
+ * 这一次 GET 不是可有可无的：它决定对话框里要不要出现"旧密码"，也会把"这不是
+ * zip"提前挡在门外 —— 否则教师会先把密码想好、输进去，才发现这个文件根本不是包。
  */
-const renameAsset = useMutation(
+async function openZipPasswordDialog(asset: AssetOut): Promise<void> {
+  const contestId = contest.currentId
+  if (!contestId) return
+  zipTarget.value = asset
+  zipStatus.value = null
+  zipForm.password = ''
+  zipForm.oldPassword = ''
+  zipForm.generate = false
+  zipLoading.value = true
+  try {
+    zipStatus.value = await assetApi.getZipPassword(contestId, asset.id)
+    zipDialog.value = true
+  } catch (error) {
+    ElMessage.error((error as Error).message)
+    zipTarget.value = null
+  } finally {
+    zipLoading.value = false
+  }
+}
+
+/** 提交按钮能不能点：已加密必须给旧密码，新密码要么填了要么让服务端生成。 */
+const zipCanSubmit = computed(() => {
+  if (zipLoading.value || !zipStatus.value) return false
+  if (zipStatus.value.encrypted && !zipForm.oldPassword) return false
+  return zipForm.generate || zipForm.password.length > 0
+})
+
+/**
+ * 提交：服务端重新打包同一个 asset id，并同步写一份 password.txt。
+ *
+ * 回执要写清三件事（**包重排了多少台 / 新密码是什么 / 还要去下发
+ * password.txt**）—— 少了哪一件，教师都会在现场卡住。
+ */
+const saveZipPassword = useMutation(
   async () => {
-    const asset = renameTarget.value
-    if (!asset) throw new Error('没有选中文件')
-    const name = renameName.value.trim()
-    if (!name) throw new Error('文件名不能为空')
-    // 服务端会按路径段的规则校验，这里先挡一次明显的错，省一个来回
-    if (name.includes('/') || name.includes('\\')) {
-      throw new Error('文件名不能包含斜杠 —— 它只是一个文件名，不是路径')
+    const contestId = contest.currentId
+    if (!contestId) throw new Error('还没有选场次')
+    const asset = zipTarget.value
+    const status = zipStatus.value
+    if (!asset || !status) throw new Error('没有选中文件')
+    if (!zipForm.generate && !zipForm.password) {
+      throw new Error('请填一个新密码，或者点「生成随机密码」')
     }
-    return assetApi.rename(asset.id, { filename: name })
+    if (status.encrypted && !zipForm.oldPassword) {
+      throw new Error('这个包已经有密码了，请先填旧密码（在之前那份 password.txt 里）')
+    }
+    return assetApi.setZipPassword(contestId, asset.id, {
+      password: zipForm.generate ? undefined : zipForm.password,
+      generate: zipForm.generate,
+      old_password: status.encrypted ? zipForm.oldPassword : undefined,
+    })
   },
   {
-    success: (asset) =>
-      `已改名为「${asset.filename}」。内容没动，已经落到机器上的那份不受影响；还没下完的任务会按新名字落地`,
+    success: ({ asset, password, password_asset, requeued }) =>
+      `已重新打包「${asset.filename}」：包已重新排队给 ${requeued} 台机器。` +
+      `新密码是 ${password}（请自己抄下来）。` +
+      `接着再去下发「${password_asset.filename}」。`,
     onDone: async () => {
-      renameOpen.value = false
-      renameTarget.value = null
+      zipDialog.value = false
+      zipTarget.value = null
+      zipStatus.value = null
       await assets.reload()
     },
   },
 )
+
+// --------------------------------------------------------------------------- //
+// 资产：删除
+// --------------------------------------------------------------------------- //
 
 /**
  * 删除资产是**软删除**（墓碑），所以用普通确认而不是打名字 —— 约定里的
@@ -553,7 +683,10 @@ function targetKindLabel(kind: string): string {
   >
     <template #hint>
       <HelpTip>
-        带密码的题面：把 <code>password.txt</code> 当普通资产一起下发即可。
+        带密码的题面：在 .zip 那一行点「密码」重新打包，系统会顺手生成一份
+        <code>password.txt</code>，再把它当普通资产下发即可。
+        这种密码是传统加密（ZipCrypto）—— <strong>挡得住随手翻看，挡不住有心人</strong>，
+        别拿它保护真正的机密。
       </HelpTip>
     </template>
     <template #toolbar>
@@ -636,12 +769,12 @@ function targetKindLabel(kind: string): string {
           </template>
         </el-table-column>
 
-        <!-- 只有服务端说 `editable` 的文件才给这个入口。前端不按扩展名自己判断：
-             两处规则必然分叉，分叉那天的表现是"给了按钮、点下去报错"。 -->
-        <el-table-column label="操作" width="210" fixed="right">
+        <!-- 「编辑」对所有资产都开放：它承担**改名**（原独立「改名」按钮已并入）
+             以及服务端说 `editable` 时的正文编辑。正文那一栏由对话框按 editable
+             决定显示与否，前端不按扩展名自己判断。 -->
+        <el-table-column label="操作" width="230" fixed="right">
           <template #default="{ row }">
             <el-button
-              v-if="row.editable"
               link
               type="primary"
               size="small"
@@ -649,8 +782,18 @@ function targetKindLabel(kind: string): string {
             >
               编辑
             </el-button>
+            <!-- 只有 .zip 的行才有这个动作；真正的判据在服务端（不是 zip 就 400） -->
+            <el-button
+              v-if="isZipName(row.filename)"
+              link
+              type="primary"
+              size="small"
+              :loading="zipLoading && zipTarget?.id === row.id"
+              @click="openZipPasswordDialog(row)"
+            >
+              密码
+            </el-button>
             <el-button link type="primary" size="small" @click="openCreate(row)">下发</el-button>
-            <el-button link type="primary" size="small" @click="openRename(row)">改名</el-button>
             <el-button link type="danger" size="small" @click="askRemoveAsset(row)">删除</el-button>
           </template>
         </el-table-column>
@@ -890,33 +1033,14 @@ function targetKindLabel(kind: string): string {
       </el-form>
     </FormDialog>
 
-    <FormDialog
-      v-model="renameOpen"
-      title="重命名可下发文件"
-      :submitting="renameAsset.pending.value"
-      confirm-text="改名"
-      @submit="renameAsset.run(undefined)"
-    >
-      <el-form label-width="90px">
-        <el-form-item label="文件名">
-          <el-input v-model="renameName" placeholder="例如 题面.zip" maxlength="255" />
-        </el-form-item>
-      </el-form>
-      <el-alert type="warning" :closable="false" show-icon>
-      <template #title>只改显示名</template>
-      <template #default>
-        文件内容按 sha256 存，改名只换标签，已经落地的那份不受影响。
-        <strong>还没下完的任务会按新名字落地。</strong>
-      </template>
-    </el-alert>
-    </FormDialog>
-
-    <!-- 「新建文本文件」「写考场公告」「编辑已有文件」共用这一个对话框 -->
+    <!-- 「新建文本文件」「写考场公告」「编辑已有文件」共用这一个对话框。
+         编辑模式对**所有**资产开放：文件名都能改（原来的「改名」按钮已经并进来），
+         正文那一栏只有服务端说 editable 的才显示。 -->
     <FormDialog
       v-model="textDialog"
       :title="textTitle"
       :submitting="createText.pending.value || saveText.pending.value"
-      :disabled="textLoading || !textForm.filename.trim()"
+      :disabled="textLoading || !textForm.filename.trim() || (textMode === 'edit' && !textDirty)"
       :confirm-text="textMode === 'edit' ? '保存' : '创建'"
       @submit="textMode === 'edit' ? saveText.run(undefined) : createText.run(undefined)"
     >
@@ -939,25 +1063,32 @@ function targetKindLabel(kind: string): string {
         show-icon
         style="margin-bottom: 14px"
       >
-        <template #title>改的是已经发出去的那一份</template>
+        <template #title>改名只影响以后的派发</template>
         <template #default>
-          保存后会用新正文替换原文件，已经下发完成的机器会被重新排队、再领一次。
-          <br />
-          已经落到机器上的那份不会自己变 —— 要它变，机器得再下载一遍。
+          还没下完的任务会按新名字落地；<strong>已经落到机器上的那份不会跟着变</strong>
+          —— 内容按 sha256 存，改名只是换个标签。
+          <template v-if="textEditable">
+            <br />
+            正文改了则不同：已下发完成的机器会被重新排队、再领一次新的那一份；
+            已经落到机器上的旧文件不会自己消失。
+          </template>
         </template>
+      </el-alert>
+
+      <el-alert
+        v-if="textMode === 'edit' && !textEditable"
+        type="info"
+        :closable="false"
+        show-icon
+        style="margin-bottom: 14px"
+      >
+        <template #title>这个文件不能在线上改正文</template>
+        <template #default>只有文本文件能在这里改内容，这个对话框对它只承担改名。</template>
       </el-alert>
 
       <el-form label-width="90px">
         <el-form-item label="文件名" required>
-          <el-input
-            v-model="textForm.filename"
-            placeholder="例如 须知.txt"
-            maxlength="255"
-            :disabled="textMode === 'edit'"
-          />
-          <div v-if="textMode === 'edit'" class="page-hint">
-            文件名不在这里改 —— 它是机器上的落地名字，改名会连带影响没下完的任务。
-          </div>
+          <el-input v-model="textForm.filename" placeholder="例如 须知.txt" maxlength="255" />
         </el-form-item>
 
         <el-form-item label="用途">
@@ -966,7 +1097,7 @@ function targetKindLabel(kind: string): string {
           </el-select>
         </el-form-item>
 
-        <el-form-item label="内容">
+        <el-form-item v-if="textMode !== 'edit' || textEditable" label="内容">
           <el-input
             v-model="textForm.content"
             class="text-content"
@@ -977,6 +1108,75 @@ function targetKindLabel(kind: string): string {
           />
         </el-form-item>
       </el-form>
+    </FormDialog>
+
+    <!-- zip 打密码 / 改密码 / 生成随机密码 -->
+    <FormDialog
+      v-model="zipDialog"
+      title="给 zip 加密码"
+      :submitting="saveZipPassword.pending.value"
+      :disabled="!zipCanSubmit"
+      confirm-text="重新打包"
+      @submit="saveZipPassword.run(undefined)"
+    >
+      <el-alert
+        v-if="zipStatus"
+        :type="zipStatus.encrypted ? 'warning' : 'info'"
+        :closable="false"
+        show-icon
+        style="margin-bottom: 14px"
+      >
+        <template #title>
+          {{ zipStatus.encrypted ? '这个包现在有密码' : '这个包现在没有密码' }}
+        </template>
+        <template #default>
+          <template v-if="zipStatus.encrypted">
+            改密码要先填旧密码 —— 服务端手上只有加密后的字节，没有旧密码读不出来。
+            旧密码就在之前那份 password.txt 里。
+          </template>
+          <template v-else>提交后会把它重新打包成带密码的 zip。</template>
+        </template>
+      </el-alert>
+
+      <el-alert type="warning" :closable="false" show-icon style="margin-bottom: 14px">
+        <template #title>这是弱加密：挡得住随手翻看，挡不住有心人</template>
+        <template #default>
+          用的是 InfoZIP 传统加密（ZipCrypto）—— 学生机器上的 Archive Manager 只认
+          这一种（AES-256 的 zip 它打不开）。已知明文攻击可以破它，题面、样例这种
+          结构已知的数据尤其如此，不要拿它保护真正的机密。
+        </template>
+      </el-alert>
+
+      <el-form label-width="90px">
+        <el-form-item v-if="zipStatus?.encrypted" label="旧密码">
+          <el-input
+            v-model="zipForm.oldPassword"
+            type="password"
+            show-password
+            placeholder="之前那份 password.txt 里写着的那个"
+          />
+        </el-form-item>
+
+        <el-form-item label="新密码">
+          <el-input
+            v-model="zipForm.password"
+            :disabled="zipForm.generate"
+            :placeholder="zipForm.generate ? '提交时由服务端生成' : '自己填一个，或让服务端生成'"
+          />
+          <el-button size="small" style="margin-top: 8px" @click="toggleGeneratePassword">
+            {{ zipForm.generate ? '改为自己填' : '生成随机密码' }}
+          </el-button>
+          <div v-if="zipForm.generate" class="page-hint">
+            服务端会生成一个 12 位、不含 0 O 1 l I 这类易混字符的随机密码，提交后才显示
+            —— 请随手抄下来。
+          </div>
+        </el-form-item>
+      </el-form>
+
+      <p class="page-hint" style="margin: 0">
+        提交后会同时生成（或更新）一份 <code>password.txt</code>，里面写清是哪个包的密码。
+        它<strong>不会自动发下去</strong> —— 请再到「可下发文件」里把它下发一次。
+      </p>
     </FormDialog>
   </PageShell>
 </template>

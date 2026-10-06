@@ -413,6 +413,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/contests/{contest_id}/assets/{asset_id}/zip-password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Asset Zip Password
+         * @description 这个 zip 现在有没有密码。
+         *
+         *     判据是标志位（读 zip 目录，不读成员正文）。不是 zip 一律 400 而不是回
+         *     ``encrypted=false``：后者会让界面给一个非 zip 文件也画上「密码」按钮，
+         *     点下去必然失败，而那时教师已经在输密码了。
+         */
+        get: operations["get_asset_zip_password_api_v1_admin_contests__contest_id__assets__asset_id__zip_password_get"];
+        put?: never;
+        /**
+         * Set Asset Zip Password
+         * @description 给 zip 打密码 / 改密码，并同步写一份 ``password.txt``。
+         *
+         *     **这个密码是弱加密**：InfoZIP 传统加密（ZipCrypto）只挡得住随手翻看，
+         *     挡不住有心人 —— 选它是因为学生机上的 Archive Manager 只认这一种
+         *     （AES-256 的 zip 它打不开）。界面文案与这里的口径必须一致，不许写"安全加密"。
+         *
+         *     **服务端不另外保存密码明文**：密码只写进 ``password.txt`` 那份文本资产，
+         *     没有新增的密码列/表。因此"密码丢了"的答案就是"去「文件下发」页读
+         *     password.txt" —— 它是普通文本资产，教师随时能读回来、能看到、能再发一遍。
+         *     审计事件里也刻意不写密码，否则等于多存了一份明文。
+         *
+         *     改内容的语义与「在线改正文」完全一致（同一套 ``_requeue_done_targets``）：
+         *     同一个 asset id 换 ``sha256``/``size``、把已经 ``done`` 的目标重排回
+         *     ``pending`` 并清零续传偏移、写一条审计事件。区别只是"新内容"不是一段文本，
+         *     而是"用新密码重新打包的 zip"。
+         */
+        post: operations["set_asset_zip_password_api_v1_admin_contests__contest_id__assets__asset_id__zip_password_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/contests/{contest_id}/deploys": {
         parameters: {
             query?: never;
@@ -2060,6 +2102,65 @@ export interface components {
          */
         AssetTextSavedOut: {
             asset: components["schemas"]["AssetOut"];
+            /**
+             * Requeued
+             * @default 0
+             */
+            requeued: number;
+        };
+        /**
+         * AssetZipPasswordIn
+         * @description 给 zip 打密码 / 改密码。
+         *
+         *     * ``password``：新密码。不给就让服务端生成一个（``generate=true``）。
+         *     * ``generate``：让服务端用 ``secrets`` 生成一个不含易混字符的随机密码。
+         *     * ``old_password``：**已经在加密状态时必填**。资产是按内容寻址的（``sha256``
+         *       决定内容），服务端手上只有加密后的字节，没有旧密码就读不出来、也就改不了。
+         *       密码**不会被服务端单独保存**：它只活在 ``password.txt`` 这份文本资产里
+         *       （见 ``api/admin.py`` 的 ``set_asset_zip_password``）。
+         */
+        AssetZipPasswordIn: {
+            /**
+             * Generate
+             * @default false
+             */
+            generate: boolean;
+            /** Old Password */
+            old_password?: string | null;
+            /** Password */
+            password?: string | null;
+        };
+        /**
+         * AssetZipPasswordOut
+         * @description 一个 zip 资产的加密状态（只读探测）。
+         *
+         *     ``encrypted`` 由服务端读 zip 的标志位算出来（不解压、不解密任何成员）。
+         *     ``filename`` 回显是因为对话框要用它写标题与密码文件的正文。
+         */
+        AssetZipPasswordOut: {
+            /** Encrypted */
+            encrypted: boolean;
+            /** Filename */
+            filename: string;
+        };
+        /**
+         * AssetZipPasswordSavedOut
+         * @description 打密码 / 改密码的回执。
+         *
+         *     * ``asset``：重新打包后的 zip（同一个 asset id，``sha256``/``size`` 变了）。
+         *     * ``password``：这次生效的密码（生成的或教师给的）—— 界面要立刻显示给教师
+         *       抄下来。这是它**唯一**一次被回显：之后想再查只能去读 ``password.txt``。
+         *     * ``password_asset``：同步写好的 ``password.txt`` 文本资产。下发它仍然是
+         *       教师自己的动作（没有"考试开始时自动下发"那套机制），这里只是把入口指出来。
+         *     * ``requeued``：**zip 这一个资产**被重排的机器台数（``done`` → ``pending``）。
+         *       ``password.txt`` 自己如果已经发出去过，也会被重排（同一套"改内容"语义），
+         *       但不计入这个数字 —— 界面那句"包已重新排队给 N 台机器"说的是包。
+         */
+        AssetZipPasswordSavedOut: {
+            asset: components["schemas"]["AssetOut"];
+            /** Password */
+            password: string;
+            password_asset: components["schemas"]["AssetOut"];
             /**
              * Requeued
              * @default 0
@@ -4475,6 +4576,74 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AssetTextSavedOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_asset_zip_password_api_v1_admin_contests__contest_id__assets__asset_id__zip_password_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contest_id: number;
+                asset_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetZipPasswordOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_asset_zip_password_api_v1_admin_contests__contest_id__assets__asset_id__zip_password_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contest_id: number;
+                asset_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AssetZipPasswordIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetZipPasswordSavedOut"];
                 };
             };
             /** @description Validation Error */

@@ -249,9 +249,36 @@ def _ensure_bootstrap_key(ctx, where: Path) -> str:
     return "created"
 
 
+def _configure_logging(level: str) -> None:
+    """让 ``syncoj`` 自己的日志出得来。
+
+    **不配这一下的话，服务端所有 INFO 都不会显示。** uvicorn 的 ``log_config``
+    只配置它自己的 logger（``uvicorn``、``uvicorn.error``…），而 Python 在
+    "没有任何处理器"时用的最后那道兜底只放行 WARNING 以上 —— 于是
+    "已载入发布签名私钥"、"局域网发现已启用"、"SyncOJ 启动，数据目录 …"
+    这些**全是 INFO**，一条都看不见。
+
+    这个坑是在端到端验证局域网发现时撞见的：机器那边收得到应答，服务端日志里
+    却连一句"发现已启用"都没有 —— 而排查"机器找不到服务端"时，最该看的就是那句。
+
+    ``disable_existing_loggers`` 在 uvicorn 的默认配置里就是 False，所以我们先挂
+    的处理器不会被它去掉；这里仍只在**根上没有任何处理器**时动手，免得把调用方
+    （比如 pytest）已经配好的日志盖掉。
+    """
+    root = logging.getLogger()
+    if not root.handlers:
+        logging.basicConfig(
+            level=level.upper(),
+            stream=sys.stderr,
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        )
+    logging.getLogger("syncoj").setLevel(level.upper())
+
+
 def _cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
+    _configure_logging(args.log_level)
     settings = _build_settings(args)
     # 让后台的发现应答器知道 HTTP 监听在哪个端口：它跑在任务里，拿不到命令行参数。
     # 而它要广播的地址必须带上这个端口，否则机器找得到服务端却连不上。

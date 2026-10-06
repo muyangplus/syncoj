@@ -273,8 +273,14 @@ def _mount_frontend(app: FastAPI, settings: Settings) -> None:
                 # 会指向一个不存在的文件 —— 表现是白屏。
                 headers={"Cache-Control": "no-cache"},
             )
-        # 其余一律交给前端路由（history 模式需要这样兜底）
-        return FileResponse(index_file)
+        # 其余一律交给前端路由（history 模式需要这样兜底）。
+        #
+        # 这份 HTML 也要**每次回源校验**，理由与公开端口那份一样：它里面写着构建产物
+        # 的 asset 文件名（`index-<hash>.js`），前端重新构建之后，浏览器缓存里的旧
+        # HTML 会指向一个**已经不存在的**旧 chunk。真机上的表现不是白屏，而是"界面
+        # 看着正常、但新加的功能一个都没有" —— 因为那一对 HTML/JS 是自洽的旧版本，
+        # 于是人会以为是功能没做，而不是缓存没刷新。
+        return FileResponse(index_file, headers={"Cache-Control": "no-cache"})
 
     log.info("管理界面已挂载: %s", dist)
 

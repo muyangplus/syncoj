@@ -55,7 +55,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Iterable, List, NamedTuple, Optional, Tuple
 
 #: 本文件在仓库里的位置。安装器也会被拷进安装包/镜像，那时 ``parents[2]`` 不再
@@ -69,6 +69,9 @@ DEFAULT_STATE_DIR = Path("/var/lib/syncoj")
 DEFAULT_DEPLOY_ROOT = "{desktop}"
 DEFAULT_SCAN_ROOT = "{desktop}/{player_no}"
 DEFAULT_SCAN_PREFIX = "none"
+#: 兜底运行账号。**只有**在既拿不到 ``SUDO_USER``、也拿不到当前用户时才用它
+#: （例如非 POSIX 的构建机上做 dry-run）。正常运行**不再默认新建专用账号** ——
+#: 默认是"跑安装的那个人"，见 :func:`default_run_user`。
 DEFAULT_RUN_USER = "syncoj"
 SERVICE_NAME = "syncoj-agent"
 
@@ -122,12 +125,30 @@ LAUNCHER_NAME = "run_agent.py"
 MAX_EXTRACTED_BYTES = 512 * 1024 * 1024
 MAX_MEMBERS = 20000
 
+#: 版本目录里记录"这一份内容指纹"的标记文件。
+#:
+#: 幂等判断**按内容**而不是"版本目录在不在"：同名版本号重新构建的包，如果只因
+#: ``releases/<版本>/`` 存在就跳过，装过的机器永远拿不到新内容。放在版本目录
+#: **内部** —— 删版本目录/卸载时它自然一起消失，不会留下指向不存在版本的记录。
+BUNDLE_SHA_MARKER_FILENAME = ".syncoj-bundle-sha256"
+
 #: 卸载时用来判断"这个目录看起来是不是 SyncOJ 装出来的"的标记。
 #: ``--prefix`` / ``--config-dir`` / ``--state-dir`` 都是可覆盖的，所以**不能**
 #: 因为路径对得上就删 —— 用户把它们指到别处时，宁可不卸也不能清人家的目录。
 UNINSTALL_PREFIX_MARKERS = (RELEASES_DIR, CURRENT_LINK, LAUNCHER_NAME)
 #: 配置目录里的凭据：统一注册密钥 + 升级信任锚。
 UNINSTALL_CONFIG_MARKERS = (CONFIG_FILENAME, BOOTSTRAP_KEY_FILENAME, PUBLIC_KEY_FILENAME)
+
+#: 状态目录里记录"这个运行账号是本安装器创建的"的标记文件。
+#:
+#: 卸载默认会删运行账号，而默认运行账号是**跑安装的那个人自己的账号** ——
+#: 没有证据就删账号是灾难级的。所以只删"有据可查是我们建的"那一个；老版本装的
+#: 机器没有这个文件（`--keep-state` 会把它留下，但这里只认文件内容）→ 一律不删。
+CREATED_USER_MARKER_FILENAME = ".syncoj-created-user"
+
+#: 家目录下"桌面"可能叫什么。顺序与 ``syncoj_agent/state.py::detect_desktop``
+#: 一致：先看 ``XDG_DESKTOP_DIR``，再看这几个实际存在的名字，都没有就按中文环境猜。
+DESKTOP_CANDIDATES = ("桌面", "Desktop", "desktop")
 #: 状态目录里的本机身份与日志。
 UNINSTALL_STATE_MARKERS = ("credential.json", "machine_uuid", "agent.log")
 
@@ -309,6 +330,51 @@ def _sha256_file(path: Path) -> str:
                 break
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _sha256_tree(root: Path) -> str:
+    """对一棵目录树做**确定性**摘要，用于 ``--from-dir`` 的内容指纹。
+
+    ``--from-dir`` 没有 tar 包可算 sha256，但"同版本重建的目录"同样需要能触发
+    覆盖安装，所以按"相对路径 + 文件内容"算。按路径排序，结果与遍历顺序无关；
+    符号链接跳过（安装包本来也不允许链接，且要防止成环）。
+    """
+    items = [entry for entry in root.rglob("*") if not entry.is_symlink()]
+    digest = hashlib.sha256()
+    for entry in sorted(items, key=lambda item: item.relative_to(root).as_posix()):
+        digest.update(entry.relative_to(root).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        if entry.is_file():
+            with open(str(entry), "rb") as handle:
+                while True:
+                    chunk = handle.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _read_release_marker(release_dir: Path) -> Optional[str]:
+    """读版本目录里记录的内容指纹。
+
+    没有这个文件（历史安装）、或读不出来，都返回 ``None`` —— 调用方按"来源未知"
+    处理，也就是**覆盖安装一次**，之后这个版本目录就有记录了。
+    """
+    marker = release_dir / BUNDLE_SHA_MARKER_FILENAME
+    try:
+        text = marker.read_text(encoding="utf-8").strip().lower()
+    except (OSError, UnicodeDecodeError):
+        return None
+    return text or None
+
+
+def _write_release_marker(staging: Path, fingerprint: str) -> None:
+    """把内容指纹写进**待替换的 staging**，随目录一起换上去。"""
+    marker = staging / BUNDLE_SHA_MARKER_FILENAME
+    # 3.8 上 write_text 没有 newline 参数，用 open
+    with marker.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(fingerprint + "\n")
 
 
 def _decode_signature(text: str) -> Optional[bytes]:
@@ -707,6 +773,76 @@ class Installer:
         self.config_path = self.config_dir / CONFIG_FILENAME
 
     # ---------------------------------------------------------------- #
+    # 运行账号 / 家目录
+    # ---------------------------------------------------------------- #
+
+    @property
+    def home_dir(self) -> Optional[Path]:
+        """运行账号的家目录；查不到（非 POSIX / 账号不存在）时为 ``None``。"""
+        return _home_of(self.run_user)
+
+    @property
+    def desktop_dir(self) -> Optional[Path]:
+        """运行账号家目录下的桌面；查不到时为 ``None``。"""
+        home = self.home_dir
+        return _desktop_of(home) if home is not None else None
+
+    def _expand_user_paths(self, raw: str) -> str:
+        """把配置模板里的 ``{desktop}`` 与开头的 ``~`` 展开成**运行账号**的真实路径。
+
+        为什么要在安装时展开：``~`` 在这里会按"跑安装的人"（通常是 root）解释，
+        而 Agent 跑的是另一个账号 —— 留着 ``~`` 会指错人；``{desktop}`` 同理，
+        装完当场看一眼 ``agent.ini`` 就知道到底扫哪里，不用等 Agent 跑起来才知道。
+
+        ``{player_no}`` / ``{contest_slug}`` **保留**：它们要等注册之后才有值。
+        查不到运行账号的家目录时（非 POSIX 构建机）原样返回 —— 让 Agent 运行时
+        按自己那个账号展开，总比写死一个构建机路径强。
+        """
+        if not raw:
+            return raw
+        home = self.home_dir
+        desktop = self.desktop_dir
+        if home is None or desktop is None:
+            return raw
+
+        parts: List[str] = []
+        for item in raw.replace(",", "\n").splitlines():
+            text = item.strip()
+            if not text:
+                continue
+            if text == "~":
+                text = str(home)
+            elif text.startswith("~/"):
+                text = str(home / text[2:])
+            text = text.replace("{desktop}", str(desktop))
+            parts.append(text)
+        return ", ".join(parts)
+
+    def _created_user_marker(self) -> Path:
+        return self.state_dir / CREATED_USER_MARKER_FILENAME
+
+    def _record_created_user(self, name: str) -> None:
+        """记一笔"这个账号是本安装器建的"，卸载时只认这个证据。"""
+        try:
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            with self._created_user_marker().open(
+                "w", encoding="utf-8", newline="\n"
+            ) as handle:
+                handle.write(name + "\n")
+        except OSError as exc:
+            self.report.warn(
+                "无法记录“运行账号是安装器创建的”（%s）；卸载时**不会**删除它" % exc
+            )
+
+    def _user_created_by_installer(self) -> Optional[str]:
+        """安装器记录下来的"我建过的账号"；没有记录返回 ``None``（当"不是我建的"）。"""
+        try:
+            text = self._created_user_marker().read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeDecodeError):
+            return None
+        return text or None
+
+    # ---------------------------------------------------------------- #
     # 前置检查
     # ---------------------------------------------------------------- #
 
@@ -752,18 +888,27 @@ class Installer:
     # ---------------------------------------------------------------- #
 
     def ensure_user(self) -> None:
+        """运行账号：存在就什么都不做；不存在才创建，并留下"是我建的"证据。
+
+        **默认不新建专用账号**：默认运行账号是"跑安装的那个人"（见
+        :func:`default_run_user`），它必然已经存在。只有显式 ``--user <不存在的
+        系统账号>`` 才会走到创建这一支 —— 那时才写
+        :data:`CREATED_USER_MARKER_FILENAME`，卸载也只删这种有据可查的账号，
+        绝不会去删人自己的账号。
+        """
         if self.options.skip_user:
             self.report.skip("跳过用户创建（--skip-user）")
             return
         if _user_exists(self.run_user):
-            self.report.skip("用户 %s 已存在" % self.run_user)
+            self.report.skip("用户 %s 已存在（不新建、不修改）" % self.run_user)
             return
         if self.report.dry_run:
             self.report.plan("创建系统用户 %s（无登录 shell）" % self.run_user)
             return
         run(["useradd", "--system", "--shell", "/usr/sbin/nologin",
              "--home-dir", str(self.state_dir), "--no-create-home", self.run_user])
-        self.report.action("已创建用户 %s" % self.run_user)
+        self._record_created_user(self.run_user)
+        self.report.action("已创建用户 %s（卸载时会删掉它）" % self.run_user)
 
     def ensure_dirs(self) -> None:
         for path in (self.prefix, self.prefix / RELEASES_DIR, self.config_dir, self.state_dir):
@@ -776,8 +921,14 @@ class Installer:
             path.mkdir(parents=True, exist_ok=True)
             self.report.action("已创建目录 %s" % path)
 
-        # 状态目录只给 Agent 用户读写 —— 里面有凭据
-        if self.state_dir.is_dir() and not self.options.skip_user and not self.report.dry_run:
+        # 状态目录只给**运行 Agent 的那个账号**读写 —— 里面有凭据、日志、哈希缓存。
+        # **绝不能留给 root**：Agent 以运行账号启动，写不进去的表现是"服务能起来，
+        # 但一写状态就 Permission denied"（token 存不下、日志也写不了）。
+        if (
+            self.state_dir.is_dir()
+            and not self.report.dry_run
+            and _user_exists(self.run_user)
+        ):
             try:
                 shutil.chown(str(self.state_dir), user=self.run_user)
                 os.chmod(str(self.state_dir), 0o750)
@@ -967,45 +1118,77 @@ class Installer:
         self.report.action("签名校验通过（key_id=%s）" % (ledger.get("key_id") or "?"))
 
 
+    def _staging_dir(self) -> Path:
+        """解包/拷贝用的临时版本目录。
+
+        与 ``releases/<版本>/`` **同层**（同一个文件系统），这样后面换目录才能用
+        一次 rename 原子完成；名字带 pid，两个安装器同时跑也不会互相踩。
+        """
+        return self.prefix / RELEASES_DIR / (".staging-" + str(os.getpid()))
+
+    def _plan_release(self, version: str, fingerprint: str) -> None:
+        """预览（--dry-run）时说清"会跳过还是覆盖"，只读不写。"""
+        release_dir = self.prefix / RELEASES_DIR / version
+        if not release_dir.is_dir():
+            self.report.plan("安装版本 %s 到 %s" % (version, release_dir))
+            return
+        marker = _read_release_marker(release_dir)
+        if marker and marker == fingerprint:
+            self.report.skip("版本 %s 已是最新（内容指纹一致），跳过" % version)
+            return
+        self.report.plan(
+            "覆盖安装版本 %s（%s）"
+            % (version, "内容指纹变了" if marker else "没有指纹记录，按历史安装处理")
+        )
+
     def install_release(self, source: Path) -> str:
         """把 Agent 代码放进 ``releases/<版本>/``，返回版本号。
 
-        已存在同版本时**直接复用**，不重装 —— 幂等性的核心：重复执行不该产生
-        任何实际变化。
+        **幂等靠内容指纹，不靠"版本目录在不在"。** 同名版本号重新构建的包，如果
+        只因为 ``releases/<版本>/`` 就跳过，装过的机器永远拿不到新内容 —— 现场
+        踩过：用户勾了"附带密钥"重新构建、铺开同一个版本号，装过的机器上那份
+        密钥/代码都进不去。
+
+        规则（指纹记在版本目录内的 ``.syncoj-bundle-sha256``）：
+
+        * 这一份来源的指纹与记录相同 → 跳过复用（重复执行不产生实际变化）；
+        * 指纹不同，或者老目录里**没有**记录（历史安装，来源未知）→ **覆盖安装**；
+        * 覆盖是"安全替换"：先解到 ``.staging-<pid>`` 并校验，再把老目录 rename
+          成 ``.old-<pid>``、staging rename 上去，成功后才删老目录；被换的正是
+          当前激活版本时先停服务（后面"启动服务"那一步会再拉起来）。
+
+        ``--from-dir`` 没有 tar 包，指纹按目录树算（:func:`_sha256_tree`）。
         """
         self.report.section("安装 Agent")
+        bundle = Path(source)
 
         if self.options.from_dir:
-            stage = Path(self.options.from_dir)
-            version = read_bundle_version(stage)
-            release_dir = self.prefix / RELEASES_DIR / version
-            if release_dir.is_dir():
-                self.report.skip("版本 %s 已安装，跳过" % version)
-                return version
-
+            version = read_bundle_version(bundle)
+            fingerprint = _sha256_tree(bundle)
             if self.report.dry_run:
-                self.report.plan("把 %s 复制到 %s" % (stage, release_dir))
+                self._plan_release(version, fingerprint)
                 return version
-
-            staging = self.prefix / RELEASES_DIR / (".staging-" + version)
-            if staging.exists():
+            staging = self._staging_dir()
+            shutil.rmtree(str(staging), ignore_errors=True)
+            try:
+                shutil.copytree(str(bundle), str(staging))
+                return self._finish_release(staging, version, fingerprint)
+            finally:
+                # 覆盖那条路已把 staging rename 走（这里是无害的空操作）；
+                # "跳过"与异常路径都靠它清掉 .staging-*，别留在 releases/ 里。
                 shutil.rmtree(str(staging), ignore_errors=True)
-            shutil.copytree(str(stage), str(staging))
-            os.replace(str(staging), str(release_dir))
-            self.report.action("已安装版本 %s" % version)
-            return version
 
-        bundle = source
         if self.report.dry_run:
+            # 预览不解包：版本号与指纹都要解包后才知道，所以只列计划
             self.report.plan("校验并解压 %s" % bundle)
             self.report.plan("安装到 %s/<版本>/" % (self.prefix / RELEASES_DIR))
             return self.options.version or "0.0.0"
 
         self._verify_checksum(bundle)
+        fingerprint = _sha256_file(bundle)
 
-        staging = self.prefix / RELEASES_DIR / (".staging-" + str(os.getpid()))
-        if staging.exists():
-            shutil.rmtree(str(staging), ignore_errors=True)
+        staging = self._staging_dir()
+        shutil.rmtree(str(staging), ignore_errors=True)
         try:
             tops = safe_extract(bundle, staging)
             if EXPECTED_TOP_LEVEL not in tops:
@@ -1020,19 +1203,92 @@ class Installer:
                     % LAUNCHER_NAME
                 )
             version = read_bundle_version(staging)
-            release_dir = self.prefix / RELEASES_DIR / version
-
-            if release_dir.is_dir():
-                self.report.skip("版本 %s 已安装，跳过解压" % version)
-                return version
-
-            os.replace(str(staging), str(release_dir))
-        except BaseException:
+            return self._finish_release(staging, version, fingerprint)
+        finally:
+            # 解包失败 / 跳过 / 覆盖成功后，staging 都不该留下
             shutil.rmtree(str(staging), ignore_errors=True)
-            raise
 
+    def _finish_release(self, staging: Path, version: str, fingerprint: str) -> str:
+        """``staging`` 里已经装好这一份内容；决定"跳过复用"还是"原子替换"。"""
+        release_dir = self.prefix / RELEASES_DIR / version
+        marker = _read_release_marker(release_dir)
+        if release_dir.is_dir() and marker and marker == fingerprint:
+            self.report.skip("版本 %s 已是最新（内容指纹一致），跳过" % version)
+            return version
+
+        # 指纹写进 staging：替换完成后它就是"这一份内容"的凭据
+        _write_release_marker(staging, fingerprint)
+
+        if release_dir.is_dir():
+            self._replace_release_dir(staging, release_dir)
+            self.report.action(
+                "已覆盖安装版本 %s（内容指纹 %s）" % (version, fingerprint[:12])
+            )
+            return version
+
+        release_dir.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(str(staging), str(release_dir))
         self.report.action("已安装版本 %s" % version)
         return version
+
+    def _replace_release_dir(self, staging: Path, release_dir: Path) -> None:
+        """把 ``staging`` 原子换到 ``release_dir``。
+
+        老目录先 rename 成 ``.old-<pid>``（同在 releases/ 下，rename 是原子的），
+        再把 staging rename 成版本目录，成功后才删老目录；第二步失败就把老目录
+        搬回去。被换的正是当前激活版本时**先停服务** —— 否则进程可能运行在半新
+        半旧的目录上（后面"启动服务"那步会再把它拉起来）。
+
+        任何路径都不把 ``.old-*`` 留在 releases/ 里（除非连回滚都失败，那时大声
+        报警并指出老目录在哪）。
+        """
+        parent = release_dir.parent
+        parent.mkdir(parents=True, exist_ok=True)
+        old = parent / (".old-" + str(os.getpid()))
+        # 上一次崩在中间留下的 .old-* 先清掉：rename 到已存在的非空目录会失败
+        shutil.rmtree(str(old), ignore_errors=True)
+
+        if current_version(self.prefix) == release_dir.name:
+            self._stop_service_for_replace()
+
+        os.replace(str(release_dir), str(old))
+        swapped = False
+        try:
+            os.replace(str(staging), str(release_dir))
+            swapped = True
+        finally:
+            if swapped:
+                shutil.rmtree(str(old), ignore_errors=True)
+            else:
+                # 回滚：把老目录搬回原位，别让机器连 current 都指不到
+                try:
+                    os.replace(str(old), str(release_dir))
+                except OSError as exc:  # pragma: no cover - 罕见
+                    self.report.warn(
+                        "覆盖失败且回滚也失败：老版本在 %s，请手工恢复（%s）" % (old, exc)
+                    )
+
+    def _stop_service_for_replace(self) -> None:
+        """替换当前激活版本之前停一次服务。
+
+        不停的话，进程可能运行在"一半旧一半新"的目录上（目录被逐个替换），而
+        systemd 的 ``Restart=always`` 还会立刻把它拉起来。换完由 ``run()`` 里
+        "启动服务"那一步照常拉起。
+        """
+        self.report.note("被替换的是当前激活版本，先停服务再换目录")
+        if not _which("systemctl"):
+            self.report.warn(
+                "找不到 systemctl，无法停服务；替换期间 Agent 可能读到半新半旧的目录"
+            )
+            return
+        result = run(["systemctl", "stop", self.service_name], check=False)
+        if result == 0:
+            self.report.action("已停止 %s（换完由后面那一步重新拉起）" % self.service_name)
+        else:
+            self.report.warn(
+                "systemctl stop %s 失败（退出码 %s），继续替换"
+                % (self.service_name, result)
+            )
 
     def _verify_checksum(self, bundle: Path) -> None:
         expected = (self.options.sha256 or "").strip().lower()
@@ -1105,10 +1361,12 @@ class Installer:
             ca_file=self.options.ca_file or "",
             bootstrap_key_file=_posix(self.config_dir / BOOTSTRAP_KEY_FILENAME),
             state_dir=self.state_dir,
-            # deploy_root / scan_roots 是**字符串模板**，可能含 {desktop}/{player_no}，
-            # 不能当 Path 处理（Path 会保留大括号，但改配置时容易误伤）
-            deploy_root=self.options.deploy_root,
-            scan_roots=self.options.scan_root,
+            # deploy_root / scan_roots 是**字符串模板**，可能含 {desktop}/{player_no}。
+            # 这里先把 {desktop} 与开头的 ~ 按**运行账号**的家目录展开成真实路径
+            # （systemd 不认 ~，而且 ~ 会按 root 解释、指错人）；{player_no} 等
+            # 要等注册后才知道的占位符原样留下，由 Agent 运行时展开。
+            deploy_root=self._expand_user_paths(self.options.deploy_root),
+            scan_roots=self._expand_user_paths(self.options.scan_root),
             scan_prefix=self.options.scan_prefix,
             upgrade_mode=self.options.upgrade_mode,
             install_root=self.prefix,
@@ -1450,42 +1708,99 @@ class Installer:
         self.report.note("密钥能注册整间机房，所以只给 root 读 —— 不要放进 agent.ini")
         return True
 
-    def _bundled_bootstrap_key_path(self, version: Optional[str]) -> Optional[Path]:
-        """安装包根目录附带的 ``bootstrap.key`` 会落在哪里；没有就 ``None``。
+    def _read_bundled_bootstrap_key(self, source: Optional[Path]) -> Optional[str]:
+        """从**这次拿到的本地来源**里读包内附带的 ``bootstrap.key``；没有就 ``None``。
 
-        打包时（``build_bundle.py``）它是 tar 的**顶层**成员，与 ``syncoj_agent/``、
-        ``run_agent.py`` 同级。解包进 ``releases/<版本>/`` 之后就在版本目录根部；
-        ``--from-dir`` 是把整个目录复制进版本目录，所以同一条路也覆盖它。
+        刻意**直接读来源**，而不是看 ``releases/<版本>/bootstrap.key``：
+
+        现场踩过一次 —— 用户勾了"附带密钥"重新构建、铺开了**同一个版本号**，
+        安装器看到 ``releases/<版本>/`` 已存在就"跳过解压"，于是那份密钥永远
+        落不到磁盘，"没有统一密钥，装不出注册单元"。所以这里不依赖解包这一步：
+
+        * ``source`` 是目录（``--from-dir``）→ 目录根下的 ``bootstrap.key``；
+        * ``source`` 是文件（tar.gz）→ **在归档里按成员名找，只在内存里读**，
+          绝不把它解到磁盘上。
+
+        "只读本地来源"同样是安全底线：密钥**绝不允许**为了它去访问网络。
         """
-        if not version:
+        if source is None:
             return None
-        return self.prefix / RELEASES_DIR / version / BOOTSTRAP_KEY_FILENAME
+        path = Path(source)
 
-    def _drop_bundled_bootstrap_key(self, bundled: Optional[Path]) -> None:
-        """把随包走的那份密钥从**版本目录**里清掉。
+        if path.is_dir():
+            candidate = path / BOOTSTRAP_KEY_FILENAME
+            if not candidate.is_file():
+                return None
+            try:
+                return candidate.read_text(encoding="utf-8").strip() or None
+            except (OSError, UnicodeDecodeError) as exc:
+                self.report.warn("包内附带的 %s 读不出来，忽略：%s" % (candidate, exc))
+                return None
+
+        if not path.is_file():
+            return None
+
+        try:
+            with tarfile.open(str(path), mode="r:*") as archive:
+                member = None
+                for candidate in archive.getmembers():
+                    # 契约是"tar 根目录下的 bootstrap.key"；`./bootstrap.key` 也认
+                    if candidate.name in (
+                        BOOTSTRAP_KEY_FILENAME,
+                        "./" + BOOTSTRAP_KEY_FILENAME,
+                    ):
+                        member = candidate
+                        break
+                if member is None or not member.isfile():
+                    return None
+                handle = archive.extractfile(member)
+                if handle is None:  # pragma: no cover - 上面已确认是普通文件
+                    return None
+                with handle:
+                    # 上限只是防一个坏归档里有超大成员；密钥本体只有几十字节
+                    payload = handle.read(64 * 1024)
+        except (tarfile.TarError, OSError) as exc:
+            self.report.warn(
+                "从安装包里读 %s 失败，忽略：%s" % (BOOTSTRAP_KEY_FILENAME, exc)
+            )
+            return None
+
+        try:
+            return payload.decode("utf-8").strip() or None
+        except UnicodeDecodeError as exc:
+            self.report.warn(
+                "安装包内的 %s 不是 UTF-8，忽略：%s" % (BOOTSTRAP_KEY_FILENAME, exc)
+            )
+            return None
+
+    def _drop_extracted_bootstrap_key(self, version: Optional[str]) -> None:
+        """清掉**解包时**落进 ``releases/<版本>/`` 的那份密钥。
 
         ``releases/<版本>/`` 对选手账号可读，而这份密钥能注册整间机房 ——
-        它没有理由留在那儿。选"写完就删"而不是"先挪到 config_dir 再解包其余部分"，
-        是因为解包在 ``install_release`` 里、与写密钥分处两步；最后统一清理还能覆盖
-        **"机器上已经有密钥、包里这份根本没被用上"** 那个容易漏掉的情形。
+        解包产物不能留在那儿。注意只清这一个路径：``--from-dir`` 给的**源目录**
+        是操作员自己的目录，不能动。
+
+        同版本已安装时根本没解包，这里自然是空操作；读密钥已经改成直接读来源
+        （见 :meth:`_read_bundled_bootstrap_key`），不再依赖这一步。
         """
-        if bundled is None or not bundled.is_file():
+        if not version:
+            return
+        stale = self.prefix / RELEASES_DIR / version / BOOTSTRAP_KEY_FILENAME
+        if not stale.is_file():
             return
         if self.report.dry_run:
-            self.report.plan(
-                "删除包内附带的 %s（不能留在选手可读的版本目录里）" % bundled
-            )
+            self.report.plan("删除 %s（解包残留，不能留在选手可读的版本目录里）" % stale)
             return
         try:
-            bundled.unlink()
+            stale.unlink()
         except OSError as exc:
-            self.report.warn(
-                "包内附带的密钥删不掉：%s（它留在 %s，选手账号读得到）" % (exc, bundled)
-            )
+            self.report.warn("删除 %s 失败：%s（它留在选手可读的版本目录里）" % (stale, exc))
             return
-        self.report.action("已删除包内附带的 %s（不能留在选手可读的版本目录里）" % bundled)
+        self.report.action("已删除 %s（解包残留，不能留在选手可读的版本目录里）" % stale)
 
-    def install_bootstrap_key(self, version: Optional[str] = None) -> bool:
+    def install_bootstrap_key(
+        self, version: Optional[str] = None, source: Optional[Path] = None
+    ) -> bool:
         """把统一密钥放到配置目录，**0600 且属主 root**。
 
         密钥由教师在服务端签发（``syncoj-server bootstrap-key issue``）。三个来源，
@@ -1493,8 +1808,11 @@ class Installer:
 
         1. ``--bootstrap-key`` / ``--bootstrap-key-file`` 显式给的（最高）；
         2. 目标机上已经存在的 ``<config-dir>/bootstrap.key``（重复装机时的常态）；
-        3. **安装包根目录里附带的 ``bootstrap.key``** —— 打包时从仓库 ``.key/``
-           打进去的，用来支持"离线包自带注册凭证"。
+        3. **这次拿到的安装包里附带的 ``bootstrap.key``**（``source``：tar.gz 或
+           ``--from-dir`` 目录）—— 包自带注册凭证。
+
+        ``source`` 必须**直接读**，不能等"解包到 ``releases/<版本>/``"：同版本
+        已安装时 ``install_release`` 会跳过解压，那条路根本走不到（现场踩过）。
 
         **安全底线：密钥只能来自这三个本地来源，绝不允许为了它去访问网络**
         （比如"问服务端要一把"）。那等于任何人只要连得到服务端就能拿到注册凭证，
@@ -1509,7 +1827,6 @@ class Installer:
         开机注册单元删掉 —— 表现是"什么都没改，但下次开机不再注册了"。
         """
         target = self.config_dir / BOOTSTRAP_KEY_FILENAME
-        bundled = self._bundled_bootstrap_key_path(version)
         raw = (self.options.bootstrap_key or "").strip()
 
         # 1) 显式给的（明文 --bootstrap-key，或 --bootstrap-key-file 的内容）
@@ -1517,47 +1834,44 @@ class Installer:
             self.report.section("统一注册密钥")
             if self.report.dry_run:
                 self.report.plan("写入 %s（0600，属主 root）" % target)
-                self._drop_bundled_bootstrap_key(bundled)
+                self._drop_extracted_bootstrap_key(version)
                 return True
             written = self._write_bootstrap_key(raw)
-            self._drop_bundled_bootstrap_key(bundled)
+            self._drop_extracted_bootstrap_key(version)
             return written
 
         # 2) 没给密钥 ≠ 没有密钥：上一次装机可能已经放好了一份
         if target.is_file():
-            self._drop_bundled_bootstrap_key(bundled)
+            self._drop_extracted_bootstrap_key(version)
             return True
 
-        # 3) 安装包根目录里附带的那份（同样是**本地**来源，绝不联网去要）
-        bundled_raw = ""
-        if bundled is not None and bundled.is_file():
-            try:
-                bundled_raw = bundled.read_text(encoding="utf-8").strip()
-            except (OSError, UnicodeDecodeError) as exc:
-                self.report.warn("安装包内附带的 %s 读不出来，忽略：%s" % (bundled, exc))
-
+        # 3) 安装包里附带的那份（直接读本地来源，绝不联网去要）
+        bundled_raw = self._read_bundled_bootstrap_key(source)
         if not bundled_raw:
-            # 包内没有（或读不出来）→ 与从前一样：这台机器没有密钥。
-            # 但空文件同样不该留在选手可读的版本目录里。
-            self._drop_bundled_bootstrap_key(bundled)
+            # 包内没有（或读不出来）→ 与从前一样：这台机器没有密钥
+            self._drop_extracted_bootstrap_key(version)
             return False
+
+        message = "使用安装包内附带的统一注册密钥"
+        if version:
+            message += "（版本 %s 附带）" % version
 
         self.report.section("统一注册密钥")
         if self.report.dry_run:
-            self.report.plan("使用安装包内附带的统一注册密钥（版本 %s 附带）" % version)
+            self.report.plan(message)
             self.report.plan("写入 %s（0600，属主 root）" % target)
-            self._drop_bundled_bootstrap_key(bundled)
+            self._drop_extracted_bootstrap_key(version)
             return True
 
-        self.report.action("使用安装包内附带的统一注册密钥（版本 %s 附带）" % version)
+        self.report.action(message)
         self.report.note(
             "它等于一张“能注册进这台服务端”的通行证 —— "
             "这个包不要给选手、不要放在学生读得到的地方"
         )
         written = self._write_bootstrap_key(bundled_raw)
-        # 无论写成功与否都清掉版本目录里那份：它在那里对选手账号可读，
+        # 解包时落进版本目录的那份也要清掉：那个目录对选手账号可读，
         # 留着的危害比"这次没装上密钥"大得多（后者重跑一次就能补）。
-        self._drop_bundled_bootstrap_key(bundled)
+        self._drop_extracted_bootstrap_key(version)
         return written
 
     def check_identity_leftovers(self) -> None:
@@ -1601,9 +1915,19 @@ class Installer:
         result = run(["systemctl", action, self.service_name], check=False)
         if result == 0:
             self.report.action("已 %s %s" % (action, self.service_name))
+            # `systemctl start` 返回 0 只代表进程被拉起来了（Type=simple），
+            # 它随后立刻退出时会一直 auto-restart。把排查入口写在回执里，
+            # 现场就不用猜"服务到底起没起来"。
+            self.report.note(
+                "若状态一直是 activating (auto-restart)，先看 "
+                "'journalctl -u %s -n 30'：多半是沙箱路径不存在（226/NAMESPACE）"
+                "或配置有问题" % self.service_name
+            )
         else:
             self.report.warn(
-                "systemctl %s 失败（退出码 %s）。用 'journalctl -u %s -n 50' 查看原因"
+                "systemctl %s 失败（退出码 %s）。先看 'journalctl -u %s -n 30' —— "
+                "如果状态是 activating (auto-restart)，多半是单元里的沙箱路径在"
+                "真机上不存在（226/NAMESPACE）或配置有问题"
                 % (action, result, self.service_name)
             )
 
@@ -1626,8 +1950,10 @@ class Installer:
         self.check_identity_leftovers()
 
         # 注意这个返回值是"这台机器现在有没有可用的密钥"，不是"这次有没有写" ——
-        # 重复执行安装器时通常不会再传一遍密钥，见 install_bootstrap_key
-        has_bootstrap_key = self.install_bootstrap_key(version)
+        # 重复执行安装器时通常不会再传一遍密钥，见 install_bootstrap_key。
+        # 必须把 source 传进去：同版本已安装时 install_release 会跳过解压，
+        # 包内那份 bootstrap.key 只能从**下载下来的那个包**里直接读。
+        has_bootstrap_key = self.install_bootstrap_key(version, source)
 
         self.write_config(version)
         self.install_unit(version)
@@ -1640,7 +1966,7 @@ class Installer:
         else:
             self.report.note("共 %d 处改动" % self.report.changes)
             self.report.note("查看状态: systemctl status %s" % self.service_name)
-            self.report.note("查看日志: journalctl -u %s -n 50" % self.service_name)
+            self.report.note("查看日志: journalctl -u %s -n 30" % self.service_name)
         return EXIT_OK
 
     # ---------------------------------------------------------------- #
@@ -1675,6 +2001,10 @@ class Installer:
         self.report.section("卸载 SyncOJ Agent")
         self._require_uninstall_confirmation()
 
+        # 删目录之前先把"运行账号是不是我建的"读出来 —— 状态目录马上会被删掉。
+        # 没有证据（老版本装的机器、或运行账号本来就是人的账号）→ 一律不删账号。
+        created_user = self._user_created_by_installer()
+
         removed = False
         failed = False
         for did, bad in (
@@ -1688,7 +2018,7 @@ class Installer:
                 UNINSTALL_CONFIG_MARKERS,
             ),
             self._uninstall_state(),
-            self._remove_user(),
+            self._remove_user(created_user),
         ):
             removed = removed or did
             failed = failed or bad
@@ -1867,34 +2197,49 @@ class Installer:
             self.report.action("已执行 systemctl daemon-reload")
         return removed, failed
 
-    def _remove_user(self) -> "Tuple[bool, bool]":
-        """删掉运行用户，``--keep-user`` 跳过。
+    def _remove_user(self, created_user: Optional[str] = None) -> "Tuple[bool, bool]":
+        """删运行账号，**只删本安装器建过的那个**；``--keep-user`` 仍然跳过。
 
-        **刻意不用 ``userdel -r``**：安装时那个用户是 ``--no-create-home`` 建的，
-        而它的 home-dir 恰好被设成了状态目录 —— ``-r`` 会把状态目录（含日志，
-        可能还有凭据）一起删掉。而且"这个家目录到底是不是安装器建的"在这里
-        无从确认，删别人的数据是不可逆的。
+        ``--keep-user`` 不再是唯一保险：默认运行账号是"跑安装的那个人自己的
+        账号"，误删是灾难级的。所以判据是硬证据 —— 安装时写下的
+        :data:`CREATED_USER_MARKER_FILENAME`。没有证据（老版本装的机器、或本来
+        就是人的账号）**一律不删**，只在回执里说明。
+
+        **刻意不用 ``userdel -r``**：安装器建账号时是 ``--no-create-home``，
+        而 home-dir 恰好被设成了状态目录 —— ``-r`` 会把状态目录（含日志、凭据）
+        一起删掉。而且"这个家目录到底是不是安装器建的"在这里也无从确认，
+        删别人的数据是不可逆的。
         """
-        self.report.section("运行用户")
+        self.report.section("运行账号")
         if self.options.keep_user:
-            self.report.skip("保留运行用户 %s（--keep-user）" % self.run_user)
+            self.report.skip("保留运行账号 %s（--keep-user）" % self.run_user)
             return False, False
         if not _user_exists(self.run_user):
-            self.report.skip("运行用户不存在，跳过：%s" % self.run_user)
+            self.report.skip("运行账号不存在，跳过：%s" % self.run_user)
+            return False, False
+        if created_user != self.run_user:
+            self.report.skip(
+                "未删除运行账号 %s —— 它不是本安装器建的（只删自己建的账号）"
+                % self.run_user
+            )
+            self.report.note(
+                "它是人自己的账号，删掉不可逆。确实要删请手工执行："
+                "userdel %s（不会动家目录）" % self.run_user
+            )
             return False, False
         if self.report.dry_run:
             self.report.plan(
-                "删除运行用户 %s（**不删**家目录：无法确认那份家目录是安装器建的）"
+                "删除运行账号 %s（状态目录里有“是安装器建的”记录；**不删**家目录）"
                 % self.run_user
             )
             return True, False
         result = run(["userdel", self.run_user], check=False)
         if result != 0:
             self.report.warn(
-                "删除运行用户 %s 失败（退出码 %s），请手工处理" % (self.run_user, result)
+                "删除运行账号 %s 失败（退出码 %s），请手工处理" % (self.run_user, result)
             )
             return True, True
-        self.report.action("已删除运行用户 %s（未动家目录）" % self.run_user)
+        self.report.action("已删除运行账号 %s（安装器建的；未动家目录）" % self.run_user)
         return True, False
 
 
@@ -2012,6 +2357,35 @@ public_key = {public_key}
     )
 
 
+def _writable_paths(prefix: Path, state_dir: Path) -> List[str]:
+    """``ReadWritePaths=`` 该开哪些目录 —— 只列**确实有理由写**的，且一律带 ``-``。
+
+    为什么每一条都带 ``-``：systemd 设沙箱时，``ReadWritePaths=`` 里只要有一条
+    路径**不存在**，整个服务就起不来，报的是 ``226/NAMESPACE`` —— 现场看到的
+    只有 ``code=exited, status=226/NAMESPACE`` 和一条无尽的重启记录。带 ``-``
+    的路径不存在时会被 systemd **跳过**。真机上就是这么炸的：单元里写了一条
+    ``/home/student/code``，而那台机器上根本没有那个目录。
+
+    为什么只列这三个：
+
+    * ``%h`` —— systemd 展开成 ``User=`` 的家目录。Agent 以那个账号运行，桌面、
+      配对码文件、下发落点都在它下面；不放开写权限，``ProtectSystem=strict``
+      会把家目录也变成只读，表现是"服务起来了但什么都不传"。
+    * 安装根目录 —— 自更新要往 ``releases/`` 里写。
+    * 状态目录 —— 日志、凭据、哈希缓存。
+
+    刻意**不**列 ``deploy_root`` / ``scan.roots`` 的具体值：它们是可选配置、
+    真机上可能不存在，而默认值都在 ``%h`` 之下（已经覆盖），多列一条就多一个
+    226 的机会。也刻意**不**列配置目录：Agent 只读它（写凭据的是
+    ``syncoj-agent-enroll`` 那个 root 单元），列成可写等于让选手账号能改
+    ``bootstrap.key`` / ``agent.ini``，那是安全降级。
+    """
+    writable = ["-%h", "-%s" % _posix(prefix), "-%s" % _posix(state_dir)]
+    # 去重但保持顺序（--prefix 与 --state-dir 被指到同一个目录时会出现重复）
+    seen = set()
+    return [p for p in writable if not (p in seen or seen.add(p))]
+
+
 def render_enroll_unit(
     prefix: Path,
     config_path: Path,
@@ -2059,7 +2433,8 @@ StandardError=journal
 ProtectSystem=strict
 ProtectControlGroups=yes
 NoNewPrivileges=yes
-ReadWritePaths=%(state)s
+# 带 `-`：状态目录不在时跳过这一条，而不是让整个单元起不来（226/NAMESPACE）
+ReadWritePaths=-%(state)s
 
 [Install]
 WantedBy=multi-user.target
@@ -2086,46 +2461,40 @@ def render_unit(
 ) -> str:
     """生成 systemd 单元。
 
-    **权限模型变了**：Agent 现在以**选手登录用户的身份**运行（而不是专用的
-    syncoj 账号），因为代码和下发文件都在选手自己的桌面下，跨用户授权在现场
-    很容易装成"服务起来了但什么都不传"。
+    **权限模型**：Agent 以**选手登录用户的身份**运行（而不是专用 syncoj 账号），
+    因为代码与下发文件都在选手自己的桌面下，跨用户授权在现场很容易装成
+    "服务起来了但什么都不传"。
 
     这带来一个直接后果：``ProtectHome=read-only`` 与 ``ProtectSystem=strict``
     会把家目录整个变成只读，Agent 就没法往桌面写东西了。所以：
 
     - **不设 ProtectHome**（Agent 本来就要读写自己的家目录）
-    - ``ReadWritePaths=%h`` —— systemd 会把 ``%h`` 展开成 ``User=`` 的家目录，
-      正好覆盖 ``{desktop}`` 及其下的一切
-    - 显式写死的绝对路径（不含占位符的）单独加进来；模板路径都在 ``%h`` 之下，
-      再加一遍是多余的
+    - ``ReadWritePaths=`` 里放**确实有理由写**的目录，且**每一条都带 ``-``**
+      （下面 :func:`_writable_paths` 有完整理由）
 
     ``ProtectSystem=strict`` 仍然保留：它把 ``/usr``、``/etc``、``/boot`` 等
     系统目录全部只读，这才是这条指令的价值所在。
+
+    ``deploy_root`` / ``scan_roots`` 两个参数**刻意不再写进单元**：它们是可选
+    配置，真机上可能根本不存在，而 ``ReadWritePaths=`` 里只要有一条不存在的
+    路径，systemd 就会在设沙箱时报 ``226/NAMESPACE``、服务永远起不来。真机上
+    踩过一次：单元里有 ``/home/student/code``，而现场那台机器的选手目录不在
+    那里。默认值 ``{desktop}`` / ``{desktop}/{player_no}`` 都在 ``%h`` 之下，
+    本来就被覆盖；写进来只会多一条可能踩雷的指令。参数保留只是为了调用方签名
+    稳定（单元内容不再依赖它们）。
     """
-    writable = ["%h", _posix(state_dir)]
-
-    # 只把**不含占位符的绝对路径**加进来；含 {desktop}/{player_no} 的都在 %h 下
-    #
-    # 用 PurePosixPath 而不是 Path 判绝对性：安装器可能在 Windows 上跑
-    # （构建镜像的开发机），而 Path("/srv/code").is_absolute() 在 Windows 上是
-    # False —— 那条路径就会被静默漏掉白名单，表现为"服务起来了但读不到目录"。
-    # 目标机是 Linux，判定必须用 POSIX 语义。
-    for candidate in [deploy_root] + scan_roots.replace(",", "\n").splitlines():
-        text = candidate.strip()
-        if not text or "{" in text:
-            continue
-        if PurePosixPath(text).is_absolute():
-            writable.append(text)
-
-    # 去重但保持顺序
-    seen = set()
-    writable = [p for p in writable if not (p in seen or seen.add(p))]
+    writable = _writable_paths(prefix, state_dir)
 
     lines = [
         "[Unit]",
         "Description=SyncOJ Agent（选手端代码回收，无界面静默运行）",
         "After=network-online.target",
         "Wants=network-online.target",
+        # 重启上限必须在 [Unit] 段。写在 [Service] 里的 StartLimit*Sec 会被
+        # systemd 当成未知键**忽略**，于是"起不来"就变成无限重启（真机上刷到过
+        # 第 28 次，日志和 CPU 都白烧）。放这里才能让它停下来等人看。
+        "StartLimitIntervalSec=300",
+        "StartLimitBurst=5",
         "",
         "[Service]",
         "Type=simple",
@@ -2151,10 +2520,16 @@ def render_unit(
         "StandardError=journal",
         "",
         "# ---- 自愈 ----",
-        "Restart=always",
+        # **on-failure 而不是 always**：自卸载成功时 Agent 以 exit 0 正常退出，
+        # always 会立刻把它重新拉起来 —— 而那时 /opt/syncoj、/etc/syncoj 都已经
+        # 被删掉，拉起来只会刷一堆"找不到文件"，现场看起来像"卸载失败"。
+        # 崩溃（非 0 退出）仍然要自愈，所以是 on-failure 不是 no；"反复起不来"
+        # 的上限交给 [Unit] 段里的 StartLimitIntervalSec/Burst。
+        #
+        # 注意：`syncoj-agent-enroll.service`（provision 那个 oneshot）不带
+        # Restart，规则与这里无关，别一起改。
+        "Restart=on-failure",
         "RestartSec=5",
-        "StartLimitIntervalSec=300",
-        "StartLimitBurst=5",
         "",
         "# ---- 权限隔离 ----",
         "User=%s" % run_user,
@@ -2175,7 +2550,7 @@ def render_unit(
         "RestrictAddressFamilies=AF_INET AF_INET6",
         "LockPersonality=yes",
         "",
-        # %h 由 systemd 展开成 User= 的家目录，覆盖 {desktop} 及其下的一切
+        # 每一条都带 `-`：路径不存在时 systemd 跳过它，而不是报 226 让服务起不来
         "ReadWritePaths=%s" % " ".join(writable),
         "",
         "# ---- 资源限制 ----",
@@ -2239,6 +2614,90 @@ def _user_exists(name: str) -> bool:
         return True
     except KeyError:
         return False
+
+
+def _current_user_name() -> Optional[str]:
+    """当前**有效**用户的名字；取不到（非 POSIX）返回 None。"""
+    getuid = getattr(os, "getuid", None)
+    if getuid is None:  # pragma: no cover - Windows
+        return None
+    try:
+        import pwd
+    except ImportError:  # pragma: no cover - 非 POSIX
+        return None
+    try:
+        return pwd.getpwuid(getuid()).pw_name
+    except (KeyError, OSError):  # pragma: no cover - 极罕见
+        return None
+
+
+def default_run_user() -> str:
+    """默认 Agent 以哪个账号运行：**跑安装的那个人**。
+
+    顺序：
+
+    1. ``SUDO_USER`` —— 用 ``sudo`` 跑安装时 sudo 会把它设成真正坐在机器前的
+       那个人的名字（而有效用户是 root）；
+    2. 当前有效用户（``os.getuid()`` → ``pwd``）；
+    3. 兜底 ``DEFAULT_RUN_USER``（只在非 POSIX 的构建机/dry-run 上会用到）。
+
+    为什么必须是"那个人"：Agent 要读的是**选手桌面上的文件**，而桌面是那个人
+    家目录下的东西。安装器自己新建一个专用账号（``syncoj``）的话，它的家目录
+    其实是状态目录 —— 读不到选手的桌面，表现是"服务起来了但扫描/下发全是空的"。
+    而且专用账号还多出"卸载时可能误删人账号"的风险，见 :data:`CREATED_USER_MARKER_FILENAME`。
+    """
+    sudo_user = (os.environ.get("SUDO_USER") or "").strip()
+    if sudo_user:
+        return sudo_user
+    return _current_user_name() or DEFAULT_RUN_USER
+
+
+def _home_of(user: str) -> Optional[Path]:
+    """某个系统账号的家目录；查不到（非 POSIX / 账号不存在）返回 None。"""
+    try:
+        import pwd
+    except ImportError:  # pragma: no cover - 非 POSIX
+        return None
+    try:
+        return Path(pwd.getpwnam(user).pw_dir)
+    except (KeyError, OSError):
+        return None
+
+
+def _desktop_from_xdg(home: Path) -> Optional[Path]:
+    """读 ``~/.config/user-dirs.dirs`` 里的 ``XDG_DESKTOP_DIR``（最权威）。"""
+    path = home / ".config" / "user-dirs.dirs"
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("XDG_DESKTOP_DIR"):
+            continue
+        _, _, value = line.partition("=")
+        value = value.strip().strip("\"'").replace("${HOME}", str(home)).replace("$HOME", str(home))
+        if value:
+            return Path(value)
+    return None
+
+
+def _desktop_of(home: Path) -> Path:
+    """某个账号家目录下的桌面。
+
+    与 ``syncoj_agent/state.py::detect_desktop`` 同一套顺序 —— 安装器**不能**
+    import 那段代码（单文件自包含，目标机上此刻还没有 Agent 包），所以刻意重写
+    一遍，与"安全解包"同一个先例。找不到实际存在的桌面时按中文环境猜 ``~/桌面``：
+    退回家目录会让 Agent 把整个家目录当成工作区扫。
+    """
+    from_xdg = _desktop_from_xdg(home)
+    if from_xdg is not None:
+        return from_xdg
+    for name in DESKTOP_CANDIDATES:
+        candidate = home / name
+        if candidate.is_dir():
+            return candidate
+    return home / "桌面"
 
 
 def _python_ok(python: str) -> bool:
@@ -2365,7 +2824,15 @@ def build_parser() -> argparse.ArgumentParser:
     layout.add_argument("--state-dir", default=str(DEFAULT_STATE_DIR))
     layout.add_argument("--unit-dir", default="/etc/systemd/system")
     layout.add_argument("--service-name", default=SERVICE_NAME)
-    layout.add_argument("--user", default=DEFAULT_RUN_USER)
+    layout.add_argument(
+        "--user",
+        default=default_run_user(),
+        help=(
+            "Agent 以哪个账号运行。**默认就是跑安装的那个人**（sudo 时为 SUDO_USER，"
+            "否则为当前用户）—— 因为选手桌面在他的家目录下。显式指定一个不存在的"
+            "系统账号时才会创建它；卸载只删这种“安装器建的”账号。"
+        ),
+    )
     layout.add_argument("--python", default="", help="Agent 使用的 python3 路径")
 
     behaviour = parser.add_argument_group("行为")

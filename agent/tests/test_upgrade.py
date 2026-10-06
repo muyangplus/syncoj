@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -26,10 +27,13 @@ for candidate in (AGENT_DIR, SERVER_DIR):
     if str(candidate) not in sys.path:
         sys.path.insert(0, str(candidate))
 
+from syncoj_agent import main as main_module  # noqa: E402
 from syncoj_agent.rsa import RSAPublicKey  # noqa: E402
 from syncoj_agent.upgrade import (  # noqa: E402
+    BUNDLE_SHA_MARKER_FILENAME,
     MAX_EXTRACTED_BYTES,
     UpgradeError,
+    UpgradeMode,
     ReleaseManifest,
     activate_release,
     current_release,
@@ -37,6 +41,7 @@ from syncoj_agent.upgrade import (  # noqa: E402
     note_boot,
     parse_version,
     prune_releases,
+    read_release_fingerprint,
     rollback_release,
     safe_extract_tar,
     stage_release,
@@ -524,6 +529,51 @@ def test_prune_never_removes_active_version(workdir: Path) -> None:
     assert "1.0.0" in list_releases(install)
 
 
+def test_prune_必须保住回滚点(workdir: Path, monkeypatch) -> None:
+    """**回滚点被删 = 回滚能力被删。**
+
+    ``UpgradeState.previous`` 往往比"最近的 keep 个"都老，正是会被 prune 掉的那
+    一个 —— 新版本一崩，守卫切回去的目标就没了，机器卡死在起不来的版本上。
+    这条不依赖符号链接（直接指定 current 是谁），任何平台都能跑。
+    """
+    import syncoj_agent.upgrade as upgrade_module
+    from syncoj_agent.upgrade import UpgradeState, save_state
+
+    install = workdir / "install"
+    for version in ("1.0.0", "1.1.0", "1.2.0", "2.0.0"):
+        bundle = make_tar(workdir / ("%s.tar.gz" % version), [("f", version, "file")])
+        stage_release(install, version, bundle)
+
+    save_state(install, UpgradeState(version="2.0.0", previous="1.0.0"))
+    monkeypatch.setattr(upgrade_module, "current_release", lambda root: "2.0.0")
+
+    removed = prune_releases(install, keep=1)
+
+    assert "1.0.0" in list_releases(install), "回滚点被 prune 掉了 —— 等于删掉回滚能力"
+    assert "2.0.0" in list_releases(install), "正在运行的版本被删了"
+    assert removed == ["1.1.0"], removed
+
+
+def test_prune_的_keep_不含必须保住的那些(workdir: Path, monkeypatch) -> None:
+    """``keep`` 是"除必须保住的之外再留几个最新"，不是"总数不超过 keep"。"""
+    import syncoj_agent.upgrade as upgrade_module
+    from syncoj_agent.upgrade import UpgradeState, save_state
+
+    install = workdir / "install"
+    for version in ("1.0.0", "1.1.0", "1.2.0", "1.3.0", "2.0.0"):
+        bundle = make_tar(workdir / ("%s.tar.gz" % version), [("f", version, "file")])
+        stage_release(install, version, bundle)
+
+    save_state(install, UpgradeState(version="2.0.0", previous="1.0.0"))
+    monkeypatch.setattr(upgrade_module, "current_release", lambda root: "2.0.0")
+
+    removed = prune_releases(install, keep=1)
+
+    # 必须保住的 1.0.0（回滚点）与 2.0.0（在跑）之外，再留 1 个最新的 1.3.0
+    assert removed == ["1.1.0", "1.2.0"], removed
+    assert list_releases(install) == ["1.0.0", "1.3.0", "2.0.0"]
+
+
 def test_activate_reports_unsupported_environment(workdir: Path) -> None:
     """在不支持符号链接的环境里必须给出**可操作**的报错，而不是一个裸 OSError。"""
     if symlinks_supported():
@@ -628,3 +678,306 @@ def test_corrupt_state_file_is_ignored(workdir: Path) -> None:
 
     assert load_state(install) is None
     assert note_boot(install, "1.0.0") is None
+
+
+# --------------------------------------------------------------------------- #
+# 同版本号重建：**版本号管降级、sha 管内容**
+# --------------------------------------------------------------------------- #
+#
+# 现场的另一半故障：用户重新构建了同一个版本号、铺开，已经装过/升级过的机器
+# 永远拿不到新内容 —— 因为升级这条路按版本号单调比较，`<=` 一律忽略。
+# 现在相等时改比内容指纹（与安装器 install.py 同一套记录），降级闸不动。
+
+
+def sha256_of(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def make_upgrade_agent(workdir: Path):
+    """造一个只用来跑 ``_handle_upgrade`` 的 Agent。
+
+    外部依赖（下载、验签）由 :func:`drive_upgrade` 换掉；这里只需要一个结构
+    完整、能装下 install_root/state_dir 的 Agent。
+    """
+    from syncoj_agent.config import AgentConfig
+    from syncoj_agent.main import Agent
+
+    config = AgentConfig.load(None)
+    config.state_dir = workdir / "state"
+    config.deploy_root = workdir / "desktop"
+    config.scan_roots = [workdir / "code"]
+    config.bootstrap_key_file = workdir / "bootstrap.key"
+    config.server_url = "https://127.0.0.1:8000"
+    config.install_root = workdir / "opt"
+    for path in (config.state_dir, config.deploy_root, config.scan_roots[0]):
+        path.mkdir(parents=True, exist_ok=True)
+    config.bootstrap_key_file.write_text("SECRET\n", encoding="utf-8")
+
+    agent = Agent(config)
+    # verify_bundle 会被打桩；这里只要非 None（None 会在更早的地方 return）
+    agent._public_key = object()
+    return agent
+
+
+def manifest_info(version: str, bundle: Path) -> dict:
+    return {
+        "version": version,
+        "url": "/api/v1/agent/releases/1",
+        "sha256": sha256_of(bundle),
+        "size": bundle.stat().st_size,
+        "signature": "FAKE-SIGNATURE",
+    }
+
+
+def drive_upgrade(monkeypatch, agent, info: dict, bundle: Path) -> dict:
+    """跑一次 ``_handle_upgrade``，把下载与验签换成可控的替身。
+
+    这样测的是**版本/内容判定**本身（今天改动的那段），而不是签名与网络 ——
+    那两件事各有自己的用例（``verify_bundle`` 的交叉验证在 server 侧）。
+    """
+    calls: dict = {"download": [], "verify": []}
+
+    def fake_download(url, dest, max_bytes):
+        calls["download"].append((url, str(dest)))
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(str(bundle), str(dest))
+        return dest.stat().st_size
+
+    def fake_verify(public_key, path, manifest):
+        calls["verify"].append(str(path))
+
+    monkeypatch.setattr(agent.client, "download_to_file", fake_download)
+    monkeypatch.setattr(main_module, "verify_bundle", fake_verify)
+    agent._handle_upgrade(info)
+    return calls
+
+
+def test_同版本内容不同时照样升级(workdir: Path, monkeypatch) -> None:
+    """**第一条**：同版本号 + sha 不同 → 真的换上新内容。
+
+    把"相等就 return"改回去时，这条必须红 —— 那时下载根本不会发生。
+    """
+    version = "1.0.0"
+    agent = make_upgrade_agent(workdir)
+    agent.config.upgrade_mode = UpgradeMode.STAGE
+
+    install_root = agent.config.install_root
+    old = make_tar(workdir / "old.tar.gz", [("main.py", "old", "file")])
+    new = make_tar(workdir / "new.tar.gz", [("main.py", "new", "file")])
+    stage_release(install_root, version, old)
+    assert (install_root / "releases" / version / "main.py").read_text(encoding="utf-8") == "old"
+
+    monkeypatch.setattr(main_module, "current_release", lambda root: version)
+
+    calls = drive_upgrade(monkeypatch, agent, manifest_info(version, new), new)
+
+    assert calls["download"], "同版本、内容不同却根本没去下载 —— 被'相等就 return'吃掉了"
+    assert calls["verify"], "下载了却没有验签"
+    assert (
+        install_root / "releases" / version / "main.py"
+    ).read_text(encoding="utf-8") == "new", "同版本号重建的新内容没有换上去"
+    assert any(
+        event.get("category") == "upgrade_staged" for event in agent._pending_events
+    )
+
+
+@requires_symlinks
+def test_同版本内容不同时可以_apply(workdir: Path, monkeypatch) -> None:
+    version = "1.0.0"
+    agent = make_upgrade_agent(workdir)
+    agent.config.upgrade_mode = UpgradeMode.APPLY
+
+    install_root = agent.config.install_root
+    old = make_tar(workdir / "old.tar.gz", [("main.py", "old", "file")])
+    new = make_tar(workdir / "new.tar.gz", [("main.py", "new", "file")])
+    stage_release(install_root, version, old)
+    activate_release(install_root, version)
+
+    calls = drive_upgrade(monkeypatch, agent, manifest_info(version, new), new)
+
+    assert calls["download"]
+    assert (install_root / "current" / "main.py").read_text(encoding="utf-8") == "new"
+    assert agent._restart_requested is True
+
+
+def test_同版本内容相同则真的无操作(workdir: Path, monkeypatch) -> None:
+    """同版本 + 同一份内容 → 幂等：不下载、不验签、不重解。"""
+    version = "1.0.0"
+    agent = make_upgrade_agent(workdir)
+    agent.config.upgrade_mode = UpgradeMode.APPLY
+
+    install_root = agent.config.install_root
+    bundle = make_tar(workdir / "b.tar.gz", [("main.py", "same", "file")])
+    stage_release(install_root, version, bundle)
+
+    probe = install_root / "releases" / version / "main.py"
+    os.utime(str(probe), (946684800, 946684800))
+    monkeypatch.setattr(main_module, "current_release", lambda root: version)
+
+    calls = drive_upgrade(monkeypatch, agent, manifest_info(version, bundle), bundle)
+
+    assert calls["download"] == [], "内容完全一样却又去下载了一遍"
+    assert calls["verify"] == [], "内容完全一样却又去验签了一遍"
+    assert int(probe.stat().st_mtime) == 946684800, "内容一样却重解/重写了"
+    assert agent._restart_requested is False
+
+
+def test_更低版本仍然被拒绝(workdir: Path, monkeypatch) -> None:
+    """降级闸没破：低于当前版本一律拒绝，哪怕内容看起来"更新"。"""
+    agent = make_upgrade_agent(workdir)
+    agent.config.upgrade_mode = UpgradeMode.APPLY
+
+    install_root = agent.config.install_root
+    current = make_tar(workdir / "cur.tar.gz", [("main.py", "2.0.0", "file")])
+    stage_release(install_root, "2.0.0", current)
+    monkeypatch.setattr(main_module, "current_release", lambda root: "2.0.0")
+
+    older = make_tar(workdir / "older.tar.gz", [("main.py", "1.0.0", "file")])
+    calls = drive_upgrade(monkeypatch, agent, manifest_info("1.0.0", older), older)
+
+    assert calls["download"] == [], "降到更低版本却去下载了 —— 降级闸破了"
+    assert calls["verify"] == []
+    assert (install_root / "releases" / "2.0.0" / "main.py").read_text(encoding="utf-8") == "2.0.0"
+    assert not (install_root / "releases" / "1.0.0").exists()
+    assert agent._restart_requested is False
+
+
+def test_更低版本优先于内容指纹(workdir: Path, monkeypatch) -> None:
+    """版本优先：即便清单的 sha 与本机那份**不同**（"内容变了"），更低版本也拒绝。"""
+    agent = make_upgrade_agent(workdir)
+    agent.config.upgrade_mode = UpgradeMode.STAGE
+
+    install_root = agent.config.install_root
+    current = make_tar(workdir / "cur.tar.gz", [("main.py", "2.0.0", "file")])
+    stage_release(install_root, "2.0.0", current)
+    assert read_release_fingerprint(install_root, "2.0.0") == sha256_of(current)
+    monkeypatch.setattr(main_module, "current_release", lambda root: "2.0.0")
+
+    different = make_tar(workdir / "different.tar.gz", [("main.py", "x", "file")])
+    assert sha256_of(different) != sha256_of(current)
+    calls = drive_upgrade(monkeypatch, agent, manifest_info("1.9.0", different), different)
+
+    assert calls["download"] == [], "版本更低时内容指纹不该有发言权"
+    assert not (install_root / "releases" / "1.9.0").exists()
+
+
+# --------------------------------------------------------------------------- #
+# stage_release 自己的"同版本重复暂存"判断
+# --------------------------------------------------------------------------- #
+
+
+def test_stage_同版本不同内容会换上新内容(workdir: Path) -> None:
+    """`if final.exists(): return final` 会把同版本重建的新内容吃掉 —— 不行。"""
+    install = workdir / "install"
+    old = make_tar(workdir / "old.tar.gz", [("main.py", "old", "file")])
+    new = make_tar(workdir / "new.tar.gz", [("main.py", "new", "file")])
+
+    stage_release(install, "1.0.0", old)
+    assert read_release_fingerprint(install, "1.0.0") == sha256_of(old)
+
+    stage_release(install, "1.0.0", new)
+
+    assert (install / "releases" / "1.0.0" / "main.py").read_text(encoding="utf-8") == "new"
+    assert read_release_fingerprint(install, "1.0.0") == sha256_of(new)
+    assert list_releases(install) == ["1.0.0"], "同版本替换不该多出一个版本目录"
+    assert not [
+        path
+        for path in (install / "releases").iterdir()
+        if path.name.startswith(".")
+    ], "替换后不该留下 .staging-* / .old-*"
+
+
+def test_stage_同版本同内容复用不重解(workdir: Path) -> None:
+    install = workdir / "install"
+    bundle = make_tar(workdir / "b.tar.gz", [("main.py", "same", "file")])
+    first = stage_release(install, "1.0.0", bundle)
+
+    probe = install / "releases" / "1.0.0" / "main.py"
+    os.utime(str(probe), (946684800, 946684800))
+    marker = install / "releases" / "1.0.0" / BUNDLE_SHA_MARKER_FILENAME
+    marker_mtime = marker.stat().st_mtime_ns
+
+    second = stage_release(install, "1.0.0", bundle)
+
+    assert first == second
+    assert int(probe.stat().st_mtime) == 946684800, "同内容却重解了"
+    assert marker.stat().st_mtime_ns == marker_mtime, "同内容却重写了指纹记录"
+
+
+def test_stage_历史安装没有指纹时覆盖一次(workdir: Path) -> None:
+    """老目录没有指纹记录（历史安装）→ 覆盖一次，之后就有记录。"""
+    install = workdir / "install"
+    release = install / "releases" / "1.0.0"
+    release.mkdir(parents=True)
+    (release / "main.py").write_text("very old", encoding="utf-8")
+    assert read_release_fingerprint(install, "1.0.0") is None
+
+    bundle = make_tar(workdir / "b.tar.gz", [("main.py", "new", "file")])
+    stage_release(install, "1.0.0", bundle)
+
+    assert (release / "main.py").read_text(encoding="utf-8") == "new"
+    assert read_release_fingerprint(install, "1.0.0") == sha256_of(bundle)
+
+
+def test_指纹记录与安装器同名(workdir: Path) -> None:
+    """契约：升级侧与安装器（install.py）必须用同一个标记文件名。"""
+    assert BUNDLE_SHA_MARKER_FILENAME == ".syncoj-bundle-sha256"
+
+
+# --------------------------------------------------------------------------- #
+# 同版本内容替换：没有"上一份"可退，就不设回滚点
+# --------------------------------------------------------------------------- #
+
+
+def drive_same_version_replace(workdir: Path, monkeypatch, agent):
+    """装好 1.0.0(old)，再下发同版本号、内容不同的 manifest(new)。
+
+    返回 ``(version, install_root)``。
+    """
+    version = "1.0.0"
+    install_root = agent.config.install_root
+    old = make_tar(workdir / "old.tar.gz", [("main.py", "old", "file")])
+    new = make_tar(workdir / "new.tar.gz", [("main.py", "new", "file")])
+    stage_release(install_root, version, old)
+    monkeypatch.setattr(main_module, "current_release", lambda root: version)
+    drive_upgrade(monkeypatch, agent, manifest_info(version, new), new)
+    return version, install_root
+
+
+def test_同版本替换不把同一个版本记成回滚点(workdir: Path, monkeypatch) -> None:
+    """同版本内容替换**没有**上一个版本可退，不能拿同一个版本号当回滚点。
+
+    否则启动守卫会"回滚"到那份已经被换成新内容的目录 —— 回滚→重启→还起不来
+    的死循环，比不回滚更糟。想留退路，正解是换版本号。
+    """
+    from syncoj_agent.upgrade import load_state
+
+    agent = make_upgrade_agent(workdir)
+    agent.config.upgrade_mode = UpgradeMode.APPLY
+
+    version, install_root = drive_same_version_replace(workdir, monkeypatch, agent)
+
+    state = load_state(install_root)
+    assert state is not None, "替换时连回滚状态都没写（先写状态、再切软链的约定）"
+    assert state.version == version
+    assert state.previous != version, "把同一个版本号记成了回滚点"
+    assert state.previous is None
+
+
+def test_同版本替换后启动守卫无路可退就清状态(
+    workdir: Path, monkeypatch
+) -> None:
+    """上一条的入口断言：previous 为空时 note_boot 放弃守卫、清状态，而不是反复重启。"""
+    from syncoj_agent.upgrade import MAX_BOOT_ATTEMPTS, load_state
+
+    agent = make_upgrade_agent(workdir)
+    agent.config.upgrade_mode = UpgradeMode.APPLY
+    version, install_root = drive_same_version_replace(workdir, monkeypatch, agent)
+
+    assert load_state(install_root).previous is None
+
+    for _ in range(MAX_BOOT_ATTEMPTS + 1):
+        assert note_boot(install_root, version) is None, (
+            "无路可退时不该把同一个版本当回滚点"
+        )
+    assert load_state(install_root) is None, "放弃守卫时必须清掉状态"

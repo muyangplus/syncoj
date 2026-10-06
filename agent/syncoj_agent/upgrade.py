@@ -6,8 +6,19 @@
 1. **默认关闭**（``upgrade.mode = off``）。即使签名完全合法也不动 —— 静默地
    在考试机上升级是高风险动作，必须由教师显式开启。
 2. **签名 + 摘要双重校验**。先验 SHA-256 再验签名，任一不过立即丢弃。
-3. **版本单调**。拒绝 "升级" 到不高于当前的版本 —— 否则攻击者可以重放一个
-   历史版本的真实签名包，把 Agent 退回已知有漏洞的状态。
+3. **版本号管降级、sha 管内容**。低于当前版本的一律拒绝 —— 否则攻击者可以重放
+   一个历史版本的真实签名包，把 Agent 退回已知有漏洞的状态。**同版本号**则比
+   内容指纹（``releases/<版本>/.syncoj-bundle-sha256``，与安装器 ``install.py``
+   用同一套记录）：指纹不同 → 当成"同版本重建"照常 stage/apply（同名版本重打的
+   包也能到达机器）；指纹相同 → 真无操作（幂等，不反复下载/解包）。
+
+   接受的一面：**同一版本号内的内容回滚从此理论可行** —— 有人重放一份旧的、
+   签过名的同版本 manifest，会被判定为"内容不同"而照单接收。跨版本号的降级闸
+   仍然在（``parse_version`` 比较），而"同版本号内的内容回退"事前无法与"同版本
+   重建"区分，所以只能接受这个代价（好在这一步仍要过签名）。
+   另一面：同版本内容被换掉之后**没有"上一份"可退** —— 所以 apply 时不会把
+   同一个版本号记成回滚点（``previous`` 留空），新内容起不来时启动守卫只能清掉
+   状态、不做假回滚。想留退路，正解是换版本号（版本单调本来就是这套设计的假设）。
 4. **安全解包**。``tarfile.extractall`` 在 Python 3.12 之前对路径穿越与符号
    链接逃逸**没有任何防护**（3.8 上更没有 ``filter="data"``）。这里逐条检查
    每个成员，拒绝绝对路径、``..``、符号链接、设备节点，并限制解压后总大小。
@@ -40,6 +51,7 @@ __all__ = [
     "activate_release",
     "rollback_release",
     "current_release",
+    "read_release_fingerprint",
     "list_releases",
     "prune_releases",
     "symlinks_supported",
@@ -49,6 +61,7 @@ __all__ = [
     "clear_state",
     "note_boot",
     "mark_healthy",
+    "BUNDLE_SHA_MARKER_FILENAME",
     "MAX_BOOT_ATTEMPTS",
     "MAX_BUNDLE_BYTES",
     "MAX_EXTRACTED_BYTES",
@@ -65,6 +78,16 @@ MAX_MEMBERS = 20000
 
 CURRENT_LINK = "current"
 RELEASES_DIR = "releases"
+
+#: 版本目录里记录"这一份内容指纹"的标记文件。
+#:
+#: **必须与安装器 ``install.py`` 用同一个名字与格式**：装机（``--from-server`` /
+#: ``--bundle``）与自更新（stage）都会往 ``releases/<版本>/`` 里放这个记录、
+#: 也都会读它来判断"这一份内容换没换"。名字或格式不一致，两边就会把对方的内容
+#: 当成"变了"，同一份包被反复覆盖，幂等性当场失效。
+#:
+#: 放在版本目录**内部**：删版本目录 / 卸载 / 回滚时它自然一起消失。
+BUNDLE_SHA_MARKER_FILENAME = ".syncoj-bundle-sha256"
 
 
 class UpgradeError(Exception):
@@ -175,6 +198,18 @@ class ReleaseManifest:
             raise UpgradeError("签名不是合法的 base64: %s" % exc)
 
 
+def _sha256_file(path: Path) -> str:
+    """流式计算文件 sha256（256MB 的包也只占 1MB 缓冲区）。"""
+    digest = hashlib.sha256()
+    with open(str(path), "rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def verify_bundle(public_key: RSAPublicKey, bundle_path: Path, manifest: ReleaseManifest) -> None:
     """校验摘要与签名。不通过就抛 :class:`UpgradeError`。
 
@@ -205,18 +240,11 @@ def verify_bundle(public_key: RSAPublicKey, bundle_path: Path, manifest: Release
     if manifest.size and size != manifest.size:
         raise UpgradeError("发布包大小不符：清单 %d，实际 %d" % (manifest.size, size))
 
-    digest = hashlib.sha256()
     try:
-        with bundle_path.open("rb") as handle:
-            while True:
-                chunk = handle.read(1024 * 1024)
-                if not chunk:
-                    break
-                digest.update(chunk)
+        actual = _sha256_file(bundle_path)
     except OSError as exc:
         raise UpgradeError("读取发布包失败: %s" % exc)
 
-    actual = digest.hexdigest()
     if actual != manifest.sha256:
         raise UpgradeError("发布包 sha256 不符：期望 %s，实际 %s"
                            % (manifest.sha256[:12], actual[:12]))
@@ -340,11 +368,87 @@ def current_release(install_root: Path) -> Optional[str]:
         return None
 
 
+def _release_dir(install_root: Path, version: str) -> Path:
+    return Path(install_root) / RELEASES_DIR / version
+
+
+def _read_fingerprint(release_dir: Path) -> Optional[str]:
+    """读版本目录里的内容指纹；没有记录 / 读不出来返回 ``None``。
+
+    ``None`` 表示"这份内容的来源未知"（历史安装，那时还没有这个记录），调用方
+    按"可能与清单不同"处理 —— 也就是允许覆盖一次，之后就有记录了。
+    """
+    marker = release_dir / BUNDLE_SHA_MARKER_FILENAME
+    try:
+        text = marker.read_text(encoding="utf-8").strip().lower()
+    except (OSError, UnicodeDecodeError):
+        return None
+    return text or None
+
+
+def _write_fingerprint(staging: Path, fingerprint: str) -> None:
+    """把内容指纹写进**待上位的 staging**，随目录一起换上去。"""
+    marker = staging / BUNDLE_SHA_MARKER_FILENAME
+    # 3.8 上 write_text 没有 newline 参数，用 open
+    with marker.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(fingerprint + "\n")
+
+
+def read_release_fingerprint(install_root: Path, version: str) -> Optional[str]:
+    """本机 ``releases/<version>/`` 里记着的那一份内容指纹；没有记录返回 ``None``。
+
+    与安装器 ``install.py`` 读的是**同一个文件、同一种格式**（发布包的 sha256），
+    所以"装机装上的那份"与"自更新暂存的那份"能互相认出来。
+    """
+    return _read_fingerprint(_release_dir(install_root, version))
+
+
+def _replace_version_dir(staging: Path, final: Path) -> None:
+    """把 ``staging`` 原子换到**已存在**的 ``final``（同版本号重建）。
+
+    老目录先 rename 成 ``.old-<pid>``（同在 releases/ 下，rename 是原子的），
+    再把 staging rename 成版本目录，成功后才删老目录；第二步失败就把老目录搬
+    回去。**这里不停服务**：正在跑的就是 Agent 自己，停自己不在它的权限面里；
+    真正的切换由后面的 ``activate_release`` + systemd ``Restart=always`` 完成。
+    替换本身是原子的，不存在"半新半旧"的目录被读到。
+
+    注意：老内容在这里就被删掉了，所以同版本内容替换**没有**可回滚的上一份
+    （``UpgradeState.previous`` 会是同一个版本号）—— 见模块 docstring 第 3 条。
+    """
+    parent = final.parent
+    old = parent / (".old-" + str(os.getpid()))
+    # 上一次崩在中间留下的 .old-* 先清掉：rename 到已存在的非空目录会失败
+    shutil.rmtree(str(old), ignore_errors=True)
+
+    os.replace(str(final), str(old))
+    swapped = False
+    try:
+        os.replace(str(staging), str(final))
+        swapped = True
+    finally:
+        if swapped:
+            shutil.rmtree(str(old), ignore_errors=True)
+        else:
+            # 回滚：把老目录搬回原位，别让 current 指到一个不存在的路径
+            try:
+                os.replace(str(old), str(final))
+            except OSError as exc:  # pragma: no cover - 罕见
+                log.error(
+                    "同版本替换失败且回滚也失败：老版本在 %s（%s）", old, exc
+                )
+
+
 def stage_release(install_root: Path, version: str, bundle_path: Path) -> Path:
     """把发布包解压到 ``releases/<version>/``。
 
     先解压到临时目录再整体改名，避免解压到一半失败留下一个"看起来存在但残缺"
     的版本目录 —— 那会让后续的激活判断出错。
+
+    **同版本号也要按内容判断**（与安装器 ``install.py`` 同一套记录，见
+    :data:`BUNDLE_SHA_MARKER_FILENAME`）：
+
+    * 版本目录里记的指纹与这一份包相同 → 直接复用，不重解（幂等）；
+    * 不同、或历史安装没有记录 → 换上新内容，别让"同版本重复暂存"把新内容吃掉。
     """
     install_root = Path(install_root)
     releases = install_root / RELEASES_DIR
@@ -355,20 +459,30 @@ def stage_release(install_root: Path, version: str, bundle_path: Path) -> Path:
     except UpgradeError as exc:
         raise UpgradeError("版本号不合法，拒绝落盘: %s" % exc)
 
+    try:
+        fingerprint = _sha256_file(Path(bundle_path))
+    except OSError as exc:
+        raise UpgradeError("读取发布包失败: %s" % exc)
+
     final = releases / version
-    if final.exists():
-        # 同版本重复暂存：直接复用，不重解（内容应当由签名保证一致）
+    if final.is_dir() and _read_fingerprint(final) == fingerprint:
+        # 同一份内容：直接复用，不重解（幂等）
         return final
 
     staging = releases / (".staging-" + hashlib.sha256(version.encode()).hexdigest()[:12])
     if staging.exists():
-        shutil.rmtree(staging, ignore_errors=True)
+        shutil.rmtree(str(staging), ignore_errors=True)
 
     try:
         safe_extract_tar(bundle_path, staging)
-        os.replace(str(staging), str(final))
+        _write_fingerprint(staging, fingerprint)
+        if final.is_dir():
+            _replace_version_dir(staging, final)
+        else:
+            os.replace(str(staging), str(final))
     except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
+        # 解包失败 / 替换失败都别把 .staging-* 留在 releases/ 里
+        shutil.rmtree(str(staging), ignore_errors=True)
         raise
 
     return final
@@ -475,7 +589,21 @@ def list_releases(install_root: Path) -> List[str]:
 
 
 def prune_releases(install_root: Path, keep: int = 3) -> List[str]:
-    """只保留最近 ``keep`` 个版本（按版本号排序），返回被删除的版本。"""
+    """清理旧版本：保留最近 ``keep`` 个**之外**，还有两个必须保住的。
+
+    ``keep`` 约束的是"除必须保住的之外，再留几个最新的"，**不是"总数不超过
+    keep"** —— 下面保护的版本哪怕比所有保留项都老，也一个都不能删。
+
+    必须保住：
+
+    * **正在运行的版本**（``current`` 指向的那个）—— 删了它下次重启就起不来；
+    * **``UpgradeState.previous``**（真的存在时）—— 那是启动守卫的回滚点。
+      回滚点被删 = **回滚能力被删**：新版本一崩，守卫切回去的目标已经没了，
+      机器就卡死在起不来的版本上（50 台一起）。而整套回滚设计正是为这个场景
+      存在的 —— 所以这里保护的不是"某个版本号"，而是**回滚能力本身**。
+
+    返回被删掉的版本号列表。
+    """
     releases = Path(install_root) / RELEASES_DIR
     items: List[Tuple[Tuple[int, ...], str]] = []
     for name in list_releases(install_root):
@@ -484,12 +612,21 @@ def prune_releases(install_root: Path, keep: int = 3) -> List[str]:
         except UpgradeError:
             continue
     items.sort()
+
+    protected = set()
     active = current_release(install_root)
+    if active:
+        protected.add(active)
+    state = load_state(install_root)
+    if state is not None and state.previous:
+        # 回滚点：删它等于删掉"新版本起不来还能退回去"的能力
+        protected.add(state.previous)
+
+    candidates = [(key, name) for key, name in items if name not in protected]
+    doomed = candidates[:-keep] if keep > 0 else candidates
 
     removed: List[str] = []
-    for _key, name in items[:-keep] if keep > 0 else items:
-        if name == active:
-            continue  # 绝不删正在运行的那个
+    for _key, name in doomed:
         shutil.rmtree(releases / name, ignore_errors=True)
         removed.append(name)
     return removed

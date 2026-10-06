@@ -445,11 +445,13 @@ def test_render_unit_permissions_follow_contestant_user(installer) -> None:
         python="/usr/bin/python3",
     )
 
-    # %h 由 systemd 展开成 User= 的家目录，正好覆盖 {desktop} 及其下的一切
-    assert "ReadWritePaths=%h /var/lib/syncoj /srv/shared/code" in text
-    # 模板路径不该被塞进去 —— 它们本来就在 %h 之下，重复列没有意义
+    # %h = User= 的家目录（覆盖选手桌面）；安装器自建的目录也开写权限。
+    # **每一条都带 `-`**：路径不存在时 systemd 跳过它，而不是 226 起不来。
+    assert "ReadWritePaths=-%h -/opt/syncoj -/var/lib/syncoj" in text
+    # 模板路径与可选配置不该被塞进来 —— 它们可能不存在，正是 226 的来源
     assert "{desktop}" not in text
     assert "{player_no}" not in text
+    assert "/srv/shared/code" not in text
     # 这条会把家目录变只读，绝不能出现
     assert "ProtectHome" not in text
     # 系统目录仍然全部只读，这才是 ProtectSystem=strict 的价值
@@ -564,7 +566,7 @@ def test_bundle_contains_launcher(workdir: Path) -> None:
 
 
 def test_render_unit_without_extra_paths(installer) -> None:
-    """没配额外路径时，白名单只剩 %h 与状态目录 —— 但 %h 必须在。
+    """没配额外路径时，白名单只剩 %h 与安装器自建的目录 —— 但 %h 必须在。
 
     少了它，ProtectSystem=strict 会把家目录也变成只读。
     """
@@ -572,7 +574,7 @@ def test_render_unit_without_extra_paths(installer) -> None:
         prefix=Path("/o"), config_path=Path("/c"), state_dir=Path("/s"),
         deploy_root="", scan_roots="", run_user="student", python="python3",
     )
-    assert "ReadWritePaths=%h /s" in text
+    assert "ReadWritePaths=-%h -/o -/s" in text
 
 
 # --------------------------------------------------------------------------- #

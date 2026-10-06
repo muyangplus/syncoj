@@ -80,6 +80,7 @@ from .upgrade import (
     mark_healthy,
     note_boot,
     parse_version,
+    read_release_fingerprint,
     rollback_release,
     save_state,
     stage_release,
@@ -849,15 +850,47 @@ class Agent:
         install_root = self.config.install_root
         running = current_release(install_root) or __version__
 
-        # 版本单调：拒绝"升级"到不高于当前的版本，否则攻击者可以重放一个
-        # 历史版本的真实签名包，把 Agent 退回已知有漏洞的状态
+        # **版本号管降级、sha 管内容**（与安装器 install.py 同一套记录）：
+        #
+        #   * 低于当前版本 → 一律拒绝。否则攻击者可以重放一个历史版本的真实
+        #     签名包，把 Agent 退回已知有漏洞的状态。
+        #   * 等于当前版本 → 不再一律 return，而是比内容指纹：清单 sha256 与
+        #     "本机 releases/<版本>/ 里记的那一份"不同 = 同版本重建，照常
+        #     stage/apply；相同 = 真的无操作（幂等，不反复下载/解包）。
+        #
+        # 接受的一面：**同一版本号内的内容回滚从此理论可行** —— 有人重放一份
+        # 旧的、签过名的同版本 manifest，会被当成"内容不同"照单接收。跨版本号的
+        # 降级闸仍是上面那条比较；"同版本号内的内容回退"事前无法与"同版本重建"
+        # 区分，所以只能接受这个代价（好在仍要过签名）。
+        # 另一面：同版本内容换掉之后**没有"上一份"可退**，所以 apply 时不给这种
+        # 替换设回滚点（见下面那段），启动守卫会走"无路可退就清状态"那条路，
+        # 而不是把同一个（可能已坏的）版本反复回滚。
         try:
-            if parse_version(manifest.version) <= parse_version(running):
-                log.debug("忽略不高于当前版本的发布 %s（当前 %s）", manifest.version, running)
-                return
+            manifest_version = parse_version(manifest.version)
+            running_version = parse_version(running)
         except UpgradeError as exc:
             log.warning("版本号无法比较，拒绝升级: %s", exc)
             return
+
+        if manifest_version < running_version:
+            log.debug(
+                "忽略低于当前版本的发布 %s（当前 %s）", manifest.version, running
+            )
+            return
+
+        if manifest_version == running_version:
+            installed_sha = read_release_fingerprint(install_root, running)
+            if installed_sha is not None and installed_sha == manifest.sha256:
+                log.debug(
+                    "同版本 %s 且内容指纹一致，无操作", manifest.version
+                )
+                return
+            log.warning(
+                "同版本号 %s 但内容指纹不同（本机 %s / 清单 %s），按覆盖安装处理",
+                manifest.version,
+                (installed_sha or "无记录")[:12],
+                manifest.sha256[:12],
+            )
 
         bundle = self.config.state_dir / "upgrade" / ("%s.tar.gz" % manifest.version)
         try:
@@ -884,6 +917,23 @@ class Agent:
         # note_boot 发现版本不符会直接丢弃，不会误判。
         try:
             previous = current_release(install_root)
+            if previous == manifest.version:
+                # **同版本内容替换没有"上一个版本"可退。**
+                #
+                # 拿同一个版本目录当 previous，回滚只会回到那份已经被换成新内容的
+                # 目录，于是变成"回滚→重启→还起不来"的死循环，比不回滚更糟。
+                # 所以不留可回滚点：把 previous 记成 None，让启动守卫走
+                # "无路可退就清状态"那条路（note_boot 在 previous 为空时放弃
+                # 守卫，而不是反复重启）。
+                #
+                # 想留退路，正解是**换版本号** —— 版本单调本来就是这套设计的假设。
+                # 支持同版本重建是为了"内容能到机器上"，不是为了"还有个旧版本
+                # 可以退"。
+                log.warning(
+                    "同版本号 %s 内容替换：没有可回滚的旧版本，启动守卫不设回滚点",
+                    manifest.version,
+                )
+                previous = None
             save_state(
                 install_root,
                 UpgradeState(
@@ -898,10 +948,14 @@ class Agent:
             self._emit("error", "upgrade_activate_failed", "激活失败：%s" % exc)
             return
 
-        log.warning("已激活版本 %s（原 %s），即将重启以生效", manifest.version, previous)
+        log.warning(
+            "已激活版本 %s（原 %s），即将重启以生效",
+            manifest.version,
+            previous or "无",
+        )
         self._emit(
             "warning", "upgrade_activated",
-            "已升级到 %s 并重启（原版本 %s）" % (manifest.version, previous),
+            "已升级到 %s 并重启（原版本 %s）" % (manifest.version, previous or "无"),
         )
         # 由 systemd 的 Restart=always 拉起新版本 —— 不需要我们自己调 systemctl，
         # 那会要求额外的 polkit 授权，平白扩大 Agent 的权限面

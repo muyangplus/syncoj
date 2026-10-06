@@ -334,7 +334,7 @@ def test_default_pattern_is_reported_back(
     就把 ``{ident}`` 冻死了，之后改标识再也认不出文件，而界面上毫无异常。
     """
     problem = add_problems(client, contest, admin_headers, [{"ident": "p1"}]).json()["problems"][0]
-    assert problem["file_patterns"] == ["{ident}/**"]
+    assert problem["file_patterns"] == ["{ident}/{ident}.cpp"]
 
 
 def test_default_pattern_template_survives_edit_round_trip(
@@ -342,7 +342,7 @@ def test_default_pattern_template_survives_edit_round_trip(
 ) -> None:
     """界面"打开编辑 → 原样保存"之后，默认模式必须还能跟着改名走。
 
-    只断言接口返回 ``{ident}/**`` 不够 —— 得证明原样存回去之后，
+    只断言接口返回默认模板不够 —— 得证明原样存回去之后，
     改名后仍然认得新目录。
     """
     problem = add_problems(client, contest, admin_headers, [{"ident": "p1"}]).json()["problems"][0]
@@ -436,7 +436,7 @@ def test_update_with_empty_patterns_falls_back_to_default(
         json={"ident": "p1", "file_patterns": []},
         headers=admin_headers,
     )
-    assert response.json()["file_patterns"] == ["{ident}/**"], "清空应当回到默认模板"
+    assert response.json()["file_patterns"] == ["{ident}/{ident}.cpp"], "清空应当回到默认模板"
 
 
 def test_update_rejects_invalid_pattern(
@@ -499,7 +499,7 @@ def test_rename_keeps_default_pattern_working(
         json={"ident": "签到题"},
         headers=admin_headers,
     )
-    assert list_problems(client, contest, admin_headers)[0]["file_patterns"] == ["{ident}/**"]
+    assert list_problems(client, contest, admin_headers)[0]["file_patterns"] == ["{ident}/{ident}.cpp"]
 
 
 # --------------------------------------------------------------------------- #
@@ -660,14 +660,14 @@ def test_match_reports_the_winning_problem(
 ) -> None:
     """要同时回「哪条模式赢了」和「它展开成了什么」。
 
-    教师写的是模板（``{ident}/**``），真正拿去匹配的是展开后的 ``p2/**``。
-    只回其中一个，排错时都要靠脑补。
+    教师写的是模板（默认那条是 ``{ident}/{ident}.cpp``），真正拿去匹配的是展开后的
+    ``p2/p2.cpp``。只回其中一个，排错时都要靠脑补。
     """
     add_problems(client, contest, admin_headers, [{"ident": "p1"}, {"ident": "p2"}])
     body = match_path(client, contest, admin_headers, "p2/p2.cpp")
     assert body["problem"] == "p2"
-    assert body["patterns"] == ["{ident}/**"]
-    assert body["expanded"] == ["p2/**"]
+    assert body["patterns"] == ["{ident}/{ident}.cpp"]
+    assert body["expanded"] == ["p2/p2.cpp"]
 
 
 def test_match_reports_title_expansion(
@@ -715,7 +715,9 @@ def test_match_does_not_touch_the_filesystem(
 ) -> None:
     """试算的是字符串，不是真实文件 —— 教师可以直接粘贴一条"计划中"的路径。"""
     add_problems(client, contest, admin_headers, [{"ident": "p1"}])
-    body = match_path(client, contest, admin_headers, "p1/尚未创建的文件.cpp")
+    # 用默认模式**认得**的那个形状（`p1/p1.cpp`）：这里要证明的是"不碰文件系统"，
+    # 不是"任何 p1/ 下的东西都算 p1"（默认已改成 `{ident}/{ident}.cpp`）
+    body = match_path(client, contest, admin_headers, "p1/p1.cpp")
     assert body["problem"] == "p1"
 
 

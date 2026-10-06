@@ -357,8 +357,8 @@ const problemCount = computed(() => problems.total.value)
             >
               {{ pattern }}
             </el-tag>
-            <!-- 空 = 服务端默认 `{ident}/**`。这里写出来，教师才知道"没配"也是一种配置 -->
-            <span v-if="!row.file_patterns?.length" class="muted">默认（{ident}/**）</span>
+            <!-- 空 = 服务端默认 `{ident}/{ident}.cpp`。这里写出来，教师才知道"没配"也是一种配置 -->
+            <span v-if="!row.file_patterns?.length" class="muted">默认（{ident}/{ident}.cpp）</span>
           </template>
         </el-table-column>
 

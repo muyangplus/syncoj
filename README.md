@@ -227,6 +227,16 @@ sudo systemctl start syncoj-agent-enroll.service    # 需要重新注册时；�
 sudo systemctl start syncoj-agent
 ```
 
+注册失败的常见几种（都在 `journalctl -u syncoj-agent-enroll.service` 里看得到原文）：
+
+| 日志里的话 | 含义 | 怎么办 |
+|---|---|---|
+| `HTTP 403 bootstrap_key_revoked` / `bootstrap_key_invalid` | **机器上那把密钥服务端不认**（吊销过、或换了库/服务器） | 在服务端「机器配对 → 装机设置」重新签发一把，放到 `/etc/syncoj/bootstrap.key`（0600 属主 root，**显式覆盖**旧的那把 —— 安装器默认不替换机器上已有的密钥），再重跑注册单元 |
+| `HTTP 403 pairing_required` 之类 | 凭据有效、但还没绑到人 | 教师到「机器配对」页认领 |
+| `Permission denied: '/etc/syncoj/agent.ini'` | 旧安装留下的配置属主不是当前运行账号 | 重跑一次安装器（它会顺手把属主改成运行账号），再按上面清一次限流状态 |
+| `注册被限速（… 秒后可重试）` | 装机时多台机器同时注册，把服务端限速顶满 | 等它说的秒数；新版注册单元会自己有限重试 |
+| `扫描目录的父目录不存在: /root/...` | 注册单元以 root 跑、却按 root 的家展开路径（老版本的 bug） | 升级到修好的版本；临时可 `sudo HOME=/home/<运行账号> … run_agent.py --provision` 跑一次 |
+
 **配对之后不等于马上能干活。** 场次有没有这个人，取决于那份名单有没有被应用进
 场次，所以客户端的凭据有三个状态：
 

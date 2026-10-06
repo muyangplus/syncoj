@@ -6,7 +6,6 @@ import { assetApi, deployApi, playerApi } from '@/api'
 import type { AssetOut, AssetZipPasswordOut, DeployTaskOut, PlayerOut } from '@/api/types'
 import DataTable from '@/components/DataTable.vue'
 import FormDialog from '@/components/FormDialog.vue'
-import HelpTip from '@/components/HelpTip.vue'
 import PageShell from '@/components/PageShell.vue'
 import { useList } from '@/composables/useList'
 import { useMutation } from '@/composables/useMutation'
@@ -675,20 +674,12 @@ function targetKindLabel(kind: string): string {
 <template>
   <PageShell
     title="文件下发"
-    hint="题面和样例都当 zip 文件上传，系统不解压。"
+    hint="题面和样例直接传 zip，系统不解压。"
     :error="listError"
     error-action="刷新页面或检查服务端；资产列表取不到时不要下发。"
     retryable
     @retry="refreshAll"
   >
-    <template #hint>
-      <HelpTip>
-        带密码的题面：在 .zip 那一行点「密码」重新打包，系统会顺手生成一份
-        <code>password.txt</code>，再把它当普通资产下发即可。
-        这种密码是传统加密（ZipCrypto）—— <strong>挡得住随手翻看，挡不住有心人</strong>，
-        别拿它保护真正的机密。
-      </HelpTip>
-    </template>
     <template #toolbar>
       <input ref="fileInput" type="file" style="display: none" @change="handleFileChange" />
       <span class="field-label">类别</span>

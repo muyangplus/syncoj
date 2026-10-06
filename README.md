@@ -199,6 +199,34 @@ bootstrap.key  ──换凭据──▶  桌面「配对码.txt」 ──读码/
 > **统一注册密钥**管"这台机器是不是我们机房的"（装 Agent **之前**烤进镜像，全机房一把），
 > **配对码**管"这台机器前面站着的是谁"（服务端发给这台机器、教师读码）。**现场要做的是配对。**
 
+### 注册是谁做的：一个 root 一次性单元，不是 Agent 本体
+
+| | 谁 | 干什么 |
+|---|---|---|
+| `syncoj-agent-enroll.service` | **root**（oneshot；装机时 enable，并立刻跑一次） | 读 `/etc/syncoj/bootstrap.key`，换回本机凭据，写进状态目录并交给运行账号 |
+| `syncoj-agent.service` | **运行账号**（= 跑安装的那个账号） | 只读凭据干活；**没有凭据就等**，绝不自己去读那把密钥 |
+
+这条分工不是洁癖：密钥是 0600、root 只读的，服务以选手身份跑**读不到**（这是设计如此）。
+所以"服务自己注册"必然失败，而失败的表现是"机器永远不出现" —— 真机上踩过：服务退出 1、
+重启 5 次后被 systemd 判成"反复起不来"而罢手，而注册单元从来没被跑过。
+
+现场遇到"机器不出现"或服务反复重启，按顺序看这四样：
+
+```bash
+systemctl status syncoj-agent-enroll.service --no-pager -l    # 注册那一步成没成
+journalctl -u syncoj-agent-enroll.service -n 30 --no-pager
+journalctl -u syncoj-agent -n 30 --no-pager                   # 服务本体
+sudo tail -n 40 /var/lib/syncoj/agent.log                     # 两者共用同一个日志文件
+```
+
+`Start request repeated too quickly` 说明 systemd 已经罢手 —— 先修掉真正的错误，再清限流状态：
+
+```bash
+sudo systemctl reset-failed syncoj-agent
+sudo systemctl start syncoj-agent-enroll.service    # 需要重新注册时；已有凭据则它直接返回
+sudo systemctl start syncoj-agent
+```
+
 **配对之后不等于马上能干活。** 场次有没有这个人，取决于那份名单有没有被应用进
 场次，所以客户端的凭据有三个状态：
 
@@ -264,8 +292,8 @@ Agent 侧路径模板支持四个占位符 —— 前两个载入配置时就展
 
 | 占位符 | 何时展开 | 展开成 |
 |---|---|---|
-| `{desktop}` | 立即 | 当前用户桌面（兼容「桌面」与 `Desktop` 两种命名） |
-| `{home}` | 立即 | 当前用户家目录 |
+| `{desktop}` | 立即 | **运行账号**（= 跑安装的那个账号）的桌面，兼容「桌面」与 `Desktop` 两种命名。**与"当前是谁在跑这个进程"无关** —— 注册单元以 root 跑，也照样解析到那个账号的桌面，绝不落到 `/root` |
+| `{home}` | 立即 | **运行账号**的家目录（理由同 `{desktop}`） |
 | `{player_no}` | 注册后 | 准考证号 |
 | `{contest_slug}` | 注册后 | 场次标识 |
 

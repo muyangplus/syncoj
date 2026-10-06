@@ -68,9 +68,25 @@ function walk(dir, out = []) {
   return out
 }
 
+/**
+ * 读文本，并把 CRLF/CR 折成 LF。
+ *
+ * 不是为了"兼容 Windows"，而是为了这条检查报出来的话能对上真实原因：本脚本靠
+ * **逐行比较**认方法（`line === '}'`），一行末尾多一个 CR 会让它一条都认不出来，
+ * 然后报"入口对账自身失效，多半是文件被重新格式化" —— 方向没错，但没人会想到
+ * 罪魁祸首是行尾符（这个坑真的踩过：`git stash` 往返一次就发生了）。
+ *
+ * `.gitattributes` 已经把整棵 `web/` 钉死 LF，而且
+ * `server/tests/test_repo_hygiene.py` 守着那条声明。这里再折一次是另一层：
+ * 声明管的是"下次检出"，而这里管的是"手上这份文件长什么样"。
+ */
+function readText(full) {
+  return readFileSync(full, 'utf8').replace(/\r\n?/g, '\n')
+}
+
 /** `endpoints.ts` 里所有 `` `${ADMIN}...` `` 模板串，归一成 `{}` 形状。 */
 function frontendPaths() {
-  const text = readFileSync(join(SRC, 'api', 'endpoints.ts'), 'utf8')
+  const text = readText(join(SRC, 'api', 'endpoints.ts'))
   const found = new Map()
   for (const line of text.split('\n')) {
     for (const match of line.matchAll(/`(\$\{ADMIN\}[^`]*)`/g)) {
@@ -93,7 +109,7 @@ function serverPaths() {
  * 而下面那条信封规则必须知道这个。
  */
 function pathNames() {
-  const text = readFileSync(join(SRC, 'api', 'endpoints.ts'), 'utf8')
+  const text = readText(join(SRC, 'api', 'endpoints.ts'))
   const found = new Map()
   for (const line of text.split('\n')) {
     const name = /^\s{2}(\w+):\s*\(\)\s*=>/.exec(line)
@@ -133,7 +149,7 @@ function envelopePaths() {
 const MIN_EXPECTED_METHODS = 40
 
 function declaredMethods() {
-  const text = readFileSync(join(SRC, 'api', 'index.ts'), 'utf8')
+  const text = readText(join(SRC, 'api', 'index.ts'))
   const found = []
   let current = null
   for (const line of text.split('\n')) {
@@ -168,7 +184,7 @@ function callSites() {
   )
   return files.map((file) => ({
     file: file.replace(WEB_ROOT, '').replace(/\\/g, '/'),
-    text: readFileSync(file, 'utf8'),
+    text: readText(file),
   }))
 }
 
@@ -197,7 +213,7 @@ for (const [path, line] of declaredPaths) {
 //   ② 一个信封路径在 index.ts 里被引用过、却没有任何一处走 listPage
 const envelopes = envelopePaths()
 const endpointNames = pathNames()
-const indexLines = readFileSync(join(SRC, 'api', 'index.ts'), 'utf8').split('\n')
+const indexLines = readText(join(SRC, 'api', 'index.ts')).split('\n')
 
 const envelopeRefs = new Map()
 let listPageCalls = 0

@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 from typing import List
@@ -44,10 +45,17 @@ BOM_SENSITIVE_SUFFIXES = (
     ".txt",
 )
 
-#: 运行在 Linux 上、行尾必须是 LF 的文件类型。
+#: 行尾必须是 LF 的文件类型。
+#:
 #: ``.ps1`` 不在其中：PowerShell 两种行尾都认，而它的主要读者是 Windows ——
 #: 为了一个不会出错的约束去要求 LF，只会让编辑器反复改回来。
-LF_ONLY_SUFFIXES = (".sh", ".py", ".ini", ".service", ".tmpl")
+#:
+#: 前端那几种（``.ts``/``.vue``/``.json``/``.mjs``）在名单里是有原因的，不是
+#: 顺手加的：``web/scripts/check-routes.mjs`` 靠**逐行比较**认方法
+#: （``line === '}'``），带 CR 的行尾会让它一条都认不出来；而它报出来的是
+#: "入口对账自身失效，多半是文件被重新格式化" —— 指的方向没错，只是没人会
+#: 想到罪魁祸首是行尾符。生成物（``web/openapi.json``）同理，它是被逐字节比对的。
+LF_ONLY_SUFFIXES = (".sh", ".py", ".ini", ".service", ".tmpl", ".ts", ".vue", ".json", ".mjs")
 
 
 def tracked_files() -> List[Path]:
@@ -182,45 +190,118 @@ def test_generated_openapi_json_uses_lf() -> None:
     )
 
 
-#: 会被**逐字节**比对的生成物 → 它们的行尾必须在 .gitattributes 里钉死。
-PINNED_TO_LF = ("web/openapi.json", "web/src/api/schema.d.ts")
+#: 会被**逐字节**或**逐行**处理的子树 → 它们在 .gitattributes 里必须钉死 LF。
+PINNED_LF_PREFIX = "web/"
 
 
-def test_generated_artifacts_are_pinned_to_lf() -> None:
-    """光靠"写文件时显式 LF"是不够的 —— 检出时也会被改写。
+def _attr_pattern_to_regex(pattern: str):
+    """把 .gitattributes 里的一条模式翻成正则。
 
-    上面那条检查看的是**当前工作区**里的文件，所以在开发机上它是绿的（文件是
-    脚本刚写的）；但在 ``core.autocrlf=true`` 的 Windows 上做一次全新 checkout，
-    git 会按 ``* text=auto`` 把它们写成 CRLF，于是：
+    只实现这个仓库真的用到的通配符（``**`` / ``*`` / ``?``）—— 写一个通用的
+    gitattributes 实现是另一个项目，而这里需要回答的只是一个很窄的问题：
+    "某条 ``eol=lf`` 的规则**管不管**这个文件。
+    """
+    out = []
+    index = 0
+    while index < len(pattern):
+        if pattern.startswith("**", index):
+            out.append(".*")
+            index += 2
+            continue
+        char = pattern[index]
+        if char == "*":
+            out.append("[^/]*")
+        elif char == "?":
+            out.append("[^/]")
+        else:
+            out.append(re.escape(char))
+        index += 1
+    return re.compile("^%s$" % "".join(out))
 
-    * ``dump_openapi.py --check`` 永远说"不是最新"（它比的是原始字节）
-    * ``test_generated_openapi_json_uses_lf`` 变红
 
-    而这两条信息都指向"有人改了代码没重新生成"，指不到真正的原因（行尾符）——
-    照着提示去重新生成一遍，一切照旧。所以声明本身也要守住。
+def _attr_matches(pattern: str, path: str) -> bool:
+    """gitattributes 的匹配规矩：**不含斜杠**的模式按文件名匹配（任意层级）。
 
-    这条只读 .gitattributes、不读文件内容，所以它在任何平台上结论一致。
+    这一条必须实现对，否则 ``*.py`` 会被当成"只匹配仓库根下的 .py"，而 git 的
+    真实语义是"任意层级" —— 在这个仓库里两者的差别到处都是（``.gitattributes``
+    里除 ``web/**`` 之外全是这种模式）。
+    """
+    if "/" in pattern:
+        return _attr_pattern_to_regex(pattern).match(path) is not None
+    return _attr_pattern_to_regex(pattern).match(path.rsplit("/", 1)[-1]) is not None
+
+
+def _attr_rules() -> "list[tuple[str, list]]":
+    """按文件里的**顺序**读出 (模式, 属性列表)。
+
+    顺序要紧：gitattributes 的规矩是后面的规则覆盖前面的，所以不能塞进 dict。
     """
     text = (REPO_ROOT / ".gitattributes").read_text(encoding="utf-8")
-    rules = {}
+    rules = []
     for line in text.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
         parts = stripped.split()
-        rules[parts[0]] = parts[1:]
+        rules.append((parts[0], parts[1:]))
+    return rules
 
-    missing = [name for name in PINNED_TO_LF if "eol=lf" not in rules.get(name, [])]
-    assert not missing, (
-        "这些生成物没有在 .gitattributes 里钉死 LF，新 checkout 的机器上会变成 CRLF，"
-        "于是「生成物是否最新」的检查会误报：%r" % missing
+
+def effective_eol(path: str, rules=None) -> "str | None":
+    """这个路径最终生效的 ``eol``（``lf`` / ``crlf`` / ``None``）。"""
+    if rules is None:  # pragma: no cover - 便利默认值
+        rules = _attr_rules()
+    eol = None
+    for pattern, values in rules:
+        if not _attr_matches(pattern, path):
+            continue
+        for value in values:
+            if value.startswith("eol="):
+                eol = value[4:]
+            elif value in ("binary", "-text"):
+                eol = None
+    return eol
+
+
+def test_frontend_tree_is_pinned_to_lf(files: List[Path]) -> None:
+    """整棵 ``web/`` 必须在 .gitattributes 里钉死 LF。
+
+    上面那条检查看的是**当前工作区**的内容，所以开发机上它是绿的；但在
+    ``core.autocrlf=true`` 的 Windows 上做一次全新 checkout、或者只是
+    ``git stash`` 一次往返，git 就会把这些文件写成 CRLF。这一次真的发生过：
+    stash 之后 ``check-routes.mjs`` 从 index.ts 里认出 **0** 个方法，报的是
+    "多半是文件被重新格式化"。
+
+    而"照着提示去格式化一遍"是修不好的 —— 声明不在，下次 checkout 又会变回去。
+    所以声明本身也要守住。这条只读 .gitattributes，任何平台上结论一致。
+    """
+    web_files = [
+        str(path.relative_to(REPO_ROOT)).replace("\\", "/")
+        for path in files
+        if str(path.relative_to(REPO_ROOT)).replace("\\", "/").startswith(PINNED_LF_PREFIX)
+    ]
+    assert web_files, "一个 web/ 下的受跟踪文件都没找到，说明这条检查自己失效了"
+
+    rules = _attr_rules()
+    wrong = [name for name in web_files if effective_eol(name, rules) != "lf"]
+
+    assert not wrong, (
+        "这些前端文件没有在 .gitattributes 里钉死 LF，新 checkout 的机器上会变成 CRLF，"
+        "于是按行解析它们的工具（先是 check-routes.mjs）会静默失效：%r" % wrong[:10]
     )
 
 
 def test_pin_check_actually_catches_a_missing_pin() -> None:
-    """自证：把规则读歪（比如把 eol=lf 写成 eol=crlf）必须能被认出来。"""
-    rules = {"web/openapi.json": ["text", "eol=crlf"]}
+    """自证：规则读歪了、或者声明被删了，都必须能被认出来。
 
-    missing = [name for name in PINNED_TO_LF if "eol=lf" not in rules.get(name, [])]
+    没有这一条的话，``_attr_pattern_to_regex`` 写错（比如 ``**`` 没翻成 ``.*``）
+    会让上面那条检查悄悄变成"空列表是空列别的子集"，永远绿。
+    """
+    rules = [("*.py", ["text", "eol=lf"]), ("web/**", ["text", "eol=crlf"])]
 
-    assert "web/openapi.json" in missing
+    assert effective_eol("web/src/api/index.ts", rules) == "crlf"
+    assert effective_eol("server/syncoj_server/main.py", rules) == "lf"
+    # 没有规则管它 → 没有生效的 eol，也算"没钉死"
+    assert effective_eol("docs/protocol.md", rules) is None
+    # 后面的规则覆盖前面的
+    assert effective_eol("web/x.py", [("*.py", ["eol=lf"]), ("web/**", ["eol=crlf"])]) == "crlf"

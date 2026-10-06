@@ -15,13 +15,18 @@
 *.bat     text eol=crlf
 *.cmd     text eol=crlf
 
-# 生成物必须钉死 LF —— 它们会被**逐字节**比对
-# （`dump_openapi.py --check` 比 web/openapi.json，`check.sh` 重新生成 schema.d.ts 再比）。
-# 只写 `* text=auto` 是不够的：在 core.autocrlf=true 的 Windows 上，一次新 checkout
-# 就会把它们变成 CRLF，于是"生成物是否已最新"永远为假、仓库卫生检查也会红 ——
-# 而这两者报出来的都是"有人改了代码没重新生成"，指不到真正的原因（行尾符）。
-web/openapi.json         text eol=lf
-web/src/api/schema.d.ts  text eol=lf
+# 前端整棵树钉死 LF。
+#
+# 理由不是"LF 更好看"，而是一个真实故障：在 core.autocrlf=true 的 Windows 上，
+# 光是 `git stash` 一次往返（或一次新 checkout）就会把 web/src/** 写成 CRLF，
+# 而 web/scripts/check-routes.mjs 是靠**逐行比较**认方法的（`line === '}'`），
+# 于是它一条都认不出来 —— 报出来的是"入口对账自身失效，多半是文件被重新格式化"。
+# 那句话指的方向没错，但没人会想到罪魁祸首是行尾符。
+#
+# 同一条理由也适用于会被**逐字节**比对的生成物（web/openapi.json 由
+# `dump_openapi.py --check` 比、web/src/api/schema.d.ts 由 check.sh 重新生成再比）：
+# 它们同样落在这条规则里。
+web/**                    text eol=lf
 
 # 二进制
 *.db      binary

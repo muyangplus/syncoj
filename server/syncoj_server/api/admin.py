@@ -70,7 +70,10 @@ from ..schemas import (
     ApplyRosterOut,
     AssetOut,
     AssetRenameIn,
+    AssetTextEditIn,
     AssetTextIn,
+    AssetTextOut,
+    AssetTextSavedOut,
     BootstrapKeyIssueIn,
     BootstrapKeyIssuedOut,
     BootstrapKeyOut,
@@ -2723,6 +2726,23 @@ def upload_asset(
     )
 
 
+def _normalize_text_content(content: str) -> str:
+    """把浏览器里来的正文归一成"真正落盘的那一份"。
+
+    两条规则，新建文本资产与在线编辑**共用这一份实现**（各写一遍的话，
+    "新建时去掉的 BOM"迟早会在编辑那条路上被存回去）：
+
+    * **去掉开头的 BOM**。从 Windows 记事本粘过来的文本可能带 U+FEFF，
+      它到 Linux 上会变成文件开头三个看不见的字节。
+    * **换行统一成 LF**。浏览器 textarea 给的是 ``\\n``，但从别处粘进来的内容
+      可能带 ``\\r\\n``；目标机是 Linux，留着 ``\\r`` 会在选手的编辑器里
+      显示成 ``^M``，看起来像文件坏了。
+    """
+    if content.startswith("\ufeff"):
+        content = content[1:]
+    return content.replace("\r\n", "\n").replace("\r", "\n")
+
+
 @router.post("/contests/{contest_id}/assets/text", response_model=AssetOut)
 def create_text_asset(
     contest_id: int,
@@ -2747,10 +2767,7 @@ def create_text_asset(
     filename = _validate_asset_filename(payload.filename)
     _reject_binary_filename(filename)
 
-    content = payload.content
-    if content.startswith("\ufeff"):
-        content = content[1:]
-    content = content.replace("\r\n", "\n").replace("\r", "\n")
+    content = _normalize_text_content(payload.content)
 
     try:
         sha256, size = ctx.blobs.put_bytes(content.encode("utf-8"))
@@ -2782,6 +2799,130 @@ def _reject_binary_filename(name: str) -> None:
         )
 
 
+# --------------------------------------------------------------------------- #
+# 在线改正文：能在线上改哪些文件、怎么判
+# --------------------------------------------------------------------------- #
+
+#: 能在线上直接改正文的扩展名**白名单**。
+#:
+#: 为什么是白名单而不是复用 `_BINARY_SUFFIXES` 那份黑名单：这个功能会**打开**
+#: 一份别人的文件、把内容显示给人、再存回去。判据必须是"我认得它是文本"，而不是
+#: "我没认出它是二进制" —— 后者对没登记的格式（`.doc`、`.psd`、`.dat`…）一律放行，
+#: 放行的后果是在对话框里显示一份乱码、教师改两笔再保存，等于把一份好好的文件
+#: 覆盖成半截乱码。
+#:
+#: 列表页靠这个集合逐行算 `AssetOut.editable`，所以它是**纯扩展名比较** ——
+#: 一个字节的磁盘读都不做（见 `_is_editable_text`）。
+_TEXT_SUFFIXES = frozenset(
+    ".txt .md .markdown .csv .tsv .ini .cfg .conf .json .yaml .yml .log .sh .py "
+    ".c .cpp .h .hpp .java .go .rs .js .ts .html .htm .tex .rst".split()
+)
+
+#: 能在线上改的正文体积上限（1 MiB）。
+#:
+#: **必须比「新建文本文件」那条路的上限宽**：新建走的是 ``AssetTextIn.content`` 的
+#: 200000 **字符**上限，而 UTF-8 里一个汉字占 3 字节、一个 emoji 占 4 —— 也就是
+#: 新建这条路径最多能造出 800 KB 上下的正文。编辑的上限如果比它小，就会出现
+#: "刚在界面上写好的公告，回头想改一个字却说过大"，而教师完全无从理解。
+#: 反过来宽一点没有代价：真要挡的是一屏塞不下的巨型 blob，不是这几十 KB。
+#:
+#: 与「新建文本文件」的 200000 字上限是**两回事**：那个管"能写多少"（schema 上的
+#: 422），这个管"能不能打开"（400）。上限存在的理由是"打开"这件事本身 ——
+#: 一个 300 KB 的 csv 是正常资产、也让改，但是把它整个塞进浏览器 textarea 再
+#: PUT 回来没有任何意义，那种规模该在本地改完重新上传。
+_TEXT_MAX_BYTES = 1024 * 1024
+
+
+def _has_text_suffix(name: str) -> bool:
+    return Path(name or "").suffix.lower() in _TEXT_SUFFIXES
+
+
+def _is_editable_text(asset: Asset) -> bool:
+    """这个资产**大概**能不能在线上改正文。
+
+    只读元数据（扩展名 + 库里记的 size），所以列表页可以逐行调它而不碰磁盘。
+    真正的"这一份到底行不行"在 :func:`_read_editable_text` 里 —— 那一步必须开文件，
+    因为它要验的是字节能不能按 UTF-8 解出来，而这件事只有读了才知道。
+    """
+    return _has_text_suffix(asset.filename) and int(asset.size or 0) <= _TEXT_MAX_BYTES
+
+
+def _require_editable_asset(asset: Asset) -> None:
+    """按元数据判一次，不合格就 400。"""
+    if not _has_text_suffix(asset.filename):
+        raise ApiError(
+            400,
+            "asset_not_editable",
+            "「%s」不是可在线编辑的文本类型 —— 只有 .txt / .md / .csv 这类文本文件"
+            "能在线上改正文，其他格式请改完再上传" % asset.filename,
+        )
+    size = int(asset.size or 0)
+    if size > _TEXT_MAX_BYTES:
+        raise ApiError(
+            400,
+            "asset_not_editable",
+            "「%s」有 %d KB，超过 1 MB 的在线编辑上限 —— 请改完再上传"
+            % (asset.filename, size // 1024),
+        )
+
+
+def _read_editable_text(ctx: AppContext, asset: Asset) -> str:
+    """读出一个可编辑文本资产的正文；不合格一律 400。
+
+    两道关：
+
+    1. **元数据**（扩展名 + 体积）—— 与列表页那个 ``editable`` 同一套判据
+    2. **字节**（必须能按 UTF-8 解出来）—— 只能开文件才知道，所以它不在列表那条路上
+
+    读出来的正文按与「新建文本文件」一致的方式归一（去 BOM、换行转 LF），这样
+    **打开再原样保存是幂等的** —— 否则一份 CRLF 文件每被打开保存一次就变一次 sha，
+    而那会连带把已经下发的机器全部重排一遍。
+    """
+    _require_editable_asset(asset)
+
+    try:
+        with ctx.blobs.open(asset.sha256) as handle:
+            # 多读一个字节：库里的 size 是**记录**，真正要拦的是"实际读到的字节"。
+            raw = handle.read(_TEXT_MAX_BYTES + 1)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="「%s」的内容已经不在服务端存储里了（%s）" % (asset.filename, exc),
+        )
+
+    if len(raw) > _TEXT_MAX_BYTES:
+        raise ApiError(
+            400,
+            "asset_not_editable",
+            "「%s」实际超过 1 MB 的在线编辑上限 —— 请改完再上传" % asset.filename,
+        )
+
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ApiError(
+            400,
+            "asset_not_utf8",
+            "「%s」的字节不是合法的 UTF-8 文本（第 %d 个字节就解不出来），"
+            "没法当成正文打开" % (asset.filename, exc.start + 1),
+        )
+
+    return _normalize_text_content(text)
+
+
+def _contest_asset(session, contest_id: int, asset_id: int) -> Asset:
+    """按「场次 + 资产」取一行，取不到就是 404。
+
+    必须把 ``contest_id`` 一起查：只按 asset_id 取的话，拿别场的 id 来也能读到、
+    还能改 —— 资产行本身不带权限信息，那等于跨场次越权。两个路由都走它，
+    免得"GET 查了场次、PUT 忘了查"。
+    """
+    asset = session.get(Asset, asset_id)
+    if asset is None or int(asset.contest_id) != int(contest_id):
+        raise HTTPException(status_code=404, detail="资产不存在或不属于本场次")
+    return asset
+
+
 @router.get("/contests/{contest_id}/assets", response_model=Page[AssetOut])
 def list_assets(
     contest_id: int,
@@ -2811,6 +2952,9 @@ def _asset_out(asset: Asset, pending_targets: int = 0) -> AssetOut:
         kind=asset.kind,
         created_at=_iso(asset.created_at) or "",
         pending_targets=int(pending_targets),
+        # 逐行算，但**不读盘**（见 `_is_editable_text`）：列表页一屏几十行，
+        # 为了这一个布尔逐个打开 blob 会把一次列表请求变成几十次磁盘读。
+        editable=_is_editable_text(asset),
     )
 
 
@@ -2830,6 +2974,123 @@ def _pending_target_counts(session, contest_id: int) -> Dict[int, int]:
         .group_by(DeployTask.asset_id)
     ).all()
     return {asset_id: int(count) for asset_id, count in rows}
+
+
+@router.get(
+    "/contests/{contest_id}/assets/{asset_id}/text", response_model=AssetTextOut
+)
+def get_asset_text(
+    contest_id: int,
+    asset_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> AssetTextOut:
+    """读出一个纯文本资产的正文，供界面在线上编辑。
+
+    列表页那个 ``AssetOut.editable`` 只看元数据（不读盘）。这里是**真判**：
+    扩展名、体积、以及最要紧的那一条 —— 字节必须能按 UTF-8 解出来。
+
+    解不出来一律 400 而不是"尽力显示"：一份乱码在对话框里看起来也有内容，
+    教师在上面改两笔再保存，就等于用半截正确的字节覆盖掉原来那份文件，
+    而原始字节是拿不回来的。
+    """
+    with ctx.db.session() as session:
+        asset = _contest_asset(session, contest_id, asset_id)
+        return AssetTextOut(
+            filename=asset.filename,
+            content=_read_editable_text(ctx, asset),
+        )
+
+
+@router.put(
+    "/contests/{contest_id}/assets/{asset_id}/text", response_model=AssetTextSavedOut
+)
+def save_asset_text(
+    contest_id: int,
+    asset_id: int,
+    payload: AssetTextEditIn,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> AssetTextSavedOut:
+    """用新正文换掉一个纯文本资产的内容，**同一个 asset id**。
+
+    资产是内容寻址的（一行只有 ``sha256`` + ``size``），所以"改内容"就是换掉
+    这两列，指向它的下发任务与目标一行都不用动。
+
+    但只换这两列是不够的：``services/deploy.py`` 的 tick 按 ``pending/ready``
+    取作业、并按**当前**的 ``asset.sha256`` 组装 job —— 已经 ``done`` 的目标
+    不会再被下发。不重排的话，选手页显示的是新正文、机器上躺着的还是旧文件，
+    而界面上一切正常，没人会发现。重排时**必须把续传偏移一起清零**：
+    拿旧文件的偏移去续新文件，拼出来的是一份永远校验不过的文件。
+
+    **审计**：这条路径改的是已经发出去的东西，事后必须查得到 —— 哪个场次、
+    哪个文件、从哪一版改到哪一版、影响了多少台。所以每次都要写一条 info 事件。
+    """
+    with ctx.db.session() as session:
+        asset = _contest_asset(session, contest_id, asset_id)
+        # 先确认这一份**本来**就能改（同样过扩展名/体积/UTF-8 三道），再动手。
+        # 反过来先写后验的话，一份不该被碰的资产会被改掉一半才发现不对。
+        _read_editable_text(ctx, asset)
+
+        old_sha = asset.sha256
+        content = _normalize_text_content(payload.content)
+        try:
+            sha256, size = ctx.blobs.put_bytes(content.encode("utf-8"))
+        except BlobTooLarge as exc:  # pragma: no cover - 上限由 schema 兜着
+            raise HTTPException(status_code=413, detail=str(exc))
+
+        asset.sha256 = sha256
+        asset.size = size
+
+        requeued = 0
+        tasks: Dict[int, DeployTask] = {}
+        for target, task in session.execute(
+            select(DeployTarget, DeployTask)
+            .join(DeployTask, DeployTarget.task_id == DeployTask.id)
+            .where(
+                DeployTask.asset_id == asset_id,
+                DeployTarget.status == DeployStatus.DONE,
+            )
+        ).all():
+            target.status = DeployStatus.PENDING
+            # 旧文件的字节数对新文件毫无意义：不清零的话下一轮会拿着这个偏移
+            # 去续传，落出来是一份坏文件。
+            target.bytes_done = 0
+            target.updated_at = utcnow()
+            requeued += 1
+            tasks[int(task.id)] = task
+
+        # 任务状态是目标状态的聚合缓存（`_derive_task_status`），读的时候会重算，
+        # 但**写**的路径上有两处按它判断：取消接口会看它是不是 done。留在 done
+        # 会让"刚被重排的任务"报"任务已完成，无法取消"。
+        for task in tasks.values():
+            if task.status != DeployStatus.CANCELLED:
+                task.status = DeployStatus.PENDING
+
+        session.add(
+            EventLog(
+                level="info",
+                category="asset_text_edited",
+                contest_id=contest_id,
+                message="在线修改了场次 %d 的「%s」：正文 sha %s → %s，重新排队 %d 台机器"
+                % (contest_id, asset.filename, old_sha[:8], sha256[:8], requeued),
+            )
+        )
+        session.flush()
+
+        pending = session.execute(
+            select(func.count(DeployTarget.id))
+            .join(DeployTask, DeployTarget.task_id == DeployTask.id)
+            .where(
+                DeployTask.asset_id == asset_id,
+                DeployTarget.status.in_(ACTIVE_DEPLOY_STATUSES),
+            )
+        ).scalar_one()
+        log.info(
+            "在线改正文：场次 %d 的「%s」sha %s → %s，重排 %d 台",
+            contest_id, asset.filename, old_sha[:8], sha256[:8], requeued,
+        )
+        return AssetTextSavedOut(asset=_asset_out(asset, int(pending or 0)), requeued=requeued)
 
 
 @router.patch("/assets/{asset_id}", response_model=AssetOut)

@@ -753,6 +753,14 @@ class AssetOut(_Base):
     #: 界面靠它说清"改名/删除会对谁生效"：已经落地的文件不受影响，
     #: 没落地的会按新名字落地 —— 不说的话教师只能靠猜。
     pending_targets: int = 0
+    #: 能不能在线上直接改正文。**由服务端算**（扩展名白名单 + 体积上限），
+    #: 前端不许按扩展名自己判断：两处规则必然分叉，而分叉的那一天表现是
+    #: "界面上给了他编辑按钮，点下去服务端说不行"（或者反过来，能改的没入口）。
+    #:
+    #: 列表页要逐行算这个字段，所以它**只看元数据、不打开 blob** —— 一屏资产
+    #: 逐个读盘去验编码，会把一次列表请求变成几十次磁盘读。真正的编码/大小
+    #: 校验在 ``GET|PUT .../text`` 里做（见 ``api/admin.py``）。
+    editable: bool = False
 
 
 class AssetRenameIn(_Base):
@@ -775,6 +783,44 @@ class AssetTextIn(_Base):
     filename: str = Field(min_length=1, max_length=255, description="文件名，如 须知.txt")
     content: str = Field(max_length=200_000, description="文本内容（UTF-8；换行统一成 LF）")
     kind: str = Field(default="testdata", max_length=32)
+
+
+class AssetTextOut(_Base):
+    """一个可在线编辑的纯文本资产的正文。
+
+    回显 ``filename`` 是因为对话框要用它写标题（"编辑 须知.txt"）——
+    调用方手上可能只有一个 asset id。
+    """
+
+    filename: str
+    content: str
+
+
+class AssetTextEditIn(_Base):
+    """在线改正文。**只有内容**，文件名不在这个入口里。
+
+    改名是"换标签"（内容按 sha256 存，改名不碰内容），改正文是"换内容"；
+    合成一个入口的话，"到底改的是哪一个"就没法从回执里说清 —— 而这两件事
+    对已经落到机器上的文件、对未完成的下发目标，后果完全不同。
+
+    ``content`` 的 200000 字上限与「新建文本文件」那条**逐字一致**：同一个
+    对话框写出来的东西，不该因为走新建还是走编辑而撞上两条不同的规则。
+    """
+
+    content: str = Field(max_length=200_000, description="文本内容（UTF-8；换行统一成 LF）")
+
+
+class AssetTextSavedOut(_Base):
+    """在线改正文的回执。
+
+    ``asset`` 是**改后**的那一份（sha256 / size 都变了），界面拿它刷新行。
+    ``requeued`` 是被重新排队（``done`` → ``pending``）的机器台数 ——
+    已经落地的文件不会自己变成新的，只有重排之后机器才会在下一轮 tick
+    拿到新字节；这个数字是教师确认"改动已经推进下去"的唯一依据。
+    """
+
+    asset: AssetOut
+    requeued: int = 0
 
 
 class DeployCreate(_Base):

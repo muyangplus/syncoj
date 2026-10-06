@@ -37,6 +37,8 @@ __all__ = [
     "openssl_available",
     "parse_version",
     "write_public_key_json",
+    "b64url_encode",
+    "b64url_decode",
 ]
 
 
@@ -325,6 +327,27 @@ def load_signing_key(path: Path) -> SigningKey:
 
 
 def _unb64(text: str) -> bytes:
+    """私钥 JSON 里的 base64url 字段。格式定义见下面 ``b64url_*``。"""
+    return b64url_decode(text)
+
+
+# --------------------------------------------------------------------------- #
+# base64url（无填充）
+# --------------------------------------------------------------------------- #
+#
+# 与 Agent 侧 :func:`syncoj_agent.rsa._unb64` 是同一套约定：``-``/``_`` 代替
+# ``+``/``/``，并且**不带填充**。带填充的变体在 URL、文件名、shell 里都会出问题，
+# 而"填充有没有"这种事一旦两边理解不同，报出来的是"签名验证失败"这种查不到
+# 根因的错。所以格式的定义留在这里一处，别的地方 import 它。
+
+
+def b64url_encode(raw: bytes) -> str:
+    """字节串 → base64url（无填充）。"""
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def b64url_decode(text: str) -> bytes:
+    """base64url → 字节串。容忍缺失的填充与标准 base64 的 ``+``/``/``。"""
     cleaned = text.strip().replace("+", "-").replace("/", "_")
     padding = "=" * (-len(cleaned) % 4)
     return base64.urlsafe_b64decode(cleaned + padding)

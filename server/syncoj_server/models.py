@@ -31,6 +31,7 @@ from sqlalchemy.orm import declarative_base, relationship
 __all__ = [
     "Base",
     "utcnow",
+    "unix_seconds",
     "iso_utc",
     "local_clock",
     "Admin",
@@ -60,6 +61,20 @@ Base = declarative_base()
 def utcnow() -> datetime:
     """当前 UTC 时间，刨掉 tzinfo（见模块 docstring）。"""
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def unix_seconds(moment: datetime) -> int:
+    """把 :func:`utcnow` 给的 naive-UTC 时刻转成真正的 Unix 秒。
+
+    **必须显式补 UTC 时区**：``datetime.timestamp()`` 对 naive 时间**按本机时区
+    解释**，于是同一个时刻在东八区机器上算出来的秒数差 28800。这个函数以前在
+    ``api/agent.py`` 里叫 ``_unix_seconds``，那里踩过一次；卸载令牌的
+    ``issued_at`` / ``expires_at`` 也是同一类值，所以把它提到这里只留一处定义 ——
+    这个量在心跳、选手页、令牌三处都要用。
+    """
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return int(moment.timestamp())
 
 
 def iso_utc(value: Optional[datetime]) -> Optional[str]:
@@ -381,6 +396,16 @@ class Agent(Base, TimestampMixin):
     enrolled_at = Column(DateTime, default=utcnow, nullable=False)
     last_enrolled_at = Column(DateTime, default=utcnow, nullable=False)
     last_seen_at = Column(DateTime, nullable=True)
+    #: 最近一次心跳**报告**"本机有发布公钥"（升级信任锚）的时刻。
+    #:
+    #: 卸载授权必须由 root 执行，而机器只能用那把公钥验签 —— 所以在没有公钥的
+    #: 机器上签授权是白费：它一定拒收，教师看到的却是"操作成功"。这一列就是那句
+    #: 拒绝的依据。
+    #:
+    #: 存时刻而不是布尔：它同时回答了"这台机器上一次说自己有锚是什么时候"，
+    #: 排查时那个时间比自己记一个状态位有用。心跳报告为"没有"时会被清空 ——
+    #: 信任锚是会被卸载脚本删掉的东西，不能只增不减。
+    release_public_key_at = Column(DateTime, nullable=True)
     #: 最近一次请求的**来源 IP**。
     #:
     #: 它存在的唯一理由是选手页的"自动匹配本机"：选手不输任何东西，服务端就靠

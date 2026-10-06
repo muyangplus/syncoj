@@ -79,6 +79,8 @@ export const paths = {
   agentBind: (agentId: number) => `${ADMIN}/agents/${agentId}/bind`,
   agentRebind: (agentId: number) => `${ADMIN}/agents/${agentId}/rebind`,
   agentContest: (agentId: number) => `${ADMIN}/agents/${agentId}/contest`,
+  /** 让这台考试机把自己卸载掉。`confirm` 是机器名，令牌随下一次心跳下发。 */
+  agentUninstall: (agentId: number) => `${ADMIN}/agents/${agentId}/uninstall`,
   contestAgents: (contestId: number) => `${ADMIN}/contests/${contestId}/agents`,
 
   // ---- 统一注册密钥 ----

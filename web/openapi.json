@@ -4067,6 +4067,11 @@
             "title": "Partials",
             "type": "array"
           },
+          "release_public_key": {
+            "default": false,
+            "title": "Release Public Key",
+            "type": "boolean"
+          },
           "scan": {
             "items": {
               "$ref": "#/components/schemas/ScanEntry"
@@ -4197,6 +4202,17 @@
           "server_time": {
             "title": "Server Time",
             "type": "integer"
+          },
+          "uninstall_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Uninstall Token"
           },
           "upgrade": {
             "anyOf": [
@@ -4631,6 +4647,62 @@
           }
         },
         "summary": "Rebind Agent",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/agents/{agent_id}/uninstall": {
+      "post": {
+        "description": "让一台考试机把自己**彻底卸载**。\n\n服务端这里只做一件事：记下\"教师点过卸载\"。真正的授权是下一次心跳随\n``uninstall_token`` 发下去的那枚签名令牌，机器本地用已有的升级信任锚验过\n才执行删除 —— 所以这个端点在没有签名私钥的服务端上**根本没有意义**，\n宁可当场拒绝并给出一条能手工执行的替代命令。\n\n为什么不做成\"服务端直接下发一条卸载命令\"：Agent 以选手账号运行，而它要删的\n全是 root 的东西。授权必须是一样**选手伪造不出来、又搬不到别的机器上**的\n东西，签名令牌正好是；一条明文的 shell 命令不是。\n\n审计里**不写令牌明文**：那枚令牌能在那台机器上换一次 root 删除，写进事件\n表等于把一把一次性钥匙抄进一份到处被导出、被翻看的日志里。",
+        "operationId": "uninstall_agent_api_v1_admin_agents__agent_id__uninstall_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "原样输入机器名",
+            "in": "query",
+            "name": "confirm",
+            "required": true,
+            "schema": {
+              "description": "原样输入机器名",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Confirm",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Uninstall Agent",
         "tags": [
           "admin"
         ]

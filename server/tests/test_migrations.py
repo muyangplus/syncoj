@@ -130,6 +130,10 @@ MIGRATION_ADDED_COLUMNS = {
         "claimed_at",
         #: ``last_seen_ip``：选手页按来源 IP 认机器要用它（§5.6）。
         "last_seen_ip",
+        #: ``release_public_key_at``：机器最近一次报告"本机有发布公钥"的时刻。
+        #: 远程卸载授权的门禁要用它（迁移 007）—— 没有信任锚的机器验不了签名，
+        #: 而在那种机器上签授权等于回一句假的"操作成功"。
+        "release_public_key_at",
     },
     #: ``player_notice`` 曾经在这一档里（迁移 003 加的"给选手看的注意事项"）。
     #: 考场公告改成"下发一份 NOTICE.md 文件"之后它没有读者了，所以本轮由迁移 005

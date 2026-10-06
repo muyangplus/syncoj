@@ -16,6 +16,7 @@ from .registry import AgentRegistry
 from .services.paircodes import PairCodeCache
 from .services.ratelimit import RateLimiter
 from .services.signing import DerError, SigningKey, load_signing_key
+from .services.uninstall import PendingUninstalls
 from .storage import BlobStore
 
 __all__ = ["AppContext"]
@@ -42,6 +43,9 @@ class AppContext:
     #: 未配对机器的配对码明文。**只在内存里** —— 协议要求每一轮 tick 都带上
     #: 当前有效的码，而库里只存哈希（见 ``services/paircodes.py``）
     pair_codes: PairCodeCache = field(default_factory=PairCodeCache)
+    #: "教师点过卸载"的机器。**只在内存里**：落库等于把一枚能在那台机器上换一次
+    #: root 删除的凭据留在 ``syncoj.db`` 里（见 ``services/uninstall.py``）
+    pending_uninstalls: PendingUninstalls = field(default_factory=PendingUninstalls)
     #: 教师浏览器最近一次打开管理界面用的地址（``http://10.0.0.5:8000``）。
     #:
     #: 服务端**没法可靠地算出**自己的对外地址（枚举网卡会在多网卡机器上挑错那

@@ -410,7 +410,32 @@ const revokeAgent = useMutation(() => {
   },
 })
 
-/** 单行操作走一个下拉：四个动作都放在表格里会把这一行挤到看不清数据。 */
+const uninstallOpen = ref(false)
+const uninstallTarget = ref<AgentRuntimeOut | null>(null)
+
+function askUninstall(agent: AgentRuntimeOut): void {
+  uninstallTarget.value = agent
+  uninstallOpen.value = true
+}
+
+/**
+ * 远程卸载。
+ *
+ * 服务端只是**记下这次请求**，真正的授权随下一轮心跳下发，所以这里没有"已删除"
+ * 这种即时结果 —— 回执原文把它说清楚了，界面不要自己另编一句。
+ */
+const uninstallAgent = useMutation(() => {
+  const target = uninstallTarget.value
+  if (!target) throw new Error('没有选中机器')
+  return agentApi.uninstall(target.agent_id, target.hostname || target.machine_id)
+}, {
+  onDone: () => {
+    uninstallOpen.value = false
+    uninstallTarget.value = null
+  },
+})
+
+/** 单行操作走一个下拉：五个动作都放在表格里会把这一行挤到看不清数据。 */
 function handleCommand(
   command: string,
   row: { player: PlayerOut; agent: AgentRuntimeOut | null },
@@ -422,6 +447,7 @@ function handleCommand(
   else if (command === 'rebind') askRebind(agent)
   else if (command === 'contest') askSetContest(agent)
   else if (command === 'revoke') askRevokeAgent(agent)
+  else if (command === 'uninstall') askUninstall(agent)
 }
 </script>
 
@@ -629,6 +655,7 @@ function handleCommand(
                   <el-dropdown-item command="setContest">指定场次</el-dropdown-item>
                   <el-dropdown-item command="unbind" divided>解除绑定</el-dropdown-item>
                   <el-dropdown-item command="revoke">作废这台机器</el-dropdown-item>
+                  <el-dropdown-item command="uninstall">卸载 Agent</el-dropdown-item>
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
@@ -772,6 +799,27 @@ function handleCommand(
       confirm-text="作废"
       detail="凭据作废（下一轮心跳 401），要重新注册并配对；只想换人请用「改派」。"
       @confirm="revokeAgent.run(undefined)"
+    />
+
+    <!--
+      卸载 Agent：不可逆，所以和「作废」一样打一遍机器名。
+
+      这里只写**后果**与"没执行怎么办"，不解释机制：这台机器下次心跳才动手，
+      届时程序、单元、注册密钥都会被删掉；授权 15 分钟内有效，机器一直没执行
+      就重新点一次。
+    -->
+    <ConfirmByNameDialog
+      v-model="uninstallOpen"
+      title="卸载这台机器上的 Agent"
+      :expected="uninstallTarget?.hostname || uninstallTarget?.machine_id || ''"
+      :submitting="uninstallAgent.pending.value"
+      confirm-text="卸载"
+      detail="这台机器下次心跳才会执行卸载，届时机器上的程序、单元、注册密钥都会被删掉。"
+      :impact="[
+        '授权 15 分钟内有效。',
+        '机器一直没执行（比如没网、没开机），重新点一次即可。',
+      ]"
+      @confirm="uninstallAgent.run(undefined)"
     />
   </PageShell>
 </template>

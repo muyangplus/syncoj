@@ -141,7 +141,7 @@ from ..security import (
     new_token,
     verify_password,
 )
-from ..services import discovery, enrollment, matching, packaging, rosters, zipcrypto
+from ..services import discovery, enrollment, matching, packaging, rosters, uninstall, zipcrypto
 from ..services.deploy import validate_dest_template
 from ..services.signing import parse_version
 from ..storage import BlobTooLarge, HashMismatch
@@ -1991,6 +1991,113 @@ def revoke_agent(
         detail="已作废 %s 那台机器的凭据。它下次心跳会被拒，届时需要重新注册（或改用「改派」）"
         % player_no,
     )
+
+
+@router.post("/agents/{agent_id}/uninstall", response_model=SimpleAck)
+def uninstall_agent(
+    agent_id: int,
+    request: Request,
+    confirm: str = Query(..., min_length=1, max_length=200, description="原样输入机器名"),
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> SimpleAck:
+    """让一台考试机把自己**彻底卸载**。
+
+    服务端这里只做一件事：记下"教师点过卸载"。真正的授权是下一次心跳随
+    ``uninstall_token`` 发下去的那枚签名令牌，机器本地用已有的升级信任锚验过
+    才执行删除 —— 所以这个端点在没有签名私钥的服务端上**根本没有意义**，
+    宁可当场拒绝并给出一条能手工执行的替代命令。
+
+    为什么不做成"服务端直接下发一条卸载命令"：Agent 以选手账号运行，而它要删的
+    全是 root 的东西。授权必须是一样**选手伪造不出来、又搬不到别的机器上**的
+    东西，签名令牌正好是；一条明文的 shell 命令不是。
+
+    审计里**不写令牌明文**：那枚令牌能在那台机器上换一次 root 删除，写进事件
+    表等于把一把一次性钥匙抄进一份到处被导出、被翻看的日志里。
+    """
+    with ctx.db.session() as session:
+        agent = session.get(Agent, agent_id)
+        if agent is None:
+            raise ApiError(404, "agent_not_found", "这台机器不在台账里")
+
+        # 不可逆动作：与「作废」同一套"把机器名打一遍"的规矩
+        machine_name = agent.hostname or agent.machine_id
+        require_confirm(machine_name, confirm, "机器名")
+
+        # 私钥是这套机制的**前提**：没有它，"服务端签发"这件事本身不存在。
+        # 放在这里（而不是让它走到下面顺手报个 500）是因为这道门禁与「发布当前
+        # 版本」是同一道，失败原因是"服务端没配好"，与机器那边的状态无关。
+        if ctx.signing_key is None:
+            raise ApiError(
+                400,
+                "uninstall_unavailable",
+                _uninstall_fallback_detail(
+                    ctx,
+                    request,
+                    lead="这台服务端没有配置发布签名私钥，签不出卸载授权（%s）。"
+                    % (ctx.signing_key_error or "请设置 SYNCOJ_RELEASE_KEY"),
+                ),
+            )
+
+        if not agent.release_public_key_at:
+            raise ApiError(
+                400,
+                "uninstall_unavailable",
+                _uninstall_fallback_detail(
+                    ctx,
+                    request,
+                    lead="这台机器最近一次心跳没有报告发布公钥，它验不了卸载授权。",
+                ),
+            )
+
+        machine_uuid = agent.machine_uuid
+        if not machine_uuid:
+            # 老机器可能在迁移里丢了 UUID。没有 UUID 就没法把授权绑死在这一台上，
+            # 而"绑不上"的授权等于允许拿到它的任何机器删自己 —— 不发。
+            raise ApiError(
+                400,
+                "uninstall_unavailable",
+                _uninstall_fallback_detail(
+                    ctx, request, lead="这台机器没有报告机器 UUID，卸载授权绑不到它身上。"
+                ),
+            )
+
+        ctx.pending_uninstalls.request(
+            machine_uuid,
+            agent_id=agent.id,
+            admin=admin.username,
+            now=utcnow(),
+        )
+        session.add(
+            EventLog(
+                level="warning",
+                category="agent_uninstall",
+                message="请求卸载机器：%s @ %s（由 %s 发起）"
+                % (machine_name, agent.machine_id[:16], admin.username),
+            )
+        )
+
+    return SimpleAck(
+        ok=True,
+        detail="已记下这台机器的卸载请求：它下次心跳会拿到卸载授权，届时自己清干净；"
+        "授权 %d 分钟内有效，机器一直没上线就重新点一次" % (uninstall.TOKEN_TTL_SECONDS // 60),
+    )
+
+
+def _uninstall_fallback_detail(
+    ctx: AppContext, request: Request, lead: Optional[str] = None
+) -> str:
+    """发不出卸载授权时给教师看的那句话。
+
+    **必须带一条能照着做的命令**：这条路走不通时，教师手里唯一剩下的办法就是
+    站到机器前面跑装机页那条卸载命令。只说"不可用"等于把人卡在半路。
+    """
+    base = (discovery.describe_advertised_url(
+        ctx, request.client.host if request.client else None
+    ) or "").rstrip("/")
+    command = uninstall.fallback_uninstall_command(base)
+    head = lead or "这台服务端没有配置发布签名私钥，签不出卸载授权。"
+    return "%s改用装机页那条卸载命令，到那台机器上执行：%s" % (head, command)
 
 
 @router.get("/contests/{contest_id}/files", response_model=Page[SourceFileOut])

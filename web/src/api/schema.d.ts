@@ -115,6 +115,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/agents/{agent_id}/uninstall": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Uninstall Agent
+         * @description 让一台考试机把自己**彻底卸载**。
+         *
+         *     服务端这里只做一件事：记下"教师点过卸载"。真正的授权是下一次心跳随
+         *     ``uninstall_token`` 发下去的那枚签名令牌，机器本地用已有的升级信任锚验过
+         *     才执行删除 —— 所以这个端点在没有签名私钥的服务端上**根本没有意义**，
+         *     宁可当场拒绝并给出一条能手工执行的替代命令。
+         *
+         *     为什么不做成"服务端直接下发一条卸载命令"：Agent 以选手账号运行，而它要删的
+         *     全是 root 的东西。授权必须是一样**选手伪造不出来、又搬不到别的机器上**的
+         *     东西，签名令牌正好是；一条明文的 shell 命令不是。
+         *
+         *     审计里**不写令牌明文**：那枚令牌能在那台机器上换一次 root 删除，写进事件
+         *     表等于把一把一次性钥匙抄进一份到处被导出、被翻看的日志里。
+         */
+        post: operations["uninstall_agent_api_v1_admin_agents__agent_id__uninstall_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/assets/{asset_id}": {
         parameters: {
             query?: never;
@@ -3786,6 +3818,11 @@ export interface components {
             machine_id: string;
             /** Partials */
             partials?: components["schemas"]["PartialDownload"][];
+            /**
+             * Release Public Key
+             * @default false
+             */
+            release_public_key: boolean;
             /** Scan */
             scan?: components["schemas"]["ScanEntry"][];
             /**
@@ -3833,6 +3870,8 @@ export interface components {
             reason?: string | null;
             /** Server Time */
             server_time: number;
+            /** Uninstall Token */
+            uninstall_token?: string | null;
             upgrade?: components["schemas"]["UpgradeInfo"] | null;
         };
         /** TickStats */
@@ -4027,6 +4066,40 @@ export interface operations {
                 "application/json": components["schemas"]["RebindAgentIn"];
             };
         };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    uninstall_agent_api_v1_admin_agents__agent_id__uninstall_post: {
+        parameters: {
+            query: {
+                /** @description 原样输入机器名 */
+                confirm: string;
+            };
+            header?: never;
+            path: {
+                agent_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {

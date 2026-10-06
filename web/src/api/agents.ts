@@ -1,6 +1,6 @@
 /** 某场次里的机器（已经配对到人的那些）。 */
 
-import { request } from './client'
+import { query, request } from './client'
 import { listPage, removeItem } from './crud'
 import type { ListParams } from './crud'
 import { paths } from './endpoints'
@@ -35,4 +35,16 @@ export const agentApi = {
    */
   revoke: (agentId: number, hostname: string) =>
     removeItem(paths.agent(agentId), hostname),
+
+  /**
+   * 让这台考试机把自己卸载掉（删程序、单元、注册密钥）。
+   *
+   * 不可逆，所以 `confirm` 同样是机器名。服务端只是**记下这次请求**：真正的
+   * 授权是下一轮心跳随 `uninstall_token` 下发的签名令牌，机器验过才动手 ——
+   * 所以它得先联网一次。没拿到就是没执行，重新点一次即可。
+   */
+  uninstall: (agentId: number, hostname: string) =>
+    request<SimpleAck>(`${paths.agentUninstall(agentId)}${query({ confirm: hostname })}`, {
+      method: 'POST',
+    }),
 }

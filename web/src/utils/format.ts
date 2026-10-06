@@ -60,6 +60,7 @@ const EVENT_CATEGORY_LABELS: Record<string, string> = {
   agent_rebind: '机器改派',
   agent_unbind: '解除绑定',
   agent_revoke: '作废机器',
+  agent_uninstall: '卸载机器',
   bootstrap_key: '统一密钥',
   machines_clear: '清空待配对机器',
   // 场次与选手

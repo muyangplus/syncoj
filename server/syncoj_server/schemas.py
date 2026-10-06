@@ -195,6 +195,16 @@ class TickRequest(_Base):
     #: 刻意由 Agent 显式上报而不是服务端从 partials 推断 —— "分片不见了" 既可能
     #: 是下完了，也可能是被清理了，推断会误判。
     completed_assets: List[int] = Field(default_factory=list)
+    #: 这台机器上**有没有可用的发布公钥**（``/etc/syncoj/release-key.pub.json``，
+    #: 也就是升级信任锚）。
+    #:
+    #: 它只上报"在不在"，不含任何密钥内容：服务端要在下发卸载授权之前知道
+    #: "那台机器到底验不验得了签名"，而在没有公钥的机器上发授权是白费 ——
+    #: 它一定会拒收，教师看到的却是"操作成功"。
+    #:
+    #: 缺省 ``False`` 是有意的：老版本 Agent 不报这个字段，而"没报"与"没有"
+    #: 在这里该得到同一个结论（当作验不了），不能乐观地假定它有。
+    release_public_key: bool = False
     stats: TickStats = Field(default_factory=TickStats)
 
 
@@ -224,6 +234,13 @@ class TickResponse(_Base):
     deploy_jobs: List[DeployJob] = Field(default_factory=list)
     cancel_assets: List[int] = Field(default_factory=list)
     upgrade: Optional[UpgradeInfo] = None
+    #: 教师请求过卸载、且这台机器报过有发布公钥时，这里是一次性卸载授权令牌；
+    #: 其余时候是 ``null``。Agent 拿它去验签，验过才执行删除。
+    #:
+    #: 同一枚令牌会在多轮心跳里原样重发（机器可能一次没收到、也可能写盘失败），
+    #: 而教师**再点一次**必然换一枚新的。它没有单独的有效状态位：令牌存在本身
+    #: 就等于"教师点过"，过期后服务端自然不再下发。
+    uninstall_token: Optional[str] = None
     config: Dict[str, Any]
 
     #: 这台机器是否已经绑定到名单条目（人）。未配对时为 False

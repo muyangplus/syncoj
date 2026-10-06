@@ -37,6 +37,7 @@ from ..models import (
     SourceFile,
     iso_utc,
     local_clock,
+    unix_seconds,
     utcnow,
 )
 from ..paths import PathValidationError, safe_join, validate_relpath
@@ -54,7 +55,7 @@ from ..schemas import (
 )
 from ..security import hash_token, new_pair_code, new_token
 from ..storage import BlobTooLarge, HashMismatch, materialize
-from ..services import enrollment, packaging
+from ..services import enrollment, packaging, uninstall
 from ..services.collect import reconcile_scan, record_events
 from ..services.deploy import collect_deploy_jobs
 from ..services.ratelimit import RateLimitExceeded
@@ -128,24 +129,6 @@ def _reject_outside_window(ctx: AppContext, identity: AgentIdentity, now) -> Non
                     "ends_at": iso_utc(ends_at),
                 },
             )
-
-
-def _unix_seconds(moment) -> int:
-    """把 ``utcnow()`` 给的 UTC 时间转成真正的 Unix 秒。
-
-    **必须显式补上 UTC 时区。** ``utcnow()`` 返回的是"没有时区标记的 UTC 时刻"，
-    而 ``datetime.timestamp()`` 对 naive 时间**按本机时区解释** —— 于是同一个时刻在
-    东八区机器上算出来的秒数差 28800。发给 Agent 的 ``server_time`` 因此一直偏 8 小时，
-    而它正是给客户端对时用的（考场机器时钟不准是常态）。
-
-    抽成一个函数是因为"同一个量只该有一处定义"：这个值在 tick 里出现两次，
-    选手页那边还有一处，三处各写一遍就必然有一处错（实际就错了）。
-    """
-    from datetime import timezone
-
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
-    return int(moment.timestamp())
 
 
 def _agent_config(ctx: AppContext) -> Dict[str, Any]:
@@ -316,6 +299,8 @@ def tick(
 
     client_ip = request.client.host if request.client else None
     now = utcnow()
+    # 只有"教师点过卸载"且"最近一次心跳报过公钥"时才有值，见 _pending_uninstall_token
+    uninstall_token: Optional[str] = None
 
     with ctx.db.session() as session:
         collect = reconcile_scan(
@@ -348,6 +333,8 @@ def tick(
             agent.last_seen_at = now
             if payload.agent_version:
                 agent.agent_version = payload.agent_version
+            _note_release_public_key(agent, payload.release_public_key, now)
+            uninstall_token = _pending_uninstall_token(ctx, agent, now)
 
     ctx.registry.note_tick(
         identity.agent_id,
@@ -366,12 +353,13 @@ def tick(
     )
 
     return TickResponse(
-        server_time=_unix_seconds(now),
+        server_time=unix_seconds(now),
         next_tick_seconds=next_tick,
         need_upload=collect.need_upload[:MAX_NEED_UPLOAD],
         deploy_jobs=jobs,
         cancel_assets=[],
         upgrade=upgrade,
+        uninstall_token=uninstall_token,
         config=_agent_config(ctx),
         claimed=True,
         # 走到这一支就说明场次与选手都解析出来了 —— 这正是三态里的"能干活"那一档。
@@ -415,6 +403,7 @@ def _tick_pending(
     """
     now = utcnow()
     pair_code = None
+    uninstall_token: Optional[str] = None
     with ctx.db.session() as session:
         agent = session.get(Agent, identity.agent_id)
         if agent is not None:
@@ -425,6 +414,11 @@ def _tick_pending(
             # 列表里显示旧名字会让人对着两台机器猜哪台是哪台
             if payload.hostname:
                 agent.hostname = payload.hostname
+
+            # 卸载授权与"配没配对"无关：要卸的可能是台配错人的机器、甚至是台
+            # 还没认领的测试机。「机器」列表里有这一行的入口，这里就得能回话。
+            _note_release_public_key(agent, payload.release_public_key, now)
+            uninstall_token = _pending_uninstall_token(ctx, agent, now)
 
             if not identity.paired:
                 # **有效性以库里的哈希与过期时刻为准**，缓存只负责提供明文。
@@ -450,13 +444,55 @@ def _tick_pending(
                     ctx.pair_codes.put(agent.id, pair_code, agent.pair_code_expires_at)
 
     return TickResponse(
-        server_time=_unix_seconds(now),
+        server_time=unix_seconds(now),
         next_tick_seconds=ctx.settings.tick_idle_seconds,
         claimed=identity.paired,
         pair_code=pair_code,
         bound=False,
         reason=identity.reason,
+        uninstall_token=uninstall_token,
         config=_agent_config(ctx),
+    )
+
+
+def _note_release_public_key(agent: Agent, reported: bool, now) -> None:
+    """记下这次心跳有没有报告发布公钥（升级信任锚）。
+
+    报告"没有"时必须**清掉**旧值：信任锚是会被卸载脚本删掉的东西，只增不减的
+    状态位会让服务端一直以为那台机器验得了签名 —— 而实际后果是签出去的授权
+    到了那边一定被拒收，教师看到的却是"操作成功"。
+    """
+    agent.release_public_key_at = now if reported else None
+
+
+def _pending_uninstall_token(ctx: AppContext, agent: Agent, now) -> Optional[str]:
+    """这台机器这一轮该拿到的卸载授权令牌；没有就是 ``None``。
+
+    两个条件同时成立才签：**教师点过卸载**（内存里的登记表里有这台机器）且
+    **最近一次心跳报过公钥**。第二个条件是"宁可不下发"的那一半：没有信任锚的
+    机器验不了签名，发过去只会让它拒收，而教师那边显示的是操作成功 ——
+    那条路必须在点按钮的时候就挡住（见 ``api/admin.py`` 的 uninstall_agent），
+    这里再判一次是因为机器可能在这两次心跳之间把公钥弄丢了。
+
+    同一枚令牌在多轮心跳里原样重发：机器可能一次没收到、也可能写盘失败重来。
+    教师再点一次会换掉登记表里的那条记录，令牌随之变成新的一枚。
+    """
+    if agent.machine_uuid is None or not agent.release_public_key_at:
+        return None
+    if ctx.signing_key is None:
+        # 运行时私钥被撤掉了（或者加载失败）：签不出来就老实不发，
+        # 而不是发一个半成品让机器在那儿反复失败
+        return None
+
+    pending = ctx.pending_uninstalls.peek(agent.machine_uuid, now)
+    if pending is None:
+        return None
+    return uninstall.mint_token(
+        ctx.signing_key,
+        machine_uuid=agent.machine_uuid,
+        agent_id=agent.id,
+        nonce=pending.nonce,
+        issued_at=pending.issued_at,
     )
 
 
@@ -573,10 +609,13 @@ def _pending_upgrade(session, ctx: AppContext) -> Optional[UpgradeInfo]:
 
 #: 装机入口的路径。写成常量是为了让台账里的相对路径与真实路由**只有一处**，
 #: 否则某天有人改了路径，台账会指到一个 404 上，而现象是"装机装不上"。
+#:
+#: 自举脚本那一条定义在 ``services/uninstall.py``：卸载授权发不出去时的替代命令
+#: 也要用它，而那个提示是在管理端拼的 —— 两边共用一个常量才不会分叉。
 INSTALL_LEDGER_PATH = "/api/v1/agent/install.json"
 INSTALL_BUNDLE_PATH = "/api/v1/agent/install/bundle"
 INSTALL_INSTALLER_PATH = "/api/v1/agent/install/installer"
-INSTALL_BOOTSTRAP_PATH = "/api/v1/agent/install/bootstrap.sh"
+INSTALL_BOOTSTRAP_PATH = uninstall.INSTALL_BOOTSTRAP_PATH
 
 
 def _installable_release(session) -> Optional[AgentRelease]:

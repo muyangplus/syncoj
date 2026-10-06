@@ -427,6 +427,20 @@ def _migration_006_release_bootstrap_key(engine: Engine) -> None:
     _rebuild_table(engine, "agent_release")
 
 
+def _migration_007_release_public_key(engine: Engine) -> None:
+    """机器记录**最近一次报告有发布公钥**的时刻（``agent.release_public_key_at``）。
+
+    用途是远程卸载授权的门禁：卸载要 root，而机器只能用升级信任锚验那枚令牌，
+    所以在没报告过公钥的机器上签授权是白费 —— 它一定拒收，教师那边却显示成功。
+
+    全是 ``ADD COLUMN`` + 可空：老库里的机器**没有**这一列的历史值，而"没报过"
+    与"没有"在判据上应当得到同一个结论，所以空白就是正确初始状态，不需要回填。
+    """
+    if "agent" not in _tables(engine):
+        return
+    _add_column(engine, "agent", "release_public_key_at", "DATETIME")
+
+
 MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
     (1, "统一密钥注册 + 名单库所需的结构", _migration_001_enrollment),
     (2, "机器永久绑定名单条目；去掉注册码链路", _migration_002_roster_binding),
@@ -441,6 +455,11 @@ MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
         6,
         "发布记录记住随包附带的那把统一注册密钥",
         _migration_006_release_bootstrap_key,
+    ),
+    (
+        7,
+        "机器记录最近一次报告有发布公钥的时刻",
+        _migration_007_release_public_key,
     ),
 ]
 

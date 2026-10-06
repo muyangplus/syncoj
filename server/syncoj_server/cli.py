@@ -91,6 +91,9 @@ def _cmd_init(args: argparse.Namespace) -> int:
     if release_state in ("created", "exists"):
         print("  5. 服务端已自动加载发布私钥，打包时公钥会随包带走:")
         print("     python agent/packaging/build_bundle.py")
+    print("  6. 装机地址不用手填：界面「发布当前版本」会把本机看到的地址写进包；")
+    print("     包是别处打的时候，机器会在局域网里广播着找一次（应答要验签）。")
+    print("     要让服务端固定对外报某个地址，用 SYNCOJ_PUBLIC_URL 或 serve --public-url。")
     # 命令到这里就结束了，但连接池还攥着 syncoj.db。进程退出时操作系统会收拾，
     # 所以从前没人注意 —— 直到同一个进程里连着跑 init 和 db reset：Windows 上
     # 删不掉一个被打开的文件，于是 db reset 报"另一个程序正在使用此文件"。

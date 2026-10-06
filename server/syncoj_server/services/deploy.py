@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Dict, List, Sequence, Tuple
 
 from sqlalchemy import select
@@ -20,7 +21,6 @@ __all__ = [
     "expand_dest_template",
     "validate_dest_template",
     "DEST_PLAYER_TOKEN",
-    "DEST_PROBLEM_TOKEN",
 ]
 
 log = logging.getLogger(__name__)
@@ -30,15 +30,32 @@ ACTIVE_STATUSES = (DeployStatus.PENDING, DeployStatus.READY)
 
 AGENT_ASSET_URL = "/api/v1/agent/assets/%d"
 
-#: 下发目标目录模板里支持的占位符。
+#: 下发目标目录模板里**唯一**支持的占位符。
 #:
 #: ``{player_no}`` 由**服务端**按目标选手逐个展开 —— 不能交给 Agent，
 #: 因为"全员下发"时每台机器的目标目录都不同，而 Agent 只知道自己的编号，
 #: 不知道这次下发是给谁的。
 DEST_PLAYER_TOKEN = "{player_no}"
-#: ``{problem}`` 保留给"按题目下发"的场景，由界面在建任务时替换成具体题目名，
-#: 服务端不展开它（服务端不知道教师想发哪道题）。
-DEST_PROBLEM_TOKEN = "{problem}"
+
+#: 模板里任何 ``{...}`` 形状的东西（不要求合理，因为要拦的正是"教师以为它会被展开"）。
+_ANY_PLACEHOLDER = re.compile(r"\{[^{}]*\}")
+#: 唯一允许和必须拦下的两个形状。
+_PLAYER_PLACEHOLDER = re.compile(r"\{player_no\}")
+_UNKNOWN_PLACEHOLDER = re.compile(r"\{[^{}]+\}")
+
+
+def _find_unknown_placeholder(template: str) -> str:
+    """模板里第一个除 ``{player_no}`` 以外的占位符；没有就返回空串。
+
+    只看花括号里不是空白的那些：``{}`` 是空名（多半是笔误），留给下面的路径
+    规则报；``{  }`` 同理。有名字的才值得单独报一句"它不会被展开"。
+    """
+    for match in _UNKNOWN_PLACEHOLDER.finditer(template):
+        token = match.group(0)
+        if token == DEST_PLAYER_TOKEN:
+            continue
+        return token
+    return ""
 
 
 def expand_dest_template(template: str, player_no: str) -> str:
@@ -49,8 +66,13 @@ def expand_dest_template(template: str, player_no: str) -> str:
 def validate_dest_template(raw: str) -> str:
     """校验并归一化下发目录模板，返回可入库的形式。
 
-    校验时先把占位符换成一个合法样例再走路径规则 —— 否则 ``{player_no}/../x``
-    这种"看起来有占位符"的写法会被当成普通字符放过去。
+    只有 ``{player_no}`` 一个占位符。**其他任何 ``{...}`` 一律拒绝** ——
+    从前的 ``{problem}`` 就是反例：它被校验放行，而 :func:`expand_dest_template`
+    并不认识它，于是机器上真的会多出一个名叫 ``{problem}`` 的目录，全程没有任何
+    报错。这种"安静地做错事"比报错难查得多，所以宁可在这里拒得干脆一点。
+
+    校验结构时先把 ``{player_no}`` 换成一个合法样例再走路径规则 —— 否则
+    ``{player_no}/../x`` 这种"看起来有占位符"的写法会被当成普通字符放过去。
 
     返回的是**原始模板**（只归一化末尾斜杠），不是替换后的样例：
     模板要入库，展开是下发那一刻才做的事。
@@ -59,7 +81,17 @@ def validate_dest_template(raw: str) -> str:
     if not text:
         return ""
 
-    probe = text.replace(DEST_PLAYER_TOKEN, "player0").replace(DEST_PROBLEM_TOKEN, "problem0")
+    # 不认识的占位符先单独报 —— 它比"路径不合法"具体得多，而且不拦的话
+    # 它会原样变成一个目录名（见上面那段）。
+    unknown = _find_unknown_placeholder(text)
+    if unknown:
+        raise ValueError(
+            "目标目录只认 {player_no} 这一个占位符，不会展开 %s；"
+            "它到机器上会原样变成一个目录名。"
+            "要按题分发请自己填 {player_no}/<题目名> 这类目录" % unknown
+        )
+
+    probe = _ANY_PLACEHOLDER.sub("player0", text)
     try:
         validate_relpath(probe, max_length=512)
     except PathValidationError as exc:

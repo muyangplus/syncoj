@@ -237,6 +237,41 @@ def test_dest_template_helpers() -> None:
         raise AssertionError("dest_dir=%r 应当被拒绝" % bad)
 
 
+def test_dest_template_rejects_unknown_placeholders() -> None:
+    """除 ``{player_no}`` 外的 ``{...}`` 一律拒绝，绝不"默默放过"。
+
+    这是一个真的会安静做错事的坑：``{problem}`` 曾经被校验放行，而
+    :func:`expand_dest_template` 并不认识它 —— 于是机器上真的多出一个名叫
+    ``{problem}`` 的目录，全程没有任何报错。现场只看到"目录名怪怪的"，
+    没人会想到是模板没展开。
+    """
+    from syncoj_server.services.deploy import validate_dest_template
+
+    # 从前那个 ``{problem}``：现在必须被拒，而且要说清"不会展开"
+    for bad in (
+        "{player_no}/{problem}/数据.zip",
+        "{problem}",
+        "{Player_No}/p1",
+        "{题目}/p1",
+        "{player_no}/{anything}",
+        "{ player_no }/p1",
+        "题面/{name}",
+    ):
+        try:
+            validate_dest_template(bad)
+        except ValueError as exc:
+            assert "占位符" in str(exc), "拒绝理由要能让人看懂：%r -> %s" % (bad, exc)
+            continue
+        raise AssertionError("dest_dir=%r 里的未知占位符应当被拒绝" % bad)
+
+    # 认识的占位符照常，多个也不许：它本来就是"每个选手一个目录段"
+    assert validate_dest_template("{player_no}") == "{player_no}"
+    assert validate_dest_template("{player_no}/p1/") == "{player_no}/p1"
+    # 完全没有花括号的普通目录当然还是放行（留空 = 桌面根目录那条硬规则没动）
+    assert validate_dest_template("") == ""
+    assert validate_dest_template("exam/p1") == "exam/p1"
+
+
 def test_deploy_expands_player_no_per_target(client: TestClient, contest: dict,
                                              admin_headers: dict, enrolled: dict) -> None:
     """**全员下发时每台机器的目标目录都不同** —— 这正是必须由服务端展开的原因。

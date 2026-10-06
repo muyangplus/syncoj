@@ -1,4 +1,4 @@
-<#
+﻿<#
 SyncOJ 全量检查（Windows 开发机版）。
 
 `scripts/check.sh` 是权威入口，两个脚本**步骤一一对应**。
@@ -6,12 +6,18 @@ SyncOJ 全量检查（Windows 开发机版）。
 为什么还留一个 .ps1：Windows 上 bash 只随 Git 一起出现（`D:\Program Files\Git\bin\bash.exe`），
 它跑 check.sh 是可行的 —— msys 会把 `PYTHONPATH` 翻译成 Windows 路径，实测能导入
 `syncoj_server`。但那条路要跨一层 msys 的路径翻译，出问题时错误信息会指向奇怪的地方；
-直接调 pwsh 更接近"到底发生了什么"。日常在 Windows 上用这个，CI 与 Linux 上用 check.sh。
+直接调 Windows 上的 PowerShell 更接近"到底发生了什么"。日常在 Windows 上用这个，
+CI 与 Linux 上用 check.sh。
+
+**本文件必须带 UTF-8 BOM**：Windows PowerShell 5.1 在没有 BOM 时按 ANSI（简体中文
+系统上是 GBK）解码脚本，下面的中文注释会让它整个文件解析失败。PowerShell 7 也认
+BOM，所以带着两边都能跑。`check.sh` 与 `test_repo_hygiene.py` 各有一条守卫盯着这件事 ——
+编辑工具保存时不会保留 BOM，改一行注释就可能把它弄丢。
 
 改了其中一个就要改另一个，否则两个平台给出的"通过"含义不同，那比只有一个入口更糟。
 
-    pwsh -File scripts/check.ps1
-    pwsh -File scripts/check.ps1 -SkipWeb      # 没装 node_modules 时
+    .\scripts\check.ps1                      # Windows PowerShell 5.1 与 pwsh 7 都行
+    .\scripts\check.ps1 -SkipWeb             # 没装 node_modules 时
 #>
 
 param(
@@ -77,6 +83,22 @@ Assert-Ok "check_py38 server/"
 $pytestTmp = Join-Path $repoRoot ".pytest-tmp"
 $pytestBase = Join-Path $pytestTmp "basetemp"
 New-Item -ItemType Directory -Force -Path $pytestBase | Out-Null
+
+Step "PowerShell 脚本的编码"
+# 仓库里的 .ps1 都带中文注释，而 Windows PowerShell 5.1 在**没有 BOM** 时按当前
+# ANSI 代码页（简体中文系统上是 GBK）解码脚本文件：于是那些中文注释会让它整个脚本
+# **解析失败**，报的还是"字符串缺少终止符"这种指向别处的错。PS 7 认 BOM，所以带上
+# BOM 两边都对。
+#
+# 为什么值得一步守卫：编辑类工具保存时**不会保留 BOM**，改一行中文注释就把它弄丢了，
+# 而症状（换一台只有 PS 5.1 的机器才发现脚本跑不起来）跟那次改动毫无关系。
+foreach ($script in Get-ChildItem (Join-Path $repoRoot "scripts\*.ps1")) {
+    $bytes = [System.IO.File]::ReadAllBytes($script.FullName)
+    $hasBom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+    if (-not $hasBom) {
+        throw "$($script.FullName) 缺少 UTF-8 BOM：Windows PowerShell 5.1 会把它的中文按 ANSI 解码，整个脚本解析失败。修法：在文件最前面补上 EF BB BF 这三个字节。"
+    }
+}
 
 Step "Agent 测试"
 Push-Location agent

@@ -85,6 +85,25 @@ PYTEST_TMP="$REPO_ROOT/.pytest-tmp"
 PYTEST_BASE="$PYTEST_TMP/basetemp"
 mkdir -p "$PYTEST_BASE"
 
+step "PowerShell 脚本的编码"
+# 仓库里的 .ps1 都写着中文注释，而 Windows PowerShell 5.1 在**没有 BOM** 时按
+# 当前 ANSI 代码页（简体中文 Windows 上是 GBK）解码脚本文件：于是一个 UTF-8 无 BOM
+# 的脚本在它上面**整个解析失败**，报的还是"字符串缺少终止符"这种指向别处的错。
+# PS 7（pwsh）默认识别 BOM，所以带上 BOM 两边都对。
+#
+# 为什么值得一条守卫：编辑类工具保存时**不会保留 BOM**，改一行中文注释就把它弄丢了，
+# 而症状（换一台只有 PS 5.1 的机器才发现脚本跑不起来）看起来跟这次改动毫无关系。
+for f in "$REPO_ROOT"/scripts/*.ps1; do
+  [ -e "$f" ] || continue
+  magic="$(head -c 3 "$f" | od -An -tx1 | tr -d ' \n')"
+  if [ "$magic" != "efbbbf" ]; then
+    echo "$f 缺少 UTF-8 BOM（文件开头是 $magic）。" >&2
+    echo "Windows PowerShell 5.1 会把它的中文按 ANSI 解码，整个脚本解析失败。" >&2
+    echo "修法：在文件最前面补上 EF BB BF 这三个字节。" >&2
+    exit 1
+  fi
+done
+
 step "Agent 测试"
 (cd agent && "$PYTHON" -m pytest -p no:cacheprovider --basetemp="$PYTEST_BASE/agent")
 

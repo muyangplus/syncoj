@@ -89,6 +89,9 @@ def _run_one(
     写满缓冲区时两边会互相等 —— 那是"并行跑出串行速度"的经典原因。
     """
     out_path = basetemp / ("%s.log" % test_file.stem)
+    # 每个文件的 basetemp 我们**自己先建好**：pytest 只保证建最后那一级，
+    # 中间任何一级不存在它就直接 FileNotFoundError（真的踩过）。
+    (basetemp / test_file.stem).mkdir(parents=True, exist_ok=True)
     with open(str(out_path), "w", encoding="utf-8", errors="replace") as handle:
         env = dict(os.environ)
         # 让 tests/ 里的 conftest 能被 import；调用方（check.sh）也会设，这里兜底
@@ -130,7 +133,9 @@ def _basetemp_dir():
     """
     keep = (os.environ.get("SYNCOJ_TEST_TMP") or "").strip()
     if keep:
-        path = Path(keep)
+        # **必须绝对化**：子进程的 cwd 是 `server/`，相对路径在那里会被重新解释，
+        # 于是 basetemp 指到一个不存在的目录、每个用例的 setup 全炸。
+        path = Path(keep).resolve()
         path.mkdir(parents=True, exist_ok=True)
         return contextlib.nullcontext(str(path))
     return tempfile.TemporaryDirectory(prefix="syncoj-tests-")
@@ -148,6 +153,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="服务端根目录（里面有 tests/），默认是脚本的上一级",
     )
     parser.add_argument("--pattern", default="tests/test_*.py", help="测试文件的 glob")
+    parser.add_argument(
+        "--files",
+        default="",
+        help="只跑这几个文件（逗号分隔，相对 --root；给排查用）",
+    )
     parser.add_argument("--jobs", type=int, default=_jobs_default(), help="worker 数")
     parser.add_argument("--serial", action="store_true", help="顺序跑（等价于 --jobs 1）")
     parser.add_argument("--list", action="store_true", help="只列出将要跑的文件")
@@ -155,7 +165,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     server_dir = Path(args.root).resolve()
-    tests = _find_tests(server_dir, args.pattern)
+    if args.files.strip():
+        tests = [
+            (server_dir / name.strip())
+            for name in args.files.split(",")
+            if name.strip()
+        ]
+        missing = [path for path in tests if not path.is_file()]
+        if missing:
+            print("找不到这些测试文件：%s" % "、".join(str(p) for p in missing), file=sys.stderr)
+            return 2
+    else:
+        tests = _find_tests(server_dir, args.pattern)
     if not tests:
         print("没有找到测试文件：%s/%s" % (server_dir, args.pattern), file=sys.stderr)
         return 2

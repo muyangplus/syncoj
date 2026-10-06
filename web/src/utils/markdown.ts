@@ -24,8 +24,18 @@ DOMPurify.addHook('afterSanitizeAttributes', (node) => {
 })
 
 marked.setOptions({
-  // 换行不当成 <br>：公告里手写的一行行文字应当合成段落（CommonMark 的规矩）
-  breaks: false,
+  // **单个换行也要断行**（GFM 的 behavior，`breaks: true`）。
+  //
+  // 这条不是风格选择：公告是在一个纯文本框里写的，写的人未必在想 Markdown 语法。
+  // 他写下
+  //
+  //     不许带手机
+  //     不许互相交谈
+  //
+  // 却看到这两行被合成一整句显示出来 —— 那是"渲染错了"，不是"他没按 Markdown 写"。
+  // 关掉它（CommonMark 默认）等于把原来 `pre-wrap` 的保证偷偷去掉：老师一行一条地
+  // 写，页面上必须一行一条地显示。
+  breaks: true,
 })
 
 export function renderMarkdown(text: string): string {

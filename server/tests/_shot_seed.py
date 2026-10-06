@@ -87,6 +87,18 @@ def test_shot_seed(app, client, admin_headers, contest, player, roster_entry, bo
         "\n"
         "代码放在 `桌面/<考号>/` 下面，具体路径见题面里的说明。\n"
         "\n"
+        "### 几条口诀（没写 - 也要各自成行）\n"
+        "\n"
+        "先编译再交\n"
+        "先存盘再举手\n"
+        "\n"
+        "### 时间与科目\n"
+        "\n"
+        "| 科目 | 时间 |\n"
+        "| --- | --- |\n"
+        "| 一试 | 08:30-12:00 |\n"
+        "| 二试 | 14:00-18:00 |\n"
+        "\n"
         "> 提前交卷的同学请安静离场。\n",
     )
     deploy_to(client, contest, admin_headers, notice["id"], [player["id"]])

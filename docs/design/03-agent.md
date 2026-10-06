@@ -15,7 +15,7 @@
 
 选手折腾 Python 环境的担忧用 `python3 -E -s` 解决（`-E` 忽略所有 `PYTHON*` 环境变量，`-s` 忽略 user site-packages）—— 选手怎么 `pip install` 都污染不到 Agent。
 
-**代价（诚实记录）**：常驻内存 30~40MB（Go 约 12MB，50 台无所谓）；同步延迟 = 轮询周期（需求已确认 20s 可接受）；依赖目标机有 `python3`（NOI Linux 必有，且 NOI 要考 Python）。
+**代价**：常驻内存 30~40MB（Go 约 12MB，50 台无所谓）；同步延迟 = 轮询周期（需求已确认 20s 可接受）；依赖目标机有 `python3`（NOI Linux 必有，且 NOI 要考 Python）。
 
 ### 3.2 主循环（同步串行，不用 asyncio）
 
@@ -44,7 +44,7 @@ while True:
 
 ### 3.4 注册、"永久配对"与"快照还原自愈"
 
-NOI Linux 常做整机还原，机器上的凭据会消失 —— 刚需，不是加分项。
+NOI Linux 常做整机还原，机器上的凭据会随还原消失。
 
 ```
 装机（root 一次性）          机器首次开机                教师
@@ -61,7 +61,8 @@ bootstrap.key ──换凭据──▶   桌面「配对码.txt」 ──读码/
 而两种模式并存意味着每种都要维护、测试，并且迟早有人选错。
 
 **"已配对"不等于"能干活"。** 场次有没有这个人，取决于那份名单有没有被应用进
-场次，所以客户端的凭据有三个状态，必须分开处理（见 `docs/protocol.md` ../design/01-architecture.md §1）：
+场次，所以客户端的凭据有三个状态，必须分开处理（见
+[`../reference/protocol.md`](../reference/protocol.md) §1）：
 
 | `claimed` | `bound` | Agent 做什么 |
 |---|---|---|
@@ -80,7 +81,7 @@ bootstrap.key ──换凭据──▶   桌面「配对码.txt」 ──读码/
 
 ### 3.5 systemd unit
 
-两个单元，分工不能混（混了下场见 ../design/04-server.md §4.6 的真机事故）：注册是 **root 的一次性单元**，
+两个单元，分工不能混（混了的后果见 ../design/04-server.md §4.6）：注册是 **root 的一次性单元**，
 服务本体以**运行账号**跑、只读凭据。
 
 ```ini
@@ -129,7 +130,7 @@ ProtectSystem=strict
 ReadWritePaths=-/var/lib/syncoj
 ```
 
-几条看着奇怪的地方，各有原因：
+几条与常规写法不同的地方，各有原因：
 
 * **`Restart=on-failure` 而不是 `always`**：远程卸载成功时 Agent 以 exit 0 正常退出，
   `always` 会立刻把它重新拉起来 —— 而那时 `/opt/syncoj`、`/etc/syncoj` 都已经删了，
@@ -142,15 +143,15 @@ ReadWritePaths=-/var/lib/syncoj
   整条链就是死的。服务以普通账号运行，而**那个账号本人在这台机器上同样能执行任何
   setuid 程序**，所以这一条对"防选手"没有增量价值。其余加固一条都没少。
 * **`ReadWritePaths=` 里每一条都带 `-`**：路径不存在时 systemd 跳过它，而不是让单元
-  在设沙箱时报 `226/NAMESPACE` 起不来 —— 真机上就炸过一次（单元里写了一条
-  `/home/student/code`，而那台机器根本没有那个目录）。前三条是服务自己要写的地方
-  （家目录、安装根、状态目录）；后四条只服务于"以 root 执行远程卸载"（../design/07-ops-and-install.md §7.4）：
+  在设沙箱时报 `226/NAMESPACE` 起不来。实例：单元里写了一条 `/home/student/code`，
+  而那台机器没有这个目录。前三条是服务自己要写的地方（家目录、安装根、状态目录）；
+  后四条只服务于"以 root 执行远程卸载"（../design/07-ops-and-install.md §7.4）：
   它们是 root:0755/0644，运行账号在 DAC 上写不进去，所以**放开 mount 层面的写权限
   不构成提权**，唯一用得上的是验过令牌的那个 root 脚本。
 * **刻意不列 `deploy_root` / `scan.roots` 的具体值**：它们是可选配置、真机上可能
   不存在，而默认值都在 `%h` 之下（已经被覆盖）。多列一条就多一个 226 的机会。
 * **注册单元刻意不用 `Restart=`**：oneshot 的重启策略在各版本 systemd 上行为不一致；
-  "试几次"由 ExecStart 里的 shell 循环自己数，顺便把手工恢复的命令打进日志。
+  "试几次"由 ExecStart 里的 shell 循环自己数，并把手工恢复的命令打进日志。
 
 ### 3.6 Python 3.8 兼容清单（代码评审硬规则）
 

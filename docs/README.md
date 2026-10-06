@@ -1,7 +1,6 @@
 # SyncOJ 文档地图
 
-这份文档按**受众**分流，不按主题堆在一起。先找到你自己的那一行，再去读那一份；
-一份文档只服务一类人，所以它不会顺手回答别人的问题。
+这份文档按**受众**分流：先找到你自己的那一行，再去读那一份。
 
 **读者要什么** → 看哪一份：
 
@@ -15,10 +14,8 @@
 
 ## 全量文件清单
 
-**这一页自己也在清单里**（`docs/README.md` —— 就是你现在读的这份），
-因为"`docs/**` 下每个文件都在清单里"是一条可以被机器检查的规矩：
-`server/tests/test_docs.py` 两边都查，所以清单漏一份、或者多写一个不存在的名字，
-都会红。
+本页自己也在清单里。`docs/**` 下每个文件都必须在清单中，清单里每个文件也都必须
+存在 —— 两边都由 `server/tests/test_docs.py` 检查。
 
 ### 上手与运维
 
@@ -54,8 +51,8 @@
 
 ### 决策记录（ADR）
 
-短篇，每篇一个主题：**状态 / 背景 / 决定 / 后果 / 被否掉的替代方案与理由**。
-`DESIGN.md` 讲"现在是什么"，ADR 讲"为什么是它、以及当初否掉了什么"。
+每篇一个主题：**状态 / 背景 / 决定 / 后果 / 被否掉的替代方案与理由**。
+`design/` 记"现在是什么"，ADR 记"为什么是它、当初否掉了什么"。
 
 | 文件 | 一句话 |
 |---|---|
@@ -89,19 +86,14 @@ docs/README.md            这一页
 └── decisions/            "当初否掉了什么" —— ADR
 ```
 
-**改代码时要同步的三处**（协议与字段）：`reference/protocol.md`、
-`reference/api-conventions.md`、`reference/config-keys.md`。契约测试
-（`server/tests/test_agent_contract.py`）会自动发现不一致。
-
-**`docs/**` 下的每个文件都必须在本页出现**，这条由
-`server/tests/test_docs.py` 守着 —— 一份没人能从这里找到的文档等于不存在。
+字段与约定的权威描述在 `reference/` 下：`reference/protocol.md`、
+`reference/api-conventions.md`、`reference/config-keys.md`，改代码要同步改这三份。
+契约测试（`server/tests/test_agent_contract.py`）会自动发现不一致。
 
 ## 要给这个仓库改代码的人
 
-上面的分流表里没有"开发者"以外的位置放这两节：`仓库结构` 与 `开发约定`。
-它们不是操作说明、也不是设计依据，而是"在这个 checkout 里干活要知道的规矩"，
-所以留在这里。**这两节的正文是原 `README.md` 逐字搬过来的**（`docs/protocol.md`
-那一处引用换成了新位置，见下面的说明）。
+`仓库结构` 与 `开发约定` 两节放在这里：它们不是操作说明、也不是设计依据，
+而是"在这个 checkout 里干活要知道的规矩"。
 
 ### 仓库结构
 
@@ -140,70 +132,20 @@ SyncOJ/
 - **Agent 侧代码必须是 Python 3.8 兼容**（目标机是 NOI Linux 2.0）。
   提交前跑 `python agent/tools/check_py38.py agent/`，CI 也会跑。
 - **协议改动必须同步三处**：`server/syncoj_server/schemas.py`、
-  `agent/syncoj_agent/` 的报文体构造、`docs/protocol.md`。
+  `agent/syncoj_agent/` 的报文体构造、`docs/reference/protocol.md`。
   契约测试 `server/tests/test_agent_contract.py` 会自动发现不一致。
 - **服务端的路径安全校验必须独立实现**，绝不信任 Agent 上报的路径。
   `agent/syncoj_agent/safepath.py` 是**另一份独立实现**（纵深防御），
   两者的一致性由契约测试中的 `test_path_validation_parity` 守住。
 - **前端类型绝不手写**。改完服务端模型后依次跑：
+
+  ```bash
+  python server/tools/dump_openapi.py && (cd web && npm run gen:types)
+  ```
+
+  `scripts/check.sh` 会校验 `web/openapi.json` 是否已同步，不同步直接失败。
+
 ## 跑全部检查
-  ```bash
-  python server/tools/dump_openapi.py && (cd web && npm run gen:types)
-  ```
-  `scripts/check.sh` 会校验 `web/openapi.json` 是否已同步，不同步直接失败。
-
-> 第二条里的 `docs/protocol.md` 现在是 `docs/reference/protocol.md`（文件名与锚点
-> 一个字都没改，只是换了目录）。契约测试认的是代码，不认路径，所以它不受影响。
-
-## 给要改这个仓库的人（续）
-
-下面几节是原 `README.md` 里的**逐字**内容：`仓库结构`、`开发约定`、
-`跑全部检查`、以及里程碑状态表。它们不是操作说明、也不是设计依据，
-而是"在这个 checkout 里干活要知道的规矩"，所以留在这一页。
-
-> `仓库结构` 那棵树画的是**重建之前**的样子（逐字留档，所以它没跟着变）。
-> 现在的落点：`DESIGN.md` 只剩一张 § 映射表；`docs/protocol.md`、
-> `docs/api-conventions.md`、`docs/judge-result.md` 移到了 `docs/reference/`；
-> `docs/` 下另有 `quickstart.md` / `install-agent.md` / `operate.md` /
-> `design/` / `decisions/`，全在本页开头那份清单里。
-
-```
-SyncOJ/
-├── DESIGN.md                 完整技术方案
-├── docs/
-│   ├── protocol.md           Agent ⇄ Server 协议规范
-│   ├── api-conventions.md    管理端 API 形状约定（信封 / 错误体 / 删除语义）
-│   └── judge-result.md       评测器对接：成绩怎么进 SyncOJ
-├── server/                   服务端（FastAPI + SQLite WAL）
-│   ├── syncoj_server/
-│   └── tests/
-├── agent/                    选手端 Agent（Python 3.8 零依赖）
-│   ├── syncoj_agent/
-│   ├── packaging/            幂等安装器 / 打包器 / 在线自举
-│   ├── tools/                py38 兼容门禁、协议 fixture 生成
-│   └── tests/
-├── scripts/                  一键跑全部检查（check.sh / check.ps1，步骤一一对应）
-└── web/                      管理界面（Vue3 + TS + Vite + Element Plus）
-    ├── src/api/              client + resource 声明 + 从 OpenAPI 生成的类型
-    ├── src/composables/      useList / useMutation —— 所有页面共用的数据层
-    ├── src/components/       通用页面外壳、表格、确认对话框
-    ├── src/views/            9 个页面
-    └── openapi.json          由 server/tools/dump_openapi.py 导出（纳入版本管理）
-```
-
-- **Agent 侧代码必须是 Python 3.8 兼容**（目标机是 NOI Linux 2.0）。
-  提交前跑 `python agent/tools/check_py38.py agent/`，CI 也会跑。
-- **协议改动必须同步三处**：`server/syncoj_server/schemas.py`、
-  `agent/syncoj_agent/` 的报文体构造、`docs/protocol.md`。
-  契约测试 `server/tests/test_agent_contract.py` 会自动发现不一致。
-- **服务端的路径安全校验必须独立实现**，绝不信任 Agent 上报的路径。
-  `agent/syncoj_agent/safepath.py` 是**另一份独立实现**（纵深防御），
-  两者的一致性由契约测试中的 `test_path_validation_parity` 守住。
-- **前端类型绝不手写**。改完服务端模型后依次跑：
-  ```bash
-  python server/tools/dump_openapi.py && (cd web && npm run gen:types)
-  ```
-  `scripts/check.sh` 会校验 `web/openapi.json` 是否已同步，不同步直接失败。
 
 ```bash
 ./scripts/check.sh          # Linux / CI；Windows 的 Git bash 里也能直接跑
@@ -213,8 +155,8 @@ SyncOJ/
 .\scripts\check.ps1            # Windows PowerShell 5.1 与 pwsh 7 都能跑
 ```
 
-两个脚本**步骤一一对应**，只换执行方式 —— 改了其中一个就要改另一个，否则两个
-平台给出的"通过"含义不同，那比只有一个入口更糟。
+两个脚本**步骤一一对应**，只换执行方式：改了其中一个就要改另一个，否则两个平台
+给出的"通过"含义不同。
 
 - `check.sh` 自动挑可用的 Python：先 `python3`，不行就退回仓库里的 `.venv`。
   Windows 上 `python3` 常常指向应用商店的占位程序（`command -v` 找得到、执行直接
@@ -233,10 +175,11 @@ SyncOJ/
 （**重新生成一遍再逐字节比对**）→ 前端入口对账 + `typecheck` + `build`。
 
 > 生成物那条检查刻意**不用 `git diff`**：git diff 比的是工作树和 HEAD，而开发中
-> 工作树本来就有未提交的改动，于是它在最常见的场景下恒红。假警报比没有检查更糟，
-> 它会训练人无视这一步。判据是"重新生成的结果和仓库里那份是否一致"。
+> 工作树本来就有未提交的改动，于是它在最常见的场景下恒红。判据是"重新生成的结果
+> 和仓库里那份是否一致"。
 
 ## 状态
+
 | 里程碑 | 状态 |
 |---|---|
 | M1 骨架：enroll / tick / 在线状态 / 管理后台 | ✅ 完成 |
@@ -258,9 +201,8 @@ SyncOJ/
 
 ### 快速开始（开发）
 
-> 这一节是原 `README.md`「快速开始（开发）」的**逐字**内容。它讲的是开发机上怎么把三块跑起来，
-> 与面向教师的 [`quickstart.md`](quickstart.md)（那一条讲的是开一场考试）不是一件事。
-> 仓库根下 `README.md` 的「三条命令」是它的最短形式。
+这一节讲开发机上怎么把三块跑起来；面向教师的开考流程见 [`quickstart.md`](quickstart.md)，
+仓库根 `README.md` 的「三条命令」是最短形式。
 
 ```bash
 # 服务端

@@ -236,9 +236,43 @@ const hasWindow = computed(() => {
 })
 
 /**
+ * 开考 / 结束倒计时。**基准是服务端时间**（`serverNow`），不是本机时钟 ——
+ * 选手把系统时钟往前拨两小时不该让"距结束"变短。
+ *
+ * 三态按场次时间窗判断，只显示其中一个：
+ *   ``距开考 hh:mm:ss`` / ``距结束 hh:mm:ss`` / ``已结束``
+ *
+ * 每秒重算（`now` 每秒变一次，`serverNow` 跟着它走），所以页面上的秒数是活的。
+ */
+const countdown = computed<{ label: string; text: string } | null>(() => {
+  const contest = context.value?.contest
+  const moment = serverNow.value
+  if (!contest || !moment) return null
+  const nowSeconds = Math.floor(moment.getTime() / 1000)
+
+  if (contest.starts_at) {
+    const start = Math.floor(new Date(contest.starts_at).getTime() / 1000)
+    if (nowSeconds < start) return { label: '距开考', text: formatDuration(start - nowSeconds) }
+  }
+  if (contest.ends_at) {
+    const end = Math.floor(new Date(contest.ends_at).getTime() / 1000)
+    if (nowSeconds >= end) return { label: '', text: '已结束' }
+    return { label: '距结束', text: formatDuration(end - nowSeconds) }
+  }
+  // 只配了开考时间：开考之后没有"结束"可言，整段不显示
+  return null
+})
+
+function formatDuration(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds))
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${pad(Math.floor(total / 3600))}:${pad(Math.floor((total % 3600) / 60))}:${pad(total % 60)}`
+}
+
+/**
  * 开考 / 结束时间在页面上怎么写。格式与「场次管理」列表**完全一致**
- * （`MM-DD HH:mm`，同机时区）：教师在那一页填的、选手在这里看的必须是同一个钟点。
- * 两处各写一种格式时，"到底是不是九点"这种问题会在考场里被问出来。
+ * （`MM-DD HH:mm`，同一个显示时区）：教师在那一页填的、选手在这里看的必须是
+ * 同一个钟点。两处各写一种格式时，"到底是不是九点"这种问题会在考场里被问出来。
  *
  * 没配的那一端写「不限」，与管理界面同一套说法（不写"留空"—— 选手看不到那个表单）。
  */
@@ -402,6 +436,11 @@ function assetState(status: string): { label: string; type: 'success' | 'info' |
             <p v-if="hasWindow" class="cell-sub">
               开考 <strong class="mono">{{ windowText(context.contest.starts_at) }}</strong>
               · 结束 <strong class="mono">{{ windowText(context.contest.ends_at) }}</strong>
+            </p>
+            <!-- 倒计时：基准是服务端时间，选手改本机时钟骗不到它 -->
+            <p v-if="countdown" class="countdown">
+              <span v-if="countdown.label" class="countdown-label">{{ countdown.label }}</span>
+              <span class="countdown-value mono">{{ countdown.text }}</span>
             </p>
             <p v-if="serverClock" class="cell-sub">
               服务端时间 <strong class="mono">{{ serverClock }}</strong><template v-if="clockSkew"> · {{ clockSkew }}</template>
@@ -657,6 +696,23 @@ function assetState(status: string): { label: string; type: 'success' | 'info' |
   align-items: baseline;
   justify-content: space-between;
   gap: 8px 20px;
+}
+
+/* 倒计时：场上最需要一眼看到的那个数，所以字号明显大于旁边的说明文字 */
+.countdown {
+  margin: 6px 0 0;
+}
+
+.countdown-label {
+  font-size: 13px;
+  color: #606266;
+  margin-right: 6px;
+}
+
+.countdown-value {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: 1px;
 }
 
 .ident-name {

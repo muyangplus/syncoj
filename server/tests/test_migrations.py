@@ -134,6 +134,9 @@ MIGRATION_ADDED_COLUMNS = {
         #: 远程卸载授权的门禁要用它（迁移 007）—— 没有信任锚的机器验不了签名，
         #: 而在那种机器上签授权等于回一句假的"操作成功"。
         "release_public_key_at",
+        #: ``scan_missing_json``：本轮不存在的扫描根（迁移 009）。机器列表上的
+        #: 「选手目录还没建」与状态变化时才记的那条审计都靠它。
+        "scan_missing_json",
     },
     #: ``player_notice`` 曾经在这一档里（迁移 003 加的"给选手看的注意事项"）。
     #: 考场公告改成"下发一份 NOTICE.md 文件"之后它没有读者了，所以本轮由迁移 005
@@ -603,6 +606,9 @@ def test_fresh_and_upgraded_databases_have_the_same_shape(
         "roster",
         "roster_entry",
         "bootstrap_key",
+        #: 运行参数表（迁移 010）。它是"新表交给 create_all"这一类里最新的一张 ——
+        #: 老库升上来必须也有它，否则读运行参数会撞 no such table。
+        "runtime_setting",
     ]
     fresh_tables = set(inspect(fresh).get_table_names())
     for table in interesting:

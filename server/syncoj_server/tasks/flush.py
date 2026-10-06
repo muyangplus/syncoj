@@ -24,6 +24,7 @@ from sqlalchemy import select
 from ..context import AppContext
 from ..models import AgentStatus, Contest, ContestStatus, EventLog, local_clock, utcnow
 from ..registry import AgentRuntime
+from ..services import runtime_settings
 
 __all__ = [
     "run_maintenance_loop",
@@ -102,10 +103,17 @@ async def run_maintenance_loop(ctx: AppContext) -> None:
 
 
 def flush_once(ctx: AppContext) -> int:
-    """执行一轮：判定离线 -> 自动结束到点的场次 -> 落库。返回本轮落库条数。"""
-    flipped: List[AgentRuntime] = ctx.registry.sweep_offline()
+    """执行一轮：判定离线 -> 自动结束到点的场次 -> 落库。返回本轮落库条数。
+
+    离线阈值**每轮现读**运行参数：它是可以在管理端改的，缓存一份就等于
+    "改完得重启服务端"。
+    """
+    with ctx.db.session() as session:
+        offline_after = runtime_settings.load(session).offline_after_seconds
+
+    flipped: List[AgentRuntime] = ctx.registry.sweep_offline(offline_after)
     for runtime in flipped:
-        _record_offline_event(ctx, runtime)
+        _record_offline_event(ctx, runtime, offline_after)
 
     close_finished_contests(ctx)
 
@@ -142,7 +150,9 @@ def flush_statuses(ctx: AppContext, runtimes: Iterable[AgentRuntime]) -> None:
             row.updated_at = now
 
 
-def _record_offline_event(ctx: AppContext, runtime: AgentRuntime) -> None:
+def _record_offline_event(
+    ctx: AppContext, runtime: AgentRuntime, offline_after_seconds: int
+) -> None:
     with ctx.db.session() as session:
         session.add(
             EventLog(
@@ -152,7 +162,7 @@ def _record_offline_event(ctx: AppContext, runtime: AgentRuntime) -> None:
                 player_id=runtime.player_id,
                 agent_id=runtime.agent_id,
                 message="选手 %s 离线（超过 %d 秒无 tick）"
-                % (runtime.player_no, ctx.settings.offline_after_seconds),
+                % (runtime.player_no, offline_after_seconds),
                 meta_json=None,
             )
         )

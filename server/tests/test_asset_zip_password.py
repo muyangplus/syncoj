@@ -15,6 +15,11 @@
 5. **密码不另存一份**：它只活在 ``password.txt`` 这份文本资产里，所以
    "丢了也能找回"—— 这条也顺便把"改密码 = 更新同一份 password.txt"钉住。
 6. **随机密码的字符集**：去掉易混字符（0 O 1 l I），两次生成必须不同。
+7. **"打包"与"改密码"是两件事**：非 zip 资产走打包（同一个 asset id、文件名换成
+   ``<原基名>.zip``、zip 里的成员名**仍是原文件名**），zip 资产走改密码；回执里的
+   ``packaged`` 是区分它们的字段。两条路共用同一套重排与 ``password.txt`` 机制，
+   所以"非 zip"不再是 400 —— 那是老口径（见
+   ``test_POST_非_zip_会被打包成_zip_而不是_400`` 的注释）。
 
 关于 ``bytes_done``：服务端没有任何写入路径会碰它（它是留给界面看的镜像），
 所以"重排时清零"这条断言必须从一个**我们亲手设的**非零值出发，否则 0 → 0
@@ -23,7 +28,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
+import re
 import shutil
 import subprocess
 import zipfile
@@ -186,6 +193,34 @@ def upload(
     return response.json()
 
 
+def upload_packaged(
+    client: TestClient,
+    headers: dict,
+    contest_id: int,
+    filename: str,
+    data: bytes,
+    *,
+    zip_password: str = "",
+    kind: str = "题面",
+) -> dict:
+    """上传时就要求服务端打包成 zip（``package_zip=true``）。
+
+    密码留空 = 让服务端生成：这一条与接口的默认值是同一个口径，所以这里不传
+    ``zip_password`` 时**不写这个字段**，走服务端自己的默认。
+    """
+    form = {"kind": kind, "package_zip": "true"}
+    if zip_password:
+        form["zip_password"] = zip_password
+    response = client.post(
+        ASSETS_URL % contest_id,
+        files={"file": (filename, data, "application/octet-stream")},
+        data=form,
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
 def get_status(client: TestClient, headers: dict, contest_id: int, asset_id: int):
     return client.get(ZIP_URL % (contest_id, asset_id), headers=headers)
 
@@ -238,6 +273,26 @@ def count_assets_named(client: TestClient, contest_id: int, filename: str) -> in
             .all()
         )
         return len(rows)
+
+
+def password_asset_id_of(client: TestClient, headers: dict, contest_id: int) -> int:
+    """场上那份 ``password.txt`` 的 id。"""
+    page = client.get(ASSETS_URL % contest_id, headers=headers)
+    assert page.status_code == 200, page.text
+    return next(
+        item["id"] for item in page.json()["items"] if item["filename"] == PASSWORD_FILE
+    )
+
+
+def password_lines(content: str) -> Dict[str, str]:
+    """把 password.txt 的正文拆成 ``{文件: …, 密码: …, 生成时间: …}``。"""
+    return dict(
+        line.split("：", 1) for line in content.strip().splitlines() if "：" in line
+    )
+
+
+def blob_exists(client: TestClient, sha256: str) -> bool:
+    return client.app.state.ctx.blobs.has(sha256)
 
 
 def add_player(client: TestClient, headers: dict, contest_id: int, player_no: str) -> dict:
@@ -566,6 +621,77 @@ def test_随机密码_长度字符集与两次不同() -> None:
     assert len(seen) > 1, "两次生成不该是同一个密码"
 
 
+def test_打包_非ASCII成员名与内容能带密码读回() -> None:
+    """成员名走 UTF-8 + bit 11：教师上传的 `题面.pdf` 用默认 cp437 装不下。"""
+    payload = bytes(range(256)) * 4
+    out = io.BytesIO()
+    zipcrypto.pack_member(
+        io.BytesIO(payload), out, member_name="题面.pdf", password=b"Pw123456"
+    )
+
+    with zipfile.ZipFile(io.BytesIO(out.getvalue())) as archive:
+        assert archive.namelist() == ["题面.pdf"]
+        info = archive.infolist()[0]
+        assert info.flag_bits & 0x1, "给了密码，成员就必须是加密的"
+        assert info.flag_bits & 0x800, "非 ASCII 名字必须置上 UTF-8 标志位"
+        assert info.file_size == len(payload)
+        assert archive.read("题面.pdf", pwd=b"Pw123456") == payload
+        with pytest.raises(RuntimeError):
+            archive.read("题面.pdf")
+
+
+def test_打包_0字节文件与不给密码写明文包() -> None:
+    """0 字节也要是一个能读回来的空成员，不能是一个坏包。"""
+    out = io.BytesIO()
+    zipcrypto.pack_member(io.BytesIO(b""), out, member_name="空.bin")
+
+    with zipfile.ZipFile(io.BytesIO(out.getvalue())) as archive:
+        info = archive.infolist()[0]
+        assert info.file_size == 0
+        assert not (info.flag_bits & 0x1), "没给密码就该写明文包"
+        assert archive.read("空.bin") == b""
+
+
+def test_打包_压缩方式可以选_store() -> None:
+    payload = bytes(range(256))
+    out = io.BytesIO()
+    zipcrypto.pack_member(
+        io.BytesIO(payload),
+        out,
+        member_name="raw.bin",
+        password=b"Pw123456",
+        method=zipfile.ZIP_STORED,
+    )
+
+    with zipfile.ZipFile(io.BytesIO(out.getvalue())) as archive:
+        assert archive.infolist()[0].compress_type == zipfile.ZIP_STORED
+        assert archive.read("raw.bin", pwd=b"Pw123456") == payload
+
+
+def test_unzip_能解开打包出来的包(tmp_path, unzip_with_password: str) -> None:
+    """打包那条路也做一次外部交叉验证（成员名用 ASCII，避免环境差异）。"""
+    payload = b"statement bytes\n"
+    out = io.BytesIO()
+    zipcrypto.pack_member(
+        io.BytesIO(payload), out, member_name="statement.pdf", password=b"Pw123456"
+    )
+    packed = tmp_path / "packed-by-us.zip"
+    packed.write_bytes(out.getvalue())
+
+    good = subprocess.run(
+        [unzip_with_password, "-P", "Pw123456", "-p", str(packed)],
+        capture_output=True,
+    )
+    assert good.returncode == 0, good.stderr
+    assert good.stdout == payload
+
+    bad = subprocess.run(
+        [unzip_with_password, "-P", "WrongPw1", "-p", str(packed)],
+        capture_output=True,
+    )
+    assert bad.returncode != 0, "错密码不该打得开"
+
+
 # --------------------------------------------------------------------------- #
 # 2. 只读探测
 # --------------------------------------------------------------------------- #
@@ -593,7 +719,12 @@ def test_GET_打完密码之后是已加密(
 
 
 def test_GET_不是_zip_就是_400(client: TestClient, admin_headers: dict, contest: dict) -> None:
-    """不能回 `encrypted=false`：那样界面会给非 zip 也画上「密码」按钮。"""
+    """GET 仍然拒绝非 zip —— 但理由变了。
+
+    老理由："不能让界面给非 zip 画上「密码」按钮"。新口径下非 zip **有**动作
+    （打包成 zip），所以界面靠这个错误码把动作从「密码」切成「打包成 zip」；
+    GET 继续回 400 是因为它回答的问题是"包里有没有密码"，对非 zip 没有答案。
+    """
     asset = upload(
         client, admin_headers, contest["id"], ZIP_NAME, "明显不是 zip 的字节".encode("utf-8")
     )
@@ -627,6 +758,7 @@ def test_打密码_同一个_asset_id_换_sha_并写好_password_txt(
     assert body["asset"]["sha256"] != before[0], "加密之后的字节就是新的那一份"
     assert body["password"] == "Pw123456"
     assert body["requeued"] == 0, "一个目标都没下发过，没有机器需要重排"
+    assert body["packaged"] is False, "本来就是 zip，走的是改密码那条路"
 
     # 落盘的是真加密包：标准库带密码读得到原文、不带密码读不出来
     blob = blob_bytes(client, body["asset"]["sha256"])
@@ -684,19 +816,225 @@ def test_既没给密码也没让生成_是_400(
     assert stored(client, asset["id"]) == before
 
 
-def test_POST_不是_zip_就是_400(
+def test_POST_非_zip_会被打包成_zip_而不是_400(
     client: TestClient, admin_headers: dict, contest: dict
 ) -> None:
-    asset = upload(client, admin_headers, contest["id"], ZIP_NAME, b"not a zip at all")
+    """**口径变了的那一条**：非 zip 原来是 ``400 asset_not_zip``，现在就地打包。
+
+    老口径把"不是 zip"当成"这个动作只对 zip 有意义"；新需求要它对**任意**资产都
+    有意义 —— 非 zip 就先包成 zip，再套密码。所以这里不再拒绝，而是同一个 asset
+    id 换内容、文件名换成 ``<原基名>.zip``，zip 里的成员名**仍是原来的文件名**。
+    """
+    raw = "明显不是 zip 的字节".encode("utf-8")
+    asset = upload(client, admin_headers, contest["id"], "题面.pdf", raw)
     before = stored(client, asset["id"])
 
     response = set_password(
         client, admin_headers, contest["id"], asset["id"], password="Pw123456"
     )
 
-    assert response.status_code == 400, response.text
-    assert response.json()["code"] == "asset_not_zip"
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["packaged"] is True, "回执必须能区分这次是打包还是改密码"
+    assert body["asset"]["id"] == asset["id"], "就地替换，不是新建一条"
+    assert body["asset"]["filename"] == "题面.zip"
+    assert body["asset"]["sha256"] != before[0]
+    assert body["asset"]["size"] != before[1]
+
+    blob = blob_bytes(client, body["asset"]["sha256"])
+    with zipfile.ZipFile(io.BytesIO(blob)) as archive:
+        assert archive.namelist() == ["题面.pdf"], "zip 里那个成员仍用原来的文件名"
+        assert archive.read("题面.pdf", pwd=b"Pw123456") == raw
+
+    content = asset_text(
+        client, admin_headers, contest["id"], body["password_asset"]["id"]
+    )
+    lines = password_lines(content)
+    assert lines["文件"] == "题面.zip", "password.txt 说的是改名之后的那一份"
+    assert lines["密码"] == "Pw123456"
+
+
+def test_打包_不改动别的资产(
+    client: TestClient, admin_headers: dict, contest: dict
+) -> None:
+    other = upload(client, admin_headers, contest["id"], "样例.pdf", b"other pdf")
+    other_before = stored(client, other["id"])
+    other_blob = blob_bytes(client, other_before[0])
+    asset = upload(client, admin_headers, contest["id"], "题面.pdf", b"pdf body")
+
+    set_password(client, admin_headers, contest["id"], asset["id"], password="Pw123456")
+
+    assert stored(client, other["id"]) == other_before
+    assert blob_bytes(client, other_before[0]) == other_blob
+
+
+def test_打包_没有扩展名的文件名补上_zip(
+    client: TestClient, admin_headers: dict, contest: dict
+) -> None:
+    asset = upload(client, admin_headers, contest["id"], "题面", b"pdf body")
+
+    body = set_password(
+        client, admin_headers, contest["id"], asset["id"], password="Pw123456"
+    ).json()
+
+    assert body["packaged"] is True
+    assert body["asset"]["filename"] == "题面.zip"
+    with zipfile.ZipFile(io.BytesIO(blob_bytes(client, body["asset"]["sha256"]))) as archive:
+        assert archive.namelist() == ["题面"]
+
+
+def test_打包后目标被重排且偏移清零(
+    client: TestClient,
+    admin_headers: dict,
+    contest: dict,
+    player: dict,
+    enrolled: dict,
+) -> None:
+    """打包与「在线改正文」是同一套语义：done → pending、偏移清零、下一轮带新 sha。"""
+    asset = upload(client, admin_headers, contest["id"], "题面.pdf", b"pdf body")
+    deploy_to(client, admin_headers, contest["id"], asset["id"], [player["id"]])
+    do_tick(
+        client,
+        enrolled["token"],
+        [],
+        machine_id=enrolled["machine_id"],
+        completed_assets=[asset["id"]],
+    )
+    assert target_states(client, asset["id"]) == [(DeployStatus.DONE, 0)]
+    pin_bytes_done(client, asset["id"], PINNED_OFFSET)
+
+    body = set_password(
+        client, admin_headers, contest["id"], asset["id"], password="Pw123456"
+    ).json()
+
+    assert body["requeued"] == 1
+    assert target_states(client, asset["id"]) == [(DeployStatus.PENDING, 0)]
+
+    jobs = do_tick(client, enrolled["token"], [], machine_id=enrolled["machine_id"])[
+        "deploy_jobs"
+    ]
+    job = next(item for item in jobs if item["asset_id"] == asset["id"])
+    assert job["sha256"] == body["asset"]["sha256"]
+    assert job["size"] == body["asset"]["size"]
+    assert job["offset"] == 0
+
+
+def test_打包的审计写清了动作与改名且不含密码(
+    client: TestClient, admin_headers: dict, contest: dict
+) -> None:
+    asset = upload(client, admin_headers, contest["id"], "题面.pdf", b"pdf body")
+
+    set_password(client, admin_headers, contest["id"], asset["id"], password="Secret1Pw")
+
+    events = audit_events(client)
+    assert len(events) == 1
+    message = events[0]["message"]
+    assert "打包" in message, "审计要能看出这次是打包，不是改密码"
+    assert "题面.pdf" in message
+    assert "题面.zip" in message
+    assert "Secret1Pw" not in message
+    assert PASSWORD_FILE in message
+
+
+def test_已经是加密_zip_的资产走改密码那条路(
+    client: TestClient, admin_headers: dict, contest: dict
+) -> None:
+    """扩展名不是 .zip、内容却是加密 zip：判据是**内容**，所以走改密码，不打包。"""
+    encrypted = io.BytesIO()
+    zipcrypto.rewrite_zip(io.BytesIO(make_zip()), encrypted, new_password=b"OldPw123")
+    asset = upload(client, admin_headers, contest["id"], "题面.pdf", encrypted.getvalue())
+
+    status = get_status(client, admin_headers, contest["id"], asset["id"])
+    assert status.json()["encrypted"] is True
+
+    before = stored(client, asset["id"])
+    refused = set_password(
+        client, admin_headers, contest["id"], asset["id"], password="NewPw456"
+    )
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["code"] == "zip_password_required"
     assert stored(client, asset["id"]) == before
+
+    body = set_password(
+        client,
+        admin_headers,
+        contest["id"],
+        asset["id"],
+        password="NewPw456",
+        old_password="OldPw123",
+    ).json()
+    assert body["packaged"] is False, "本来就是 zip，走的是改密码"
+    assert body["asset"]["filename"] == "题面.pdf", "改密码不改名"
+    blob = blob_bytes(client, body["asset"]["sha256"])
+    with zipfile.ZipFile(io.BytesIO(blob)) as archive:
+        assert archive.read("题面.txt", pwd=b"NewPw456") == EXPECTED["题面.txt"]
+        assert_password_rejected(archive, "题面.txt", "OldPw123")
+
+
+# --------------------------------------------------------------------------- #
+# 3b. 上传时就打包：磁盘上直接只有 zip，没有原始字节
+# --------------------------------------------------------------------------- #
+
+
+def test_上传时打包_密码写进_password_txt且磁盘上没有原始字节(
+    client: TestClient, admin_headers: dict, contest: dict
+) -> None:
+    raw = "第一版题面\n".encode("utf-8")
+    asset = upload_packaged(
+        client, admin_headers, contest["id"], "题面.pdf", raw, zip_password="UploadPw1"
+    )
+
+    assert asset["filename"] == "题面.zip", "落库的文件名就是打包后的那个"
+    assert asset["sha256"] != hashlib.sha256(raw).hexdigest()
+    # "不是先把原文件存下来再改"：原始字节那份 blob 根本不存在
+    assert not blob_exists(client, hashlib.sha256(raw).hexdigest())
+
+    blob = blob_bytes(client, asset["sha256"])
+    with zipfile.ZipFile(io.BytesIO(blob)) as archive:
+        assert archive.namelist() == ["题面.pdf"]
+        assert archive.read("题面.pdf", pwd=b"UploadPw1") == raw
+
+    password_id = password_asset_id_of(client, admin_headers, contest["id"])
+    lines = password_lines(asset_text(client, admin_headers, contest["id"], password_id))
+    assert lines["文件"] == "题面.zip"
+    assert lines["密码"] == "UploadPw1"
+
+    events = audit_events(client)
+    assert len(events) == 1
+    assert "打包" in events[0]["message"]
+    assert "UploadPw1" not in events[0]["message"]
+
+
+def test_上传时打包_不填密码就用服务端生成的随机密码(
+    client: TestClient, admin_headers: dict, contest: dict
+) -> None:
+    raw = b"pdf bytes"
+    asset = upload_packaged(client, admin_headers, contest["id"], "题面.pdf", raw)
+
+    assert asset["filename"] == "题面.zip"
+    password_id = password_asset_id_of(client, admin_headers, contest["id"])
+    password = password_lines(
+        asset_text(client, admin_headers, contest["id"], password_id)
+    )["密码"]
+    assert len(password) == zipcrypto.PASSWORD_LENGTH
+    assert set(password) <= set(zipcrypto.PASSWORD_ALPHABET)
+    assert not (set(password) & set("0O1lI"))
+
+    blob = blob_bytes(client, asset["sha256"])
+    with zipfile.ZipFile(io.BytesIO(blob)) as archive:
+        assert archive.read("题面.pdf", pwd=password.encode("utf-8")) == raw
+
+
+def test_上传时不打包就还是原样落盘(
+    client: TestClient, admin_headers: dict, contest: dict
+) -> None:
+    """``package_zip`` 默认 false：老行为一个字节都不变（原样落盘、不写密码文件）。"""
+    raw = b"pdf bytes"
+    asset = upload(client, admin_headers, contest["id"], "题面.pdf", raw)
+
+    assert asset["filename"] == "题面.pdf"
+    assert asset["sha256"] == hashlib.sha256(raw).hexdigest()
+    assert blob_bytes(client, asset["sha256"]) == raw
     assert count_assets_named(client, contest["id"], PASSWORD_FILE) == 0
 
 
@@ -1112,3 +1450,58 @@ def test_密码只活在_password_txt_里_能读回来(
     )
     assert lines["文件"] == ZIP_NAME
     assert lines["密码"] == "Recover1"
+
+
+# --------------------------------------------------------------------------- #
+# 9. 前端入口：password.txt 那一行不给打包 / 改密码动作
+#
+# 为什么这条断言读 .vue 源码而不是打接口：这条例外是**界面层**的规则。
+# `password.txt` 是服务端生成的单件（正文由 `_upsert_password_asset` 维护），
+# 把它打成 `password.zip` 会顺手再生成一份新的 `password.txt` —— 这个文件能自己
+# 滚下去。本轮不再动服务端（`api/admin.py` 正被并发修改，见交接说明），所以
+# "这个文件没有打包入口"只能对着页面源码对账 —— 和 `scripts/check-routes.mjs`、
+# `test_frontend_contract.py` 是同一个思路。
+#
+# 链条：唯一一个打开对话框的按钮被 `canZipAction(row)` 把着 → `password.txt`
+# 永远进不了 `setZipPassword` → 服务端不会为它再跑一次
+# `_upsert_password_asset` → 不会多出第二份 `password.txt`。
+# 哪一步服务端也补上白名单时，这里要同时改成"打接口拿 400"，别只留半条。
+# --------------------------------------------------------------------------- #
+
+DEPLOY_VIEW = (
+    Path(__file__).resolve().parents[2] / "web" / "src" / "views" / "DeploysView.vue"
+)
+
+
+def _deploy_view_source() -> str:
+    if not DEPLOY_VIEW.is_file():  # pragma: no cover - 前端被挪走时不该静默通过
+        pytest.skip("找不到 %s" % DEPLOY_VIEW)
+    return DEPLOY_VIEW.read_text(encoding="utf-8")
+
+
+def test_password_txt_那一行没有打包动作() -> None:
+    source = _deploy_view_source()
+
+    # 1) 名字就是服务端那个常量名（同一个字符串，不另起别名）
+    assert re.search(r"const PASSWORD_FILENAME = ['\"]password\.txt['\"]", source), (
+        "DeploysView 里必须有 password.txt 这个常量（服务端 PASSWORD_FILENAME）"
+    )
+
+    # 2) 守卫函数真的拿它做排除，不是恒真的壳 —— 去掉这一句就会多出一份新的
+    #    password.txt（"自己滚下去"）
+    matched = re.search(r"function canZipAction\b[^{]*\{(.*?)\n\}", source, re.S)
+    assert matched, "找不到 canZipAction()：打包动作的入口守卫被删了"
+    body = matched.group(1)
+    assert "PASSWORD_FILENAME" in body, (
+        "canZipAction 必须按 PASSWORD_FILENAME 排除 —— 把 password.txt 打成包会再"
+        "生成一份新的 password.txt"
+    )
+
+    # 3) 打开对话框的入口只有一处，而且被这个守卫包着 —— 否则"每一行都有动作"
+    #    会从另一个地方漏出去
+    assert source.count("openZipPasswordDialog(row)") == 1, (
+        "openZipPasswordDialog 的调用点不止一处：绕过 canZipAction 的那一个会漏出去"
+    )
+    assert 'v-if="canZipAction(row)"' in source, (
+        "开放那个动作的按钮必须由 canZipAction 把关"
+    )

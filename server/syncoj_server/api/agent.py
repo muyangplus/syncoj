@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -55,7 +56,7 @@ from ..schemas import (
 )
 from ..security import hash_token, new_pair_code, new_token
 from ..storage import BlobTooLarge, HashMismatch, materialize
-from ..services import enrollment, install_policy, packaging, uninstall
+from ..services import enrollment, install_policy, packaging, runtime_settings, scan_missing, uninstall
 from ..services.collect import reconcile_scan, record_events
 from ..services.deploy import collect_deploy_jobs
 from ..services.ratelimit import RateLimitExceeded
@@ -132,15 +133,32 @@ def _reject_outside_window(ctx: AppContext, identity: AgentIdentity, now) -> Non
 
 
 def _agent_config(ctx: AppContext) -> Dict[str, Any]:
-    """下发给 Agent 的运行时策略。服务端是权威，客户端不得自行决定。"""
+    """下发给 Agent 的运行时策略。服务端是权威，客户端不得自行决定。
+
+    ``scan_interval`` 与 ``tick_idle_seconds`` 同值：扫描发生在心跳里，两者在
+    Agent 那边本来就是一回事（用户明确要求保持绑定）。心跳节奏是**运行参数**，
+    改完下一轮心跳就生效，所以这里每次都现读。
+    """
+    settings = _runtime_settings(ctx)
     cfg = build_policy(
         max_file_size=ctx.settings.max_file_size,
-        scan_interval=ctx.settings.tick_idle_seconds,
+        scan_interval=settings.tick_idle_seconds,
         max_files=ctx.settings.max_files_per_scan,
     )
-    cfg["tick_idle_seconds"] = ctx.settings.tick_idle_seconds
-    cfg["tick_active_seconds"] = ctx.settings.tick_active_seconds
+    cfg["tick_idle_seconds"] = settings.tick_idle_seconds
+    cfg["tick_active_seconds"] = settings.tick_active_seconds
     return cfg
+
+
+def _runtime_settings(ctx: AppContext) -> runtime_settings.RuntimeSettings:
+    """现读运行参数。
+
+    心跳端点每轮都要问一次（而不是启动时缓存一份）：改完**一轮心跳内**生效、
+    不用重启，是这三个参数存在的全部意义。读的是一次主键查询 + 一次会话，
+    相对于这一轮里已经做的那些写操作可以忽略。
+    """
+    with ctx.db.session() as session:
+        return runtime_settings.load(session)
 
 
 # --------------------------------------------------------------------------- #
@@ -204,7 +222,9 @@ def enroll(
                 agent_version=payload.agent_version,
                 raw_token=raw_token,
                 raw_pair_code=raw_pair_code,
-                offline_after_seconds=ctx.settings.offline_after_seconds,
+                # 注册冲突判定用的"还在线"阈值也走运行参数：它与离线扫描
+                # 必须是同一个数，否则会出现"列表说它离线、注册说它还活着"
+                offline_after_seconds=_runtime_settings(ctx).offline_after_seconds,
                 pair_code_ttl_seconds=ctx.settings.pair_code_ttl_seconds,
             )
         except enrollment.BootstrapRejected as exc:
@@ -334,6 +354,14 @@ def tick(
             if payload.agent_version:
                 agent.agent_version = payload.agent_version
             _note_release_public_key(agent, payload.release_public_key, now)
+            _note_scan_missing(
+                session,
+                agent,
+                payload.stats.scan_missing,
+                player_id=identity.player_id,
+                contest_id=identity.contest_id,
+                now=now,
+            )
             uninstall_token = _pending_uninstall_token(ctx, agent, now)
 
     ctx.registry.note_tick(
@@ -344,13 +372,14 @@ def tick(
         file_count=collect.seen_files + collect.new_files,
         disk_free=payload.stats.disk_free,
         last_error=payload.stats.last_error,
+        scan_missing=payload.stats.scan_missing,
     )
 
-    # 自适应周期：有活干就收紧，没活干就放宽
+    # 自适应周期：有活干就收紧，没活干就放宽。两个值都是**运行参数**，现读 ——
+    # 教师改完下一轮就按新节奏走，不用重启服务端
+    live = _runtime_settings(ctx)
     active = bool(collect.need_upload or jobs or collect.deleted)
-    next_tick = (
-        ctx.settings.tick_active_seconds if active else ctx.settings.tick_idle_seconds
-    )
+    next_tick = live.tick_active_seconds if active else live.tick_idle_seconds
 
     return TickResponse(
         server_time=unix_seconds(now),
@@ -400,6 +429,9 @@ def _tick_pending(
     还有一条同样重要：**同一个码在有效期内必须原样回同一串**。
     每轮换一个新的会让教师刚在屏幕上读到的数字当场作废，而现场看起来
     只是"配对码一直在跳"，没人会往心跳上想。
+
+    "扫描根不存在"与配不配对无关，这里也照记：目录还没建这件事在**未配对**的
+    机器上同样值得教师看见（它正是"机器在跑、但扫出来零个文件"的一半原因）。
     """
     now = utcnow()
     pair_code = None
@@ -418,6 +450,14 @@ def _tick_pending(
             # 卸载授权与"配没配对"无关：要卸的可能是台配错人的机器、甚至是台
             # 还没认领的测试机。「机器」列表里有这一行的入口，这里就得能回话。
             _note_release_public_key(agent, payload.release_public_key, now)
+            _note_scan_missing(
+                session,
+                agent,
+                payload.stats.scan_missing,
+                player_id=None,
+                contest_id=None,
+                now=now,
+            )
             uninstall_token = _pending_uninstall_token(ctx, agent, now)
 
             if not identity.paired:
@@ -445,7 +485,8 @@ def _tick_pending(
 
     return TickResponse(
         server_time=unix_seconds(now),
-        next_tick_seconds=ctx.settings.tick_idle_seconds,
+        # 它本来就没事可做，用空闲周期（运行参数，现读）
+        next_tick_seconds=_runtime_settings(ctx).tick_idle_seconds,
         claimed=identity.paired,
         pair_code=pair_code,
         bound=False,
@@ -463,6 +504,55 @@ def _note_release_public_key(agent: Agent, reported: bool, now) -> None:
     到了那边一定被拒收，教师看到的却是"操作成功"。
     """
     agent.release_public_key_at = now if reported else None
+
+
+def _note_scan_missing(
+    session,
+    agent: Agent,
+    reported: List[str],
+    *,
+    now,
+    player_id: Optional[int] = None,
+    contest_id: Optional[int] = None,
+) -> None:
+    """记下本轮"不存在的扫描根"，**只在状态变化时**留一条审计。
+
+    为什么按变化记而不是每轮记：心跳是 20 秒一次，一台机器一个上午能刷出上千条
+    一模一样的事件 —— 那条审计就再也读不得了（真正要找的是"目录什么时候没的、
+    什么时候回来的"）。
+
+    判据是**集合**而不是列表：顺序变了不算变化。Agent 那边为了对账做了排序，
+    但排序是它的实现细节，服务端不该因为对方换了排序方式就记一堆假事件。
+    """
+    current = scan_missing.normalize(reported)
+    previous = scan_missing.load_scan_missing(agent.scan_missing_json)
+    agent.scan_missing_json = scan_missing.dump_scan_missing(current)
+    if current == previous:
+        return
+
+    if current:
+        session.add(
+            EventLog(
+                level="warning",
+                category="scan_missing",
+                contest_id=contest_id,
+                player_id=player_id,
+                agent_id=agent.id,
+                # 路径原样写进去：教师要去那台机器上建目录，需要的就是那几个字面路径
+                message="扫描根不存在：%s" % "、".join(current),
+            )
+        )
+    else:
+        session.add(
+            EventLog(
+                level="info",
+                category="scan_missing",
+                contest_id=contest_id,
+                player_id=player_id,
+                agent_id=agent.id,
+                message="扫描根已就位：%s" % "、".join(previous),
+            )
+        )
 
 
 def _pending_uninstall_token(ctx: AppContext, agent: Agent, now) -> Optional[str]:

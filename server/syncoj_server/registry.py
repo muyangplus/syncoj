@@ -53,6 +53,8 @@ class AgentRuntime:
     file_count: int = 0
     disk_free: Optional[int] = None
     last_error: Optional[str] = None
+    #: 本机上当前不存在的扫描根（最近一次心跳报的）。页面写一句"选手目录还没建"。
+    scan_missing: List[str] = field(default_factory=list)
 
     #: 需要被批量落库
     dirty: bool = True
@@ -83,6 +85,7 @@ class AgentRuntime:
             "file_count": self.file_count,
             "disk_free": self.disk_free,
             "last_error": self.last_error,
+            "scan_missing": list(self.scan_missing),
             "tick_count": self.tick_count,
         }
 
@@ -146,6 +149,7 @@ class AgentRegistry:
         file_count: int = 0,
         disk_free: Optional[int] = None,
         last_error: Optional[str] = None,
+        scan_missing: Optional[List[str]] = None,
     ) -> Optional[AgentRuntime]:
         """记录一次心跳。返回运行时对象；未知 agent_id 返回 None。"""
         now = utcnow()
@@ -166,6 +170,10 @@ class AgentRegistry:
             runtime.file_count = file_count
             runtime.disk_free = disk_free
             runtime.last_error = last_error
+            if scan_missing is not None:
+                # 每一轮都覆盖：缺失是"此刻的事实"，不是累积的告警 ——
+                # 目录建好之后它必须自己从列表上消失
+                runtime.scan_missing = list(scan_missing)
             runtime.dirty = True
             if was_offline:
                 log.info("agent %s (%s) 恢复在线", agent_id, runtime.player_no)
@@ -205,14 +213,23 @@ class AgentRegistry:
     # 后台任务接口
     # ---------------------------------------------------------------- #
 
-    def sweep_offline(self) -> List[AgentRuntime]:
+    def sweep_offline(self, offline_after_seconds: Optional[int] = None) -> List[AgentRuntime]:
         """把超时未 tick 的机器标记为离线。返回本次刚转为离线的集合。
 
         由后台任务周期调用 —— 不能只在 tick 时判断，因为"不再 tick"这件事
         本身没有任何事件可以触发。
+
+        ``offline_after_seconds`` 由调用方**现读**运行参数传进来（缺省用构造时的
+        值）：这个阈值是可以在管理端改的，而"改完立即生效"就体现在这里 ——
+        缓存到注册表里的话，教师改完得重启服务端才管用。
         """
+        threshold = (
+            int(offline_after_seconds)
+            if offline_after_seconds is not None
+            else self._offline_after
+        )
         now = utcnow()
-        deadline = now - timedelta(seconds=self._offline_after)
+        deadline = now - timedelta(seconds=threshold)
         flipped: List[AgentRuntime] = []
         with self._lock:
             for runtime in self._agents.values():
@@ -225,7 +242,7 @@ class AgentRegistry:
                     flipped.append(runtime)
         for runtime in flipped:
             log.info("agent %s (%s) 判定离线（超过 %ds 无 tick）",
-                     runtime.agent_id, runtime.player_no, self._offline_after)
+                     runtime.agent_id, runtime.player_no, threshold)
         return flipped
 
     def take_dirty(self) -> List[AgentRuntime]:

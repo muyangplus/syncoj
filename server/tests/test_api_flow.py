@@ -233,14 +233,35 @@ def test_tick_empty_scan_then_needs_upload(client: TestClient, enrolled: dict) -
 
     body = tick(client, token, [], machine_id=machine)
     assert body["need_upload"] == []
-    # 空闲时应放宽轮询周期
-    assert body["next_tick_seconds"] == 60
+    # 空闲时用心跳周期（默认 30s）
+    assert body["next_tick_seconds"] == 30
 
     content = b"int main() { return 0; }\n"
     body = tick(client, token, [entry("main.cpp", content)], machine_id=machine)
     assert body["need_upload"] == ["main.cpp"]
     # 有活干时应收紧轮询周期
     assert body["next_tick_seconds"] == 2
+
+
+def test_扫描周期跟随空闲心跳(client: TestClient, enrolled: dict) -> None:
+    """``scan_interval`` 与 ``tick_idle_seconds`` **同值**：扫描发生在心跳里。
+
+    用户明确要求两者继续绑在一起（不拆成两个旋钮）。但"绑在一起"不等于"写死
+    在启动配置里"：这两项都是**运行参数**，改完一轮心跳内生效 —— 所以这里把
+    库里那一项改掉，断言下发的两份值一起变。
+    """
+    app_ctx = client.app.state.ctx  # type: ignore[attr-defined]
+
+    from syncoj_server.services import runtime_settings
+
+    with app_ctx.db.session() as session:
+        runtime_settings.save(session, {"tick_idle_seconds": 12})
+
+    body = tick(client, enrolled["token"], [], machine_id=enrolled["machine_id"])
+
+    assert body["config"]["tick_idle_seconds"] == 12
+    assert body["config"]["scan_interval"] == 12, "扫描周期没有跟着空闲心跳走"
+    assert body["next_tick_seconds"] == 12
 
 
 def test_tick_does_not_re_request_unchanged_content(

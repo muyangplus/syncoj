@@ -5,7 +5,7 @@
 > - `server/syncoj_server/errors.py`（错误码清单）
 > - `agent/syncoj_agent/client.py` 与 `main.py`（报文体构造与状态机）
 > - `server/tests/test_agent_contract.py`（契约测试会自动发现不一致）
-> - `docs/api-conventions.md`（管理端 API 的同类约定）
+> - `docs/reference/api-conventions.md`（管理端 API 的同类约定）
 
 ## 0. 总则
 

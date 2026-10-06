@@ -15,7 +15,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 
-import { absolute, bootstrapCommand, installApi } from '@/api'
+import { absolute, bootstrapCommand, installApi, uninstallCommand } from '@/api'
 import { ApiError } from '@/api/client'
 import { describeError } from '@/api/crud'
 import { apiOrigin } from '@/publicMode'
@@ -83,6 +83,16 @@ const origin = window.location.origin
  * 公开端口上这两个文件也是发得出去的。
  */
 const command = computed(() => bootstrapCommand(apiOrigin()))
+
+/**
+ * 卸载命令也在这里给出，理由与安装命令一样：教师是**站在这台机器前面**打开这一页的。
+ * 而它必须能从这一页拿到，是因为离线包刻意不含安装器 —— 装完之后机器上只剩
+ * `run_agent.py`，没有 install.py，手工卸载的第一步就得先把安装器弄回去。
+ *
+ * 地址同样取 API 端口：这是**现在**要下载 bootstrap.sh 的地址，不是被写进那台
+ * 机器长期使用的地址（卸载是一次性的）。
+ */
+const uninstall = computed(() => uninstallCommand(apiOrigin()))
 /** 服务端给的是相对路径，拼成绝对地址才能给浏览器下载 —— 拼法由 api 层统一提供。 */
 const bundleUrl = computed(() => (ledger.value ? absolute(origin, ledger.value.bundle) : ''))
 const installerUrl = computed(() =>
@@ -124,7 +134,6 @@ function goRollout(): void {
       -->
       <el-alert v-if="error" type="error" :closable="false" show-icon :title="error">
         <div class="alert-row">
-          <span>取不到台账就先别抄命令 —— 版本号和校验和都可能对不上。</span>
           <el-button size="small" type="primary" plain @click="load">重试</el-button>
         </div>
       </el-alert>
@@ -209,27 +218,28 @@ function goRollout(): void {
           </el-link>
         </div>
 
-        <!--
-          一句实话，不展开：sha256 与包体来自同一个未鉴权的地方，它挡的是传输损坏，
-          挡不住"有人替你换了个包"——那必须靠机器上的发布公钥验签。
-        -->
-        <p class="hint">
-          sha256 只挡传输损坏；要挡住"有人替你换了个包"，得让机器上有发布公钥。
-        </p>
-        <!--
-          两件事必须写在同一条路上：机器**先要有统一注册密钥**才会注册、才会写出配对码。
-          少了前半句，教师会站在机器前一直等一个永远不出现的东西 —— 而安装器那时只会说
-          "没有统一密钥，装不出注册单元"，那句话在几十行输出里很容易被忽略。
-        -->
-        <p class="hint">
-          机器上要先有统一注册密钥（<code>/etc/syncoj/bootstrap.key</code>，见「机器配对 →
-          装机设置」；或者用一个勾了"附带密钥"的版本），否则它不会注册。
-        </p>
-        <p class="hint">装完机器会在桌面写出六位配对码，去管理界面「机器配对」绑给选手。</p>
+        <p class="hint">机器上没有统一注册密钥就不会注册。</p>
+        <p class="hint">去管理界面「机器配对」绑给选手。</p>
       </template>
 
       <!-- 首屏：台账还没回来，给骨架而不是一片空白（空白会被当成"这页坏了"） -->
       <el-skeleton v-else-if="loading" :rows="4" animated />
+
+      <!--
+        卸载命令**不在上面那个 `v-else-if="ledger"` 里**：它与台账无关（没有铺开任何
+        版本时，机器上照样装着老版本、照样可能要卸）。所以模板里的顺序是"先说完要装的，
+        再说要卸的"，而这个块永远显示。
+
+        位置在最下面（次要）：它是一次性、破坏性的操作，不该抢"来抄安装命令"的人的视线。
+        命令与安装同源 —— bootstrap.sh 把参数原样交给 install.py，所以机器上不必先有
+        安装器（离线包刻意不含它）。
+      -->
+      <div class="install-row uninstall-row">
+        <span class="info-label">卸载</span>
+        <code class="install-command">{{ uninstall }}</code>
+        <el-button size="small" @click="copyText(uninstall, '卸载命令')">复制</el-button>
+      </div>
+      <p class="hint">在要清掉的那台机器上跑它。会删掉统一注册密钥与本机凭据。</p>
     </el-card>
   </div>
 </template>
@@ -296,6 +306,13 @@ function goRollout(): void {
   display: flex;
   align-items: flex-start;
   gap: 8px;
+}
+
+/* 卸载命令：与上面几块拉开距离，但样式复用安装命令那一套（同一类东西长得一样） */
+.uninstall-row {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid #ebeef5;
 }
 
 /*

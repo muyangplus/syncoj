@@ -40,6 +40,28 @@ export function bootstrapCommand(origin: string): string {
   )
 }
 
+/**
+ * 清掉一台机器上已经装好的 Agent。**一句话，不折行。**
+ *
+ * 走的是**同一个** `bootstrap.sh`（它把参数原样交给 install.py），所以机器上不必
+ * 先有 install.py —— 这正是这条命令存在的理由：离线包刻意不含 `packaging/`，装完
+ * 之后机器上只剩 `run_agent.py`，想卸载就得先把安装器弄回去。服务端地址由
+ * bootstrap.sh 自己从机器上已有的 `/etc/syncoj/agent.ini` 里读，所以这条命令里
+ * 只需要"从哪儿取脚本"这一个地址。
+ *
+ * **与安装命令不同，这里刻意排成一行**：安装命令里有 `--server <地址>`，很长，
+ * 软换行会把 `--server` 拆成两半（看起来像打错了），所以它自己给了续行符；卸载
+ * 命令短得多（没有那一长串参数），一整行读完就能确认，也就没有拆成两行的理由 ——
+ * 而每多一个反斜杠，手抄的人就多一次抄错的机会。
+ *
+ * `--yes` 不是可选项：管道里 stdin 不是终端，安装器在非交互时**拒绝**执行卸载
+ * （它删的是统一注册密钥与升级信任锚，不看一眼就删掉只能重新注册/重配信任锚）。
+ */
+export function uninstallCommand(origin: string): string {
+  const base = origin.replace(/\/+$/, '')
+  return `curl -fsSL ${base}${paths.installBootstrap()} | sudo sh -s -- --uninstall --yes`
+}
+
 export const installApi = {
   /**
    * 当前可装机版本的台账。

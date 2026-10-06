@@ -25,7 +25,7 @@ export { assetApi } from './assets'
 export { deployApi } from './deploys'
 export { scoreApi } from './scores'
 export { releaseApi } from './releases'
-export { installApi, absolute, bootstrapCommand } from './install'
+export { installApi, absolute, bootstrapCommand, uninstallCommand } from './install'
 export { playerPageApi } from './playerPage'
 export type { PlayerAssetOut, PlayerContextOut, PlayerNoticeOut } from './playerPage'
 

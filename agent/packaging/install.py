@@ -3400,7 +3400,8 @@ roots = {scan_roots}
 ; 准考证号会出现两次）；auto = 取根目录名；其他字面量直接用
 ; （前缀里也能用 {{player_no}} / {{contest_slug}}）
 prefix = {scan_prefix}
-interval = 60
+; 心跳兜底间隔（秒）：服务端策略优先，只有"还没下发策略"时用它（默认 30）
+interval = 30
 max_file_size = 2097152
 
 [log]

@@ -285,12 +285,14 @@ def test_default_不覆盖被人改过的键(installer, installer_module) -> Non
     instance.install_policy = policy_for(
         installer_module, {"config_policy": {"scan.interval": "default"}}
     )
-    # 快照里写的是安装器上次写的值（默认 60），现场被教师改成了 30
-    seed_config(instance, OLD_CONFIG, snapshot="[scan]\ninterval = 60\n")
+    # 快照里是安装器上次写下的值；现场被教师改成了 47 —— 故意用一个**不等于任何
+    # 默认值**的数，这样"被默认值盖掉"也会被这条抓住
+    teacher = OLD_CONFIG.replace("interval = 30", "interval = 47")
+    seed_config(instance, teacher, snapshot="[scan]\ninterval = 60\n")
 
     instance.write_config(PORT)
 
-    assert read_values(instance.config_path)["scan"]["interval"] == "30", "教师改的值被覆盖了"
+    assert read_values(instance.config_path)["scan"]["interval"] == "47", "教师改的值被覆盖了"
 
 
 def test_default_在快照缺失时按人改过处理(installer, installer_module) -> None:
@@ -300,39 +302,48 @@ def test_default_在快照缺失时按人改过处理(installer, installer_modul
     instance.install_policy = policy_for(
         installer_module, {"config_policy": {"scan.interval": "default"}}
     )
-    path = seed_config(instance, OLD_CONFIG)  # 故意不给快照
+    teacher = OLD_CONFIG.replace("interval = 30", "interval = 47")
+    path = seed_config(instance, teacher)  # 故意不给快照
 
     instance.write_config(PORT)
 
-    assert read_values(path)["scan"]["interval"] == "30"
+    assert read_values(path)["scan"]["interval"] == "47"
 
 
 def test_force_无条件覆盖(installer, installer_module) -> None:
+    from syncoj_agent.config import AgentConfig
+
     instance = installer()
     seed_release(instance)
     instance.install_policy = policy_for(
         installer_module, {"config_policy": {"scan.interval": "force"}}
     )
-    path = seed_config(instance, OLD_CONFIG, snapshot="[scan]\ninterval = 60\n")
-    # force 要能在"模板默认值"上生效：60 → 渲染出来的新值
-    _write_text(path, OLD_CONFIG.replace("interval = 30", "interval = 60"))
+    teacher = OLD_CONFIG.replace("interval = 30", "interval = 47")
+    path = seed_config(instance, teacher, snapshot="[scan]\ninterval = 60\n")
 
     instance.write_config(PORT)
 
     values = read_values(path)
-    assert values["scan"]["interval"] == "60"
+    # 期望值从**唯一来源**取（配置默认），别在测试里再抄一个数：改默认值时
+    # 这条不会假红，而"三处不一致"另有专门的用例盯着
+    assert values["scan"]["interval"] == str(AgentConfig.load(None).scan_interval)
+    assert values["scan"]["interval"] != "47", "force 应当覆盖教师改过的值"
     # 注释与其它内容原样保留
     assert "教师手工改过这一行" in path.read_text(encoding="utf-8")
 
 
 def test_逐键更新不碰其它内容(installer, installer_module) -> None:
     """只改点名的键：注释、顺序、没点名的键都得原样留着。"""
+    from syncoj_agent.config import AgentConfig
+
     instance = installer()
     seed_release(instance)
     instance.install_policy = policy_for(
         installer_module, {"config_policy": {"scan.interval": "force"}}
     )
-    text = OLD_CONFIG + "\n[extra]\n; 教师自己加的东西\nmine = 1\n"
+    text = OLD_CONFIG.replace("interval = 30", "interval = 47") + (
+        "\n[extra]\n; 教师自己加的东西\nmine = 1\n"
+    )
     path = seed_config(instance, text, snapshot="[scan]\ninterval = 60\n")
 
     instance.write_config(PORT)
@@ -341,11 +352,15 @@ def test_逐键更新不碰其它内容(installer, installer_module) -> None:
     assert "教师手工改过这一行" in after
     assert "教师自己加的东西" in after
     assert read_values(path)["extra"]["mine"] == "1"
-    assert read_values(path)["scan"]["interval"] == "60"
+    assert read_values(path)["scan"]["interval"] == str(
+        AgentConfig.load(None).scan_interval
+    )
 
 
 def test_force_config_仍然整份重建(installer, installer_module) -> None:
     """显式 ``--force-config`` 是操作员说的"覆盖它"，优先级高于逐键策略。"""
+    from syncoj_agent.config import AgentConfig
+
     instance = installer(["--force-config"])
     seed_release(instance)
     instance.install_policy = policy_for(
@@ -357,7 +372,9 @@ def test_force_config_仍然整份重建(installer, installer_module) -> None:
 
     after = path.read_text(encoding="utf-8")
     assert "教师手工改过这一行" not in after, "force-config 应当整份重建"
-    assert read_values(path)["scan"]["interval"] == "60"
+    assert read_values(path)["scan"]["interval"] == str(
+        AgentConfig.load(None).scan_interval
+    )
 
 
 def test_每次写配置都会留下快照(installer, installer_module) -> None:

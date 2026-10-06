@@ -38,7 +38,10 @@ DEFAULT_POLICY: Dict[str, object] = {
     "exclude_dirs": DEFAULT_EXCLUDE_DIRS,
     "exclude_suffixes": DEFAULT_EXCLUDE_SUFFIXES,
     "max_file_size": 2 * 1024 * 1024,
-    "scan_interval": 60,
+    #: 心跳兜底间隔（秒）。**扫描是每轮 cycle 都跑的**（没有独立节流），这个值
+    #: 只在"服务端没给 next_tick_seconds"时当兜底等待用（见 main.py `_clamp_wait`）。
+    #: 与 config.py / config.example.ini / 安装器模板保持一致（都是 30）。
+    "scan_interval": 30,
     "max_files": 5000,
     "policy_version": 1,
 }

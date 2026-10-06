@@ -200,6 +200,9 @@ def test_render_config_contains_all_settings(installer) -> None:
     assert "deploy_root = {desktop}" in text
     assert "prefix = none" in text
     assert "mode = off" in text
+    # 心跳兜底默认值必须与 syncoj_agent/config.py 里的默认值一致
+    # （服务端策略仍然优先，这里只是"还没下发策略"时的兜底）
+    assert "interval = 30" in text
     # 运行账号必须进配置：{home}/{desktop} 的展开只认它，不认"谁在跑"
     assert "run_user = noi" in text
 

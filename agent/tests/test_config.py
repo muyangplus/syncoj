@@ -546,6 +546,9 @@ def test_shipped_example_config_is_loadable() -> None:
     assert config.server_url.startswith("https://")
     assert config.scan_roots, "示例里至少得有一个扫描目录"
     assert config.deploy_root.is_absolute()
+    # 心跳兜底默认值三处必须一致（dataclass / 示例 / 安装器模板），
+    # 漂了的后果是"服务端还没下发策略"时节奏取决于哪一处被读到，而且不会报错
+    assert config.scan_interval == 30
 
 
 def test_shipped_example_config_uses_only_known_placeholders() -> None:
@@ -594,6 +597,9 @@ def test_default_ini_is_the_source_of_truth_for_the_runbook() -> None:
     # deploy_root 默认为桌面，且载入时就展开
     assert config.deploy_root.is_absolute()
     assert "{desktop}" not in str(config.deploy_root)
+    # 内置模板里没有 [scan] interval → 走 fallback，兜底必须是 30
+    # （服务端策略仍然优先，见 _clamp_wait）
+    assert config.scan_interval == 30
     # 自更新默认 apply（模板里写的就是它）—— 机器铺开之后没人会一台台点升级
     assert "mode = apply" in DEFAULT_INI
     # 但这个内置默认**没有公钥**：那就升不了级，降级成 off 并吵一句，而不是

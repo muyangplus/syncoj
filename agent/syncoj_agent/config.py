@@ -223,8 +223,9 @@ roots = {desktop}/{player_no}
 #   auto = 取根目录名。配置了多个扫描目录时用它可以区分同名文件
 #   其他字面量 = 就用这个字符串
 prefix = none
-# 两轮扫描之间的最小间隔（秒）。实际节奏由服务端 tick 响应控制
-interval = 60
+# 心跳兜底间隔（秒）。**服务端策略优先**（tick 响应里的 next_tick_seconds 与
+# 下发的策略都会盖过它）；只有"还没下发策略"时才用这个值（默认 30）
+interval = 30
 # 单文件大小上限（字节）。超过则跳过并上报
 max_file_size = 2097152
 
@@ -302,7 +303,11 @@ class AgentConfig:
     scan_roots: List[Path] = field(default_factory=list)
     #: 上报路径的前缀策略：``none`` 不加、``auto`` 取根目录名、其他按字面量
     scan_prefix: str = PREFIX_NONE
-    scan_interval: int = 60
+    #: 心跳兜底间隔（秒）。**服务端策略优先**：tick 响应里的 ``next_tick_seconds``
+    #: 与配置策略里的 ``scan.interval`` 都会盖过它（见 ``_clamp_wait``）——
+    #: 这个值只在"服务端还没下发策略"或"策略读不到"时生效，所以要和服务端的
+    #: 空心跳默认值保持一致（30 秒），否则连不上策略时机器会比其他机器慢一半。
+    scan_interval: int = 30
     max_file_size: int = 2 * 1024 * 1024
 
     #: 下发文件的落地根目录。服务端给的 dest 是相对路径，只会落在这下面
@@ -579,7 +584,7 @@ class AgentConfig:
                 for item in _split_paths(parser.get("scan", "roots", fallback="") or "{desktop}/{player_no}")
             ],
             scan_prefix=(parser.get("scan", "prefix", fallback=PREFIX_NONE) or PREFIX_NONE).strip(),
-            scan_interval=int(parser.get("scan", "interval", fallback="60")),
+            scan_interval=int(parser.get("scan", "interval", fallback="30")),
             max_file_size=int(parser.get("scan", "max_file_size", fallback=str(2 * 1024 * 1024))),
             log_level=(parser.get("log", "level", fallback="INFO") or "INFO").strip().upper(),
             log_file=_opt_path(parser.get("log", "file", fallback="")),

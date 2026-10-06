@@ -390,6 +390,13 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         port=args.port,
         log_level=args.log_level,
         access_log=not args.quiet_access,
+        # **显式**设定空闲连接多久被服务端关掉。uvicorn 的默认是 5 秒，而 Agent 侧
+        # 有一条配套规则：连接空闲超过 `IDLE_RECYCLE_SECONDS`（4 秒）就主动丢掉重开，
+        # 免得请求正好撞上服务端关连接（真机上撞出过一条静默挂死 34 分钟的心跳）。
+        # 两个数字是一个**契约**：这里必须**大于**Agent 那个阈值。
+        # 65 秒的另一个好处：Agent 空闲心跳 30 秒一轮，连接能跨轮复用，
+        # 不必每轮都做一次 TCP 握手。
+        timeout_keep_alive=65,
     )
     try:
         uvicorn.Server(config).run(sockets=listeners)

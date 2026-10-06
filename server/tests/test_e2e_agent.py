@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import shutil
 import socket
 import sys
@@ -60,20 +61,25 @@ def age_agent(app, machine_uuid: str, seconds: int = 7200) -> None:
         record.last_seen_at = utcnow() - timedelta(seconds=seconds)
 
 
-@pytest.fixture()
-def live_server(settings: Settings) -> Iterator[str]:
-    """在后台线程里跑一个真的 uvicorn，返回 base_url。"""
+@contextlib.contextmanager
+def live_uvicorn(settings: Settings, **overrides) -> Iterator[str]:
+    """在后台线程里跑一个真的 uvicorn，返回 base_url。
+
+    ``overrides`` 直接传给 ``uvicorn.Config`` —— 目前只有那条 keep-alive 回归用得上
+    （它要**显式**设 ``timeout_keep_alive``，不能依赖版本默认值）。
+    """
     app = create_app(settings)
     port = _free_port()
 
-    config = uvicorn.Config(
-        app,
+    options = dict(
         host="127.0.0.1",
         port=port,
         log_level="warning",
         access_log=False,
         lifespan="on",
     )
+    options.update(overrides)
+    config = uvicorn.Config(app, **options)
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
@@ -91,6 +97,25 @@ def live_server(settings: Settings) -> Iterator[str]:
     finally:
         server.should_exit = True
         thread.join(timeout=10)
+
+
+@pytest.fixture()
+def live_server(settings: Settings) -> Iterator[str]:
+    """真的 uvicorn（用它的默认 keep-alive）。"""
+    with live_uvicorn(settings) as base_url:
+        yield base_url
+
+
+@pytest.fixture()
+def live_server_short_keepalive(settings: Settings) -> Iterator[str]:
+    """真的 uvicorn，但**显式**把空闲连接超时设成 1 秒。
+
+    为什么要显式设：断言不能依赖某个 uvicorn 版本的默认值（现在是 5 秒）。
+    ``keep-alive=1`` + 睡 2 秒 → 那条空闲连接**必然**已经被服务端关掉，
+    这样"复用它"的行为就是确定性的，而不是竞态。
+    """
+    with live_uvicorn(settings, timeout_keep_alive=1) as base_url:
+        yield base_url
 
 
 @pytest.fixture()
@@ -892,7 +917,54 @@ def test_prefix_none_avoids_duplicated_player_no(
         agent._ensure_credential()
         agent._ensure_roots(player_no)
         assert agent._roots == [("", desktop / player_no)], agent._roots
-        # 扫描根不存在时会被创建出来（选手可能还没建过目录）
-        assert (desktop / player_no).is_dir()
+        # **不代建**：选手的考号目录由他自己保存文件时产生。现场表现是"老师打开
+        # 桌面就多出一堆空文件夹"，而且那还会掩盖"这台机器根本没在收文件"。
+        assert not (desktop / player_no).exists(), "扫描根不该被 Agent 代建"
+        # 缺失的根会明说给服务端（它拿这个做后台提示），而不是静默跳过
+        payload, _oversize, _errors = agent._build_tick_payload([], {}, scan_complete=False)
+        assert payload["stats"]["scan_missing"] == [str(desktop / player_no)]
     finally:
         agent.client.close()
+
+
+def test_空闲连接被服务端关掉之后下一次心跳仍然正常(
+    workdir: Path, settings: Settings, live_server_short_keepalive: str, seeded: dict,
+    client: TestClient, admin_headers: dict,
+) -> None:
+    """**真机那次"静默挂死 34 分钟"的跨端回归。**
+
+    现场（用户在机器上抓到的）：一次 keep-alive 竞态之后 Agent 卡在一次 socket 读上
+    （``wchan=do_sys_poll``）、34 分钟没再心跳，旁边留着一条 CLOSE-WAIT 的连接。
+    根因是"服务端把空闲连接关了、Agent 还抱着它复用"。
+
+    **让真的 uvicorn 关连接**（``timeout_keep_alive=1`` + 睡 2 秒 → 那条连接必然
+    已经关了），再跑第二次 tick：
+
+    * 修复前：要么 ``RemoteDisconnected``，要么像真机那样静默挂住（这条会红）；
+    * 修复后：空闲超 4 秒的控制面连接会被**主动回收**，或者至少"丢连接 + 幂等重试
+      一次"能兜住。
+
+    只断言"第二次 tick 成功、且耗时正常"，**不**断言发生了哪种异常 —— 异常是竞态，
+    成功才是性质。keep-alive 显式设 1 秒（不用默认值）也是为了确定性。
+    """
+    code_dir = workdir / "code"
+    code_dir.mkdir()
+
+    config, agent = start_agent(
+        workdir, live_server_short_keepalive, seeded, client, admin_headers, code_dir
+    )
+    # 把控制面超时压到 3 秒：万一又出现"静默挂死"，这条用例会**快速**变红，
+    # 而不是像真机那样挂 34 分钟
+    config.request_timeout = 3
+    agent.client.timeout = 3
+    try:
+        agent.cycle()  # 建立并开始复用控制面连接
+        time.sleep(2)  # 服务端 keep-alive=1 → 这条空闲连接必然已经被关掉
+
+        started = time.monotonic()
+        agent.cycle()  # ← 修复前会在这里 RemoteDisconnected / 挂住
+        elapsed = time.monotonic() - started
+    finally:
+        agent.client.close()
+
+    assert elapsed < 10, "第二次心跳花了 %.1f 秒 —— 空闲连接没有被回收/重试兜住" % elapsed

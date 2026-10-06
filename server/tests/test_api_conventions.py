@@ -1,8 +1,8 @@
-"""接口**形状**的机械检查（`docs/api-conventions.md`）。
+"""接口**形状**的机械检查（`docs/reference/api-conventions.md`）。
 
 这个文件不做语义测试，它盯的是"整个接口面是不是一个形状"：
 
-* 列表信封（`docs/api-conventions.md` §2）
+* 列表信封（`docs/reference/api-conventions.md` §2）
 * 结构性删除必须带确认（§5）
 * 路径命名（§4）
 * `web/openapi.json` 与当前代码一致（§7）
@@ -33,11 +33,18 @@ OPENAPI_JSON = REPO_ROOT / "web" / "openapi.json"
 ENVELOPE_FIELDS = {"items", "total", "limit", "offset"}
 
 #: 管理端 / Agent 侧前缀
-#: 允许的命名空间。三个而不是两个：
+#: 允许的命名空间。四个而不是两个：
 #:   admin  —— 管理端（要登录）
 #:   agent  —— 考试机（要凭据）
 #:   player —— **免登录**的选手页（靠来源 IP 或「场次+考号」定位，见 DESIGN §5.6）
-API_PREFIXES = ("/api/v1/admin", "/api/v1/agent", "/api/v1/player")
+#:   meta   —— **免登录**的全站运行时常量（显示时区…）。它要被登录页、选手页与
+#:             装机页一起读，挂在任何一个需要鉴权的命名空间下都用不了
+API_PREFIXES = (
+    "/api/v1/admin",
+    "/api/v1/agent",
+    "/api/v1/player",
+    "/api/v1/meta",
+)
 
 #: 目前应该有多少个 GET 集合走信封。少一个就说明有人新加列表时忘了套 ——
 #: 下限而不是等号：加了新列表接口不该让这条测试变红，只要它是信封。
@@ -331,11 +338,11 @@ def test_bulk_clears_require_confirm_in_the_body(spec: Dict[str, Any]) -> None:
 
 
 def test_clear_paths_are_post_not_delete() -> None:
-    """这是对 `docs/api-conventions.md` §5.1 那个例子的守卫。
+    """这是对 `docs/reference/api-conventions.md` §5.1 那个例子的守卫。
 
     清空是**动作**（`POST .../clear`）而不是"删掉这个集合"：DELETE 带请求体
     在浏览器与各种客户端上支持得七零八落，而确认值必须走请求体才不会被
-    copy-paste 丢掉。`docs/api-conventions.md` 里给的例子就是 POST。
+    copy-paste 丢掉。`docs/reference/api-conventions.md` 里给的例子就是 POST。
     """
     assert all(path.endswith("/clear") for path in BULK_CLEARS)
     assert len(BULK_CLEARS) >= 6, "清空入口少了一半以上，多半是漏掉了确认"

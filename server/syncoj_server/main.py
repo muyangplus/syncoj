@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from . import __version__, errors
 from .api import admin as admin_api
 from .api import agent as agent_api
+from .api import meta as meta_api
 from .api import player as player_api
 from .config import Settings, default_settings
 from .context import AppContext
@@ -78,6 +79,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # 它不放进 /agent：Agent 那侧每个端点都要求 Bearer 凭据，混在一起
     # 迟早有人顺手给这一页也挂上 require_agent —— 那就等于把入口关掉了。
     app.include_router(player_api.router)
+    # 全站元信息（显示时区…）。同样免登录：选手页与装机页都不登录，
+    # 而它们都要按同一个钟点显示时间。
+    app.include_router(meta_api.router)
     app.include_router(admin_api.router)
 
     _install_public_port_gate(app)

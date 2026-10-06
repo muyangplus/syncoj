@@ -116,6 +116,8 @@ from ..schemas import (
     ReleaseOut,
     ReleaseSourceOut,
     ReleaseUpdate,
+    RuntimeSettingsOut,
+    RuntimeSettingsUpdate,
     RebindAgentIn,
     RosterCreate,
     RosterDetailOut,
@@ -148,6 +150,8 @@ from ..services import (
     matching,
     packaging,
     rosters,
+    runtime_settings,
+    scan_missing,
     uninstall,
     zipcrypto,
 )
@@ -186,7 +190,7 @@ def _parse_iso(value: Optional[str], label: str) -> Optional[datetime]:
     * 带偏移（``2026-06-01T09:00:00+08:00``）—— 浏览器 ``toISOString`` 之外的
       工具会这么发；按它自己声明的时区折算，绝不当地时间硬存
     * 不带时区（``2026-06-01T09:00:00``）—— **当成 UTC**。这是本系统对外的
-      时间约定（见 ``docs/api-conventions.md`` 的命名表），不是猜。
+      时间约定（见 ``docs/reference/api-conventions.md`` 的命名表），不是猜。
 
     空串与 ``None`` 都是"这一端不限制"。
     """
@@ -1245,6 +1249,74 @@ def clear_pending_machines(
 
 
 # --------------------------------------------------------------------------- #
+# 运行参数（心跳节奏与离线判定）
+# --------------------------------------------------------------------------- #
+
+
+@router.get("/settings/runtime", response_model=RuntimeSettingsOut)
+def get_runtime_settings(
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> RuntimeSettingsOut:
+    """当前生效的运行参数。
+
+    这三项决定"机器多久心跳一次"与"多久没心跳算离线"，都是**整间机房**的节奏，
+    所以界面要能一眼看到当前值 —— 否则教师只能靠列表上的刷新间隔去猜。
+    """
+    with ctx.db.session() as session:
+        return RuntimeSettingsOut(**runtime_settings.load(session).as_dict())
+
+
+@router.put("/settings/runtime", response_model=RuntimeSettingsOut)
+def update_runtime_settings(
+    payload: RuntimeSettingsUpdate,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> RuntimeSettingsOut:
+    """改运行参数。**改完立即生效，不用重启。**
+
+    心跳处理与离线判定每次都现读这三项（``services/runtime_settings.py`` 的
+    ``load``），所以下一轮心跳就按新节奏走；下发给 Agent 的策略本来每轮都带，
+    机器那边也跟着换。
+
+    改一行配置会改变整间机房的节奏，所以**记一条审计**（谁、把哪一项从多少改成
+    多少）—— 事后看到"心跳突然变密了"时，这是唯一能回答"谁动的"的东西。
+    """
+    changes = payload.model_dump(exclude_none=True)
+    with ctx.db.session() as session:
+        before = runtime_settings.load(session)
+        try:
+            after = runtime_settings.save(session, changes)
+        except runtime_settings.RuntimeSettingError as exc:
+            # 400 而不是 422：请求体本身合法（类型、范围都对），不合格的是
+            # **改完之后这一组值**之间的关系 —— 那要看库里当前的另外两项
+            raise ApiError(400, "bad_request", exc.detail)
+
+        changed = [
+            "%s：%d → %d" % (name, before.as_dict()[name], value)
+            for name, value in after.as_dict().items()
+            if before.as_dict()[name] != value
+        ]
+        if changed:
+            session.add(
+                EventLog(
+                    level="warning",
+                    category="runtime_settings",
+                    message="修改运行参数（%s）：%s" % (admin.username, "；".join(changed)),
+                    meta_json=json.dumps(
+                        {
+                            "by": admin.username,
+                            "before": before.as_dict(),
+                            "after": after.as_dict(),
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            )
+        return RuntimeSettingsOut(**after.as_dict())
+
+
+# --------------------------------------------------------------------------- #
 # 统一注册密钥
 # --------------------------------------------------------------------------- #
 # 统一注册密钥
@@ -1388,7 +1460,7 @@ def import_players(
 ) -> PlayerImportOut:
     """批量导入/更新选手。按 ``player_no`` 幂等 upsert。
 
-    **这不是集合读取，所以不用列表信封**（``docs/api-conventions.md`` §2）：
+    **这不是集合读取，所以不用列表信封**（``docs/reference/api-conventions.md`` §2）：
     它返回的是"这次导入干了什么"，前端要显示的是 ``created``/``updated``。
     顺带回传受影响的行，是因为导入之后常常紧接着"应用名单""批量配对"，
     调用方需要那些 id，不该再查一次。
@@ -1787,6 +1859,9 @@ def list_agents(
                 hostname=agent.hostname,
                 agent_version=agent.agent_version,
                 online=False,
+                # 离线机器没有运行时对象，但"上一次报的扫描根缺失"仍要显示：
+                # 目录没建这件事不会因为机器掉线就变得不重要
+                scan_missing=scan_missing.load_scan_missing(agent.scan_missing_json),
             )
         )
     return slice_page(items, page)
@@ -2319,7 +2394,7 @@ def clear_source_files(
     """清理代码台账。
 
     这是**软删除**（打墓碑）的批量版本：行先删掉，``blobs/`` 里的内容只在
-    没有任何记录再引用它时才释放 —— 见 ``docs/api-conventions.md`` §5.2。
+    没有任何记录再引用它时才释放 —— 见 ``docs/reference/api-conventions.md`` §5.2。
 
     默认 ``purge=false``：只清掉**已经消失**的墓碑记录（选手删了文件之后留下的
     那些），这不会影响任何还在的东西 —— 也是这个操作最常见的用途。
@@ -2840,11 +2915,133 @@ def _create_asset_row(
     return _asset_out(asset)
 
 
+#: 上传转存到临时文件时的块大小。与 blob 存储同一个量级。
+_UPLOAD_CHUNK = 1024 * 1024
+
+
+def _packaged_filename(filename: str) -> str:
+    """打包之后资产的新文件名：``题面.pdf`` → ``题面.zip``。
+
+    只换**最后一个**后缀（``样例.tar.gz`` → ``样例.tar.zip``）；名字本来就以
+    ``.zip`` 结尾时回到它自己，不叠成 ``x.zip.zip``。zip 里的成员名仍然是教师
+    上传时的那个名字（``题面.pdf``），改名只发生在"资产"这一层。
+
+    用 ``Path(...).stem`` 而不是 ``with_suffix``：只有后缀的名字（``.zip``）会让
+    ``with_suffix`` 抛 ValueError —— 一个改名动作不该因为文件名怪就变成 500。
+    """
+    stem = Path(filename).stem
+    return (stem + ".zip") if stem else (filename + ".zip")
+
+
+def _spool_upload(source, dest, *, max_bytes: int) -> int:
+    """把上传流原样转存进可 seek 的 ``dest``，返回字节数（超过上限就是 413）。
+
+    打包要先算出 CRC 才能写加密头（见 ``zipcrypto.pack_member``），而那一步要求
+    源可 seek —— ``UploadFile.file`` 不保证可以。上限那句话与 ``put_stream`` 的
+    一致，这样"太大"的报错不会因为走的是哪条路而换一个说法。
+    """
+    size = 0
+    while True:
+        chunk = source.read(_UPLOAD_CHUNK)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > max_bytes:
+            raise HTTPException(
+                status_code=413, detail="内容超过上限 %d 字节" % max_bytes
+            )
+        dest.write(chunk)
+    dest.flush()
+    dest.seek(0)
+    return size
+
+
+def _upload_packaged_asset(
+    ctx: AppContext,
+    contest_id: int,
+    source,
+    *,
+    filename: str,
+    kind: str,
+    zip_password: str,
+) -> AssetOut:
+    """上传时就把字节包成 zip（可选加密），并同步写 ``password.txt``。
+
+    密码留空 = 服务端生成一个：这个入口的另一半职责就是把密码写进
+    ``password.txt``，没有密码就没有那份文件 —— 教师选了「打包并加密」却拿到一个
+    连自己都不知道口令的包，是比"多生成一个密码"坏得多的结果。
+
+    落库与写 ``password.txt`` 在**同一个会话**里做（``_create_asset`` 的
+    ``session`` 参数就是为这件事留的）：一半成功一半失败时能整体回滚，不会出现
+    "zip 已经是新的、密码文件还是旧的"。
+    """
+    password = zip_password or zipcrypto.generate_password()
+    zip_filename = _packaged_filename(filename)
+
+    with tempfile.TemporaryFile() as raw, tempfile.TemporaryFile() as packed:
+        _spool_upload(source, raw, max_bytes=ctx.settings.max_asset_size)
+        try:
+            zipcrypto.pack_member(
+                raw, packed, member_name=filename, password=password.encode("utf-8")
+            )
+        except zipcrypto.ZipCryptoError as exc:
+            raise ApiError(
+                400, "zip_package_failed", "打包「%s」失败（%s）" % (filename, exc)
+            )
+        packed.seek(0)
+        try:
+            sha256, size = ctx.blobs.put_stream(
+                packed, max_bytes=ctx.settings.max_asset_size
+            )
+        except BlobTooLarge as exc:  # pragma: no cover - 2 GB 上限下走不到
+            raise HTTPException(status_code=413, detail=str(exc))
+        except HashMismatch as exc:  # pragma: no cover - 未声明哈希时不会触发
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    with ctx.db.session() as session:
+        created = _create_asset(
+            ctx,
+            contest_id,
+            sha256=sha256,
+            size=size,
+            filename=zip_filename,
+            kind=kind,
+            session=session,
+        )
+        asset = session.get(Asset, created.id)
+        if asset is None:  # pragma: no cover - _create_asset 刚 flush 过
+            raise ApiError(404, "asset_not_found", "资产不存在")
+        password_asset, password_requeued = _upsert_password_asset(
+            ctx, session, contest_id, zip_asset=asset, password=password
+        )
+        session.add(
+            EventLog(
+                level="info",
+                category="asset_zip_password",
+                contest_id=contest_id,
+                message="上传时就把「%s」打包成 zip（成员名 %s，新文件名「%s」，"
+                "sha %s），同步写好密码文件 password.txt（资产 #%d，重排 %d 台）"
+                % (
+                    filename,
+                    filename,
+                    zip_filename,
+                    sha256[:8],
+                    password_asset.id,
+                    password_requeued,
+                ),
+            )
+        )
+        session.flush()
+        return _asset_out(asset, _pending_targets(session, asset.id))
+
+
 @router.post("/contests/{contest_id}/assets", response_model=AssetOut)
 def upload_asset(
     contest_id: int,
     file: UploadFile = File(...),
     kind: str = Form("testdata"),
+    package_zip: bool = Form(False),
+    zip_password: str = Form(""),
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> AssetOut:
@@ -2852,8 +3049,23 @@ def upload_asset(
 
     走与服务端回收同一套内容寻址存储：相同内容只占一份磁盘。因此"给全场下发
     同一份 500MB 测试点"实际只消耗 500MB，而不是 50 × 500MB。
+
+    ``package_zip=true`` 时**磁盘上直接只存打包后的 zip**：成员名是原文件名，
+    资产文件名是 ``<原基名>.zip``，并同步写/更新一份 ``password.txt``。这里刻意
+    不做"先把原文件存下来再改"：那会凭空留下一份谁都不引用的原始 blob，而"这个
+    资产是什么"从落盘那一刻起就只能是那个 zip。
     """
     filename = _validate_asset_filename(Path(file.filename or "unnamed").name)
+
+    if package_zip:
+        return _upload_packaged_asset(
+            ctx,
+            contest_id,
+            file.file,
+            filename=filename,
+            kind=kind,
+            zip_password=zip_password,
+        )
 
     try:
         sha256, size = ctx.blobs.put_stream(
@@ -3317,8 +3529,8 @@ def _open_asset_blob(ctx: AppContext, asset: Asset):
         )
 
 
-def _probe_asset_zip(ctx: AppContext, asset: Asset) -> bool:
-    """这个资产是不是 zip、里面有没有加密成员；不是 zip 就 400。
+def _probe_asset_zip_state(ctx: AppContext, asset: Asset) -> Optional[bool]:
+    """``True`` 已加密 / ``False`` 明文 zip / ``None`` 不是 zip。
 
     只读 zip 的目录与标志位（见 ``zipcrypto.probe_encrypted``），**不解压、
     不解密任何成员**：教师点一下按钮，不该把几百 MB 的题面从磁盘上拖一遍。
@@ -3327,12 +3539,25 @@ def _probe_asset_zip(ctx: AppContext, asset: Asset) -> bool:
         try:
             return zipcrypto.probe_encrypted(handle)
         except zipcrypto.NotAZipError:
-            raise ApiError(
-                400,
-                "asset_not_zip",
-                "「%s」不是能识别的 zip 压缩包 —— 这个动作只对 zip 有意义"
-                % asset.filename,
-            )
+            return None
+
+
+def _probe_asset_zip(ctx: AppContext, asset: Asset) -> bool:
+    """GET 的判据：不是 zip 就 400 ``asset_not_zip``。
+
+    回 400 而不是 ``encrypted=false``：这一条 GET 回答的是"包里有没有密码"，
+    对一份 pdf 它没有答案。界面拿到 ``asset_not_zip`` 会把动作切换成「打包成
+    zip」（POST 那条路对非 zip 是打包，不是拒绝）—— 它由**内容**判定，
+    比行上的扩展名可靠。
+    """
+    encrypted = _probe_asset_zip_state(ctx, asset)
+    if encrypted is None:
+        raise ApiError(
+            400,
+            "asset_not_zip",
+            "「%s」不是能识别的 zip 压缩包，没有密码状态可读" % asset.filename,
+        )
+    return encrypted
 
 
 def _rewrite_asset_zip(
@@ -3389,6 +3614,44 @@ def _rewrite_asset_zip(
                     400,
                     "zip_password_failed",
                     "重新打包「%s」失败（%s）" % (asset.filename, exc),
+                )
+            buffer.seek(0)
+            try:
+                return ctx.blobs.put_stream(
+                    buffer, max_bytes=ctx.settings.max_asset_size
+                )
+            except BlobTooLarge as exc:  # pragma: no cover - 由 2 GB 上限兜着
+                raise HTTPException(status_code=413, detail=str(exc))
+
+
+def _pack_asset(
+    ctx: AppContext,
+    asset: Asset,
+    *,
+    new_password: str,
+) -> Tuple[str, int]:
+    """把资产里的原始字节包成一个单成员 zip，返回 ``(sha256, size)``。
+
+    成员名就是资产现在的文件名（``题面.pdf``）：打包只改变"这是一个 zip"这件事，
+    不改变包里那份文件叫什么。
+
+    与 ``_rewrite_asset_zip`` 同一条纪律：先在临时文件里做完，全部成功才交给内容
+    寻址存储。中途失败（超过上限、源读不动）时原来那份 blob 一个字节都没动。
+    """
+    with _open_asset_blob(ctx, asset) as source:
+        with tempfile.TemporaryFile() as buffer:
+            try:
+                zipcrypto.pack_member(
+                    source,
+                    buffer,
+                    member_name=asset.filename,
+                    password=new_password.encode("utf-8"),
+                )
+            except zipcrypto.ZipCryptoError as exc:
+                raise ApiError(
+                    400,
+                    "zip_package_failed",
+                    "打包「%s」失败（%s）" % (asset.filename, exc),
                 )
             buffer.seek(0)
             try:
@@ -3476,9 +3739,10 @@ def get_asset_zip_password(
 ) -> AssetZipPasswordOut:
     """这个 zip 现在有没有密码。
 
-    判据是标志位（读 zip 目录，不读成员正文）。不是 zip 一律 400 而不是回
-    ``encrypted=false``：后者会让界面给一个非 zip 文件也画上「密码」按钮，
-    点下去必然失败，而那时教师已经在输密码了。
+    判据是标志位（读 zip 目录，不读成员正文）。不是 zip 就 400 ``asset_not_zip``：
+    这一条 GET 回答的是"包里有没有密码"，对一份 pdf 它没有答案。界面拿到这个
+    错误码会把动作切成「打包成 zip」（POST 对非 zip 是打包，不是拒绝）——
+    「是不是 zip」由**内容**判定，比列表行上的扩展名可靠。
     """
     with ctx.db.session() as session:
         asset = _contest_asset(session, contest_id, asset_id)
@@ -3498,7 +3762,7 @@ def set_asset_zip_password(
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> AssetZipPasswordSavedOut:
-    """给 zip 打密码 / 改密码，并同步写一份 ``password.txt``。
+    """给 zip 打密码 / 改密码；不是 zip 时先把它打包成 zip，并同步写 ``password.txt``。
 
     **这个密码是弱加密**：InfoZIP 传统加密（ZipCrypto）只挡得住随手翻看，
     挡不住有心人 —— 选它是因为学生机上的 Archive Manager 只认这一种
@@ -3512,11 +3776,13 @@ def set_asset_zip_password(
     改内容的语义与「在线改正文」完全一致（同一套 ``_requeue_done_targets``）：
     同一个 asset id 换 ``sha256``/``size``、把已经 ``done`` 的目标重排回
     ``pending`` 并清零续传偏移、写一条审计事件。区别只是"新内容"不是一段文本，
-    而是"用新密码重新打包的 zip"。
+    而是"用新密码重新打包的 zip"。资产本来不是 zip 时，除了重新打包，文件名还会
+    换成 ``<原基名>.zip``（zip 里的成员名仍是原文件名）—— 这是**同一个资产**的
+    就地替换，不是新建一条；回执里的 ``packaged`` 说明这次走的是哪条路。
     """
     with ctx.db.session() as session:
         asset = _contest_asset(session, contest_id, asset_id)
-        encrypted = _probe_asset_zip(ctx, asset)
+        state = _probe_asset_zip_state(ctx, asset)
 
         if payload.generate:
             # 服务端生成：字符集去掉易混字符，用 secrets（见 zipcrypto）。
@@ -3531,22 +3797,32 @@ def set_asset_zip_password(
             )
 
         old_password = payload.old_password
-        if encrypted and not old_password:
+        if state is True and not old_password:
             raise ApiError(
                 400,
                 "zip_password_required",
                 "「%s」已经有密码了，改密码要先给旧密码（旧密码在之前那份 password.txt 里）"
                 % asset.filename,
             )
-        if not encrypted:
-            # 明文包不需要旧密码。教师顺手填了一个也只是习惯 —— 静默忽略比
-            # 报错更符合意图，但绝不能让它参与任何判断。
+        if state is not True:
+            # 明文 zip 与"根本不是 zip"都不需要旧密码。教师顺手填了一个也只是
+            # 习惯 —— 静默忽略比报错更符合意图，但绝不能让它参与任何判断。
             old_password = None
 
         old_sha = asset.sha256
-        sha256, size = _rewrite_asset_zip(
-            ctx, asset, new_password=password, old_password=old_password
-        )
+        old_filename = asset.filename
+        if state is None:
+            # 不是 zip：就地打包成 zip。成员名仍是原文件名（不然包里那份 pdf
+            # 会改名叫 .zip），资产文件名换成 <原基名>.zip —— 名字变了，教师
+            # 在列表里一眼能看出这是一个包。
+            sha256, size = _pack_asset(ctx, asset, new_password=password)
+            asset.filename = _packaged_filename(old_filename)
+            packaged = True
+        else:
+            sha256, size = _rewrite_asset_zip(
+                ctx, asset, new_password=password, old_password=old_password
+            )
+            packaged = False
         asset.sha256 = sha256
         asset.size = size
 
@@ -3555,12 +3831,26 @@ def set_asset_zip_password(
             ctx, session, contest_id, zip_asset=asset, password=password
         )
 
-        session.add(
-            EventLog(
-                level="info",
-                category="asset_zip_password",
-                contest_id=contest_id,
-                message="给场次 %d 的「%s」重新打包了 zip（sha %s → %s），"
+        if packaged:
+            message = (
+                "给场次 %d 的「%s」打包成 zip（成员名 %s，文件名改为「%s」，"
+                "sha %s → %s），重新排队 %d 台机器；同步写好密码文件 password.txt"
+                "（资产 #%d，重排 %d 台）"
+                % (
+                    contest_id,
+                    old_filename,
+                    old_filename,
+                    asset.filename,
+                    old_sha[:8],
+                    sha256[:8],
+                    requeued,
+                    password_asset.id,
+                    password_requeued,
+                )
+            )
+        else:
+            message = (
+                "给场次 %d 的「%s」重新打包了 zip（sha %s → %s），"
                 "重新排队 %d 台机器；同步写好密码文件 password.txt"
                 "（资产 #%d，重排 %d 台）"
                 % (
@@ -3571,14 +3861,22 @@ def set_asset_zip_password(
                     requeued,
                     password_asset.id,
                     password_requeued,
-                ),
+                )
+            )
+        session.add(
+            EventLog(
+                level="info",
+                category="asset_zip_password",
+                contest_id=contest_id,
+                message=message,
             )
         )
         session.flush()
 
         pending = _pending_targets(session, asset.id)
         log.info(
-            "zip 打密码：场次 %d 的「%s」sha %s → %s（重排 %d 台），password.txt=#%d",
+            "zip %s：场次 %d 的「%s」sha %s → %s（重排 %d 台），password.txt=#%d",
+            "打包" if packaged else "打密码",
             contest_id,
             asset.filename,
             old_sha[:8],
@@ -3591,6 +3889,7 @@ def set_asset_zip_password(
             password=password,
             password_asset=password_asset,
             requeued=requeued,
+            packaged=packaged,
         )
 
 

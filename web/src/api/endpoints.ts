@@ -25,6 +25,14 @@ import { query } from './client'
 
 export const ADMIN = '/api/v1/admin'
 
+/**
+ * 免登录的全站运行时常量。
+ *
+ * 它不在 `/api/v1/admin` 下面：登录页、选手页与装机页都要读它，而这三个页面
+ * 都拿不到管理端凭据。
+ */
+export const API_ROOT = '/api/v1'
+
 /** 全局清空时要输入的确认字面量。与服务端 `schemas.GLOBAL_CONFIRM` 对齐。 */
 export const GLOBAL_CONFIRM = 'all'
 
@@ -82,6 +90,8 @@ export const paths = {
   /** 让这台考试机把自己卸载掉。`confirm` 是机器名，令牌随下一次心跳下发。 */
   agentUninstall: (agentId: number) => `${ADMIN}/agents/${agentId}/uninstall`,
   contestAgents: (contestId: number) => `${ADMIN}/contests/${contestId}/agents`,
+  /** 运行参数：心跳节奏与离线判定。整间机房生效。 */
+  runtimeSettings: () => `${ADMIN}/settings/runtime`,
 
   // ---- 统一注册密钥 ----
   bootstrapKeys: () => `${ADMIN}/bootstrap-keys`,
@@ -118,10 +128,12 @@ export const paths = {
   assetText: (contestId: number, assetId: number) =>
     `${ADMIN}/contests/${contestId}/assets/${assetId}/text`,
   /**
-   * 某个 zip 资产的加密状态（GET）与打密码/改密码（POST）。
+   * 某个 zip 资产的加密状态（GET）与打密码/打包（POST）。
    *
    * 同一个路径两个方法，和 `assetText` 一样。GET 只读 zip 的标志位（不解压、
-   * 不解密任何成员）；POST 重新打包同一个 asset id，并同步写一份 password.txt。
+   * 不解密任何成员），不是 zip 会拿到 400 `asset_not_zip`；POST 对 zip 是重新
+   * 打包同一个 asset id，对非 zip 是**先打包成 zip**（成员名 = 原文件名，资产名
+   * 换成 `<原基名>.zip`），两种情况都同步写一份 password.txt。
    *
    * 用的是 InfoZIP 传统加密（ZipCrypto）：学生机上的 Archive Manager 只认这一种。
    * 它是**弱加密** —— 挡得住随手翻看，挡不住有心人。界面文案必须按这个口径写，
@@ -170,4 +182,6 @@ export const paths = {
   installInstaller: () => '/api/v1/agent/install/installer',
   installBootstrap: () => '/api/v1/agent/install/bootstrap.sh',
   playerContext: () => '/api/v1/player/context',
+  /** 全站运行时常量（显示时区…）。**免登录**，三个前台页面都要读它。 */
+  meta: () => `${API_ROOT}/meta`,
 } as const

@@ -51,8 +51,10 @@ from __future__ import annotations
 import os
 import secrets
 import struct
+import time
 import zlib
 import zipfile
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import BinaryIO, List, Optional
 
@@ -65,6 +67,7 @@ __all__ = [
     "PASSWORD_ALPHABET",
     "PASSWORD_LENGTH",
     "generate_password",
+    "pack_member",
     "probe_encrypted",
     "rewrite_zip",
 ]
@@ -357,32 +360,99 @@ def rewrite_zip(
         _write_eocd(dest, len(entries), central_size, central_offset, archive.comment)
 
 
-def _write_member(
-    archive: zipfile.ZipFile,
-    info: zipfile.ZipInfo,
+def pack_member(
+    source: BinaryIO,
     dest: BinaryIO,
-    old_password: Optional[bytes],
-    new_password: bytes,
-) -> _WrittenEntry:
-    encrypted = bool(info.flag_bits & _MASK_ENCRYPTED)
-    if encrypted and not old_password:
-        raise PasswordRequiredError(
-            "「%s」在原来的包里就是加密的，必须给旧密码" % info.filename
-        )
+    *,
+    member_name: str,
+    password: Optional[bytes] = None,
+    method: int = zipfile.ZIP_DEFLATED,
+    date_time=None,
+) -> None:
+    """把一段原始字节（pdf、样例、任何**不是 zip** 的文件）包成一个单成员 zip。
 
-    name = _encode_name(info)
-    extra = info.extra or b""
-    # 成员注释在标准库里是 bytes；万一将来变成 str 也不至于把包写坏
-    comment = info.comment or b""
-    if isinstance(comment, str):
-        comment = comment.encode("utf-8")
-    dos_time, dos_date = _dos_datetime(info.date_time)
-    method = info.compress_type
-    # 清掉 data descriptor（因为我们把 CRC/长度写进了本地头）与 strong encryption
-    # （我们写的是传统加密），再置上加密位。
-    flags = (
-        info.flag_bits | _MASK_ENCRYPTED
-    ) & ~_MASK_DATA_DESCRIPTOR & ~_MASK_STRONG_ENCRYPTION
+    ``source`` 必须是可 seek 的二进制流。为什么读两遍：ZipCrypto 的加密头里那个
+    校验字节写在成员数据**之前**，而它是 CRC 的高字节 —— 不知道 CRC 就写不出加密
+    头，所以只能先扫一遍把 CRC 算出来，再回头压缩+加密。想一遍过就得改用 data
+    descriptor，那是另一套本地头（见模块 docstring）。
+
+    ``member_name`` 一律按 UTF-8 编码并置上 bit 11 标志位：教师上传的是
+    ``题面.pdf`` 这种名字，zip 默认的 cp437 装不下它。
+
+    ``password`` 为空时写出一个**明文** zip —— "打包"与"加密码"本来就是两件事，
+    调用方要哪一件由它自己决定（接口层永远不会给出空密码，见 ``api/admin.py``）。
+    """
+    name = member_name.encode("utf-8")
+    when = tuple(date_time) if date_time else time.localtime()[:6]
+    dos_time, dos_date = _dos_datetime(when)
+
+    crc = 0
+    while True:
+        chunk = source.read(_CHUNK)
+        if not chunk:
+            break
+        crc = zlib.crc32(chunk, crc)
+    crc &= 0xFFFFFFFF
+    source.seek(0)
+
+    info = zipfile.ZipInfo(member_name, date_time=when)
+    info.compress_type = method
+    info.extract_version = 20
+
+    entry = _write_entry(
+        dest,
+        name=name,
+        extra=b"",
+        comment=b"",
+        flags=_MASK_UTF8_NAME,
+        method=method,
+        dos_time=dos_time,
+        dos_date=dos_date,
+        crc=crc,
+        reader=lambda: nullcontext(source),
+        new_password=password,
+        info=info,
+    )
+    central_offset = dest.tell()
+    _write_central(entry, dest)
+    central_size = dest.tell() - central_offset
+    _write_eocd(dest, 1, central_size, central_offset, b"")
+
+
+def _write_entry(
+    dest: BinaryIO,
+    *,
+    name: bytes,
+    extra: bytes,
+    comment: bytes,
+    flags: int,
+    method: int,
+    dos_time: int,
+    dos_date: int,
+    crc: int,
+    reader,
+    new_password: Optional[bytes],
+    info: zipfile.ZipInfo,
+) -> _WrittenEntry:
+    """写一个成员（本地头 + 名字/附加区 + 数据 + 回填），返回中央目录要用的字段。
+
+    这一层**不知道明文是从哪来的**：改密码那条路传进来的是 ``archive.open`` 打开的
+    旧成员，打包那条路传进来的是原始文件的字节流。两条路共享同一份"加密头、CRC、
+    压缩后大小含 12 字节头"的实现 —— 这些坑踩过一次就够了（见模块 docstring）。
+
+    ``reader`` 是**工厂**而不是现成的流：调用它拿到的对象要支持 ``with``，这样
+    退出时能保证成员被关掉（改密码那条路打开的正是 zip 成员）。
+
+    ``crc`` 必须在写数据**之前**就给出来：ZipCrypto 加密头里的校验字节是它的高
+    字节，而校验字节写在成员数据前面。所以两条路都先扫一遍源。
+    """
+    # 清掉 data descriptor（我们把 CRC/长度写进了本地头，见模块 docstring）与
+    # strong encryption（我们写的是传统加密）；加密位跟着有没有密码走。
+    flags = (flags & ~_MASK_DATA_DESCRIPTOR) & ~_MASK_STRONG_ENCRYPTION
+    if new_password:
+        flags |= _MASK_ENCRYPTED
+    else:
+        flags &= ~_MASK_ENCRYPTED
     flags &= 0xFFFF
 
     local_offset = dest.tell()
@@ -408,31 +478,105 @@ def _write_member(
     dest.write(extra)
 
     # 加密头：12 字节，第 12 字节是校验字节。本地头里写的是 CRC，所以用 CRC 高字节
-    # （bit 3 已经清掉了，reader 也会来找 CRC 高字节）。
-    crypto = _ZipCrypto(new_password)
-    check_byte = (info.CRC >> 24) & 0xFF
-    dest.write(crypto.encrypt(os.urandom(11) + bytes((check_byte,))))
+    # （bit 3 已经清掉了，reader 也会来找 CRC 高字节）。没有密码时这一段整个不写。
+    crypto = _ZipCrypto(new_password) if new_password else None
+    if crypto is not None:
+        check_byte = (crc >> 24) & 0xFF
+        dest.write(crypto.encrypt(os.urandom(11) + bytes((check_byte,))))
 
     compressor = _Compressor(method)
-    crc = 0
+    actual_crc = 0
     payload_size = 0
     uncomp_size = 0
+    with reader() as handle:
+        while True:
+            chunk = handle.read(_CHUNK)
+            if not chunk:
+                break
+            uncomp_size += len(chunk)
+            actual_crc = zlib.crc32(chunk, actual_crc)
+            packed = compressor.feed(chunk)
+            if packed:
+                payload_size += len(packed)
+                dest.write(crypto.encrypt(packed) if crypto is not None else packed)
+    tail = compressor.finish()
+    if tail:
+        payload_size += len(tail)
+        dest.write(crypto.encrypt(tail) if crypto is not None else tail)
+
+    actual_crc &= 0xFFFFFFFF
+    if actual_crc != crc:  # pragma: no cover - 改密码那条路标准库已经校验过一遍
+        # 打包那条路的源要读两遍（第一遍算 CRC），两遍不一致说明源在被改；
+        # 与其写出一个自相矛盾的包，不如在这里停住。
+        raise ZipCryptoError("「%s」的 CRC 与第一遍读出来的不一致" % info.filename)
+
+    # **加密成员的大小要把 12 字节加密头算进去**（APPNOTE：压缩后大小包含加密头）。
+    # 标准库读的时候正是这么用的：它先把 compress_size 减掉 12 再当密文长度，
+    # 漏掉这 12 字节的话密文会被截短一截，解出来的数据 CRC 对不上 —— 报出来是
+    # "Bad CRC-32"，看起来像密码错，实际是长度写错了。
+    comp_size = payload_size + (_ENCRYPTION_HEADER_SIZE if crypto is not None else 0)
+    if comp_size > _ZIP64_LIMIT or uncomp_size > _ZIP64_LIMIT:  # pragma: no cover
+        raise ZipCryptoError("成员「%s」超过 4 GB，不支持重新打包" % info.filename)
+
+    end = dest.tell()
+    dest.seek(local_offset + 14)
+    dest.write(struct.pack(_PATCH_FMT, actual_crc, comp_size, uncomp_size))
+    dest.seek(end)
+
+    return _WrittenEntry(
+        info=info,
+        name=name,
+        extra=extra,
+        comment=comment,
+        flags=flags,
+        method=method,
+        dos_time=dos_time,
+        dos_date=dos_date,
+        crc=actual_crc,
+        comp_size=comp_size,
+        uncomp_size=uncomp_size,
+        local_offset=local_offset,
+    )
+
+
+def _write_member(
+    archive: zipfile.ZipFile,
+    info: zipfile.ZipInfo,
+    dest: BinaryIO,
+    old_password: Optional[bytes],
+    new_password: bytes,
+) -> _WrittenEntry:
+    encrypted = bool(info.flag_bits & _MASK_ENCRYPTED)
+    if encrypted and not old_password:
+        raise PasswordRequiredError(
+            "「%s」在原来的包里就是加密的，必须给旧密码" % info.filename
+        )
+
+    def reader():
+        return archive.open(info, "r", old_password if encrypted else None)
+
+    name = _encode_name(info)
+    # 成员注释在标准库里是 bytes；万一将来变成 str 也不至于把包写坏
+    comment = info.comment or b""
+    if isinstance(comment, str):
+        comment = comment.encode("utf-8")
+    dos_time, dos_date = _dos_datetime(info.date_time)
+
     try:
-        with archive.open(info, "r", old_password if encrypted else None) as handle:
-            while True:
-                chunk = handle.read(_CHUNK)
-                if not chunk:
-                    break
-                uncomp_size += len(chunk)
-                crc = zlib.crc32(chunk, crc)
-                packed = compressor.feed(chunk)
-                if packed:
-                    payload_size += len(packed)
-                    dest.write(crypto.encrypt(packed))
-        tail = compressor.finish()
-        if tail:
-            payload_size += len(tail)
-            dest.write(crypto.encrypt(tail))
+        return _write_entry(
+            dest,
+            name=name,
+            extra=info.extra or b"",
+            comment=comment,
+            flags=info.flag_bits,
+            method=info.compress_type,
+            dos_time=dos_time,
+            dos_date=dos_date,
+            crc=info.CRC & 0xFFFFFFFF,
+            reader=reader,
+            new_password=new_password,
+            info=info,
+        )
     except (RuntimeError, zipfile.BadZipFile) as exc:
         # 新版 Python 在加密头那一关就抛 RuntimeError("Bad password")；
         # 老版本（含 3.8）要读到底、CRC 对不上才抛 BadZipFile。两种都是"密码不对"。
@@ -450,38 +594,6 @@ def _write_member(
         raise ZipCryptoError(
             "「%s」的压缩数据坏了（%s）" % (info.filename, exc)
         )
-
-    crc &= 0xFFFFFFFF
-    if crc != (info.CRC & 0xFFFFFFFF):  # pragma: no cover - 标准库已经校验过一遍
-        raise ZipCryptoError("「%s」的 CRC 与目录里记的不一致" % info.filename)
-
-    # **加密成员的大小要把 12 字节加密头算进去**（APPNOTE：压缩后大小包含加密头）。
-    # 标准库读的时候正是这么用的：它先把 compress_size 减掉 12 再当密文长度，
-    # 漏掉这 12 字节的话密文会被截短一截，解出来的数据 CRC 对不上 —— 报出来是
-    # "Bad CRC-32"，看起来像密码错，实际是长度写错了。
-    comp_size = payload_size + _ENCRYPTION_HEADER_SIZE
-    if comp_size > _ZIP64_LIMIT or uncomp_size > _ZIP64_LIMIT:  # pragma: no cover
-        raise ZipCryptoError("成员「%s」超过 4 GB，不支持重新打包" % info.filename)
-
-    end = dest.tell()
-    dest.seek(local_offset + 14)
-    dest.write(struct.pack(_PATCH_FMT, crc, comp_size, uncomp_size))
-    dest.seek(end)
-
-    return _WrittenEntry(
-        info=info,
-        name=name,
-        extra=extra,
-        comment=comment,
-        flags=flags,
-        method=method,
-        dos_time=dos_time,
-        dos_date=dos_date,
-        crc=crc,
-        comp_size=comp_size,
-        uncomp_size=uncomp_size,
-        local_offset=local_offset,
-    )
 
 
 def _write_central(entry: _WrittenEntry, dest: BinaryIO) -> None:

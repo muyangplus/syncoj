@@ -239,6 +239,10 @@ FIELD_LABELS = {
     "confirm": "确认名称",
     "confirm_name": "确认名称",
     "kind": "种类",
+    # 运行参数（心跳节奏与离线判定）
+    "tick_idle_seconds": "空闲心跳（秒）",
+    "tick_active_seconds": "有活心跳（秒）",
+    "offline_after_seconds": "离线判定（秒）",
     # 题目
     "ident": "题目标识",
     "title": "标题",

@@ -17,7 +17,7 @@
    可空性，在 SQLite 里只能"建新表→搬数据→换名"。本方案一开始写的是"绝不重建"
    （怕关不掉外键，让 ``DROP TABLE`` 顺着 ``ON DELETE CASCADE`` 把子表删光），
    但那等于永久放弃改结构，代价太大 —— 所以改成把配方定死、并加看守测试
-   （见 ``DESIGN.md`` §4.8 与 ``tests/test_migrations.py``）。**三条必须同时成立**：
+   （见 ``docs/design/04-server.md`` §4.8 与 ``tests/test_migrations.py``）。**三条必须同时成立**：
    裸连接 + autocommit 下关 ``foreign_keys``（``PRAGMA`` 在事务里是空操作）、
    打开 ``legacy_alter_table``（否则 ``RENAME`` 会去改写引用方）、DDL 用文本改写
    生成而不是 ``to_metadata()``。少任何一条都是静默删数据的级别。
@@ -459,6 +459,33 @@ def _migration_008_release_install_policy(engine: Engine) -> None:
     _add_column(engine, "agent_release", "upgrade_mode", "VARCHAR(16)")
 
 
+def _migration_009_agent_scan_missing(engine: Engine) -> None:
+    """机器记录"本机上不存在的扫描根"（``agent.scan_missing_json``）。
+
+    Agent 每轮心跳都会报当前不存在的扫描根（最多 5 条绝对路径）。服务端拿它做两件
+    事：在机器列表上写一句"选手目录还没建"，以及**在状态变化时**记一条审计 ——
+    缺失出现是 warning、恢复是 info。后者要求"这一次和上一次比有没有变"，
+    所以必须落库，不能只放内存。
+
+    只有一个 ``ADD COLUMN`` + 可空：老库里的机器**没有**这一列的历史值，而"没报过"
+    与"没有已知缺失"在判据上是同一个结论，空白就是正确初始状态。
+    """
+    if "agent" not in _tables(engine):
+        return
+    _add_column(engine, "agent", "scan_missing_json", "TEXT")
+
+
+def _migration_010_runtime_settings(engine: Engine) -> None:
+    """运行参数表（``runtime_setting``）：心跳节奏与离线判定。
+
+    这张表由 ``create_all`` 负责建（新库直接就有），迁移这一步只推进版本号 ——
+    但**必须存在**：不写的话，老库升上来时 ``user_version`` 会停在上一步，而
+    "新库与老库结构一致"那条守卫测试会红。理由与其他"新表交给 create_all"的
+    步骤一致（见模块 docstring 第 3 条）。
+    """
+    return
+
+
 MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
     (1, "统一密钥注册 + 名单库所需的结构", _migration_001_enrollment),
     (2, "机器永久绑定名单条目；去掉注册码链路", _migration_002_roster_binding),
@@ -483,6 +510,16 @@ MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
         8,
         "发布记录记住随包带走的三条安装策略",
         _migration_008_release_install_policy,
+    ),
+    (
+        9,
+        "机器记录本轮不存在的扫描根",
+        _migration_009_agent_scan_missing,
+    ),
+    (
+        10,
+        "运行参数表（心跳节奏与离线判定）",
+        _migration_010_runtime_settings,
     ),
 ]
 

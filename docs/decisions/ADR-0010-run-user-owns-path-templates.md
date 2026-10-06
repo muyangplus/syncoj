@@ -1,6 +1,6 @@
 # ADR-0010：`{home}` / `{desktop}` 恒按**运行账号**展开
 
-**状态**：已锁定（v1，真机踩坑后补上）
+**状态**：已锁定（v1，真机故障后补上）
 
 ## 背景
 
@@ -8,7 +8,7 @@ Agent 配置里支持路径模板：`scan.roots = {desktop}/{player_no}`、
 `deploy_root = {desktop}`。占位符要展开成某个**具体的家目录**，而问题就是
 "哪个用户的家目录"。
 
-**真机上踩过**：注册单元 `syncoj-agent-enroll.service` 以 **root** 跑，
+**真机故障**：注册单元 `syncoj-agent-enroll.service` 以 **root** 跑，
 于是按"当前进程的用户"展开就得到 `/root/桌面` —— 而那台机器上根本不存在这个目录：
 
 ```
@@ -44,7 +44,7 @@ Agent 配置里支持路径模板：`scan.roots = {desktop}/{player_no}`、
 - `run_user` 留空退回当前用户，所以注册单元以 root 跑时**必须**让安装器把它写进去；
   没写就会退回 `/root`，又回到那个故障。
 - 配置校验发生在注册之前，所以"展开不了的占位符原样保留"是必须的：
-  把"还没注册"报成"配置错了"只会让人白折腾。
+  按"配置错了"报错是误报。
 - `protectHome` 不能设成 `read-only`（见 [ADR-0008](ADR-0008-systemd-unit-hardening.md)），
   因为 Agent 要往那个桌面写配对码。
 

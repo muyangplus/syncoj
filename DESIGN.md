@@ -1,8 +1,8 @@
 # SyncOJ 技术方案
 
-正文已经按受众拆到 [`docs/design/`](docs/design/) 下。**这份文件只剩一张映射表**，
-存在的唯一理由：代码与注释里有几十处 `DESIGN.md §5.4`、`§7.4` 这类引用
-（`git grep -n "§"` 可看现状），逐个改成新路径收益是零、改错风险很大。
+正文已经按受众拆到 [`docs/design/`](docs/design/) 下。**这份文件只剩一张映射表**：
+代码与注释里有几十处 `DESIGN.md §5.4`、`§7.4` 这类引用（`git grep -n "§"` 可看现状），
+逐个改成新路径收益是零、改错风险大。
 **章节编号一律没有动** —— 所以 `DESIGN.md §X.Y` 与 `docs/design/<文件> §X.Y`
 指的是同一节，只是正文换了地方。
 
@@ -44,9 +44,9 @@
 | §7.1 密钥从哪来 / §7.2 发布当前版本 / §7.2.1 安装策略 | [`docs/design/07-ops-and-install.md`](docs/design/07-ops-and-install.md) |
 | §7.3 机器怎么知道服务端在哪 / §7.4 远程卸载 | [`docs/design/07-ops-and-install.md`](docs/design/07-ops-and-install.md) |
 
-**"为什么这么定"在 ADR 里**（[`docs/decisions/`](docs/decisions/)）：`design/` 讲
-现在是什么样，ADR 讲当初否掉了什么、代价是什么。§0 那张表里每一行都指向对应的 ADR。
+**"为什么这么定"在 ADR 里**（[`docs/decisions/`](docs/decisions/)）：`design/` 记
+现在是什么样，ADR 记当初否掉了什么、代价是什么。§0 那张表里每一行都指向对应的 ADR。
 
-上手、装机、运维三份操作说明不在 `design/` 下 —— 它们是给人照着做的，不是设计依据：
+上手、装机、运维三份操作说明不在 `design/` 下，是给人照着做的步骤，不是设计依据：
 [`docs/quickstart.md`](docs/quickstart.md)、[`docs/install-agent.md`](docs/install-agent.md)、
 [`docs/operate.md`](docs/operate.md)。文档总入口是 [`docs/README.md`](docs/README.md)。

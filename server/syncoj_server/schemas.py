@@ -4,7 +4,7 @@
 OpenAPI 生成；Agent 侧因为必须零依赖（不能 import pydantic），改用
 ``agent/tools/build_fixture.py`` 生成真实 payload，再由契约测试反向校验。
 
-字段命名与 `docs/protocol.md` 必须逐字对应。
+字段命名与 `docs/reference/protocol.md` 必须逐字对应。
 """
 
 from __future__ import annotations
@@ -63,7 +63,7 @@ def page_of(items: List[T], total: int, params: Any) -> "Page[T]":
     """把已经切好页的一批对象装进信封。
 
     只做装配，不碰 SQL —— 分页由调用方决定是真的 ``LIMIT/OFFSET`` 还是
-    Python 切片（见 ``docs/api-conventions.md`` §2）。
+    Python 切片（见 ``docs/reference/api-conventions.md`` §2）。
     """
     return Page(
         items=items, total=int(total), limit=int(params.limit), offset=int(params.offset)
@@ -175,6 +175,15 @@ class TickStats(_Base):
     disk_free: Optional[int] = Field(default=None, ge=0)
     last_error: Optional[str] = Field(default=None, max_length=1024)
     queue: int = Field(default=0, ge=0)
+    #: 本机上**当前不存在**的扫描根（绝对路径，最多 5 条，由 Agent 每轮上报）。
+    #:
+    #: 存在的理由是"选手目录还没建"这类问题在服务端完全看不见：扫描根不存在时
+    #: Agent 扫出来是零个文件，而那与"选手还没开始写"长得一模一样。教师需要的是
+    #: "这台机器的目录还没建"，而不是等考完才发现一份代码都没收到。
+    #:
+    #: 缺省空列表：老版本 Agent 不报这个字段，而"没报"与"没有缺失"在这里正好是
+    #: 同一个结论（没有已知的缺失）。
+    scan_missing: List[str] = Field(default_factory=list)
 
 
 class TickRequest(_Base):
@@ -300,7 +309,7 @@ class FileClearIn(ConfirmIn):
     """清代码台账。
 
     ``purge=False``（默认）只打墓碑 —— 行还在、``?include_deleted=true`` 仍能
-    查到，导出里也仍然带着（见 ``docs/api-conventions.md`` §5.2）。
+    查到，导出里也仍然带着（见 ``docs/reference/api-conventions.md`` §5.2）。
     ``purge=True`` 才连行一起删，只在"这些记录本来就是误传"时才该用。
     """
 
@@ -626,7 +635,7 @@ class PlayerImportOut(_Base):
     """批量导入选手的结果。
 
     这是**动作结果**，不是集合读取 —— 所以它**不用列表信封**（见
-    ``docs/api-conventions.md`` §2：信封只属于 GET 集合）。
+    ``docs/reference/api-conventions.md`` §2：信封只属于 GET 集合）。
     返回 ``players`` 是因为调用方（导入界面）要拿到新建行的 id 才能
     接着做"给这几个人应用名单""批量配对"之类的动作。
     """
@@ -661,7 +670,8 @@ class ProblemUpsert(_Base):
     所以要按路径段的规则校验（服务端会做）。
 
     ``file_patterns`` 是用于把回收的代码归到这道题的 glob 模式。
-    留空表示用服务端的默认模式（出厂值 ``{ident}/**``）。
+    留空表示用服务端的默认模式（出厂值 ``{ident}/{ident}.cpp``：只认"题目目录下
+    与题目同名的那个源文件"。要连整个题目目录一起收，显式写 ``{ident}/**``）。
     """
 
     ident: str = Field(min_length=1, max_length=64)
@@ -730,6 +740,11 @@ class AgentRuntimeOut(_Base):
     disk_free: Optional[int] = None
     last_error: Optional[str] = None
     tick_count: int = 0
+    #: 这台机器上**当前不存在**的扫描根（最近一次心跳报的，最多 5 条）。
+    #:
+    #: 页面上只写一句「选手目录还没建：<路径>」—— 它是"机器在跑但目录不在"这个
+    #: 事实的唯一线索：那种情况下扫出来是零个文件，与"选手还没开始写"长得一模一样。
+    scan_missing: List[str] = Field(default_factory=list)
 
 
 class EventOut(_Base):
@@ -884,12 +899,16 @@ class AssetZipPasswordSavedOut(_Base):
     * ``requeued``：**zip 这一个资产**被重排的机器台数（``done`` → ``pending``）。
       ``password.txt`` 自己如果已经发出去过，也会被重排（同一套"改内容"语义），
       但不计入这个数字 —— 界面那句"包已重新排队给 N 台机器"说的是包。
+    * ``packaged``：这次是**把它打包成 zip**（原资产不是 zip）还是**给已有的 zip
+      改密码**。只有前者会把 ``asset.filename`` 换成 ``<原基名>.zip``，界面要靠
+      这个字段说清回执里的"打包"与"改密码"是两件事。
     """
 
     asset: AssetOut
     password: str
     password_asset: AssetOut
     requeued: int = 0
+    packaged: bool = False
 
 
 class DeployCreate(_Base):
@@ -1187,6 +1206,58 @@ class UpgradeStatusOut(_Base):
 #   边界，**服务端不返回**才是。
 # * 路径与状态沿用现有枚举（``ContestStatus`` / ``DeployStatus`` 的字符串值），
 #   不另造一套"选手友好"的状态：前端要按同一套值分支，多一套就多一处要同步。
+
+
+class RuntimeSettingsOut(_Base):
+    """运行参数：心跳节奏与离线判定。
+
+    三项都是**整间机房生效**的（服务端按它们决定下发给每台机器什么节奏、
+    多久没心跳算离线），所以界面上要说清影响面。
+
+    单位统一是秒。``tick_idle_seconds`` **同时是本地扫描周期** —— 这两件事在
+    Agent 那边绑在一起（扫描发生在心跳里），界面上必须写成一项，不能拆成两个
+    各自可调的旋钮（拆开会让"心跳快了扫描也快了"这件事从界面上消失）。
+    """
+
+    #: 空闲心跳。范围 5–3600。
+    tick_idle_seconds: int = Field(default=30, ge=5, le=3600)
+    #: 有活干时的心跳。范围 1–60。
+    tick_active_seconds: int = Field(default=2, ge=1, le=60)
+    #: 距上次心跳超过它就判离线。必须大于 ``tick_idle_seconds``。
+    offline_after_seconds: int = Field(default=90, ge=10, le=86400)
+
+
+class RuntimeSettingsUpdate(_Base):
+    """改运行参数。只放要改的项，没提到的保持当前值。
+
+    这样界面改一项不必把另外两项也带上 —— 带上就得担心"界面显示的旧值覆盖了
+    别人刚改的值"。
+
+    **范围校验在这里做（422），跨字段那条在服务端做（400）**：范围是每一项自己的
+    事，跨字段（离线必须大于空闲心跳）要看的是**改完之后**那一组值，而它取决于
+    库里当前的另外两项 —— 那只能由服务端算。
+    """
+
+    tick_idle_seconds: Optional[int] = Field(default=None, ge=5, le=3600)
+    tick_active_seconds: Optional[int] = Field(default=None, ge=1, le=60)
+    offline_after_seconds: Optional[int] = Field(default=None, ge=10, le=86400)
+
+
+class MetaOut(_Base):
+    """全站共用的运行时元信息（免登录）。
+
+    ``display_utc_offset_minutes`` 是**服务端与前端唯一那个要一致的数**：界面上
+    所有时间字符串都按它渲染，而不是按浏览器所在时区。教师从不与考区同时区的
+    机器上打开管理界面时，后者会让整页时间差几个小时，而页面上完全看不出来。
+
+    回的是**固定的分钟偏移**而不是 IANA 名：前端要能只靠一个数算出钟点；
+    IANA 名需要一整个时区数据库才能解释，那是浏览器上的第二个真相源。
+    """
+
+    #: 显示时区相对 UTC 的偏移分钟数。默认 480（UTC+8），``SYNCOJ_TZ`` 可改。
+    display_utc_offset_minutes: int = 480
+    #: 给人看的标识，例如 ``Asia/Shanghai（+08:00）`` 或 ``+08:00``
+    display_timezone: str = "+08:00"
 
 
 class PlayerContestOut(_Base):

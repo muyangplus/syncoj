@@ -3,6 +3,7 @@ import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 import { assetApi, deployApi, playerApi } from '@/api'
+import { ApiError } from '@/api/client'
 import type { AssetOut, AssetZipPasswordOut, DeployTaskOut, PlayerOut } from '@/api/types'
 import DataTable from '@/components/DataTable.vue'
 import FormDialog from '@/components/FormDialog.vue'
@@ -97,9 +98,12 @@ const groups = computed(() => {
 // --------------------------------------------------------------------------- //
 // 上传
 //
-// 上传的是**文件本身**，服务端原样落盘、不解压。所以题面与样例都应该在教师
-// 自己的机器上先打包成 zip 再上传 —— 传一个文件夹进来只会变成一个打不开的
-// 条目，学生那边也恢复不出目录结构。
+// 默认上传的是**文件本身**：服务端原样落盘、不解压。题面与样例本来就该是 zip，
+// 传一个文件夹进来只会变成一条打不开的条目，学生那边也恢复不出目录结构。
+//
+// 勾上「打包成 zip」之后反过来：服务端当场把字节包成 zip（成员名 = 原文件名，
+// 资产名 = <原基名>.zip）再落盘。密码留空 = 服务端生成一个，之后只能在
+// password.txt 里读到 —— 所以上传完还得把它下发一次，否则学生手里没有口令。
 // --------------------------------------------------------------------------- //
 
 /** 服务端默认值是 `testdata`，界面上给个中文名；教师自己填的照原样显示。 */
@@ -117,14 +121,28 @@ const KIND_PRESETS = ['题面', '样例', '测试点', '须知', '其他']
 const uploadKind = ref('题面')
 const fileInput = ref<HTMLInputElement>()
 
+/** 上传时就让服务端打包成 zip（可选加密）。密码留空 = 服务端生成一个。 */
+const uploadPackage = ref(false)
+const uploadZipPassword = ref('')
+
 const upload = useMutation(
   async (file: File) => {
     const contestId = contest.currentId
     if (!contestId) throw new Error('还没有选场次')
-    return assetApi.upload(contestId, file, uploadKind.value)
+    // 带走这一份快照：提交过程中教师可能又改了勾选，而回执说的是这次**实际**
+    // 发生的事（服务端只认收到的字段）
+    const packaged = uploadPackage.value
+    const asset = await assetApi.upload(contestId, file, uploadKind.value, {
+      packageZip: packaged,
+      zipPassword: uploadZipPassword.value,
+    })
+    return { asset, packaged }
   },
   {
-    success: (asset) => `已上传 ${asset.filename}（${formatBytes(asset.size)}）`,
+    success: ({ asset, packaged }) =>
+      packaged
+        ? `已打包成「${asset.filename}」（${formatBytes(asset.size)}）。密码在 password.txt 里，记得把它也下发一次`
+        : `已上传 ${asset.filename}（${formatBytes(asset.size)}）`,
     onDone: () => assets.reload(),
   },
 )
@@ -373,7 +391,7 @@ const createText = useMutation(
 )
 
 // --------------------------------------------------------------------------- //
-// 资产：zip 密码（打密码 / 改密码 / 生成随机密码）
+// 资产：zip 密码 / 打包成 zip（打密码 / 改密码 / 生成随机密码）
 //
 // 用的是 InfoZIP 传统加密（ZipCrypto），因为学生机器上的 Archive Manager 只认
 // 这一种：AES-256 的 zip 它打不开（除非另外装了 p7zip），传统加密的会弹框要密码。
@@ -381,6 +399,10 @@ const createText = useMutation(
 // **它是弱加密**：已知明文攻击可以破，题面/样例这种已知结构的数据更是如此。
 // 所以这里（以及对话框里）的定位是"挡得住随手翻看，挡不住有心人"，不许出现
 // "安全加密"这类说法 —— 那会给教师一种它并不提供的保证。
+//
+// 非 zip 的资产也走同一个动作：服务端先把它包成 zip（成员名 = 原文件名，资产
+// 文件名换成 <原基名>.zip），再套密码。是打包还是改密码由服务端按**内容**判定，
+// 回执里的 `packaged` 说清是哪一种。
 //
 // 密码不存在服务端：它只活在同步生成的 password.txt 里。回执里那句"请自己抄
 // 下来"不是客套 —— 对话框关掉之后，能找回它的地方就只有那份文件。
@@ -390,12 +412,41 @@ const zipDialog = ref(false)
 const zipTarget = ref<AssetOut | null>(null)
 const zipStatus = ref<AssetZipPasswordOut | null>(null)
 const zipLoading = ref(false)
+/** 这次动作是「把非 zip 打包成 zip」还是「给已有的 zip 改密码」。 */
+const zipPackMode = ref(false)
 const zipForm = reactive({ password: '', oldPassword: '', generate: false })
 
-/** 只有 .zip 的行才给「密码」入口；真正的判据在服务端（不是 zip 就 400）。 */
-function isZipName(name: string): boolean {
-  return name.toLowerCase().endsWith('.zip')
+/**
+ * 行上那个动作按钮的字。
+ *
+ * 只看扩展名：列表一次 500 行，为每一行去探一次内容是不现实的。真正的判据在
+ * 服务端 —— 点开之后 GET 会按内容把对话框切成打包 / 改密码（见下面）。
+ */
+function zipActionLabel(name: string): string {
+  return name.toLowerCase().endsWith('.zip') ? '密码' : '打包成 zip'
 }
+
+/** 服务端生成的密码文件（`api/admin.py` 里的 `PASSWORD_FILENAME`）。 */
+const PASSWORD_FILENAME = 'password.txt'
+
+/**
+ * 这一行给不给打包 / 改密码入口。
+ *
+ * `password.txt` 排除在外：它是服务端生成的**单件**（正文由
+ * `_upsert_password_asset` 维护），不是教学资产。把它打成 `password.zip` 会顺手
+ * 再生成一份新的 `password.txt` —— 这个文件能自己滚下去，所以它连入口都不该有。
+ */
+function canZipAction(row: AssetOut): boolean {
+  return row.filename.toLowerCase() !== PASSWORD_FILENAME
+}
+
+/** 打包后资产的新文件名。**只用于对话框里的预览**，真正改名的是服务端。 */
+const zipNewName = computed(() => {
+  const name = zipTarget.value?.filename ?? ''
+  // 与服务端 `_packaged_filename` 同一条规则：只换最后一个后缀
+  const stem = name.replace(/\.[^./\\]*$/, '')
+  return `${stem || name}.zip`
+})
 
 function toggleGeneratePassword(): void {
   zipForm.generate = !zipForm.generate
@@ -404,24 +455,38 @@ function toggleGeneratePassword(): void {
 }
 
 /**
- * 打开密码对话框前先问一次状态。
+ * 打开对话框前先问一次状态。
  *
- * 这一次 GET 不是可有可无的：它决定对话框里要不要出现"旧密码"，也会把"这不是
- * zip"提前挡在门外 —— 否则教师会先把密码想好、输进去，才发现这个文件根本不是包。
+ * 这一次 GET 决定两件事：对话框里要不要出现"旧密码"，以及这次动作是打包还是
+ * 改密码。判据是**内容**：一个叫 `.pdf` 的文件可能真是一个包，一个叫 `.zip` 的
+ * 文件也可能根本不是。
+ *
+ * GET 对非 zip 回 400 `asset_not_zip` —— 那不是失败，而是"这次该打包"的信号：
+ * POST 对非 zip 是打包成 zip，不是拒绝。其他错误才是真的错误。
  */
 async function openZipPasswordDialog(asset: AssetOut): Promise<void> {
   const contestId = contest.currentId
   if (!contestId) return
   zipTarget.value = asset
   zipStatus.value = null
+  // 先按扩展名给一个默认值，GET 回来之后以内容为准
+  zipPackMode.value = !asset.filename.toLowerCase().endsWith('.zip')
   zipForm.password = ''
   zipForm.oldPassword = ''
   zipForm.generate = false
   zipLoading.value = true
   try {
     zipStatus.value = await assetApi.getZipPassword(contestId, asset.id)
+    zipPackMode.value = false
     zipDialog.value = true
   } catch (error) {
+    if (error instanceof ApiError && error.code === 'asset_not_zip') {
+      // 不是 zip：这次动作是打包。它没有旧密码这回事，所以给一份本地状态
+      zipStatus.value = { encrypted: false, filename: asset.filename }
+      zipPackMode.value = true
+      zipDialog.value = true
+      return
+    }
     ElMessage.error((error as Error).message)
     zipTarget.value = null
   } finally {
@@ -437,10 +502,12 @@ const zipCanSubmit = computed(() => {
 })
 
 /**
- * 提交：服务端重新打包同一个 asset id，并同步写一份 password.txt。
+ * 提交：服务端就地改同一个 asset id 的字节（非 zip 时先打包），并同步写一份
+ * password.txt。
  *
  * 回执要写清三件事（**包重排了多少台 / 新密码是什么 / 还要去下发
- * password.txt**）—— 少了哪一件，教师都会在现场卡住。
+ * password.txt**）—— 少了哪一件，教师都会在现场卡住。打包还要多说一句"文件名
+ * 变了"：不然他会以为文件自己改了名字。
  */
 const saveZipPassword = useMutation(
   async () => {
@@ -455,17 +522,28 @@ const saveZipPassword = useMutation(
     if (status.encrypted && !zipForm.oldPassword) {
       throw new Error('这个包已经有密码了，请先填旧密码（在之前那份 password.txt 里）')
     }
-    return assetApi.setZipPassword(contestId, asset.id, {
+    const saved = await assetApi.setZipPassword(contestId, asset.id, {
       password: zipForm.generate ? undefined : zipForm.password,
       generate: zipForm.generate,
       old_password: status.encrypted ? zipForm.oldPassword : undefined,
     })
+    // 带上原名：回执里那句"改名"要能说清从哪个名字改过来的，而 zipTarget
+    // 在 onDone 里会被清空
+    return { saved, before: asset.filename }
   },
   {
-    success: ({ asset, password, password_asset, requeued }) =>
-      `已重新打包「${asset.filename}」：包已重新排队给 ${requeued} 台机器。` +
-      `新密码是 ${password}（请自己抄下来）。` +
-      `接着再去下发「${password_asset.filename}」。`,
+    success: ({ saved, before }) => {
+      const head =
+        saved.packaged && saved.asset.filename !== before
+          ? `已打包成「${saved.asset.filename}」：文件名已从「${before}」改成「${saved.asset.filename}」；`
+          : `已重新打包「${saved.asset.filename}」：`
+      return (
+        head +
+        `包已重新排队给 ${saved.requeued} 台机器。` +
+        `新密码是 ${saved.password}（请自己抄下来）。` +
+        `接着再去下发「${saved.password_asset.filename}」。`
+      )
+    },
     onDone: async () => {
       zipDialog.value = false
       zipTarget.value = null
@@ -674,7 +752,7 @@ function targetKindLabel(kind: string): string {
 <template>
   <PageShell
     title="文件下发"
-    hint="题面和样例直接传 zip，系统不解压。"
+    hint="题面和样例直接传 zip，系统不解压；非 zip 的文件可以点它那一行的「打包成 zip」。"
     :error="listError"
     error-action="刷新页面或检查服务端；资产列表取不到时不要下发。"
     retryable
@@ -686,6 +764,14 @@ function targetKindLabel(kind: string): string {
       <el-select v-model="uploadKind" size="small" style="width: 110px">
         <el-option v-for="kind in KIND_PRESETS" :key="kind" :label="kind" :value="kind" />
       </el-select>
+      <el-checkbox v-model="uploadPackage" size="small">打包成 zip</el-checkbox>
+      <el-input
+        v-if="uploadPackage"
+        v-model="uploadZipPassword"
+        size="small"
+        style="width: 190px"
+        placeholder="密码（留空 = 服务端生成）"
+      />
       <el-button size="small" :loading="upload.pending.value" @click="pickFile">上传文件</el-button>
       <el-button size="small" @click="openTextDialog('create')">新建文本文件</el-button>
       <el-button size="small" @click="openTextDialog('notice', NOTICE_FILENAME)">写考场公告</el-button>
@@ -763,7 +849,7 @@ function targetKindLabel(kind: string): string {
         <!-- 「编辑」对所有资产都开放：它承担**改名**（原独立「改名」按钮已并入）
              以及服务端说 `editable` 时的正文编辑。正文那一栏由对话框按 editable
              决定显示与否，前端不按扩展名自己判断。 -->
-        <el-table-column label="操作" width="230" fixed="right">
+        <el-table-column label="操作" width="280" fixed="right">
           <template #default="{ row }">
             <el-button
               link
@@ -773,16 +859,18 @@ function targetKindLabel(kind: string): string {
             >
               编辑
             </el-button>
-            <!-- 只有 .zip 的行才有这个动作；真正的判据在服务端（不是 zip 就 400） -->
+            <!-- 每一行都有这个动作（系统生成的 password.txt 除外，见 canZipAction）：
+                 zip 行是「密码」，其余是「打包成 zip」。真正的判据在服务端 ——
+                 它按**内容**决定这次是打包还是改密码。 -->
             <el-button
-              v-if="isZipName(row.filename)"
+              v-if="canZipAction(row)"
               link
               type="primary"
               size="small"
               :loading="zipLoading && zipTarget?.id === row.id"
               @click="openZipPasswordDialog(row)"
             >
-              密码
+              {{ zipActionLabel(row.filename) }}
             </el-button>
             <el-button link type="primary" size="small" @click="openCreate(row)">下发</el-button>
             <el-button link type="danger" size="small" @click="askRemoveAsset(row)">删除</el-button>
@@ -792,7 +880,7 @@ function targetKindLabel(kind: string): string {
 
       <template #empty>
         <p>还没有上传任何文件。</p>
-        <p>先在本地打包成 zip 再传。</p>
+        <p>题面直接传 zip；传了别的文件之后，可以点它那一行的「打包成 zip」。</p>
         <el-button type="primary" size="small" style="margin-top: 12px" @click="pickFile">
           上传文件
         </el-button>
@@ -1101,13 +1189,13 @@ function targetKindLabel(kind: string): string {
       </el-form>
     </FormDialog>
 
-    <!-- zip 打密码 / 改密码 / 生成随机密码 -->
+    <!-- zip 打密码 / 改密码 / 打包成 zip / 生成随机密码 -->
     <FormDialog
       v-model="zipDialog"
-      title="给 zip 加密码"
+      :title="zipPackMode ? '打包成 zip' : '给 zip 加密码'"
       :submitting="saveZipPassword.pending.value"
       :disabled="!zipCanSubmit"
-      confirm-text="重新打包"
+      :confirm-text="zipPackMode ? '打包' : '重新打包'"
       @submit="saveZipPassword.run(undefined)"
     >
       <el-alert
@@ -1118,10 +1206,21 @@ function targetKindLabel(kind: string): string {
         style="margin-bottom: 14px"
       >
         <template #title>
-          {{ zipStatus.encrypted ? '这个包现在有密码' : '这个包现在没有密码' }}
+          {{
+            zipPackMode
+              ? '这个文件还不是压缩包'
+              : zipStatus.encrypted
+                ? '这个包现在有密码'
+                : '这个包现在没有密码'
+          }}
         </template>
         <template #default>
-          <template v-if="zipStatus.encrypted">
+          <template v-if="zipPackMode">
+            提交后会把它打包成带密码的 zip，文件名改成
+            <code>{{ zipNewName }}</code>；包里那个成员仍叫
+            <code>{{ zipTarget?.filename }}</code>。
+          </template>
+          <template v-else-if="zipStatus.encrypted">
             改密码要先填旧密码 —— 服务端手上只有加密后的字节，没有旧密码读不出来。
             旧密码就在之前那份 password.txt 里。
           </template>

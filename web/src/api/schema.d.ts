@@ -362,6 +362,11 @@ export interface paths {
          *
          *     走与服务端回收同一套内容寻址存储：相同内容只占一份磁盘。因此"给全场下发
          *     同一份 500MB 测试点"实际只消耗 500MB，而不是 50 × 500MB。
+         *
+         *     ``package_zip=true`` 时**磁盘上直接只存打包后的 zip**：成员名是原文件名，
+         *     资产文件名是 ``<原基名>.zip``，并同步写/更新一份 ``password.txt``。这里刻意
+         *     不做"先把原文件存下来再改"：那会凭空留下一份谁都不引用的原始 blob，而"这个
+         *     资产是什么"从落盘那一刻起就只能是那个 zip。
          */
         post: operations["upload_asset_api_v1_admin_contests__contest_id__assets_post"];
         delete?: never;
@@ -456,15 +461,16 @@ export interface paths {
          * Get Asset Zip Password
          * @description 这个 zip 现在有没有密码。
          *
-         *     判据是标志位（读 zip 目录，不读成员正文）。不是 zip 一律 400 而不是回
-         *     ``encrypted=false``：后者会让界面给一个非 zip 文件也画上「密码」按钮，
-         *     点下去必然失败，而那时教师已经在输密码了。
+         *     判据是标志位（读 zip 目录，不读成员正文）。不是 zip 就 400 ``asset_not_zip``：
+         *     这一条 GET 回答的是"包里有没有密码"，对一份 pdf 它没有答案。界面拿到这个
+         *     错误码会把动作切成「打包成 zip」（POST 对非 zip 是打包，不是拒绝）——
+         *     「是不是 zip」由**内容**判定，比列表行上的扩展名可靠。
          */
         get: operations["get_asset_zip_password_api_v1_admin_contests__contest_id__assets__asset_id__zip_password_get"];
         put?: never;
         /**
          * Set Asset Zip Password
-         * @description 给 zip 打密码 / 改密码，并同步写一份 ``password.txt``。
+         * @description 给 zip 打密码 / 改密码；不是 zip 时先把它打包成 zip，并同步写 ``password.txt``。
          *
          *     **这个密码是弱加密**：InfoZIP 传统加密（ZipCrypto）只挡得住随手翻看，
          *     挡不住有心人 —— 选它是因为学生机上的 Archive Manager 只认这一种
@@ -478,7 +484,9 @@ export interface paths {
          *     改内容的语义与「在线改正文」完全一致（同一套 ``_requeue_done_targets``）：
          *     同一个 asset id 换 ``sha256``/``size``、把已经 ``done`` 的目标重排回
          *     ``pending`` 并清零续传偏移、写一条审计事件。区别只是"新内容"不是一段文本，
-         *     而是"用新密码重新打包的 zip"。
+         *     而是"用新密码重新打包的 zip"。资产本来不是 zip 时，除了重新打包，文件名还会
+         *     换成 ``<原基名>.zip``（zip 里的成员名仍是原文件名）—— 这是**同一个资产**的
+         *     就地替换，不是新建一条；回执里的 ``packaged`` 说明这次走的是哪条路。
          */
         post: operations["set_asset_zip_password_api_v1_admin_contests__contest_id__assets__asset_id__zip_password_post"];
         delete?: never;
@@ -565,7 +573,7 @@ export interface paths {
          * @description 清理代码台账。
          *
          *     这是**软删除**（打墓碑）的批量版本：行先删掉，``blobs/`` 里的内容只在
-         *     没有任何记录再引用它时才释放 —— 见 ``docs/api-conventions.md`` §5.2。
+         *     没有任何记录再引用它时才释放 —— 见 ``docs/reference/api-conventions.md`` §5.2。
          *
          *     默认 ``purge=false``：只清掉**已经消失**的墓碑记录（选手删了文件之后留下的
          *     那些），这不会影响任何还在的东西 —— 也是这个操作最常见的用途。
@@ -721,7 +729,7 @@ export interface paths {
          * Import Players
          * @description 批量导入/更新选手。按 ``player_no`` 幂等 upsert。
          *
-         *     **这不是集合读取，所以不用列表信封**（``docs/api-conventions.md`` §2）：
+         *     **这不是集合读取，所以不用列表信封**（``docs/reference/api-conventions.md`` §2）：
          *     它返回的是"这次导入干了什么"，前端要显示的是 ``created``/``updated``。
          *     顺带回传受影响的行，是因为导入之后常常紧接着"应用名单""批量配对"，
          *     调用方需要那些 id，不该再查一次。
@@ -1622,6 +1630,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/settings/runtime": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Runtime Settings
+         * @description 当前生效的运行参数。
+         *
+         *     这三项决定"机器多久心跳一次"与"多久没心跳算离线"，都是**整间机房**的节奏，
+         *     所以界面要能一眼看到当前值 —— 否则教师只能靠列表上的刷新间隔去猜。
+         */
+        get: operations["get_runtime_settings_api_v1_admin_settings_runtime_get"];
+        /**
+         * Update Runtime Settings
+         * @description 改运行参数。**改完立即生效，不用重启。**
+         *
+         *     心跳处理与离线判定每次都现读这三项（``services/runtime_settings.py`` 的
+         *     ``load``），所以下一轮心跳就按新节奏走；下发给 Agent 的策略本来每轮都带，
+         *     机器那边也跟着换。
+         *
+         *     改一行配置会改变整间机房的节奏，所以**记一条审计**（谁、把哪一项从多少改成
+         *     多少）—— 事后看到"心跳突然变密了"时，这是唯一能回答"谁动的"的东西。
+         */
+        put: operations["update_runtime_settings_api_v1_admin_settings_runtime_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/agent/assets/{asset_id}": {
         parameters: {
             query?: never;
@@ -1868,6 +1910,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/meta": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Meta
+         * @description 全站共用的运行时元信息。
+         *
+         *     ``display_utc_offset_minutes`` 是**服务端与前端必须一致**的那个数：界面上
+         *     所有时间字符串都按它渲染。让前端自己猜（例如拿浏览器时区）的后果是教师的
+         *     笔记本不在东八区时，整页时间都差几个小时 —— 而页面上完全看不出来。
+         */
+        get: operations["get_meta_api_v1_meta_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/player/context": {
         parameters: {
             query?: never;
@@ -1974,6 +2040,8 @@ export interface components {
             player_name?: string | null;
             /** Player No */
             player_no: string;
+            /** Scan Missing */
+            scan_missing?: string[];
             /** Scan Root */
             scan_root?: string | null;
             /** Seconds Since Tick */
@@ -2187,9 +2255,17 @@ export interface components {
          *     * ``requeued``：**zip 这一个资产**被重排的机器台数（``done`` → ``pending``）。
          *       ``password.txt`` 自己如果已经发出去过，也会被重排（同一套"改内容"语义），
          *       但不计入这个数字 —— 界面那句"包已重新排队给 N 台机器"说的是包。
+         *     * ``packaged``：这次是**把它打包成 zip**（原资产不是 zip）还是**给已有的 zip
+         *       改密码**。只有前者会把 ``asset.filename`` 换成 ``<原基名>.zip``，界面要靠
+         *       这个字段说清回执里的"打包"与"改密码"是两件事。
          */
         AssetZipPasswordSavedOut: {
             asset: components["schemas"]["AssetOut"];
+            /**
+             * Packaged
+             * @default false
+             */
+            packaged: boolean;
             /** Password */
             password: string;
             password_asset: components["schemas"]["AssetOut"];
@@ -2261,6 +2337,16 @@ export interface components {
              * @default testdata
              */
             kind: string;
+            /**
+             * Package Zip
+             * @default false
+             */
+            package_zip: boolean;
+            /**
+             * Zip Password
+             * @default
+             */
+            zip_password: string;
         };
         /** Body_upload_file_api_v1_agent_files_post */
         Body_upload_file_api_v1_agent_files_post: {
@@ -2709,7 +2795,7 @@ export interface components {
          * @description 清代码台账。
          *
          *     ``purge=False``（默认）只打墓碑 —— 行还在、``?include_deleted=true`` 仍能
-         *     查到，导出里也仍然带着（见 ``docs/api-conventions.md`` §5.2）。
+         *     查到，导出里也仍然带着（见 ``docs/reference/api-conventions.md`` §5.2）。
          *     ``purge=True`` 才连行一起删，只在"这些记录本来就是误传"时才该用。
          */
         FileClearIn: {
@@ -2878,6 +2964,29 @@ export interface components {
             score?: number | null;
             /** Status */
             status?: string | null;
+        };
+        /**
+         * MetaOut
+         * @description 全站共用的运行时元信息（免登录）。
+         *
+         *     ``display_utc_offset_minutes`` 是**服务端与前端唯一那个要一致的数**：界面上
+         *     所有时间字符串都按它渲染，而不是按浏览器所在时区。教师从不与考区同时区的
+         *     机器上打开管理界面时，后者会让整页时间差几个小时，而页面上完全看不出来。
+         *
+         *     回的是**固定的分钟偏移**而不是 IANA 名：前端要能只靠一个数算出钟点；
+         *     IANA 名需要一整个时区数据库才能解释，那是浏览器上的第二个真相源。
+         */
+        MetaOut: {
+            /**
+             * Display Timezone
+             * @default +08:00
+             */
+            display_timezone: string;
+            /**
+             * Display Utc Offset Minutes
+             * @default 480
+             */
+            display_utc_offset_minutes: number;
         };
         /** Page[AgentRuntimeOut] */
         Page_AgentRuntimeOut_: {
@@ -3282,7 +3391,7 @@ export interface components {
          * @description 批量导入选手的结果。
          *
          *     这是**动作结果**，不是集合读取 —— 所以它**不用列表信封**（见
-         *     ``docs/api-conventions.md`` §2：信封只属于 GET 集合）。
+         *     ``docs/reference/api-conventions.md`` §2：信封只属于 GET 集合）。
          *     返回 ``players`` 是因为调用方（导入界面）要拿到新建行的 id 才能
          *     接着做"给这几个人应用名单""批量配对"之类的动作。
          */
@@ -3463,7 +3572,8 @@ export interface components {
          *     所以要按路径段的规则校验（服务端会做）。
          *
          *     ``file_patterns`` 是用于把回收的代码归到这道题的 glob 模式。
-         *     留空表示用服务端的默认模式（出厂值 ``{ident}/**``）。
+         *     留空表示用服务端的默认模式（出厂值 ``{ident}/{ident}.cpp``：只认"题目目录下
+         *     与题目同名的那个源文件"。要连整个题目目录一起收，显式写 ``{ident}/**``）。
          */
         ProblemUpsert: {
             /** File Patterns */
@@ -3731,6 +3841,53 @@ export interface components {
             note?: string | null;
         };
         /**
+         * RuntimeSettingsOut
+         * @description 运行参数：心跳节奏与离线判定。
+         *
+         *     三项都是**整间机房生效**的（服务端按它们决定下发给每台机器什么节奏、
+         *     多久没心跳算离线），所以界面上要说清影响面。
+         *
+         *     单位统一是秒。``tick_idle_seconds`` **同时是本地扫描周期** —— 这两件事在
+         *     Agent 那边绑在一起（扫描发生在心跳里），界面上必须写成一项，不能拆成两个
+         *     各自可调的旋钮（拆开会让"心跳快了扫描也快了"这件事从界面上消失）。
+         */
+        RuntimeSettingsOut: {
+            /**
+             * Offline After Seconds
+             * @default 90
+             */
+            offline_after_seconds: number;
+            /**
+             * Tick Active Seconds
+             * @default 2
+             */
+            tick_active_seconds: number;
+            /**
+             * Tick Idle Seconds
+             * @default 30
+             */
+            tick_idle_seconds: number;
+        };
+        /**
+         * RuntimeSettingsUpdate
+         * @description 改运行参数。只放要改的项，没提到的保持当前值。
+         *
+         *     这样界面改一项不必把另外两项也带上 —— 带上就得担心"界面显示的旧值覆盖了
+         *     别人刚改的值"。
+         *
+         *     **范围校验在这里做（422），跨字段那条在服务端做（400）**：范围是每一项自己的
+         *     事，跨字段（离线必须大于空闲心跳）要看的是**改完之后**那一组值，而它取决于
+         *     库里当前的另外两项 —— 那只能由服务端算。
+         */
+        RuntimeSettingsUpdate: {
+            /** Offline After Seconds */
+            offline_after_seconds?: number | null;
+            /** Tick Active Seconds */
+            tick_active_seconds?: number | null;
+            /** Tick Idle Seconds */
+            tick_idle_seconds?: number | null;
+        };
+        /**
          * ScanEntry
          * @description 一条扫描结果。**不含文件内容**，只有索引。
          */
@@ -3932,6 +4089,8 @@ export interface components {
              * @default 0
              */
             queue: number;
+            /** Scan Missing */
+            scan_missing?: string[];
         };
         /** UpgradeInfo */
         UpgradeInfo: {
@@ -6734,6 +6893,59 @@ export interface operations {
             };
         };
     };
+    get_runtime_settings_api_v1_admin_settings_runtime_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeSettingsOut"];
+                };
+            };
+        };
+    };
+    update_runtime_settings_api_v1_admin_settings_runtime_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RuntimeSettingsUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeSettingsOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     download_asset_api_v1_agent_assets__asset_id__get: {
         parameters: {
             query?: never;
@@ -7026,6 +7238,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_meta_api_v1_meta_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MetaOut"];
                 };
             };
         };

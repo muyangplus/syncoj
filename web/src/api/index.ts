@@ -27,6 +27,8 @@ export { scoreApi } from './scores'
 export { releaseApi, CONFIG_POLICY_CHOICES, UPGRADE_MODE_CHOICES } from './releases'
 export type { InstallPolicy } from './releases'
 export { installApi, absolute, bootstrapCommand, uninstallCommand } from './install'
+export { metaApi } from './meta'
+export { settingsApi } from './settings'
 export { playerPageApi } from './playerPage'
 export type { PlayerAssetOut, PlayerContextOut, PlayerNoticeOut } from './playerPage'
 

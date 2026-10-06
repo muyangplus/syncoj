@@ -284,14 +284,51 @@ if (envelopes.size === 0 || envelopeRefs.size === 0 || listPageCalls === 0) {
   process.exit(1)
 }
 
+function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * 把 `metaApi.get` 这样的方法名编译成**容忍空白与换行**的正则。
+ *
+ * 为什么不能用 `site.text.includes('metaApi.get')`：调用点一旦被折成
+ *     void metaApi
+ *       .get()
+ * 字面量就匹配不上，于是守卫报"这个接口没有界面入口" —— **一次纯粹的排版变化
+ * 让守卫假红**（真实发生过）。判据应当是"文本里出现了这个方法名"，而不是
+ * "它以某种排版出现"。结尾的 `\b` 是刻意**加严**的：`metaApi.get` 不该被
+ * `metaApi.getList` 匹配上，而 `includes` 会。
+ */
+function methodPattern(method) {
+  const parts = method.split('.').map(escapeRegExp)
+  return new RegExp('\\b' + parts.join('\\s*\\.\\s*') + '\\b')
+}
+
 const sites = callSites()
-for (const method of declaredMethods()) {
-  if (sites.some((site) => site.text.includes(method))) continue
+const methods = declaredMethods()
+let matchedMethods = 0
+for (const method of methods) {
+  const pattern = methodPattern(method)
+  if (sites.some((site) => pattern.test(site.text))) {
+    matchedMethods += 1
+    continue
+  }
   if (ALLOWED_UNUSED.has(method)) continue
   problems.push(
     `这个接口没有任何界面入口：${method}\n` +
       '      （服务端有、前端声明了，但 src/views|components|stores|composables 里没人调它）',
   )
+}
+
+// 和上面信封那条一样：一条"什么也没匹配上"的规则等于没有规则。所以显式证明
+// 它真的认出了调用点 —— 否则格式化一变，这里会静默变成永远通过。
+if (methods.length > 0 && matchedMethods === 0) {
+  console.error(
+    '入口对账自身失效：从 api/ 下认出了 ' +
+      `${methods.length} 个方法，但在任何调用点里一个都没匹配到。` +
+      '多半是匹配规则失效了 —— 改规则，不要放过这条检查。',
+  )
+  process.exit(1)
 }
 
 // 只看管理端：Agent 侧的路径（`/api/v1/agent/*`）与探活 `/healthz` 不归这个

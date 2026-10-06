@@ -253,6 +253,18 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
     settings = _build_settings(args)
+    # 让后台的发现应答器知道 HTTP 监听在哪个端口：它跑在任务里，拿不到命令行参数。
+    # 而它要广播的地址必须带上这个端口，否则机器找得到服务端却连不上。
+    settings.http_port = args.port
+    if args.public_url:
+        settings.public_url = args.public_url
+    if settings.public_url:
+        print("[i] 对外地址: %s" % settings.public_url)
+    elif args.host not in ("127.0.0.1", "localhost", "::1"):
+        # 没显式配、又确实在对外监听：地址将从"教师浏览器用过的那个 Host"学出来。
+        # 这件事必须说出来 —— 否则"包里的地址是从哪来的"在现场是个谜。
+        print("[i] 未指定对外地址：将从管理界面的访问地址推出来（也可用 SYNCOJ_PUBLIC_URL / --public-url 固定）")
+
     # 用工厂模式，避免 import 时产生磁盘副作用
     from . import main as app_module
 
@@ -487,6 +499,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve = sub.add_parser("serve", help="启动服务")
     p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--port", type=int, default=8000)
+    p_serve.add_argument(
+        "--public-url",
+        default=None,
+        help="这台服务端对考试机的地址，如 http://10.0.0.5:8000。"
+        "会内嵌进离线包、也用来应答局域网发现；不填则从管理界面的访问地址推。",
+    )
     p_serve.add_argument(
         "--log-level",
         default="info",

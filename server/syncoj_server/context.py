@@ -42,6 +42,13 @@ class AppContext:
     #: 未配对机器的配对码明文。**只在内存里** —— 协议要求每一轮 tick 都带上
     #: 当前有效的码，而库里只存哈希（见 ``services/paircodes.py``）
     pair_codes: PairCodeCache = field(default_factory=PairCodeCache)
+    #: 教师浏览器最近一次打开管理界面用的地址（``http://10.0.0.5:8000``）。
+    #:
+    #: 服务端**没法可靠地算出**自己的对外地址（枚举网卡会在多网卡机器上挑错那
+    #: 一块），但"有人从这个地址成功访问过"是一条真实证据 —— 内嵌进离线包和
+    #: 广播应答都用它。``None`` = 还没人从非回环地址访问过，此时什么都别做，
+    #: 尤其不要退回 ``127.0.0.1``（那会让 50 台机器各自找自己）。
+    public_url_hint: Optional[str] = None
 
     @classmethod
     def create(cls, settings: Settings) -> "AppContext":

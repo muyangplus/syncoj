@@ -48,6 +48,29 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    """环境变量里的布尔。认 ``1/true/yes/on`` 与 ``0/false/no/off``（不分大小写）。
+
+    不认的值**退回默认值**而不是报错：这是启动路径上的一行配置，为它让服务端起
+    不来不值得；而"写错了当没写"在这里的后果只是发现开关保持默认，
+    有日志可查。
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
+def _env_opt_str(name: str) -> Optional[str]:
+    raw = os.environ.get(name)
+    return raw.strip() if raw and raw.strip() else None
+
+
 def _default_file_pattern() -> str:
     """默认代码路径模式。
 
@@ -130,6 +153,47 @@ class Settings:
     #: 前端构建产物目录（web/dist）。存在则由本进程托管，不存在就只提供 API。
     #: 单进程托管省掉一个 Caddy/nginx —— 本机部署场景下少一个组件就少一处故障点。
     web_dist: Optional[Path] = field(default_factory=lambda: _env_opt_path("SYNCOJ_WEB_DIST") or _guess_web_dist())
+
+    # ---- 对外地址与局域网发现 ----
+    #:
+    #: **这台服务端对考试机来说是什么地址。** 它有三处用途，必须是同一个值：
+    #: 内嵌进离线包、发给广播探测的应答、以及管理界面里让人照着抄。
+    #:
+    #: 不设也能跑：打包/应答时会退回"最后一个非回环的 Host 头"（教师既然能从
+    #: 那台机器打开界面，那个地址就是通的）。两者都没有时**什么都不做** ——
+    #: 退化成 ``127.0.0.1`` 是最坏的一种，因为 50 台机器会各自找自己，
+    #: 而现象是"注册不上"，没人会想到去看服务端配置。
+    public_url: Optional[str] = field(default_factory=lambda: _env_opt_str("SYNCOJ_PUBLIC_URL"))
+
+    #: HTTP 监听端口。**由 ``serve --port`` 写入**，用来在没配 ``public_url`` 时
+    #: 拼出要广播的地址。放在 Settings 里是因为应答器跑在后台任务里，
+    #: 拿不到命令行参数。
+    http_port: int = 8000
+
+    #: 是否应答局域网里的发现探测。关掉它不影响任何别的功能。
+    discovery_enabled: bool = field(
+        default_factory=lambda: _env_bool("SYNCOJ_DISCOVERY", True)
+    )
+
+    #: 发现用的 UDP 端口。**固定**是最重要的性质：机器上不能预置任何配置，
+    #: 所以两边都得知道往哪个端口喊。可以改，但改了就要整间机房一起改。
+    discovery_port: int = field(
+        default_factory=lambda: _env_int("SYNCOJ_DISCOVERY_PORT", 45871)
+    )
+
+    #: 同一个来源 IP 每秒最多应答几次。UDP 应答器是个**无状态反射点**，
+    #: 不限速的话它就成了别人手里的放大器。
+    discovery_replies_per_second: int = 5
+
+    #: 探测报文的最小长度。**应答不得大于探测** —— 否则这个端口可以被用来放大
+    #: 流量（小请求、大应答）。RSA-2048 的签名 base64 就有 344 字符，所以探测
+    #: 那边带了填充；这条是那道约束的服务端一侧。
+    #:
+    #: **必须与 ``services.discovery.MIN_PROBE_BYTES`` 相等**（有测试盯着）：
+    #: 探测填到 640、而这里要求 1024 的话，现象是"完全没人应答"。
+    discovery_min_probe_bytes: int = field(
+        default_factory=lambda: _env_int("SYNCOJ_DISCOVERY_MIN_PROBE", 640)
+    )
 
     # ---- 认证 ----
     admin_session_ttl_seconds: int = 12 * 3600

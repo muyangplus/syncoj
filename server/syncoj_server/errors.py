@@ -75,8 +75,8 @@ CODE_BY_STATUS = {
 #: 前端目前只对少数几个做分支（见 web/src/api/client.ts），其余一律直接展示
 #: ``detail``。所以这里的原则是"够用就好"：不为了对称给每个接口都编一个码。
 #:
-#: 还有一条同样重要的反面规矩：**不许登记服务端根本拋不出来的码**。这里曾经躺着
-#: 一批这样的码（``contest_frozen``、``roster_in_use``、``last_admin`` 之类），
+#: 还有一条同样重要的反面规矩：**不许登记服务端根本拋不出来的码**。曾经这里躺着
+#: 8 个这样的码（``contest_frozen``、``roster_in_use``、``last_admin`` 之类），
 #: 它们描述的是"设计时觉得以后可能会有"的场景 —— 而实际对应的校验要么不存在、
 #: 要么当初就选了另一种更宽容的做法。死码的害处不在于占地方，而在于它会被当成
 #: 契约：前端照着它写分支、文档照着它写章节，于是所有人都以为有那么一条保护在。
@@ -85,6 +85,7 @@ ERROR_CODES = {
     # 认证 / 鉴权
     "unauthorized": "未登录或会话已过期",
     "forbidden": "没有权限执行这个操作",
+    "token_expired": "登录已过期，请重新登录",
     "bad_credentials": "用户名或密码不对",
     # 机器注册与配对
     "pairing_required": "这台机器还没有配对到名单里的任何人",
@@ -115,6 +116,10 @@ ERROR_CODES = {
     "name_mismatch": "两次输入的确认名称不一致",
     "path_invalid": "路径不合法",
     "release_not_signed": "服务端没有配置发布签名私钥，无法提供升级",
+    "release_trust_anchor_missing": "本机没有要内嵌进包里的发布公钥，打出的包机器验不了签名",
+    "release_source_missing": "本机没有可用于构建的 Agent 源码",
+    "release_build_failed": "构建 Agent 升级包失败",
+    "version_mismatch": "提交的版本号和源码里的对不上",
 }
 
 

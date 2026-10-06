@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 import { releaseApi } from '@/api'
-import type { ReleaseOut, UpgradeStatusOut } from '@/api/types'
+import type { ReleaseOut, ReleaseSourceOut, UpgradeStatusOut } from '@/api/types'
 import { useMutation } from '@/composables/useMutation'
 import { usePolling } from '@/composables/usePolling'
 import { formatBytes, formatTime } from '@/utils/format'
@@ -57,6 +57,70 @@ const signingKnown = computed(() => status.value !== null)
 function pickFile(): void {
   fileInput.value?.click()
 }
+
+/**
+ * 「发布当前版本」：本机有没有可构建的源码。
+ *
+ * 取不到就当没有 —— 这是这一页的**次要功能**，它挂了不该把"上传/铺开"也标红。
+ * 服务端正则永远回 200（没有源码是正常状态），所以这里几乎不会真的失败。
+ */
+const source = ref<ReleaseSourceOut | null>(null)
+const buildVersion = ref('')
+const buildNotes = ref('')
+
+async function loadSource(): Promise<void> {
+  try {
+    source.value = await releaseApi.source()
+    if (!buildVersion.value) buildVersion.value = source.value.version ?? ''
+  } catch {
+    source.value = null
+  }
+}
+
+onMounted(loadSource)
+
+const buildable = computed(() => source.value?.available === true)
+
+/**
+ * 提交的版本号和源码里那个不一致。
+ *
+ * 服务端也会拒（409 `version_mismatch`），这里提前说是因为它的成因只有两种，
+ * 两种都很具体：要么改代码忘了改 `__version__`，要么手输时打错了。
+ */
+const versionDrifts = computed(
+  () => buildable.value && !!buildVersion.value.trim() && buildVersion.value.trim() !== source.value?.version,
+)
+
+/** 同名版本是否已经在历史里。会覆盖它那份包（未铺开的话）。 */
+const versionExists = computed(() =>
+  releases.value.some((row) => row.version === buildVersion.value.trim()),
+)
+
+/**
+ * 本机没有要内嵌进包里的公钥。
+ *
+ * 这时**服务端会拒绝构建**（能签、但机器验不了 —— 铺开之后所有机器一动不动，
+ * 而界面上一切正常）。所以这里不摆一个点了必然报错的按钮，直接把缺哪个文件
+ * 写出来。
+ */
+const trustAnchorMissing = computed(
+  () => buildable.value && source.value?.public_key == null,
+)
+
+const canBuild = computed(
+  () => buildable.value && !trustAnchorMissing.value && !!buildVersion.value.trim(),
+)
+
+const build = useMutation(
+  () => releaseApi.build(buildVersion.value.trim(), buildNotes.value.trim()),
+  {
+    success: (release) => `已构建并签发 ${release.version}（未铺开，Agent 还看不到）`,
+    onDone: async () => {
+      buildNotes.value = ''
+      await refresh()
+    },
+  },
+)
 
 const upload = useMutation(
   (file: File) => releaseApi.upload(file, version.value.trim(), notes.value.trim()),
@@ -277,6 +341,61 @@ const editSave = useMutation(
       </el-descriptions>
     </el-card>
 
+    <!--
+      「发布当前版本」：服务端本机仓库里就有 agent/ 源码时，不必先手工打包再上传。
+      放在「上传新版本」前面是因为它是**正常路径**；上传那条留给"服务端没有源码
+      的部署"（生产上服务端常常只是一个 pip 装出来的实例）。
+    -->
+    <el-card v-if="signingReady && buildable" shadow="never" class="section">
+      <template #header><span>发布当前版本</span></template>
+
+      <div class="upload-row">
+        <el-input v-model="buildVersion" placeholder="版本号" style="width: 160px" />
+        <el-input v-model="buildNotes" placeholder="发布说明（可选）" style="flex: 1" />
+        <el-button
+          type="primary"
+          :loading="build.pending.value"
+          :disabled="!canBuild"
+          @click="build.run(undefined)"
+        >
+          构建并签发
+        </el-button>
+      </div>
+
+      <p class="page-hint">
+        从本机
+        <span class="mono">{{ source?.agent_root }}</span>
+        的源码打一个包，用签名私钥签好，直接进版本历史。
+        <strong>仍然是「未铺开」—— 要再点「铺开」，机器才拿得到。</strong>
+      </p>
+
+      <p v-if="versionDrifts" class="page-hint warn-hint">
+        提交的版本号和源码里写的
+        <span class="mono">{{ source?.version }}</span>
+        不一致，服务端会拒绝。要么改
+        <span class="mono">agent/syncoj_agent/__init__.py</span> 里的
+        <span class="mono">__version__</span>，要么把这里改回来 —— 两者不一致时，
+        包里那份代码和发布记录上那个号就对不上了。
+      </p>
+      <p v-else-if="versionExists" class="page-hint warn-hint">
+        历史里已经有 {{ buildVersion.trim() }}。未铺开的同名版本会被覆盖（没有机器拿过它）；
+        正在铺开的会被服务端拒绝，要先「撤回」。
+      </p>
+
+      <p v-if="trustAnchorMissing" class="page-hint warn-hint">
+        本机没有要内嵌进包里的发布公钥（<span class="mono">.key/release-key.pub.json</span>），
+        服务端会拒绝构建 —— 那样打出来的包机器验不了签名，铺开之后所有机器都会静默不升级。
+        跑一次 <span class="mono">syncoj-server init</span> 会把它生成出来。
+      </p>
+    </el-card>
+
+    <el-card v-else-if="signingReady && source && !source.available" shadow="never" class="section">
+      <template #header><span>发布当前版本</span></template>
+      <p class="page-hint" style="margin: 0">
+        {{ source.reason }}
+      </p>
+    </el-card>
+
     <el-card v-if="signingReady" shadow="never" class="section">
       <template #header><span>上传新版本</span></template>
       <div class="upload-row">
@@ -495,5 +614,10 @@ const editSave = useMutation(
 .muted {
   color: #909399;
   font-size: 12px;
+}
+
+/* 提醒用的提示行：不是错误，是"这一步会怎样" */
+.warn-hint {
+  color: #e6a23c;
 }
 </style>

@@ -128,6 +128,10 @@ export const paths = {
 
   // ---- Agent 发布 ----
   releases: () => `${ADMIN}/releases`,
+  /** 本机有没有可构建的 Agent 源码、会打出哪个版本。永远 200。 */
+  releasesSource: () => `${ADMIN}/releases/source`,
+  /** 从本机仓库的 `agent/` 源码构建并签发一个版本（只建草稿，不铺开）。 */
+  releasesBuild: () => `${ADMIN}/releases/build`,
   releaseRollout: (releaseId: number) => `${ADMIN}/releases/${releaseId}/rollout`,
   releaseYank: (releaseId: number) => `${ADMIN}/releases/${releaseId}/yank`,
   release: (releaseId: number) => `${ADMIN}/releases/${releaseId}`,

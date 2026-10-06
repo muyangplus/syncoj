@@ -900,6 +900,34 @@ class ReleaseUpdate(_Base):
     channel: Optional[str] = Field(default=None, max_length=16)
 
 
+class ReleaseSourceOut(_Base):
+    """本机有没有可构建的 Agent 源码、会打出哪个版本。
+
+    ``available=False`` 时 ``reason`` 一定是一句能直接显示的中文 ——
+    这个接口设计成"永远 200"，因为"没有源码"是一种正常状态而不是错误。
+    """
+
+    available: bool
+    version: Optional[str] = None
+    agent_root: Optional[str] = None
+    public_key: Optional[str] = None
+    reason: Optional[str] = None
+
+
+class ReleaseBuildIn(_Base):
+    """「发布当前版本」的请求体。
+
+    ``version`` **必填**：界面会预填源码里的 ``__version__``，但服务端不接受
+    "猜一个默认值"。让发版这件事必须经过一次显式确认，是为了在"改了代码忘了改
+    版本号"时撞上"这个版本已经存在"，而不是静默覆盖掉上一版 —— 后者更糟，
+    因为已经升级过的机器会因为"版本不高于当前"拒绝升级，而界面上一切正常。
+    """
+
+    version: str = Field(min_length=1, max_length=64)
+    channel: str = Field(default="stable", max_length=16)
+    notes: Optional[str] = Field(default=None, max_length=2000)
+
+
 class UpgradeStatusOut(_Base):
     """自更新总览。教师一眼看清"现在会不会有机器被升级"。"""
 

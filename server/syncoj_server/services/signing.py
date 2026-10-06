@@ -36,6 +36,7 @@ __all__ = [
     "generate_keypair",
     "openssl_available",
     "parse_version",
+    "write_public_key_json",
 ]
 
 
@@ -383,3 +384,22 @@ def generate_keypair(out_path: Path, bits: int = DEFAULT_KEY_BITS) -> SigningKey
         raise
 
     return load_signing_key(out_path)
+
+
+def write_public_key_json(path: Path, key: SigningKey) -> None:
+    """把公钥写成 Agent 读得懂的 JSON（``release-key.pub.json``）。
+
+    **这里是这个文件格式的唯一定义。** 它是 Agent 的信任锚：写歪一个字段名，
+    表现是每台机器都拒绝升级，而服务端这边一切正常 —— 而它会同时在两处被写
+    （``syncoj-server init``/``genkey``，以及测试夹具），两处各写一遍迟早会漂。
+
+    公钥不是秘密，0644 就好；但行尾必须是 LF：它要在开发机和服务器之间搬运、
+    被 sha256 比对，字节不同会让人怀疑"是不是换了密钥"。
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(key.public_key_dict(), indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )

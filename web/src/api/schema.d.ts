@@ -1218,6 +1218,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/releases/build": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Build Release
+         * @description 从本机仓库里的 ``agent/`` 源码构建一个升级包并签发。
+         *
+         *     **构建不等于铺开**：``published_at`` 保持为空，Agent 不会收到任何东西，
+         *     直到显式调 rollout。构建和"推给 50 台机器"是风险等级完全不同的两件事。
+         *
+         *     检查的**顺序是有意的**：先答"这台服务器到底能不能发布"（配置问题），再答
+         *     "你这次提交的对不对"（输入问题）。反过来的话，一个只是填错版本号的人会先
+         *     撞上版本不一致，改对了再撞上"没有公钥" —— 两轮才走到真正该修的那一步。
+         */
+        post: operations["build_release_api_v1_admin_releases_build_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/releases/source": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Release Source
+         * @description 本机有没有可构建的 Agent 源码。**永远 200。**
+         *
+         *     界面上"发布当前版本"要在**点之前**就知道行不行：没有源码时该显示成一句
+         *     解释（"生产上服务端可能没 checkout，请改用上传"），而不是让人点一下再吃
+         *     一个 500。所以这里把"不可用"当成正常状态返回。
+         */
+        get: operations["release_source_api_v1_admin_releases_source_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/releases/{release_id}": {
         parameters: {
             query?: never;
@@ -2831,6 +2882,26 @@ export interface components {
             /** Roster Entry Id */
             roster_entry_id: number;
         };
+        /**
+         * ReleaseBuildIn
+         * @description 「发布当前版本」的请求体。
+         *
+         *     ``version`` **必填**：界面会预填源码里的 ``__version__``，但服务端不接受
+         *     "猜一个默认值"。让发版这件事必须经过一次显式确认，是为了在"改了代码忘了改
+         *     版本号"时撞上"这个版本已经存在"，而不是静默覆盖掉上一版 —— 后者更糟，
+         *     因为已经升级过的机器会因为"版本不高于当前"拒绝升级，而界面上一切正常。
+         */
+        ReleaseBuildIn: {
+            /**
+             * Channel
+             * @default stable
+             */
+            channel: string;
+            /** Notes */
+            notes?: string | null;
+            /** Version */
+            version: string;
+        };
         /** ReleaseOut */
         ReleaseOut: {
             /** Channel */
@@ -2861,6 +2932,25 @@ export interface components {
              * @default false
              */
             yanked: boolean;
+        };
+        /**
+         * ReleaseSourceOut
+         * @description 本机有没有可构建的 Agent 源码、会打出哪个版本。
+         *
+         *     ``available=False`` 时 ``reason`` 一定是一句能直接显示的中文 ——
+         *     这个接口设计成"永远 200"，因为"没有源码"是一种正常状态而不是错误。
+         */
+        ReleaseSourceOut: {
+            /** Agent Root */
+            agent_root?: string | null;
+            /** Available */
+            available: boolean;
+            /** Public Key */
+            public_key?: string | null;
+            /** Reason */
+            reason?: string | null;
+            /** Version */
+            version?: string | null;
         };
         /** ReleaseUpdate */
         ReleaseUpdate: {
@@ -5263,6 +5353,59 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    build_release_api_v1_admin_releases_build_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReleaseBuildIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReleaseOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    release_source_api_v1_admin_releases_source_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReleaseSourceOut"];
                 };
             };
         };

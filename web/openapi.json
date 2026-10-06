@@ -2668,6 +2668,41 @@
         "title": "RebindAgentIn",
         "type": "object"
       },
+      "ReleaseBuildIn": {
+        "additionalProperties": false,
+        "description": "「发布当前版本」的请求体。\n\n``version`` **必填**：界面会预填源码里的 ``__version__``，但服务端不接受\n\"猜一个默认值\"。让发版这件事必须经过一次显式确认，是为了在\"改了代码忘了改\n版本号\"时撞上\"这个版本已经存在\"，而不是静默覆盖掉上一版 —— 后者更糟，\n因为已经升级过的机器会因为\"版本不高于当前\"拒绝升级，而界面上一切正常。",
+        "properties": {
+          "channel": {
+            "default": "stable",
+            "maxLength": 16,
+            "title": "Channel",
+            "type": "string"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "version": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version"
+        ],
+        "title": "ReleaseBuildIn",
+        "type": "object"
+      },
       "ReleaseOut": {
         "additionalProperties": false,
         "properties": {
@@ -2748,6 +2783,65 @@
           "created_at"
         ],
         "title": "ReleaseOut",
+        "type": "object"
+      },
+      "ReleaseSourceOut": {
+        "additionalProperties": false,
+        "description": "本机有没有可构建的 Agent 源码、会打出哪个版本。\n\n``available=False`` 时 ``reason`` 一定是一句能直接显示的中文 ——\n这个接口设计成\"永远 200\"，因为\"没有源码\"是一种正常状态而不是错误。",
+        "properties": {
+          "agent_root": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Root"
+          },
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "public_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Public Key"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          }
+        },
+        "required": [
+          "available"
+        ],
+        "title": "ReleaseSourceOut",
         "type": "object"
       },
       "ReleaseUpdate": {
@@ -7065,6 +7159,70 @@
           }
         },
         "summary": "Upload Release",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/releases/build": {
+      "post": {
+        "description": "从本机仓库里的 ``agent/`` 源码构建一个升级包并签发。\n\n**构建不等于铺开**：``published_at`` 保持为空，Agent 不会收到任何东西，\n直到显式调 rollout。构建和\"推给 50 台机器\"是风险等级完全不同的两件事。\n\n检查的**顺序是有意的**：先答\"这台服务器到底能不能发布\"（配置问题），再答\n\"你这次提交的对不对\"（输入问题）。反过来的话，一个只是填错版本号的人会先\n撞上版本不一致，改对了再撞上\"没有公钥\" —— 两轮才走到真正该修的那一步。",
+        "operationId": "build_release_api_v1_admin_releases_build_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReleaseBuildIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Build Release",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/releases/source": {
+      "get": {
+        "description": "本机有没有可构建的 Agent 源码。**永远 200。**\n\n界面上\"发布当前版本\"要在**点之前**就知道行不行：没有源码时该显示成一句\n解释（\"生产上服务端可能没 checkout，请改用上传\"），而不是让人点一下再吃\n一个 500。所以这里把\"不可用\"当成正常状态返回。",
+        "operationId": "release_source_api_v1_admin_releases_source_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseSourceOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Release Source",
         "tags": [
           "admin"
         ]

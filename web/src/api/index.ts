@@ -45,6 +45,7 @@ import type {
   ProblemOut,
   ProblemUpsert,
   ReleaseOut,
+  ReleaseSourceOut,
   ReleaseUpdate,
   RosterCreate,
   RosterDetailOut,
@@ -524,6 +525,26 @@ export const scoreApi = {
 
 export const releaseApi = {
   status: () => request<UpgradeStatusOut>(paths.releases()),
+
+  /**
+   * 本机有没有可构建的源码、会打出哪个版本。
+   *
+   * **永远 200**，不能用它来判"出没出错"：没有源码是正常状态
+   * （生产上服务端可能根本没 checkout），要显示成一句解释。
+   */
+  source: () => request<ReleaseSourceOut>(paths.releasesSource()),
+
+  /**
+   * 从本机仓库的 `agent/` 源码构建并签发一个版本。
+   *
+   * `version` 必填 —— 界面会预填 `source()` 给的那个值，但服务端不接受默认值：
+   * 发版必须经过一次显式确认。构建出来的是**草稿**，还要再点铺开才会推给机器。
+   */
+  build: (version: string, notes = '', channel = 'stable') =>
+    request<ReleaseOut>(paths.releasesBuild(), {
+      method: 'POST',
+      body: { version, notes: notes || null, channel },
+    }),
 
   upload: (file: File, version: string, notes: string, channel = 'stable') => {
     const form = new FormData()

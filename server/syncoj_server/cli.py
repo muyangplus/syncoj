@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import secrets
@@ -171,17 +170,15 @@ def _ensure_release_key(where: Path) -> str:
 
 
 def _write_public_key(public: Path, key) -> None:
-    """公钥不是秘密，0644 就好；但行尾必须是 LF。
+    """转交给 :func:`services.signing.write_public_key_json`。
 
-    同一条理由写在这里而不是只在 genkey 里：公钥要在开发机和服务器之间搬运、
-    被 sha256 比对，字节不同会让人怀疑"是不是换了密钥"。
+    文件格式的定义在那边（Agent 读的是同一个文件），这里只留一个名字，好让
+    下面那些调用点读起来仍然是"写公钥"而不是"写 JSON"，也免得这个格式将来
+    只在某一处被改对。
     """
-    public.parent.mkdir(parents=True, exist_ok=True)
-    public.write_text(
-        json.dumps(key.public_key_dict(), indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-        newline="\n",
-    )
+    from .services.signing import write_public_key_json
+
+    write_public_key_json(public, key)
     try:
         os.chmod(str(public), 0o644)
     except OSError:
@@ -320,15 +317,7 @@ def _cmd_genkey(args: argparse.Namespace) -> int:
         return 1
 
     pub_path = Path(args.public_out) if args.public_out else out.with_suffix(".pub.json")
-    pub_path.parent.mkdir(parents=True, exist_ok=True)
-    # 显式 LF：Windows 上 write_text 默认翻成 CRLF，于是"公钥文件"在两个平台上
-    # 字节不同。JSON 本身不在乎，但一台机器上的文件跟另一台上的不一样，
-    # 会让人怀疑内容真的不同 —— 排查时间就是这么烧掉的。
-    pub_path.write_text(
-        json.dumps(key.public_key_dict(), indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-        newline="\n",
-    )
+    _write_public_key(pub_path, key)
 
     print("[+] 私钥: %s  (权限 0600，绝不外传)" % out)
     print("[+] 公钥: %s" % pub_path)

@@ -45,6 +45,7 @@ __all__ = [
     "ensure_key_dir",
     "key_dir",
     "key_dir_for_write",
+    "release_public_key_path",
     "release_signing_key_path",
     "repo_root",
     "write_secret_text",
@@ -117,6 +118,25 @@ def release_signing_key_path() -> Optional[Path]:
     if where is None:
         return None
     candidate = where / RELEASE_SIGNING_KEY_NAME
+    return candidate if candidate.is_file() else None
+
+
+def release_public_key_path() -> Optional[Path]:
+    """随包带走的发布**公钥**（``<密钥目录>/release-key.pub.json``）；没有就是 ``None``。
+
+    与 :func:`release_signing_key_path` 有一处刻意的不对称：**没有单独的环境变量
+    能指向它**。私钥在生产上常在仓库布局之外（``/etc/syncoj/release-key.pem``），
+    所以它需要 ``SYNCOJ_RELEASE_KEY`` 这条逃生通道；公钥则是要被内嵌进升级包、
+    跟着包走到每一台目标机上的信任锚，它只能是"密钥目录里那一个文件"。给它再加
+    一个覆盖入口，只会多出"私钥是 A、公钥是 B"这种谁也没法从现场看出来的错配。
+
+    只在文件真的存在时才返回路径 —— "没有公钥"是**正常**状态（自更新整体关闭），
+    不是错误；而给一个不存在的路径会让构建脚本当场失败。
+    """
+    where = key_dir()
+    if where is None:
+        return None
+    candidate = where / RELEASE_PUBLIC_KEY_NAME
     return candidate if candidate.is_file() else None
 
 

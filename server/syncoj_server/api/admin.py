@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import tempfile
 import zipfile
 from dataclasses import dataclass
@@ -34,6 +35,7 @@ from fastapi import (
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from sqlalchemy import func, or_, select
 
+from .. import keys
 from ..config import Settings
 from ..context import AppContext
 from ..errors import ERROR_CODES, ApiError
@@ -101,7 +103,9 @@ from ..schemas import (
     ProblemMatchOut,
     ProblemOut,
     ProblemUpsert,
+    ReleaseBuildIn,
     ReleaseOut,
+    ReleaseSourceOut,
     ReleaseUpdate,
     RebindAgentIn,
     RosterCreate,
@@ -128,7 +132,7 @@ from ..security import (
     new_token,
     verify_password,
 )
-from ..services import enrollment, matching, rosters
+from ..services import enrollment, matching, packaging, rosters
 from ..services.deploy import validate_dest_template
 from ..services.signing import parse_version
 from ..storage import BlobTooLarge, HashMismatch
@@ -210,7 +214,10 @@ def require_admin(request: Request, ctx: AppContext = Depends(get_ctx)) -> Admin
         if admin_session.revoked_at is not None:
             raise _unauthorized("会话已注销")
         if admin_session.expires_at < now:
-            raise _unauthorized("会话已过期")
+            # 这一条单独给 ``token_expired`` 而不是笼统的 ``unauthorized``：
+            # "过期了" 和 "这个凭据我根本不认识" 对人的含义不同 —— 前者是
+            # 该重新登录，后者是有人的 token 被换了/拼错了。
+            raise _unauthorized("登录已过期，请重新登录", code="token_expired")
         if not admin.is_active:
             raise _unauthorized("账号已停用")
         return AdminIdentity(id=admin.id, username=admin.username)
@@ -3727,23 +3734,11 @@ def list_releases(
     )
 
 
-@router.post("/releases", response_model=ReleaseOut)
-def upload_release(
-    file: UploadFile = File(...),
-    # 注意：必须显式声明 Form(...)。带 File 的端点里，裸的 `version: str = ""`
-    # 会被 FastAPI 当成**查询参数**而不是表单字段 —— 客户端在 multipart 里发的
-    # version 会被静默忽略，然后参数取默认空值。这类 bug 不会报错，只会"没生效"。
-    version: str = Form(""),
-    channel: str = Form("stable"),
-    notes: str = Form(""),
-    ctx: AppContext = Depends(get_ctx),
-    admin: AdminIdentity = Depends(require_admin),
-) -> ReleaseOut:
-    """上传 Agent 升级包。
+def _require_signing_key(ctx: AppContext) -> None:
+    """没有私钥就别往下走 —— 打出一个未签名的包是最坏的失败方式：
 
-    **上传不等于铺开**：``published_at`` 保持为空，Agent 不会收到任何东西，
-    直到教师显式调 rollout。上传一个包和把它推给 50 台机器是风险等级完全
-    不同的两件事，不该合成一个动作。
+    Agent 会拒收它，于是"界面上发布成功、所有机器都升不上去"。宁可在这里
+    直接拦住并说清怎么配。
     """
     if ctx.signing_key is None:
         raise ApiError(
@@ -3753,19 +3748,30 @@ def upload_release(
             % (ctx.signing_key_error or "请设置 SYNCOJ_RELEASE_KEY"),
         )
 
-    version = (version or "").strip()
-    if not version:
-        raise HTTPException(status_code=400, detail="必须指定版本号")
 
+def _store_release(
+    ctx: AppContext,
+    *,
+    stream,
+    version: str,
+    channel: str,
+    notes: Optional[str],
+    filename: str,
+    admin: AdminIdentity,
+    source: str,
+) -> ReleaseOut:
+    """把一份升级包**收进库并签发**，返回发布记录。
+
+    抽出来是因为现在有两个入口（上传一个包、从源码构建一个包），而这两条路
+    在"签名对象是什么、同名版本怎么处理、留哪条审计"上**必须完全一致**：
+    任何一处不同都会让两条路产出行为不同的发布，而现场只看得出来"有时能升级
+    有时不能"。真正不同的只有 ``source``（审计里那份包是打哪儿来的）。
+    """
+    _require_signing_key(ctx)
     try:
-        parse_version(version)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="版本号不合法: %s" % exc)
-
-    filename = Path(file.filename or "agent-bundle.tar.gz").name
-
-    try:
-        sha256, size = ctx.blobs.put_stream(file.file, max_bytes=ctx.settings.max_release_size)
+        sha256, size = ctx.blobs.put_stream(
+            stream, max_bytes=ctx.settings.max_release_size
+        )
     except BlobTooLarge as exc:
         raise HTTPException(status_code=413, detail=str(exc))
 
@@ -3806,12 +3812,171 @@ def upload_release(
         session.add(
             EventLog(
                 level="info",
-                category="release_uploaded",
-                message="上传 Agent 版本 %s（%s，%d 字节，%s）"
-                % (version, filename, size, sha256[:12]),
+                category="release_%s" % source,
+                message="%s Agent 版本 %s（%s，%d 字节，%s）"
+                % (_SOURCE_LABELS[source], version, filename, size, sha256[:12]),
+                meta_json=json.dumps(
+                    {"by": admin.username, "source": source, "version": version},
+                    ensure_ascii=False,
+                ),
             )
         )
         return _release_out(row)
+
+
+#: 审计里怎么称呼这个包的来路。用固定词表而不是自由文本，日志才 grep 得动。
+_SOURCE_LABELS = {"uploaded": "上传", "built": "构建"}
+
+
+def _expected_public_key_path(ctx: AppContext) -> Path:
+    """"本该在那儿的公钥文件"的路径，只用来写错误消息。
+
+    优先从密钥目录推（那才是真实布局）；退而用私钥文件旁边的位置，好在"私钥
+    来自 ``SYNCOJ_RELEASE_KEY`` 指向的别处"时仍然给出一个**说得通**的建议路径。
+    绝不去读这个文件 —— 它只是在报错时用来告诉人"该把文件放哪"。
+    """
+    where = keys.key_dir()
+    if where is not None:
+        return where / keys.RELEASE_PUBLIC_KEY_NAME
+    signing = ctx.settings.release_signing_key
+    parent = Path(signing).parent if signing else Path("<密钥目录>")
+    return parent / keys.RELEASE_PUBLIC_KEY_NAME
+
+
+@router.get("/releases/source", response_model=ReleaseSourceOut)
+def release_source(
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> ReleaseSourceOut:
+    """本机有没有可构建的 Agent 源码。**永远 200。**
+
+    界面上"发布当前版本"要在**点之前**就知道行不行：没有源码时该显示成一句
+    解释（"生产上服务端可能没 checkout，请改用上传"），而不是让人点一下再吃
+    一个 500。所以这里把"不可用"当成正常状态返回。
+    """
+    probe = packaging.probe_source()
+    return ReleaseSourceOut(
+        available=probe.available,
+        version=probe.version,
+        agent_root=probe.agent_root,
+        public_key=probe.public_key,
+        reason=probe.reason,
+    )
+
+
+@router.post("/releases/build", response_model=ReleaseOut)
+def build_release(
+    payload: ReleaseBuildIn,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> ReleaseOut:
+    """从本机仓库里的 ``agent/`` 源码构建一个升级包并签发。
+
+    **构建不等于铺开**：``published_at`` 保持为空，Agent 不会收到任何东西，
+    直到显式调 rollout。构建和"推给 50 台机器"是风险等级完全不同的两件事。
+
+    检查的**顺序是有意的**：先答"这台服务器到底能不能发布"（配置问题），再答
+    "你这次提交的对不对"（输入问题）。反过来的话，一个只是填错版本号的人会先
+    撞上版本不一致，改对了再撞上"没有公钥" —— 两轮才走到真正该修的那一步。
+    """
+    _require_signing_key(ctx)
+    # 有私钥、却没有要内嵌的公钥：服务端能签，机器验不了。这是最难查的一种现场
+    # —— 界面显示发布成功、铺开也成功，然后所有机器一动不动。所以在这里拦住，
+    # 而不是等构建完、铺开完再让人去猜。
+    if keys.release_public_key_path() is None:
+        raise ApiError(
+            503,
+            "release_trust_anchor_missing",
+            "本机能签名，但找不到要内嵌进包里的发布公钥（%s）—— 这样打出去的包"
+            "机器验不了签名，会静默拒绝升级。" % _expected_public_key_path(ctx),
+        )
+
+    version = payload.version.strip()
+    if not version:
+        raise HTTPException(status_code=400, detail="必须指定版本号")
+    try:
+        parse_version(version)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="版本号不合法: %s" % exc)
+
+    probe = packaging.probe_source()
+    if not probe.available:
+        raise ApiError(503, "release_source_missing", probe.reason or "找不到可构建的源码")
+    if probe.version != version:
+        raise ApiError(
+            409,
+            "version_mismatch",
+            "源码里的版本是 %s，你提交的是 %s。要么改 agent/syncoj_agent/__init__.py "
+            "里的 __version__，要么把版本号填对 —— 两者不一致时，包里那份代码和"
+            "发布记录上那个号就对不上了。" % (probe.version, version),
+            {"source_version": probe.version, "given": version},
+        )
+
+    # 打到一个临时文件，再和"上传"走同一条入库路径。临时目录用 blob 库的
+    # ``.tmp``：同一个文件系统，最后那次 rename 才是原子的（跨分区会退化成拷贝）。
+    # 它只会被 ``sweep_tmp`` 按 ``*.part`` 清理，我们这个目录不在其列。
+    tmp_dir = Path(tempfile.mkdtemp(prefix="build-", dir=str(ctx.blobs.tmp_root)))
+    tmp_path = tmp_dir / ("syncoj-agent-%s.tar.gz" % version)
+    try:
+        built_version, size, sha256 = packaging.build_agent_bundle(tmp_path)
+        if built_version != version:  # pragma: no cover - 上面刚比对过，双保险
+            raise ApiError(409, "version_mismatch", "构建出的版本是 %s" % built_version)
+        with tmp_path.open("rb") as handle:
+            return _store_release(
+                ctx,
+                stream=handle,
+                version=version,
+                channel=payload.channel,
+                notes=payload.notes,
+                filename=tmp_path.name,
+                admin=admin,
+                source="built",
+            )
+    except packaging.BuildError as exc:
+        # 原文只进日志：它可能带着一大堆路径和栈
+        log.warning("构建 Agent 发布包失败：%s", exc.log)
+        raise ApiError(500, "release_build_failed", exc.detail)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+@router.post("/releases", response_model=ReleaseOut)
+def upload_release(
+    file: UploadFile = File(...),
+    # 注意：必须显式声明 Form(...)。带 File 的端点里，裸的 `version: str = ""`
+    # 会被 FastAPI 当成**查询参数**而不是表单字段 —— 客户端在 multipart 里发的
+    # version 会被静默忽略，然后参数取默认空值。这类 bug 不会报错，只会"没生效"。
+    version: str = Form(""),
+    channel: str = Form("stable"),
+    notes: str = Form(""),
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> ReleaseOut:
+    """上传 Agent 升级包。
+
+    **上传不等于铺开**：``published_at`` 保持为空，Agent 不会收到任何东西，
+    直到教师显式调 rollout。上传一个包和把它推给 50 台机器是风险等级完全
+    不同的两件事，不该合成一个动作。
+    """
+    version = (version or "").strip()
+    if not version:
+        raise HTTPException(status_code=400, detail="必须指定版本号")
+
+    try:
+        parse_version(version)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="版本号不合法: %s" % exc)
+
+    return _store_release(
+        ctx,
+        stream=file.file,
+        version=version,
+        channel=channel,
+        notes=notes,
+        filename=Path(file.filename or "agent-bundle.tar.gz").name,
+        admin=admin,
+        source="uploaded",
+    )
 
 
 @router.post("/releases/{release_id}/rollout", response_model=ReleaseOut)

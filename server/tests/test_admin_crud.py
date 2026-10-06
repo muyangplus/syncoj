@@ -15,11 +15,15 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Dict, List
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
+from syncoj_server.models import Admin, AdminSession, utcnow
 from syncoj_server.schemas import GLOBAL_CONFIRM
+from syncoj_server.security import hash_password
 
 from conftest import (
     agent_headers,
@@ -587,3 +591,45 @@ def test_contest_note_survives_a_round_trip(
         headers=admin_headers,
     ).json()
     assert renamed["note"] == note
+
+
+def test_过期会话拿到的是_token_expired(app, client: TestClient) -> None:
+    """会话过期要和"这个凭据我根本不认识"分开报。
+
+    两者都是 401，但对人的含义完全不同：过期 → 重新登录就好；不认识 → 有人
+    的 token 被换过、或者粘贴时少了几位。以前这里一律回 ``unauthorized``，
+    于是 ``ERROR_CODES`` 里那个 ``token_expired`` 从来没有出现在任何响应里 ——
+    一个登记在册、文档里写着、却永远发不出来的码（现在由 ``test_errors.py``
+    的静态检查守着这类事）。
+    """
+    ctx = app.state.ctx
+    with ctx.db.session() as session:
+        session.add(Admin(username="admin", password_hash=hash_password("pw-1")))
+    token = client.post(
+        "/api/v1/admin/login", json={"username": "admin", "password": "pw-1"}
+    ).json()["token"]
+
+    # 把会话直接推到过去，而不是等 —— 真等一遍要跑满 admin_session_ttl_seconds
+    with ctx.db.session() as session:
+        session.execute(select(AdminSession)).scalar_one().expires_at = utcnow() - timedelta(
+            seconds=1
+        )
+
+    response = client.get(
+        "/api/v1/admin/contests", headers={"Authorization": "Bearer " + token}
+    )
+
+    assert response.status_code == 401
+    body = response.json()
+    assert body["code"] == "token_expired"
+    assert "重新登录" in body["detail"]
+
+
+def test_不存在的会话给的是_unauthorized(client: TestClient) -> None:
+    """对照组：码不一样才是重点，而不是"401 就都算过期"。"""
+    response = client.get(
+        "/api/v1/admin/contests", headers={"Authorization": "Bearer not-a-real-token"}
+    )
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "unauthorized"

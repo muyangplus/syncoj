@@ -300,7 +300,7 @@ const saveText = useMutation(
     if (!name) throw new Error('文件名不能为空')
     // 服务端会按路径段的规则校验，这里先挡一次明显的错，省一个来回
     if (name.includes('/') || name.includes('\\')) {
-      throw new Error('文件名不能包含斜杠 —— 它只是一个文件名，不是路径')
+      throw new Error('文件名不能包含斜杠')
     }
 
     let renamedAsset: AssetOut | null = null
@@ -752,7 +752,7 @@ function targetKindLabel(kind: string): string {
 <template>
   <PageShell
     title="文件下发"
-    hint="题面和样例直接传 zip，系统不解压；非 zip 的文件可以点它那一行的「打包成 zip」。"
+    hint="题面和样例直接传 zip；非 zip 的文件可以点它那一行的「打包成 zip」。"
     :error="listError"
     error-action="刷新页面或检查服务端；资产列表取不到时不要下发。"
     retryable
@@ -1089,11 +1089,6 @@ function targetKindLabel(kind: string): string {
             placeholder="留空 = 桌面根目录；{player_no}/题目名 = 该选手的题目目录"
           />
           <div class="page-hint">
-            <strong>留空就是桌面根目录</strong>；按题分发就自己填
-            <code>{player_no}/&lt;题目名&gt;</code>。
-            这里<strong>只认 <code>{player_no}</code> 这一个占位符</strong>，
-            别的 <code>{...}</code> 会被直接拒绝（不会展开，只会变成一个怪目录名）。
-            <br />
             <strong>实际落点预览：</strong>
             <code>{{ destPreview }}</code>
           </div>
@@ -1104,10 +1099,7 @@ function targetKindLabel(kind: string): string {
             <el-radio value="overwrite">覆盖</el-radio>
             <el-radio value="skip_exist">已存在则跳过</el-radio>
           </el-radio-group>
-          <div class="page-hint">
-            目标位置上已有同名文件时：覆盖会换掉它，跳过则留原来那份。
-            「同名」指的是整个 zip 的名字。
-          </div>
+          <div class="page-hint">目标位置上已有同名文件时：覆盖会换掉它，跳过则留原来那份。</div>
         </el-form-item>
       </el-form>
     </FormDialog>
@@ -1124,18 +1116,6 @@ function targetKindLabel(kind: string): string {
       @submit="textMode === 'edit' ? saveText.run(undefined) : createText.run(undefined)"
     >
       <el-alert
-        v-if="textIsNotice && textMode !== 'edit'"
-        type="info"
-        :closable="false"
-        show-icon
-        style="margin-bottom: 14px"
-      >
-        <template #title>
-          这个文件会显示在选手页的「考场公告」里 —— 每个选手看到的是本场下发给他自己的那份。
-        </template>
-      </el-alert>
-
-      <el-alert
         v-if="textMode === 'edit'"
         type="warning"
         :closable="false"
@@ -1144,8 +1124,7 @@ function targetKindLabel(kind: string): string {
       >
         <template #title>改名只影响以后的派发</template>
         <template #default>
-          还没下完的任务会按新名字落地；<strong>已经落到机器上的那份不会跟着变</strong>
-          —— 内容按 sha256 存，改名只是换个标签。
+          还没下完的任务会按新名字落地；<strong>已经落到机器上的那份不会跟着变</strong>。
           <template v-if="textEditable">
             <br />
             正文改了则不同：已下发完成的机器会被重新排队、再领一次新的那一份；
@@ -1162,7 +1141,6 @@ function targetKindLabel(kind: string): string {
         style="margin-bottom: 14px"
       >
         <template #title>这个文件不能在线上改正文</template>
-        <template #default>只有文本文件能在这里改内容，这个对话框对它只承担改名。</template>
       </el-alert>
 
       <el-form label-width="90px">
@@ -1221,8 +1199,7 @@ function targetKindLabel(kind: string): string {
             <code>{{ zipTarget?.filename }}</code>。
           </template>
           <template v-else-if="zipStatus.encrypted">
-            改密码要先填旧密码 —— 服务端手上只有加密后的字节，没有旧密码读不出来。
-            旧密码就在之前那份 password.txt 里。
+            改密码要先填旧密码。旧密码就在之前那份 password.txt 里。
           </template>
           <template v-else>提交后会把它重新打包成带密码的 zip。</template>
         </template>
@@ -1230,11 +1207,6 @@ function targetKindLabel(kind: string): string {
 
       <el-alert type="warning" :closable="false" show-icon style="margin-bottom: 14px">
         <template #title>这是弱加密：挡得住随手翻看，挡不住有心人</template>
-        <template #default>
-          用的是 InfoZIP 传统加密（ZipCrypto）—— 学生机器上的 Archive Manager 只认
-          这一种（AES-256 的 zip 它打不开）。已知明文攻击可以破它，题面、样例这种
-          结构已知的数据尤其如此，不要拿它保护真正的机密。
-        </template>
       </el-alert>
 
       <el-form label-width="90px">
@@ -1256,10 +1228,7 @@ function targetKindLabel(kind: string): string {
           <el-button size="small" style="margin-top: 8px" @click="toggleGeneratePassword">
             {{ zipForm.generate ? '改为自己填' : '生成随机密码' }}
           </el-button>
-          <div v-if="zipForm.generate" class="page-hint">
-            服务端会生成一个 12 位、不含 0 O 1 l I 这类易混字符的随机密码，提交后才显示
-            —— 请随手抄下来。
-          </div>
+          <div v-if="zipForm.generate" class="page-hint">提交后才显示，请随手抄下来。</div>
         </el-form-item>
       </el-form>
 

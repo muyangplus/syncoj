@@ -471,7 +471,7 @@ function assetState(status: string): { label: string; type: 'success' | 'info' |
                   -->
                   <el-tooltip placement="top" popper-class="player-hash-popper">
                     <template #content>
-                      <div class="hash-label">SHA256（核对完整性用）</div>
+                      <div class="hash-label">SHA256</div>
                       <div class="hash-value">{{ row.sha256 }}</div>
                     </template>
                     <span class="file-name">{{ row.filename }}</span>

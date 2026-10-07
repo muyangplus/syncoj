@@ -173,7 +173,7 @@ function goRollout(): void {
               :content="
                 ledger.signature
                   ? `已签名（key_id: ${ledger.key_id ?? '未知'}）`
-                  : '台账里没有签名记录：机器上就算有发布公钥，也只能验 sha256'
+                  : '台账里没有签名记录'
               "
             >
               <el-tag :type="ledger.signature ? 'success' : 'warning'" size="small" effect="plain">
@@ -218,7 +218,6 @@ function goRollout(): void {
           </el-link>
         </div>
 
-        <p class="hint">机器上没有统一注册密钥就不会注册。</p>
         <p class="hint">去管理界面「机器配对」绑给选手。</p>
       </template>
 

@@ -639,7 +639,21 @@ function handleCommand(
               选手目录还没建：
               <span class="mono">{{ row.agent.scan_missing.join('、') }}</span>
             </div>
-            <span v-if="!row.agent?.last_error && !row.agent?.scan_missing?.length" class="muted">
+            <!--
+              「有 N 个文件不符合题目预设」：教师看到的是"这个学生一份代码都没交"，
+              而它跟"文件存错了地方、名字不对"长得一模一样。只写事实与下一步。
+            -->
+            <div v-if="row.agent?.scan_skipped" class="scan-missing">
+              有 {{ row.agent.scan_skipped }} 个文件不符合题目预设，已跳过
+            </div>
+            <span
+              v-if="
+                !row.agent?.last_error &&
+                !row.agent?.scan_missing?.length &&
+                !row.agent?.scan_skipped
+              "
+              class="muted"
+            >
               —
             </span>
           </template>

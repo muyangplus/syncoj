@@ -149,6 +149,7 @@ from ..services import (
     install_policy,
     matching,
     packaging,
+    problem_rules,
     rosters,
     runtime_settings,
     scan_missing,
@@ -1862,6 +1863,9 @@ def list_agents(
                 # 离线机器没有运行时对象，但"上一次报的扫描根缺失"仍要显示：
                 # 目录没建这件事不会因为机器掉线就变得不重要
                 scan_missing=scan_missing.load_scan_missing(agent.scan_missing_json),
+                # 被挡掉的文件数同理：它也是"上一次心跳说着什么"，而教师往往正是
+                # 在机器刚掉线、代码没上来的时候来查这一行
+                scan_skipped=int(agent.scan_skipped or 0),
             )
         )
     return slice_page(items, page)
@@ -2201,7 +2205,7 @@ def list_files(
     with ctx.db.session() as session:
         # 归属是**算出来的**，不是存下来的：教师改一个模式，界面上立刻跟着变，
         # 不需要重收文件，也不用担心存量数据里的旧归属变成脏数据
-        rules = contest_problem_rules(session, contest_id, ctx.settings)
+        rules = problem_rules.rules_for(session, contest_id, ctx.settings)
 
         filters = [Player.contest_id == contest_id]
         if player_id is not None:
@@ -2466,7 +2470,7 @@ def export_source_files(
     而只看文件列表做不到这一点（同名文件、大小相近的代码太常见了）。
     """
     with ctx.db.session() as session:
-        rules = contest_problem_rules(session, contest_id, ctx.settings)
+        rules = problem_rules.rules_for(session, contest_id, ctx.settings)
         stmt = (
             select(SourceFile, Player.player_no)
             .join(Player, SourceFile.player_id == Player.id)
@@ -4483,7 +4487,7 @@ def match_problem_path(
     只做匹配，不碰文件系统；``path`` 按普通字符串处理，不需要是已存在的文件。
     """
     with ctx.db.session() as session:
-        rules = contest_problem_rules(session, contest_id, ctx.settings)
+        rules = problem_rules.rules_for(session, contest_id, ctx.settings)
 
     ident = matching.match_problem(payload.path, rules)
     hit = next((rule for rule in rules if rule.ident == ident), None)
@@ -4626,53 +4630,8 @@ def _problem_out(row: Problem, settings: Settings) -> ProblemOut:
         note=row.note,
         # 把实际生效的模式一并给前端 —— 否则界面得自己推默认值，
         # 而默认值是可配置的（settings.default_file_pattern），前端推不出来
-        file_patterns=problem_patterns(row, settings),
+        file_patterns=problem_rules.patterns_for(row, settings),
     )
-
-
-def problem_patterns(row: Problem, settings: Settings) -> List[str]:
-    """题目实际生效的 glob 模式模板。
-
-    配了就用配的，没配就用服务端的默认模板。注意返回的是**模板本身**：
-    ``{ident}`` / ``{title}`` 占位符原样保留，由 ``matching`` 在每次匹配时展开。
-
-    这很关键：如果这里把占位符换成具体名字再返回，前端"打开编辑再保存"
-    就会把 ``{ident}/**`` 冻成一个写死的 ``p1/**`` —— 之后改个题目标识，
-    代码就再也认不出来了，而界面上看不出任何异常。
-    """
-    if not row.file_patterns:
-        return [settings.default_file_pattern]
-
-    try:
-        stored = json.loads(row.file_patterns)
-    except (TypeError, ValueError):
-        log.warning("题目 %s 的 file_patterns 不是合法 JSON，回退到默认模式", row.ident)
-        return [settings.default_file_pattern]
-
-    if not isinstance(stored, list):
-        return [settings.default_file_pattern]
-    return [str(p) for p in stored if isinstance(p, str) and p.strip()]
-
-
-def contest_problem_rules(
-    session, contest_id: int, settings: Settings
-) -> List[matching.ProblemRule]:
-    """把某场次的题目整理成匹配规则，供归题使用。
-
-    **顺序就是题目的顺序** —— 匹配时第一个命中的胜出。让顺序显式可预期，
-    比"最具体者优先"这类隐式规则好排查。
-    """
-    rows = session.execute(
-        select(Problem)
-        .where(Problem.contest_id == contest_id)
-        .order_by(Problem.order_index, Problem.ident)
-    ).scalars()
-    return [
-        matching.ProblemRule(
-            ident=row.ident, title=row.title, patterns=problem_patterns(row, settings)
-        )
-        for row in rows
-    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -4723,7 +4682,7 @@ def score_matrix(
             matching.ProblemRule(
                 ident=row.ident,
                 title=row.title,
-                patterns=problem_patterns(row, ctx.settings),
+                patterns=problem_rules.patterns_for(row, ctx.settings),
             )
             for row in declared
         ]

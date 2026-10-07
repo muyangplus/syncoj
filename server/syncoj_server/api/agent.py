@@ -56,7 +56,7 @@ from ..schemas import (
 )
 from ..security import hash_token, new_pair_code, new_token
 from ..storage import BlobTooLarge, HashMismatch, materialize
-from ..services import enrollment, install_policy, packaging, runtime_settings, scan_missing, uninstall
+from ..services import enrollment, install_policy, packaging, problem_rules, runtime_settings, scan_missing, uninstall
 from ..services.collect import reconcile_scan, record_events
 from ..services.deploy import collect_deploy_jobs
 from ..services.ratelimit import RateLimitExceeded
@@ -323,12 +323,16 @@ def tick(
     uninstall_token: Optional[str] = None
 
     with ctx.db.session() as session:
+        # 「严格按题目预设回收」：只有**这一场配了题目**时才拿模式去过滤，
+        # 一场都没配就照旧全收（理由见 services/collect.reconcile_scan 的 docstring）
+        rules = problem_rules.rules_for(session, identity.contest_id, ctx.settings)
         collect = reconcile_scan(
             session,
             identity.player_id,
             payload.scan,
             ctx.settings,
             scan_complete=payload.scan_complete,
+            rules=rules,
         )
         record_events(
             session,
@@ -362,6 +366,13 @@ def tick(
                 contest_id=identity.contest_id,
                 now=now,
             )
+            _note_scan_skipped(
+                session,
+                agent,
+                collect,
+                player_id=identity.player_id,
+                contest_id=identity.contest_id,
+            )
             uninstall_token = _pending_uninstall_token(ctx, agent, now)
 
     ctx.registry.note_tick(
@@ -373,6 +384,7 @@ def tick(
         disk_free=payload.stats.disk_free,
         last_error=payload.stats.last_error,
         scan_missing=payload.stats.scan_missing,
+        scan_skipped=collect.skipped_unmatched,
     )
 
     # 自适应周期：有活干就收紧，没活干就放宽。两个值都是**运行参数**，现读 ——
@@ -551,6 +563,62 @@ def _note_scan_missing(
                 player_id=player_id,
                 agent_id=agent.id,
                 message="扫描根已就位：%s" % "、".join(previous),
+            )
+        )
+
+
+def _note_scan_skipped(
+    session,
+    agent: Agent,
+    collect,
+    *,
+    player_id: Optional[int] = None,
+    contest_id: Optional[int] = None,
+) -> None:
+    """记下本轮"被题目预设挡掉的文件数"，**只在状态变化时**留一条审计。
+
+    与"扫描根不存在"同一个理由：心跳 30 秒一次，一台机器一上午能刷出上千条一样
+    的事件，那条审计就再也读不得了。教师真正要找的是两个转折点 ——
+    「从什么时候开始有文件被挡在外面」与「什么时候恢复正常」。
+
+    判据是**有没有**而不是具体数量：9 个变 10 个不是状态变化，不值得再记一条
+    （数量每轮都不同，按数量判等于每轮都记）。
+    """
+    current = int(collect.skipped_unmatched or 0)
+    previous = int(agent.scan_skipped or 0)
+    agent.scan_skipped = current or None
+    if (previous > 0) == (current > 0):
+        return
+
+    if current > 0:
+        session.add(
+            EventLog(
+                level="warning",
+                category="scan_no_match",
+                contest_id=contest_id,
+                player_id=player_id,
+                agent_id=agent.id,
+                message="本轮有 %d 个文件不符合题目预设的位置或文件名，已跳过：%s"
+                % (current, "、".join(collect.skipped_sample)),
+                meta_json=json.dumps(
+                    {
+                        "count": current,
+                        "sample": list(collect.skipped_sample),
+                        "truncated": current > len(collect.skipped_sample),
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        )
+    else:
+        session.add(
+            EventLog(
+                level="info",
+                category="scan_no_match",
+                contest_id=contest_id,
+                player_id=player_id,
+                agent_id=agent.id,
+                message="不再有文件被挡在题目预设之外（上一次 %d 个）" % previous,
             )
         )
 

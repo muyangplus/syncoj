@@ -191,6 +191,12 @@
             ],
             "title": "Scan Root"
           },
+          "scan_skipped": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Scan Skipped",
+            "type": "integer"
+          },
           "seconds_since_tick": {
             "anyOf": [
               {

@@ -2044,6 +2044,11 @@ export interface components {
             scan_missing?: string[];
             /** Scan Root */
             scan_root?: string | null;
+            /**
+             * Scan Skipped
+             * @default 0
+             */
+            scan_skipped: number;
             /** Seconds Since Tick */
             seconds_since_tick?: number | null;
             /**

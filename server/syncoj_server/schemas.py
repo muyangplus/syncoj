@@ -745,6 +745,11 @@ class AgentRuntimeOut(_Base):
     #: 页面上只写一句「选手目录还没建：<路径>」—— 它是"机器在跑但目录不在"这个
     #: 事实的唯一线索：那种情况下扫出来是零个文件，与"选手还没开始写"长得一模一样。
     scan_missing: List[str] = Field(default_factory=list)
+    #: 最近一次心跳里**被题目预设挡掉**的文件数（0 = 没有被挡掉的）。
+    #:
+    #: 页面上写一句「有 N 个文件不符合题目预设，已跳过」：没有它，教师看到的是
+    #: "这个学生一份代码都没交"，而那与"他把文件存错了地方"长得一模一样。
+    scan_skipped: int = Field(default=0, ge=0)
 
 
 class EventOut(_Base):

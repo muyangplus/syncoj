@@ -55,6 +55,8 @@ class AgentRuntime:
     last_error: Optional[str] = None
     #: 本机上当前不存在的扫描根（最近一次心跳报的）。页面写一句"选手目录还没建"。
     scan_missing: List[str] = field(default_factory=list)
+    #: 最近一次心跳里被题目预设挡掉的文件数（0 = 没有被挡掉的）。
+    scan_skipped: int = 0
 
     #: 需要被批量落库
     dirty: bool = True
@@ -86,6 +88,7 @@ class AgentRuntime:
             "disk_free": self.disk_free,
             "last_error": self.last_error,
             "scan_missing": list(self.scan_missing),
+            "scan_skipped": int(self.scan_skipped),
             "tick_count": self.tick_count,
         }
 
@@ -150,6 +153,7 @@ class AgentRegistry:
         disk_free: Optional[int] = None,
         last_error: Optional[str] = None,
         scan_missing: Optional[List[str]] = None,
+        scan_skipped: Optional[int] = None,
     ) -> Optional[AgentRuntime]:
         """记录一次心跳。返回运行时对象；未知 agent_id 返回 None。"""
         now = utcnow()
@@ -174,6 +178,9 @@ class AgentRegistry:
                 # 每一轮都覆盖：缺失是"此刻的事实"，不是累积的告警 ——
                 # 目录建好之后它必须自己从列表上消失
                 runtime.scan_missing = list(scan_missing)
+            if scan_skipped is not None:
+                # 同上：它是"本轮"的数字，不是累计值
+                runtime.scan_skipped = int(scan_skipped)
             runtime.dirty = True
             if was_offline:
                 log.info("agent %s (%s) 恢复在线", agent_id, runtime.player_no)

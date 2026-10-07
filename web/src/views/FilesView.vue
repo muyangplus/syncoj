@@ -112,7 +112,8 @@ const sortMode = ref<'recent' | 'path'>('recent')
 const rows = computed(() => {
   const needle = keyword.value.trim().toLowerCase()
   const matched = list.rows.value.filter((file) => {
-    // 归题筛选：``未归类`` 单独一档，因为"模式没配上"是排错的第一步
+    // 归题筛选：``未归类`` 单独一档。回收时已经按题目预设过滤过，所以这一档剩下的
+    // 是两种历史记录："收上来的时候还没配题目" 与 "模式后来被改过"
     if (problemFilter.value === 'matched' && !file.problem) return false
     if (problemFilter.value === 'loose' && file.problem) return false
     if (

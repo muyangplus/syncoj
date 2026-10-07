@@ -486,6 +486,21 @@ def _migration_010_runtime_settings(engine: Engine) -> None:
     return
 
 
+def _migration_011_agent_scan_skipped(engine: Engine) -> None:
+    """机器记录"本轮被题目预设挡掉的文件数"（``agent.scan_skipped``）。
+
+    ``services/collect.py`` 只收匹配得上题目的文件，被挡掉的记一条审计 —— 但**只在
+    状态变化时**记，否则 30 秒一条会把审计刷满。判"有没有变"必须有上一次的值，
+    所以它落库而不是只放内存。
+
+    只有一个 ``ADD COLUMN`` + 可空：``NULL`` 与 ``0`` 在判据上是同一个结论
+    （现在没有被挡掉的文件），老库里没有这一列就是正确初始状态。
+    """
+    if "agent" not in _tables(engine):
+        return
+    _add_column(engine, "agent", "scan_skipped", "INTEGER")
+
+
 MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
     (1, "统一密钥注册 + 名单库所需的结构", _migration_001_enrollment),
     (2, "机器永久绑定名单条目；去掉注册码链路", _migration_002_roster_binding),
@@ -520,6 +535,11 @@ MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
         10,
         "运行参数表（心跳节奏与离线判定）",
         _migration_010_runtime_settings,
+    ),
+    (
+        11,
+        "机器记录本轮被题目预设挡掉的文件数",
+        _migration_011_agent_scan_skipped,
     ),
 ]
 

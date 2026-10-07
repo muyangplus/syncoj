@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -33,13 +33,24 @@ from sqlalchemy.orm import Session
 from ..config import Settings
 from ..models import EventLog, SourceFile, utcnow
 from ..paths import PathValidationError, validate_relpath
+from . import matching
 
-__all__ = ["CollectResult", "reconcile_scan", "LAST_SEEN_REFRESH_SECONDS"]
+__all__ = [
+    "CollectResult",
+    "reconcile_scan",
+    "LAST_SEEN_REFRESH_SECONDS",
+    "MAX_SKIPPED_SAMPLE",
+]
 
 log = logging.getLogger(__name__)
 
 #: ``last_seen_at`` 的最小刷新间隔，避免每轮 tick 都产生无意义的 UPDATE
 LAST_SEEN_REFRESH_SECONDS = 300
+
+#: 事件与页面上最多列几个"被题目预设挡掉"的路径。**计数是完整的，只有样本截断** ——
+#: 一台机器上被挡掉几百个文件是可能的（整个目录都不符合预设），而一条审计里塞几百个
+#: 路径既没人看，又把那一行撑大。
+MAX_SKIPPED_SAMPLE = 20
 
 
 @dataclass
@@ -55,6 +66,10 @@ class CollectResult:
     new_files: int = 0
     changed_files: int = 0
     seen_files: int = 0
+    #: 本轮被"题目预设"挡掉的文件数（不匹配任何题目模式）。完整计数。
+    skipped_unmatched: int = 0
+    #: 上面那些路径里的一小段样本，供审计与页面显示。
+    skipped_sample: List[str] = field(default_factory=list)
     #: 待写入的审计事件 (level, category, message, meta)
     events: List[Tuple[str, str, str, dict]] = field(default_factory=list)
 
@@ -65,6 +80,7 @@ def reconcile_scan(
     entries: Sequence[object],
     settings: Settings,
     scan_complete: bool = True,
+    rules: Optional[Sequence[matching.ProblemRule]] = None,
 ) -> CollectResult:
     """对账一次扫描结果。
 
@@ -75,6 +91,14 @@ def reconcile_scan(
     ``scan_complete=False`` 时**跳过删除判定**。这是必须的：Agent 递归扫描时
     完全可能因为某个子目录权限不足而漏掉一批文件，若照常判定，这批文件会被
     错误地标成"选手删除了"，污染审计日志。
+
+    ``rules`` 是这一场次的题目模式（``services.problem_rules``）。给了它就**只收**
+    匹配得上某个题目的文件：不匹配的既不进台账、也不要求上传。两个刻意的决定：
+
+    * ``rules`` 为空表示"这一场还没配任何题目"，此时**一律照收** —— 教师还没建题目
+      就什么都收不上来，是最糟的默认值；严格只在"有预设可依"时才严格。
+    * 被挡掉的路径仍然算进 ``seen``：教师改完模式之后，那些老条目不该被当成
+      "选手删除了文件"，只有真的从磁盘上消失才算删除。
     """
     result = CollectResult()
     now = utcnow()
@@ -112,6 +136,15 @@ def reconcile_scan(
         if path in seen:
             continue
         seen.add(path)
+
+        # 「严格按题目预设回收」：不属于任何题目的文件不进台账、不要求上传。
+        # 放在 sha256 校验**之前** —— 一个本来就不该收的文件，它的 sha256 合不合法
+        # 都不该出现在"被拒绝的条目"里（那会让教师以为需要处理它）。
+        if rules and matching.match_problem(path, rules) is None:
+            result.skipped_unmatched += 1
+            if len(result.skipped_sample) < MAX_SKIPPED_SAMPLE:
+                result.skipped_sample.append(path)
+            continue
 
         if not isinstance(sha256, str) or len(sha256) != 64:
             result.rejected.append((path, "sha256 不合法"))

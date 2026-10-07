@@ -415,6 +415,12 @@ class Agent(Base, TimestampMixin):
     #: 记一条 warning、恢复时记一条 info，而"这一次和上一次比有没有变"必须有上一次
     #: 的值。列表为空与列是 NULL 在这里是同一件事（没有已知的缺失）。
     scan_missing_json = Column(Text, nullable=True)
+    #: 最近一次心跳里**被题目预设挡掉**的文件数（见 ``services/collect.py``）。
+    #:
+    #: 与 ``scan_missing_json`` 同一个理由：判"状态变化"必须有上一次的值，而只放内存
+    #: 的话服务端一重启就会把同一批文件重报一遍。它是"数量"而不是"清单"——
+    #: 清单在审计事件的 meta 里（截到 20 条），这里只需要回答"现在有没有"。
+    scan_skipped = Column(Integer, nullable=True)
     #: 最近一次请求的**来源 IP**。
     #:
     #: 它存在的唯一理由是选手页的"自动匹配本机"：选手不输任何东西，服务端就靠

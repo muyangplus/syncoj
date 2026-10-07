@@ -385,6 +385,55 @@ def test_服务端在_tick_里要求时下一轮就传_manual(config: AgentConfi
     assert reasons == ["periodic", "manual"]
 
 
+def test_待配对路径也认服务端的诊断请求(config: AgentConfig) -> None:
+    """待配对 / 没有场次的机器也要被服务端点得动。
+
+    这条心跳走的是 ``_pending_tick``，而正常 tick 里读 ``diagnostics_request``
+    的那一段在**扫描之后** —— 待配对路径提前返回，永远走不到那里。
+    """
+    client = RecordingClient()
+    agent = make_agent(config, client)
+    agent._build_tick_payload = lambda *a, **k: ({}, [], [])  # type: ignore[assignment]
+    agent._flush_events = lambda: None  # type: ignore[assignment]
+    agent._adopt_identity = lambda data: SimpleNamespace(state=STATE_UNCLAIMED)  # type: ignore[assignment]
+    client.tick_response = {
+        "claimed": False,
+        "bound": False,
+        "next_tick_seconds": 30,
+        "diagnostics_request": True,
+    }
+
+    state, wait = agent._pending_tick()
+
+    assert state == STATE_UNCLAIMED
+    assert wait == 30.0
+    assert agent._diag_pending == "manual", "待配对那条路径没有认 diagnostics_request"
+
+
+def test_待配对路径也会把诊断包发出去(config: AgentConfig) -> None:
+    """``cycle()`` 在还不能干活时**提前返回** —— 那条路径从前不会走到发送那一步。
+
+    后果是：一台卡在配对阶段的机器，服务端点「要一份」永远没反应，周期性的那份
+    也从来没发过 —— 而"卡在配对"正是最需要现场的一类故障。
+    """
+    client = RecordingClient()
+    agent = make_agent(config, client)
+    now = [9000.0]
+    agent._monotonic = lambda: now[0]  # type: ignore[assignment]
+    agent._maybe_send_diagnostics()  # 基线
+    assert len(client.uploads) == 1
+
+    agent._ensure_credential = lambda: SimpleNamespace(state=STATE_UNCLAIMED)  # type: ignore[assignment]
+    agent._pending_tick = lambda: (STATE_UNCLAIMED, 12.0)  # type: ignore[assignment]
+    now[0] += HEALTHY_PERIOD_SECONDS
+
+    assert agent.cycle() == 12.0
+    assert len(client.uploads) == 2, "待配对那条路径没有把该传的诊断包传出去"
+    assert json.loads(gzip.decompress(client.uploads[-1]).decode())[
+        "state"
+    ] == STATE_UNCLAIMED
+
+
 def test_manual_优先于_error(config: AgentConfig) -> None:
     client = RecordingClient()
     agent = make_agent(config, client)

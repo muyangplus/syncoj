@@ -30,9 +30,15 @@
   ],
   "cancel_assets": [],
   "upgrade": null,                      // 或 {version, url, sha256, sig}
+  "diagnostics_request": false,         // 一次性：教师点过「要一份」就回一次 true
   "config": {"scan_interval": 30, "max_file_size": 2097152}
 }
 ```
+
+**`diagnostics_request` 是一次性字段**：管理端在机器行上点过「诊断」之后，它在
+**下一次** tick 的响应里为 `true`，服务端同时把标记清掉。机器没收到就让教师再点一次 ——
+服务端不重发（这与卸载令牌"多轮原样重发"的语义刻意不同：少收一份诊断包的代价只是
+"这次少看到一份现场"）。正常与未配对两条 tick 路径都要处理它。
 
 每次 tick 上报全量索引：50 个文件 × ~100 字节 = **5KB/次**，20s 一次，带宽与 CPU 成本可忽略。收益：
 

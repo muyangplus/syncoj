@@ -23,9 +23,11 @@ __all__ = [
     "DeployJob",
     "UpgradeInfo",
     "TickResponse",
+    "DiagnosticsUploadOut",
     "UploadResult",
     "AgentEvent",
     "SimpleAck",
+    "DiagnosticsOut",
     "Page",
 ]
 
@@ -256,6 +258,10 @@ class TickResponse(_Base):
     #: 而教师**再点一次**必然换一枚新的。它没有单独的有效状态位：令牌存在本身
     #: 就等于"教师点过"，过期后服务端自然不再下发。
     uninstall_token: Optional[str] = None
+    #: 教师点过「要一份诊断」且这台机器这一轮把它取走了：``true`` 只出现**一次**，
+    #: 服务端在返回它的同时就把标记清掉（见 ``api/agent.py`` 的
+    #: ``_take_diagnostics_request``）。机器没收到就让教师再点一次 —— 不重发。
+    diagnostics_request: bool = False
     config: Dict[str, Any]
 
     #: 这台机器是否已经绑定到名单条目（人）。未配对时为 False
@@ -277,6 +283,18 @@ class UploadResult(_Base):
     sha256: str
     revision: int
     stored: bool
+
+
+class DiagnosticsUploadOut(_Base):
+    """Agent 诊断包上报成功的回执（``POST /api/v1/agent/diagnostics``）。
+
+    ``received_at`` 是服务端收到它的时刻（ISO-8601，UTC）；``bytes`` 是
+    **解压后 JSON 文本**的字节数 —— 与库里那一列、以及管理端读回来的
+    ``bytes`` 是同一个数（不是压缩后的大小）。
+    """
+
+    received_at: str
+    bytes: int = 0
 
 
 class AgentEvent(_Base):
@@ -750,6 +768,21 @@ class AgentRuntimeOut(_Base):
     #: 页面上写一句「有 N 个文件不符合题目预设，已跳过」：没有它，教师看到的是
     #: "这个学生一份代码都没交"，而那与"他把文件存错了地方"长得一模一样。
     scan_skipped: int = Field(default=0, ge=0)
+
+
+class DiagnosticsOut(_Base):
+    """一台机器**最新一份**诊断包（管理端 ``GET .../diagnostics``）。
+
+    ``content`` 直接给**解析好的对象**（服务端存的本来就是解压后的 JSON 文本，
+    见 ``models.AgentDiagnostic``）。``bytes`` 是那份文本的字节数，
+    ``reason`` 是 Agent 自报的原因（``periodic`` / ``error`` / ``manual``，
+    可能为 ``null``）。
+    """
+
+    received_at: str
+    reason: Optional[str] = None
+    bytes: int = 0
+    content: Dict[str, Any] = Field(default_factory=dict)
 
 
 class EventOut(_Base):

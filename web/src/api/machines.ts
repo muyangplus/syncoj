@@ -10,7 +10,13 @@ import { request } from './client'
 import { clearCollection, listPage, removeItem } from './crud'
 import type { ListParams } from './crud'
 import { GLOBAL_CONFIRM, paths } from './endpoints'
-import type { BindResultOut, CloneAlertOut, PendingMachineOut } from './types'
+import type {
+  BindResultOut,
+  CloneAlertOut,
+  DiagnosticsOut,
+  PendingMachineOut,
+  SimpleAck,
+} from './types'
 
 export const machineApi = {
   /** 待配对的机器。按最后心跳倒序 —— 教师站在机器前时它就在最上面。 */
@@ -57,4 +63,11 @@ export const machineApi = {
    */
   clearPending: (confirm: string = GLOBAL_CONFIRM) =>
     clearCollection(paths.machinesPendingClear(), confirm),
+
+  /** 某台机器**最新一份**诊断包。没收到过会抛 `code=diagnostics_not_found`。 */
+  diagnostics: (agentId: number) => request<DiagnosticsOut>(paths.agentDiagnostics(agentId)),
+
+  /** 要一份诊断：机器下一次心跳回传。机器不在线就一直等，没收到就再点一次。 */
+  requestDiagnostics: (agentId: number) =>
+    request<SimpleAck>(paths.agentDiagnosticsRequest(agentId), { method: 'POST' }),
 }

@@ -1537,6 +1537,13 @@ class Agent:
         if isinstance(remote_config, dict):
             self.policy = merge_policy(remote_config)
 
+        if tick.get("diagnostics_request"):
+            # 管理端按了"抓一份现场"：**待配对的机器也要能补发** —— 它卡在配对
+            # 阶段的现场恰恰最有用。这条路径不会走到正常 tick 里读这个字段的那
+            # 一段（那一段在扫描之后），所以在这里单独接一次。
+            log.info("服务端要求回传一份诊断包（manual）")
+            self.request_diagnostics("manual")
+
         self._flush_events()
 
         credential = self._adopt_identity(tick)
@@ -1586,6 +1593,11 @@ class Agent:
         if credential.state != STATE_READY:
             state, wait = self._pending_tick()
             if state != STATE_READY:
+                # 待配对/无场次的机器也要能把现场交出去：这条**提前返回**的路径
+                # 从前不会走到下面那次 `_maybe_send_diagnostics`，于是服务端点
+                # 的「要一份」在一台卡在配对阶段的机器上永远没反应，周期性的
+                # 那份也从来没发过 —— 而"卡在配对"正是最需要现场的一类故障。
+                self._maybe_send_diagnostics()
                 return wait
             # 刚能干活了 —— **同一次 cycle 就接着往下走**
             credential = self._credential or credential

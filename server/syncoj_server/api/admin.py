@@ -44,6 +44,7 @@ from ..models import (
     Admin,
     AdminSession,
     Agent,
+    AgentDiagnostic,
     AgentRelease,
     Asset,
     BootstrapKey,
@@ -92,6 +93,7 @@ from ..schemas import (
     DeployCreate,
     DeployTargetOut,
     DeployTaskOut,
+    DiagnosticsOut,
     EventOut,
     FileClearIn,
     JudgeRunClearIn,
@@ -2186,6 +2188,94 @@ def _uninstall_fallback_detail(
     command = uninstall.fallback_uninstall_command(base)
     head = lead or "这台服务端没有配置发布签名私钥，签不出卸载授权。"
     return "%s改用装机页那条卸载命令，到那台机器上执行：%s" % (head, command)
+
+
+@router.post("/agents/{agent_id}/diagnostics/request", response_model=SimpleAck)
+def request_agent_diagnostics(
+    agent_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> SimpleAck:
+    """要这台机器**下一次心跳**时回传一份诊断包。
+
+    这里只置一个"待取"标记，真正的回传发生在机器下一次 tick —— 所以
+    **机器不在线时什么也不会发生**：标记会一直等着，直到它下一次心跳。
+    机器一直不上线就让教师再点一次。
+
+    标记一次性：tick 把它取走的同时清空（见 ``api/agent.py`` 的
+    ``_take_diagnostics_request``），服务端不会在后续心跳里重发 ——
+    "没收到"由教师重点一次表达，而不是由服务端猜。
+
+    待配对的机器同样可以点：它卡在配对阶段的现场恰恰最有用，而那个标记在
+    ``_tick_pending`` 那条心跳路径上一样会被取走。
+    """
+    with ctx.db.session() as session:
+        agent = session.get(Agent, agent_id)
+        if agent is None:
+            raise ApiError(404, "agent_not_found", "这台机器不在台账里")
+
+        agent.diagnostics_requested_at = utcnow()
+        session.add(
+            EventLog(
+                level="info",
+                category="diagnostics_request",
+                agent_id=agent.id,
+                message="请求机器回传诊断包：%s（由 %s 发起）"
+                % (agent.hostname or agent.machine_id[:16], admin.username),
+            )
+        )
+        session.flush()
+
+    return SimpleAck(
+        ok=True,
+        detail="已记下诊断请求：这台机器下一次心跳会回传一份现场；它没上线就再点一次",
+    )
+
+
+def _diagnostics_content(raw: Optional[str]) -> Dict[str, Any]:
+    """把库里存的诊断文本解析成对象。
+
+    内容是我们自己校验过才写进去的，但手工改库/半截写入仍可能留下坏值；
+    为它让「诊断」对话框整个 500，等于在最需要看现场的时候把现场弄丢。
+    解析不出来就给一个空对象（``bytes`` 仍照报，教师看得出"有内容但读不出"）。
+    """
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+@router.get("/agents/{agent_id}/diagnostics", response_model=DiagnosticsOut)
+def get_agent_diagnostics(
+    agent_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> DiagnosticsOut:
+    """读这台机器**最新一份**诊断包（每台机器只留一份，新的覆盖旧的）。
+
+    ``content`` 直接给解析好的对象 —— 服务端存的就是解压后的 JSON 文本，
+    这里不必再解压一次。还没收到过是 ``404`` + ``code=diagnostics_not_found``：
+    那是一种正常初态（机器刚装好、或刚点完「要一份」还没到下一次心跳），
+    不是错误。
+    """
+    with ctx.db.session() as session:
+        agent = session.get(Agent, agent_id)
+        if agent is None:
+            raise ApiError(404, "agent_not_found", "这台机器不在台账里")
+
+        row = session.get(AgentDiagnostic, agent_id)
+        if row is None:
+            raise ApiError(404, "diagnostics_not_found")
+
+        return DiagnosticsOut(
+            received_at=_iso(row.received_at),
+            reason=row.reason,
+            bytes=int(row.bytes or 0),
+            content=_diagnostics_content(row.content),
+        )
 
 
 @router.get("/contests/{contest_id}/files", response_model=Page[SourceFileOut])

@@ -27,6 +27,7 @@ from ..context import AppContext
 from ..errors import ApiError
 from ..models import (
     Agent,
+    AgentDiagnostic,
     AgentRelease,
     Asset,
     Contest,
@@ -46,6 +47,7 @@ from ..policy import build_policy
 from ..schemas import (
     InstallLedgerOut,
     AgentEvent,
+    DiagnosticsUploadOut,
     EnrollRequest,
     EnrollResponse,
     SimpleAck,
@@ -56,7 +58,16 @@ from ..schemas import (
 )
 from ..security import hash_token, new_pair_code, new_token
 from ..storage import BlobTooLarge, HashMismatch, materialize
-from ..services import enrollment, install_policy, packaging, problem_rules, runtime_settings, scan_missing, uninstall
+from ..services import (
+    diagnostics,
+    enrollment,
+    install_policy,
+    packaging,
+    problem_rules,
+    runtime_settings,
+    scan_missing,
+    uninstall,
+)
 from ..services.collect import reconcile_scan, record_events
 from ..services.deploy import collect_deploy_jobs
 from ..services.ratelimit import RateLimitExceeded
@@ -321,6 +332,9 @@ def tick(
     now = utcnow()
     # 只有"教师点过卸载"且"最近一次心跳报过公钥"时才有值，见 _pending_uninstall_token
     uninstall_token: Optional[str] = None
+    #: 教师点过「要一份诊断」且这一轮把它取走了。一次性：取走即清（见
+    #: _take_diagnostics_request），所以下面两个 tick 分支各取一次。
+    diagnostics_request = False
 
     with ctx.db.session() as session:
         # 「严格按题目预设回收」：只有**这一场配了题目**时才拿模式去过滤，
@@ -374,6 +388,8 @@ def tick(
                 contest_id=identity.contest_id,
             )
             uninstall_token = _pending_uninstall_token(ctx, agent, now)
+            # 一次性标记在这里取走：本轮响应会带 true，库里同步清空
+            diagnostics_request = _take_diagnostics_request(agent)
 
     ctx.registry.note_tick(
         identity.agent_id,
@@ -401,6 +417,7 @@ def tick(
         cancel_assets=[],
         upgrade=upgrade,
         uninstall_token=uninstall_token,
+        diagnostics_request=diagnostics_request,
         config=_agent_config(ctx),
         claimed=True,
         # 走到这一支就说明场次与选手都解析出来了 —— 这正是三态里的"能干活"那一档。
@@ -448,6 +465,9 @@ def _tick_pending(
     now = utcnow()
     pair_code = None
     uninstall_token: Optional[str] = None
+    #: 一次性诊断请求标记：与正常 tick 那条路同一个语义（取走即清）。待配对的
+    #: 机器同样可能被教师点「诊断」—— 它的现场恰恰最有用。
+    diagnostics_request = False
     with ctx.db.session() as session:
         agent = session.get(Agent, identity.agent_id)
         if agent is not None:
@@ -471,6 +491,7 @@ def _tick_pending(
                 now=now,
             )
             uninstall_token = _pending_uninstall_token(ctx, agent, now)
+            diagnostics_request = _take_diagnostics_request(agent)
 
             if not identity.paired:
                 # **有效性以库里的哈希与过期时刻为准**，缓存只负责提供明文。
@@ -504,6 +525,7 @@ def _tick_pending(
         bound=False,
         reason=identity.reason,
         uninstall_token=uninstall_token,
+        diagnostics_request=diagnostics_request,
         config=_agent_config(ctx),
     )
 
@@ -1183,6 +1205,123 @@ def _dumps(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False)[:8000]
     except (TypeError, ValueError):
         return "{}"
+
+
+# --------------------------------------------------------------------------- #
+# 诊断回传
+# --------------------------------------------------------------------------- #
+
+
+def _take_diagnostics_request(agent: Agent) -> bool:
+    """取走这台机器的「要一份诊断」标记；有则返回 ``True`` 并**立刻清掉**。
+
+    语义与 ``uninstall_token`` 刻意不同：卸载令牌会在多轮心跳里原样重发（机器
+    可能一次没收到、也可能写盘失败），而这里的标记取走就没了 —— 教师看到"还是
+    没有回传"就再点一次，服务端不去猜它到底收没收到。这一点写进了协议文档
+    （``docs/reference/protocol.md`` §3），别处没有再补一份。
+    """
+    if agent.diagnostics_requested_at is None:
+        return False
+    agent.diagnostics_requested_at = None
+    return True
+
+
+async def _read_diagnostics_body(request: Request) -> bytes:
+    """把请求体读进内存，**一超上限就停**。
+
+    不能简单 ``await request.body()``：那会把任意大的 body 整个读进来，而诊断
+    端点的第一道防线就是"压缩后不超过 256 KB"。先看 ``Content-Length``（有的
+    话）能省掉整次上传；没有（分块传输）就边读边数。
+    """
+    limit = diagnostics.MAX_COMPRESSED_BYTES
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            too_big = int(declared) > limit
+        except ValueError:
+            too_big = False
+        if too_big:
+            raise ApiError(
+                413, "payload_too_large", "诊断包压缩后超过 %d 字节" % limit
+            )
+
+    chunks = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > limit:
+            raise ApiError(
+                413, "payload_too_large", "诊断包压缩后超过 %d 字节" % limit
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+@router.post("/diagnostics", response_model=DiagnosticsUploadOut)
+async def upload_diagnostics(
+    request: Request,
+    ctx: AppContext = Depends(get_ctx),
+    identity: Principal = Depends(require_principal),
+) -> DiagnosticsUploadOut:
+    """接收一份 gzip 压缩的诊断包（Agent 定期 / 出错 / 被点名时回传的现场）。
+
+    * **鉴权与 tick 同一套**（``require_principal``）：**已配对与未配对都收** ——
+      一台卡在配对阶段的机器，它的现场恰恰最有用。
+    * body 是**原始 gzip 字节**，不是 multipart、也不是 JSON。两道上限都要有
+      （压缩后 256 KB、解压后 1 MB），理由见 ``services/diagnostics.py``。
+    * 解压出来必须是合法 JSON **且是对象**；**不逐字段校验** —— Agent 将来加
+      字段不该被服务端拒绝。
+    * **按机器限速 60 秒**：超了回 429 + ``Retry-After``。对 Agent 来说 429 就是
+      "这次没传成、不重试"，下一轮自然再来 —— 所以这里不能用 400。
+    * 存储**每台机器只留最新一份**（同一个 ``agent_id`` 覆盖写入），存解压后的
+      JSON 文本。
+    * 审计**只在"第一次收到这台机器的诊断包"时记一条 info**：10 分钟一份的例行
+      上报不该刷满审计表，而"一台机器开始回传现场"是一次值得留痕的状态变化。
+    """
+    blob = await _read_diagnostics_body(request)
+
+    try:
+        bundle = diagnostics.decode_bundle(blob)
+    except diagnostics.BundleRejected as exc:
+        raise ApiError(exc.status_code, exc.code, exc.detail)
+
+    # 限速放在"包合法"之后：坏包不占用窗口 —— 429 表达的是"刚收过一份"，
+    # 不是"你发来的东西不对"，两者混在一起会让 Agent 的日志指错方向。
+    try:
+        ctx.diagnostics_limiter.check(identity.agent_id)
+    except RateLimitExceeded as exc:
+        raise ApiError(
+            429,
+            "rate_limited",
+            exc.detail,
+            headers={"Retry-After": str(exc.retry_after)},
+        )
+
+    now = utcnow()
+    reason = diagnostics.extract_reason(bundle.data)
+    with ctx.db.session() as session:
+        row = session.get(AgentDiagnostic, identity.agent_id)
+        first = row is None
+        if first:
+            row = AgentDiagnostic(agent_id=identity.agent_id)
+            session.add(row)
+        row.received_at = now
+        row.reason = reason
+        row.bytes = bundle.size
+        row.content = bundle.content
+
+        if first:
+            session.add(
+                EventLog(
+                    level="info",
+                    category="diagnostics_received",
+                    agent_id=identity.agent_id,
+                    message="首次收到诊断包：%s（%d 字节）"
+                    % (reason or "未说明原因", bundle.size),
+                )
+            )
+
+    return DiagnosticsUploadOut(received_at=iso_utc(now), bytes=bundle.size)
 
 
 # --------------------------------------------------------------------------- #

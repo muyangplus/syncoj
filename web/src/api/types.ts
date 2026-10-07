@@ -57,6 +57,8 @@ export type ProblemMatchIn = S['ProblemMatchIn']
 export type ProblemMatchOut = S['ProblemMatchOut']
 
 export type AgentRuntimeOut = S['AgentRuntimeOut']
+/** 一台机器最新一份诊断包。`content` 是服务端解析好的对象。 */
+export type DiagnosticsOut = S['DiagnosticsOut']
 export type SourceFileOut = S['SourceFileOut']
 export type EventOut = S['EventOut']
 

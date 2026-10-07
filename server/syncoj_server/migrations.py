@@ -501,6 +501,24 @@ def _migration_011_agent_scan_skipped(engine: Engine) -> None:
     _add_column(engine, "agent", "scan_skipped", "INTEGER")
 
 
+def _migration_012_agent_diagnostics(engine: Engine) -> None:
+    """诊断回传：``agent`` 加一次性请求标记，新表 ``agent_diagnostic`` 交给 create_all。
+
+    ``diagnostics_requested_at`` 是"教师点了「要一份」，等下一次心跳取走"的标记。
+    它必须落库：只放内存的话，服务端在教师点完到机器心跳之间重启一次，这次请求
+    就静默消失了 —— 而现场表现只是"点了没反应"。
+
+    只有一个 ``ADD COLUMN`` + 可空：老库里的机器没有这一列，而"没点过"与
+    "没有待取标记"是同一个结论，空白就是正确初始状态。
+
+    新表（``agent_diagnostic``，每台机器最新一份诊断包）由 ``create_all`` 负责建，
+    理由见模块 docstring 第 3 条：新表不进迁移，迁移只负责给已有表补列。
+    """
+    if "agent" not in _tables(engine):
+        return
+    _add_column(engine, "agent", "diagnostics_requested_at", "DATETIME")
+
+
 MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
     (1, "统一密钥注册 + 名单库所需的结构", _migration_001_enrollment),
     (2, "机器永久绑定名单条目；去掉注册码链路", _migration_002_roster_binding),
@@ -540,6 +558,11 @@ MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
         11,
         "机器记录本轮被题目预设挡掉的文件数",
         _migration_011_agent_scan_skipped,
+    ),
+    (
+        12,
+        "诊断回传：机器的一次性请求标记与诊断包表",
+        _migration_012_agent_diagnostics,
     ),
 ]
 

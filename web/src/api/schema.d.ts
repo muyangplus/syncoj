@@ -85,6 +85,62 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/agents/{agent_id}/diagnostics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Agent Diagnostics
+         * @description 读这台机器**最新一份**诊断包（每台机器只留一份，新的覆盖旧的）。
+         *
+         *     ``content`` 直接给解析好的对象 —— 服务端存的就是解压后的 JSON 文本，
+         *     这里不必再解压一次。还没收到过是 ``404`` + ``code=diagnostics_not_found``：
+         *     那是一种正常初态（机器刚装好、或刚点完「要一份」还没到下一次心跳），
+         *     不是错误。
+         */
+        get: operations["get_agent_diagnostics_api_v1_admin_agents__agent_id__diagnostics_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/agents/{agent_id}/diagnostics/request": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Request Agent Diagnostics
+         * @description 要这台机器**下一次心跳**时回传一份诊断包。
+         *
+         *     这里只置一个"待取"标记，真正的回传发生在机器下一次 tick —— 所以
+         *     **机器不在线时什么也不会发生**：标记会一直等着，直到它下一次心跳。
+         *     机器一直不上线就让教师再点一次。
+         *
+         *     标记一次性：tick 把它取走的同时清空（见 ``api/agent.py`` 的
+         *     ``_take_diagnostics_request``），服务端不会在后续心跳里重发 ——
+         *     "没收到"由教师重点一次表达，而不是由服务端猜。
+         *
+         *     待配对的机器同样可以点：它卡在配对阶段的现场恰恰最有用，而那个标记在
+         *     ``_tick_pending`` 那条心跳路径上一样会被取走。
+         */
+        post: operations["request_agent_diagnostics_api_v1_admin_agents__agent_id__diagnostics_request_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/agents/{agent_id}/rebind": {
         parameters: {
             query?: never;
@@ -1681,6 +1737,39 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/agent/diagnostics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Upload Diagnostics
+         * @description 接收一份 gzip 压缩的诊断包（Agent 定期 / 出错 / 被点名时回传的现场）。
+         *
+         *     * **鉴权与 tick 同一套**（``require_principal``）：**已配对与未配对都收** ——
+         *       一台卡在配对阶段的机器，它的现场恰恰最有用。
+         *     * body 是**原始 gzip 字节**，不是 multipart、也不是 JSON。两道上限都要有
+         *       （压缩后 256 KB、解压后 1 MB），理由见 ``services/diagnostics.py``。
+         *     * 解压出来必须是合法 JSON **且是对象**；**不逐字段校验** —— Agent 将来加
+         *       字段不该被服务端拒绝。
+         *     * **按机器限速 60 秒**：超了回 429 + ``Retry-After``。对 Agent 来说 429 就是
+         *       "这次没传成、不重试"，下一轮自然再来 —— 所以这里不能用 400。
+         *     * 存储**每台机器只留最新一份**（同一个 ``agent_id`` 覆盖写入），存解压后的
+         *       JSON 文本。
+         *     * 审计**只在"第一次收到这台机器的诊断包"时记一条 info**：10 分钟一份的例行
+         *       上报不该刷满审计表，而"一台机器开始回传现场"是一次值得留痕的状态变化。
+         */
+        post: operations["upload_diagnostics_api_v1_agent_diagnostics_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/agent/enroll": {
         parameters: {
             query?: never;
@@ -2681,6 +2770,47 @@ export interface components {
              * @default 0
              */
             total: number;
+        };
+        /**
+         * DiagnosticsOut
+         * @description 一台机器**最新一份**诊断包（管理端 ``GET .../diagnostics``）。
+         *
+         *     ``content`` 直接给**解析好的对象**（服务端存的本来就是解压后的 JSON 文本，
+         *     见 ``models.AgentDiagnostic``）。``bytes`` 是那份文本的字节数，
+         *     ``reason`` 是 Agent 自报的原因（``periodic`` / ``error`` / ``manual``，
+         *     可能为 ``null``）。
+         */
+        DiagnosticsOut: {
+            /**
+             * Bytes
+             * @default 0
+             */
+            bytes: number;
+            /** Content */
+            content?: {
+                [key: string]: unknown;
+            };
+            /** Reason */
+            reason?: string | null;
+            /** Received At */
+            received_at: string;
+        };
+        /**
+         * DiagnosticsUploadOut
+         * @description Agent 诊断包上报成功的回执（``POST /api/v1/agent/diagnostics``）。
+         *
+         *     ``received_at`` 是服务端收到它的时刻（ISO-8601，UTC）；``bytes`` 是
+         *     **解压后 JSON 文本**的字节数 —— 与库里那一列、以及管理端读回来的
+         *     ``bytes`` 是同一个数（不是压缩后的大小）。
+         */
+        DiagnosticsUploadOut: {
+            /**
+             * Bytes
+             * @default 0
+             */
+            bytes: number;
+            /** Received At */
+            received_at: string;
         };
         /**
          * EnrollRequest
@@ -4067,6 +4197,11 @@ export interface components {
             contest_slug?: string | null;
             /** Deploy Jobs */
             deploy_jobs?: components["schemas"]["DeployJob"][];
+            /**
+             * Diagnostics Request
+             * @default false
+             */
+            diagnostics_request: boolean;
             /** Need Upload */
             need_upload?: string[];
             /** Next Tick Seconds */
@@ -4256,6 +4391,68 @@ export interface operations {
                 "application/json": components["schemas"]["SetAgentContestIn"];
             };
         };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_agent_diagnostics_api_v1_admin_agents__agent_id__diagnostics_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                agent_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiagnosticsOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    request_agent_diagnostics_api_v1_admin_agents__agent_id__diagnostics_request_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                agent_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {
@@ -6978,6 +7175,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    upload_diagnostics_api_v1_agent_diagnostics_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiagnosticsUploadOut"];
                 };
             };
         };

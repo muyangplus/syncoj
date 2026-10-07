@@ -13,6 +13,7 @@ import type {
 } from '@/api/types'
 import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
 import DataTable from '@/components/DataTable.vue'
+import DiagnosticsDialog from '@/components/DiagnosticsDialog.vue'
 import FormDialog from '@/components/FormDialog.vue'
 import PageShell from '@/components/PageShell.vue'
 import RosterPersonPicker from '@/components/RosterPersonPicker.vue'
@@ -212,6 +213,21 @@ function askClearPending(): void {
     return
   }
   clearPendingOpen.value = true
+}
+
+// --------------------------------------------------------------------------- //
+// 诊断包（这台机器**最新一份**现场）
+//
+// 对话框是共享组件（`DiagnosticsDialog`）：场次里的机器（`OverviewView`）也要用
+// 同一份，抄两遍必然只改一处。
+// --------------------------------------------------------------------------- //
+
+const diagTarget = ref<PendingMachineOut | null>(null)
+const diagOpen = ref(false)
+
+function askDiagnostics(row: PendingMachineOut): void {
+  diagTarget.value = row
+  diagOpen.value = true
 }
 
 // --------------------------------------------------------------------------- //
@@ -453,10 +469,13 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
           </template>
         </el-table-column>
 
-        <el-table-column label="操作" width="150" fixed="right">
+        <el-table-column label="操作" width="210" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="askBind(row)">
               配给…
+            </el-button>
+            <el-button link type="primary" size="small" @click="askDiagnostics(row)">
+              诊断
             </el-button>
             <el-button link type="danger" size="small" @click="askRevoke(row)">移除</el-button>
           </template>
@@ -756,6 +775,12 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
         </el-button>
       </template>
     </el-dialog>
+
+    <DiagnosticsDialog
+      v-model="diagOpen"
+      :agent-id="diagTarget?.id ?? 0"
+      :label="diagTarget?.hostname || diagTarget?.machine_id || ''"
+    />
   </PageShell>
 </template>
 

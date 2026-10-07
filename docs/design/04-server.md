@@ -21,6 +21,7 @@
 | `bootstrap_key` | 镜像内置的统一注册密钥（只存哈希、可吊销、带过期） |
 | `agent` | 每机 Token 哈希、`machine_uuid`、指纹、`roster_entry_id`、可选 `contest_id`、配对码哈希、吊销状态 |
 | `agent_status` | 在线状态快照，`last_tick_at`、指标 |
+| `agent_diagnostic` | 每台机器**最新一份**诊断包（解压后的 JSON 文本），新的一份覆盖旧的 |
 | `source_file` | 回收台账：`(contest, player, path, sha256, size, revision, first_seen, last_seen)` |
 | `asset` | 内容寻址的下发文件 |
 | `deploy_task` / `deploy_target` | 下发任务与逐选手进度（含 `bytes_done`） |
@@ -32,6 +33,16 @@
 已删除的表：`enroll_code`（每选手注册码）、`machine_claim`（未配对机器另立表）。
 后者的语义已经并回 `agent` —— 未配对就是 `agent.roster_entry_id IS NULL`，
 不必再多一张要同步的表。
+
+**诊断包每台机器只留最新一份。** Agent 在健康时就定期回传现场，用途是"机器离线
+之后还看得到它最后的样子"，而教师要看的是**当前**那份。按 10 分钟一份存历史会让
+`agent_diagnostic` 按机器数 × 时间无限长下去，而更早的现场对排查几乎没有用
+（Agent 的日志本身也在轮转）。要留旧包，就在管理端读到之后自己存出去。
+
+`agent.diagnostics_requested_at` 是「要一份诊断」的一次性标记：教师点过之后，
+下一次心跳把它取走（响应里带 `diagnostics_request=true`）并立刻清空。落库而不是
+只放内存，是因为"点完"到"机器心跳"之间服务端可能重启 —— 只放内存的话这次请求会
+静默消失，而现场表现只是"点了没反应"。
 
 ### 4.3 写入策略（SQLite 的命门）
 

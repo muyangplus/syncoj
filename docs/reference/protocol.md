@@ -272,6 +272,7 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
   ],
   "cancel_assets": [],
   "upgrade": null,
+  "diagnostics_request": false,
   "config": { "…见 §7…" },
   "claimed": true,
   "bound": true,
@@ -281,6 +282,12 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
   "contest_slug": "mock-1"
 }
 ```
+
+**`diagnostics_request` 是一次性字段**：管理端点过「要一份」之后，这个字段在
+**下一次**心跳里为 `true`，服务端在返回它的同时就把标记清掉 —— 机器没收到就让教师
+再点一次，服务端不重发。它与 `uninstall_token` 的"多轮原样重发"刻意不同：卸载授权
+要保证机器真的拿到那枚 root 凭据，而少收一份诊断包的代价只是"这次少看到一份现场"。
+正常 tick 与未配对机器的 tick（见下文）两条路径都会处理它。
 
 未配对 / 无场次的机器**也走这个接口**，响应形态相同但三态不同（见 §1），
 并且此时：
@@ -428,6 +435,55 @@ Agent 收到 409 应当静默丢弃，下一轮 tick 自然会拿到真正需要
 | `enroll_conflict`（服务端产生） | 指纹撞上在线的机器，拒绝自动认回 |
 | `enroll_ambiguous`（服务端产生） | 多台机器共用同一指纹，无法自动认回 |
 | `bind`（服务端产生） | 机器被配对到某个名单条目 |
+
+---
+
+## 6.1 `POST /api/v1/agent/diagnostics`
+
+把一份 **gzip 压缩**的诊断包回传给服务端（Agent 定期 / 出错后 / 被点名时）。
+
+### 请求
+
+| 项 | 值 |
+|---|---|
+| 方法 / 路径 | `POST /api/v1/agent/diagnostics` |
+| 认证 | 与 tick 同一套 Bearer 凭据。**未配对的机器也收** —— 卡在配对阶段的机器，现场恰恰最有用 |
+| `Content-Type` | `application/gzip` |
+| body | **原始 gzip 字节**（不是 multipart，也不是 JSON）。解压后是 `diagnostics.build_bundle(...)` 那份报文 |
+
+### 上限
+
+| 项 | 上限 | 超了 |
+|---|---|---|
+| 压缩后 | 256 KB | `413` + `code=payload_too_large` |
+| 解压后 | 1 MB | `413` + `code=payload_too_large` |
+
+**两道上限都要有**：压缩比可以很大，只看压缩后大小等于没防 zip bomb。服务端用带上限的
+解压（`zlib.decompressobj(16 + zlib.MAX_WBITS)` 配 `max_length`），**不会**先把整个明文
+展开再判长度。
+
+解压出来必须是**合法 JSON、而且是对象**；**只校验"是对象"，不逐字段校验** —— Agent
+将来加字段不该被服务端拒绝。坏 gzip / 非 UTF-8 / 非 JSON / 不是对象一律
+`400` + `code=bad_request`。
+
+### 限速
+
+**按机器 60 秒一份**。窗口内再来一次是 `429` + `Retry-After`（秒）。对 Agent 来说
+429 就是"这次没传成、不重试"，下一轮自然再来 —— 所以这里**不是** 400。
+换一台机器不受影响：窗口按 `agent_id` 而不是按 IP（考场机器共用出口 IP）。
+
+### 响应 `200`
+
+```json
+{ "received_at": "2026-10-07T10:00:00Z", "bytes": 4096 }
+```
+
+`bytes` 是**解压后 JSON 文本**的字节数，不是压缩后的大小。
+
+### 存储
+
+服务端**每台机器只留最新一份**（同一个 `agent_id` 覆盖写入），存解压后的 JSON 文本。
+"解压炸弹"在上传那一刻就已经挡住，所以管理端读的时候不必再解压一次。
 
 ---
 

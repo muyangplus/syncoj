@@ -1471,6 +1471,62 @@
         "title": "DeployTaskOut",
         "type": "object"
       },
+      "DiagnosticsOut": {
+        "additionalProperties": false,
+        "description": "一台机器**最新一份**诊断包（管理端 ``GET .../diagnostics``）。\n\n``content`` 直接给**解析好的对象**（服务端存的本来就是解压后的 JSON 文本，\n见 ``models.AgentDiagnostic``）。``bytes`` 是那份文本的字节数，\n``reason`` 是 Agent 自报的原因（``periodic`` / ``error`` / ``manual``，\n可能为 ``null``）。",
+        "properties": {
+          "bytes": {
+            "default": 0,
+            "title": "Bytes",
+            "type": "integer"
+          },
+          "content": {
+            "additionalProperties": true,
+            "title": "Content",
+            "type": "object"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "received_at": {
+            "title": "Received At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "received_at"
+        ],
+        "title": "DiagnosticsOut",
+        "type": "object"
+      },
+      "DiagnosticsUploadOut": {
+        "additionalProperties": false,
+        "description": "Agent 诊断包上报成功的回执（``POST /api/v1/agent/diagnostics``）。\n\n``received_at`` 是服务端收到它的时刻（ISO-8601，UTC）；``bytes`` 是\n**解压后 JSON 文本**的字节数 —— 与库里那一列、以及管理端读回来的\n``bytes`` 是同一个数（不是压缩后的大小）。",
+        "properties": {
+          "bytes": {
+            "default": 0,
+            "title": "Bytes",
+            "type": "integer"
+          },
+          "received_at": {
+            "title": "Received At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "received_at"
+        ],
+        "title": "DiagnosticsUploadOut",
+        "type": "object"
+      },
       "EnrollRequest": {
         "additionalProperties": false,
         "description": "注册请求。\n\n只有一条路了：**镜像内置的统一密钥**。每选手注册码已经被\"机器永久绑定\n名单条目\"取代 —— 逐台发码在\"一份镜像装遍整间机房\"的现实里根本不可行，\n而两种模式并存意味着每种都要维护、测试、并且迟早有人选错。\n\n机器身份的三个要素，作用各不相同：\n\n* ``machine_uuid`` —— Agent 首次运行时生成。**配对之后认机器主要靠它**，\n  换凭据、重新注册都按它匹配，不再需要配对码\n* ``machine_fingerprint`` —— 硬件指纹（SMBIOS UUID）。UUID 会随整机快照还原\n  一起消失，指纹不会，所以它是第二道依据\n* ``machine_id`` —— 仅供人工辨认（列表里显示），不参与身份判定",
@@ -4363,6 +4419,11 @@
             "title": "Deploy Jobs",
             "type": "array"
           },
+          "diagnostics_request": {
+            "default": false,
+            "title": "Diagnostics Request",
+            "type": "boolean"
+          },
           "need_upload": {
             "items": {
               "type": "string"
@@ -4826,6 +4887,92 @@
           }
         },
         "summary": "Set Agent Contest",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/agents/{agent_id}/diagnostics": {
+      "get": {
+        "description": "读这台机器**最新一份**诊断包（每台机器只留一份，新的覆盖旧的）。\n\n``content`` 直接给解析好的对象 —— 服务端存的就是解压后的 JSON 文本，\n这里不必再解压一次。还没收到过是 ``404`` + ``code=diagnostics_not_found``：\n那是一种正常初态（机器刚装好、或刚点完「要一份」还没到下一次心跳），\n不是错误。",
+        "operationId": "get_agent_diagnostics_api_v1_admin_agents__agent_id__diagnostics_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiagnosticsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Agent Diagnostics",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/agents/{agent_id}/diagnostics/request": {
+      "post": {
+        "description": "要这台机器**下一次心跳**时回传一份诊断包。\n\n这里只置一个\"待取\"标记，真正的回传发生在机器下一次 tick —— 所以\n**机器不在线时什么也不会发生**：标记会一直等着，直到它下一次心跳。\n机器一直不上线就让教师再点一次。\n\n标记一次性：tick 把它取走的同时清空（见 ``api/agent.py`` 的\n``_take_diagnostics_request``），服务端不会在后续心跳里重发 ——\n\"没收到\"由教师重点一次表达，而不是由服务端猜。\n\n待配对的机器同样可以点：它卡在配对阶段的现场恰恰最有用，而那个标记在\n``_tick_pending`` 那条心跳路径上一样会被取走。",
+        "operationId": "request_agent_diagnostics_api_v1_admin_agents__agent_id__diagnostics_request_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Request Agent Diagnostics",
         "tags": [
           "admin"
         ]
@@ -9116,6 +9263,28 @@
           }
         },
         "summary": "Download Asset",
+        "tags": [
+          "agent"
+        ]
+      }
+    },
+    "/api/v1/agent/diagnostics": {
+      "post": {
+        "description": "接收一份 gzip 压缩的诊断包（Agent 定期 / 出错 / 被点名时回传的现场）。\n\n* **鉴权与 tick 同一套**（``require_principal``）：**已配对与未配对都收** ——\n  一台卡在配对阶段的机器，它的现场恰恰最有用。\n* body 是**原始 gzip 字节**，不是 multipart、也不是 JSON。两道上限都要有\n  （压缩后 256 KB、解压后 1 MB），理由见 ``services/diagnostics.py``。\n* 解压出来必须是合法 JSON **且是对象**；**不逐字段校验** —— Agent 将来加\n  字段不该被服务端拒绝。\n* **按机器限速 60 秒**：超了回 429 + ``Retry-After``。对 Agent 来说 429 就是\n  \"这次没传成、不重试\"，下一轮自然再来 —— 所以这里不能用 400。\n* 存储**每台机器只留最新一份**（同一个 ``agent_id`` 覆盖写入），存解压后的\n  JSON 文本。\n* 审计**只在\"第一次收到这台机器的诊断包\"时记一条 info**：10 分钟一份的例行\n  上报不该刷满审计表，而\"一台机器开始回传现场\"是一次值得留痕的状态变化。",
+        "operationId": "upload_diagnostics_api_v1_agent_diagnostics_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiagnosticsUploadOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Upload Diagnostics",
         "tags": [
           "agent"
         ]

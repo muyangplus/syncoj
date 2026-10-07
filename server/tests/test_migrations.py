@@ -141,6 +141,10 @@ MIGRATION_ADDED_COLUMNS = {
         #: 机器列表上的「有 N 个文件不符合题目预设」，以及"有没有被挡掉"这个
         #: 状态变化的判据（按轮记的话，一台机器一个上午就能刷出上千条事件）。
         "scan_skipped",
+        #: ``diagnostics_requested_at``：教师点过「要一份诊断」、等下一次心跳取走的
+        #: 一次性标记（迁移 012）。必须落库 —— 只放内存的话，服务端在"点完"到
+        #: "机器心跳"之间重启一次，这次请求就静默消失了。
+        "diagnostics_requested_at",
     },
     #: ``player_notice`` 曾经在这一档里（迁移 003 加的"给选手看的注意事项"）。
     #: 考场公告改成"下发一份 NOTICE.md 文件"之后它没有读者了，所以本轮由迁移 005
@@ -613,6 +617,9 @@ def test_fresh_and_upgraded_databases_have_the_same_shape(
         #: 运行参数表（迁移 010）。它是"新表交给 create_all"这一类里最新的一张 ——
         #: 老库升上来必须也有它，否则读运行参数会撞 no such table。
         "runtime_setting",
+        #: 诊断包表（迁移 012）。每台机器只留最新一份，同样由 create_all 负责建；
+        #: 放进这份清单是为了让它也受"全新库与升级库结构一致"的看守。
+        "agent_diagnostic",
     ]
     fresh_tables = set(inspect(fresh).get_table_names())
     for table in interesting:

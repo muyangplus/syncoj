@@ -7,6 +7,7 @@ import type { AdminHealth } from '@/api'
 import type { AgentRuntimeOut, PlayerOut, ScoreMatrixOut } from '@/api/types'
 import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
 import DataTable from '@/components/DataTable.vue'
+import DiagnosticsDialog from '@/components/DiagnosticsDialog.vue'
 import FormDialog from '@/components/FormDialog.vue'
 import PageShell from '@/components/PageShell.vue'
 import PlayerImportDialog from '@/components/PlayerImportDialog.vue'
@@ -410,6 +411,14 @@ const revokeAgent = useMutation(() => {
   },
 })
 
+// 诊断包：与「待配对机器」那一页共用同一个对话框组件
+const diagOpen = ref(false)
+const diagTarget = ref<AgentRuntimeOut | null>(null)
+function askDiagnostics(agent: AgentRuntimeOut): void {
+  diagTarget.value = agent
+  diagOpen.value = true
+}
+
 const uninstallOpen = ref(false)
 const uninstallTarget = ref<AgentRuntimeOut | null>(null)
 
@@ -448,6 +457,7 @@ function handleCommand(
   else if (command === 'contest') askSetContest(agent)
   else if (command === 'revoke') askRevokeAgent(agent)
   else if (command === 'uninstall') askUninstall(agent)
+  else if (command === 'diagnostics') askDiagnostics(agent)
 }
 </script>
 
@@ -676,10 +686,14 @@ function handleCommand(
               <template #dropdown>
                 <el-dropdown-menu>
                   <el-dropdown-item command="rebind">改派给另一个人</el-dropdown-item>
-                  <el-dropdown-item command="setContest">指定场次</el-dropdown-item>
+                  <!-- 命令名必须与 handleCommand 里那一串完全一致：这里从前写的是
+                       `setContest`，而处理分支判的是 `contest`，于是这个菜单项点了
+                       没有任何反应（点下去像"界面坏了"，而控制台一个字都不报）。 -->
+                  <el-dropdown-item command="contest">指定场次</el-dropdown-item>
                   <el-dropdown-item command="unbind" divided>解除绑定</el-dropdown-item>
                   <el-dropdown-item command="revoke">作废这台机器</el-dropdown-item>
                   <el-dropdown-item command="uninstall">卸载 Agent</el-dropdown-item>
+                  <el-dropdown-item command="diagnostics">诊断</el-dropdown-item>
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
@@ -844,6 +858,12 @@ function handleCommand(
         '机器一直没执行（比如没网、没开机），重新点一次即可。',
       ]"
       @confirm="uninstallAgent.run(undefined)"
+    />
+
+    <DiagnosticsDialog
+      v-model="diagOpen"
+      :agent-id="diagTarget?.agent_id ?? 0"
+      :label="diagTarget?.hostname || diagTarget?.machine_id || ''"
     />
   </PageShell>
 </template>

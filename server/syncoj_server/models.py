@@ -44,6 +44,7 @@ __all__ = [
     "BootstrapKey",
     "Agent",
     "AgentStatus",
+    "AgentDiagnostic",
     "SourceFile",
     "Asset",
     "DeployTask",
@@ -421,6 +422,12 @@ class Agent(Base, TimestampMixin):
     #: 的话服务端一重启就会把同一批文件重报一遍。它是"数量"而不是"清单"——
     #: 清单在审计事件的 meta 里（截到 20 条），这里只需要回答"现在有没有"。
     scan_skipped = Column(Integer, nullable=True)
+    #: 教师点过「要一份诊断」，等**下一次心跳**取走的一次性标记。
+    #:
+    #: 只存"待取"这一个事实，取走即置空（见 ``api/agent.py`` 的
+    #: ``_take_diagnostics_request``）—— 机器没收到就让教师再点一次。
+    #: 落库而不是只放内存：服务端重启不该把教师刚点的请求吞掉。
+    diagnostics_requested_at = Column(DateTime, nullable=True)
     #: 最近一次请求的**来源 IP**。
     #:
     #: 它存在的唯一理由是选手页的"自动匹配本机"：选手不输任何东西，服务端就靠
@@ -467,6 +474,39 @@ class AgentStatus(Base):
     disk_free = Column(BigInteger, nullable=True)
     last_error = Column(Text, nullable=True)
     updated_at = Column(DateTime, default=utcnow, nullable=False)
+
+
+class AgentDiagnostic(Base):
+    """一台机器**最新一份**诊断包（Agent 定期/出错/被点名时回传的现场）。
+
+    为什么只留最新一份而不是历史：诊断包的用途是"机器离线之后还看得到它最后
+    的样子"，教师要看的是**当前**那份现场；存历史会让一张表按机器数 × 每 10
+    分钟一条无限长下去，而旧的现场对排查几乎没用（Agent 的日志本身也在轮转，
+    更早的包只会是更早的噪音）。旧包想留，就在管理端读到之后自己存出去。
+
+    ``agent_id`` 直接当主键：一台机器一行，"覆盖写入"因此是天然语义，不需要
+    额外的唯一约束。``content`` 存**解压后的 JSON 文本**，所以读的时候不必再
+    解压一次 —— 而"解压炸弹"在上传那一刻就已经被上限挡住（见
+    ``services/diagnostics.py``）。
+
+    ``bytes`` 是**解压后** JSON 文本的字节数（也就是 ``content`` 的大小）：
+    它比压缩后的大小更能说明"这份现场里到底有多少东西"。
+    ``agent`` 行被删时一起删（``CASCADE``）—— 机器都不在台账里了，留着它的
+    诊断包没有意义，反而会在"作废后重新注册"时指向一个已经不存在的身份。
+    """
+
+    __tablename__ = "agent_diagnostic"
+
+    agent_id = Column(
+        Integer, ForeignKey("agent.id", ondelete="CASCADE"), primary_key=True
+    )
+    received_at = Column(DateTime, nullable=False, default=utcnow)
+    #: Agent 自报的 ``reason``（``periodic`` / ``error`` / ``manual``）。没给或
+    #: 给了个空白值就是 ``NULL`` —— 服务端只原样存下，不做取值校验。
+    reason = Column(String(32), nullable=True)
+    #: 解压后 JSON 文本的字节数（见类 docstring）。
+    bytes = Column(Integer, nullable=False, default=0)
+    content = Column(Text, nullable=False)
 
 
 # --------------------------------------------------------------------------- #

@@ -87,6 +87,10 @@ export const paths = {
   agentBind: (agentId: number) => `${ADMIN}/agents/${agentId}/bind`,
   agentRebind: (agentId: number) => `${ADMIN}/agents/${agentId}/rebind`,
   agentContest: (agentId: number) => `${ADMIN}/agents/${agentId}/contest`,
+  /** 某台机器**最新一份**诊断包。没收到过是 404 `diagnostics_not_found`。 */
+  agentDiagnostics: (agentId: number) => `${ADMIN}/agents/${agentId}/diagnostics`,
+  /** 要这台机器下一次心跳回传一份诊断包。一次性标记，它不在线就一直等着。 */
+  agentDiagnosticsRequest: (agentId: number) => `${ADMIN}/agents/${agentId}/diagnostics/request`,
   /** 让这台考试机把自己卸载掉。`confirm` 是机器名，令牌随下一次心跳下发。 */
   agentUninstall: (agentId: number) => `${ADMIN}/agents/${agentId}/uninstall`,
   contestAgents: (contestId: number) => `${ADMIN}/contests/${contestId}/agents`,

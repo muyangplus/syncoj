@@ -105,6 +105,11 @@ string，不塞进请求体 —— 否则分页链接、收藏、刷新就都没
 > 要么当初就选了更宽容的做法（删名单是被允许的，只是把引用它的场次置空）。
 > 要加新码，请**连同产生它的那条分支一起加**。
 
+> `agent_not_found` 与 `diagnostics_not_found` 是"具名码比兜底码有用"的两个例子：
+> 前者是"这台机器已经不在台账里"，后者是"这台机器还没回传过诊断包" ——
+> 后者的界面表现是「诊断」对话框里的"还没有收到诊断包"这一**正常初态**，
+> 不是一句"找不到这个对象"。
+
 ### 422 校验错误
 
 pydantic 的原始错误**不直接暴露给人**。处理器把它揉成一句话：
@@ -152,6 +157,8 @@ pydantic 的原始错误**不直接暴露给人**。处理器把它揉成一句�
 | 改状态 | `POST /players/{id}/withdraw`、`POST /contests/{id}/freeze` |
 | 绑定关系 | `POST /machines/{id}/bind` |
 | 解绑关系 | `DELETE /machines/{id}/bind` |
+| 要一份诊断 | `POST /agents/{id}/diagnostics/request`（机器下一次心跳取走，一次性） |
+| 读最新诊断包 | `GET /agents/{id}/diagnostics`（没有收到过是 404 `diagnostics_not_found`） |
 
 ---
 

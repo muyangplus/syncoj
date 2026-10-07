@@ -133,10 +133,14 @@ const EVENT_CATEGORY_LABELS: Record<string, string> = {
   bulk_rewrite: '批量重写',
   scan_rejected: '扫描拒绝',
   scan_incomplete: '扫描不完整',
+  scan_no_match: '不符合题目预设',
   oversize_skipped: '超限跳过',
   upload_rejected: '上传被拒',
   offline: '离线',
   disk_full: '磁盘满',
+  // 诊断包
+  diagnostics_request: '要一份诊断',
+  diagnostics_received: '收到诊断包',
   // 发布
   release_uploaded: '发布上传',
   release_rollout: '发布铺开',

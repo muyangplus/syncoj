@@ -31,7 +31,7 @@
 ## 10. 待办
 
 原「10.1 发布当前版本」已实现，见 ../design/07-ops-and-install.md §7.2。下面四条是**这轮结束时
-确实还没做完**的，按"要不要动代码/文档"分开写。
+确实还没做完**的。
 
 1. **诊断回传的服务端侧还不存在**。Agent 侧已经完整：每 10 分钟一份、连续失败 2 次补一份、
    tick 里带 `diagnostics_request` 时补一份（代码在 `agent/syncoj_agent/diagnostics.py` 与

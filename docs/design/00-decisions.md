@@ -1,18 +1,13 @@
 # 0. 已锁定决策
 
-这一节只回答"定下来的是什么"：**"为什么这么定、当初否掉了什么"在 ADR 里**
-（[`../decisions/`](../decisions/)）—— 最后一列指过去。要改哪一行之前先读它指向的
-那篇 ADR，里面记着被否掉的替代方案，免得同一个想法被重新提一遍。
-
-**这张表的正文是原来 `DESIGN.md` 那一节逐行搬过来的**（只做了两件事：把跨文件的
-`见 §X` 改成可点的链接，以及在备注列尾巴上补一条 ADR 指路）。所以代码注释里的
-老式编号引用与新位置指的是同一件事。
+下表是已锁定决策，每条指向对应的 ADR；**为什么这么定、当初否掉了什么在 ADR 里**
+（[`../decisions/`](../decisions/)），要改哪一行之前先读它指向的那篇。
 
 | 项 | 决策 | 备注 |
 |---|---|---|
 | 目标环境 | NOI Linux 2.0（Ubuntu 20.04 / glibc 2.31 / systemd 245 / Python 3.8.10） | v1 仅 Linux，平台层预留 Windows（[`ADR-0001`](../decisions/ADR-0001-tech-stack-and-dependencies.md)） |
 | Agent 技术栈 | Python 3.8 + **零第三方依赖**，`python3 -E -s` 启动 | 见 [03-agent.md §3.1](03-agent.md) 为何砍依赖（[`ADR-0001`](../decisions/ADR-0001-tech-stack-and-dependencies.md)） |
-| 通信模型 | **HTTP 自适应轮询**（空闲 60s / 有活 2s），无 WebSocket | 同步延迟容忍度 20s（[`ADR-0002`](../decisions/ADR-0002-communication-and-identity.md)） |
+| 通信模型 | **HTTP 自适应轮询**（空闲 30s / 有活 2s），无 WebSocket；三个节奏值在管理端「运行参数」里可改 | 同步延迟容忍度 20s（[`ADR-0002`](../decisions/ADR-0002-communication-and-identity.md)） |
 | 服务端 | FastAPI + uvicorn + SQLAlchemy 2.0 + SQLite(WAL)，单机 | （[`ADR-0001`](../decisions/ADR-0001-tech-stack-and-dependencies.md)） |
 | 前端 | Vue3 + Vite + Pinia，TS 类型从 OpenAPI 生成 | M3 起（[`ADR-0001`](../decisions/ADR-0001-tech-stack-and-dependencies.md)） |
 | 评测对接 | 只投递 `source/` + 扫描结果目录回写成绩，**不触发评测** | 开场仍由教师点 LemonLime/Arbiter GUI（[`ADR-0001`](../decisions/ADR-0001-tech-stack-and-dependencies.md)） |
@@ -33,9 +28,6 @@
 | 前端 | 共享数据层（`useList`/`useMutation`）+ 通用页面外壳，页面只描述长相不描述取数 | 见 [05-api-and-frontend.md §5.3](05-api-and-frontend.md)（[`ADR-0001`](../decisions/ADR-0001-tech-stack-and-dependencies.md)） |
 | 删除语义 | 结构性数据硬删 + **输入名称确认**；产物性数据（代码/资产）软删留墓碑 | 见 [05-api-and-frontend.md §5.4](05-api-and-frontend.md)（[`ADR-0003`](../decisions/ADR-0003-delete-semantics.md)） |
 | 库结构演进 | `PRAGMA user_version` + 有序迁移；重建表需要一套已验证的安全配方 | 见 [04-server.md §4.8](04-server.md)（[`ADR-0003`](../decisions/ADR-0003-delete-semantics.md)） |
-| 选手代码目录 | **默认 `~/Desktop/<准考证号>`**（`{desktop}` 按运行账号的家目录展开），下发根默认 `~/Desktop` | 用户拍板；见 [04-server.md §4.5](04-server.md)（[`ADR-0010`](../decisions/ADR-0010-run-user-owns-path-templates.md)） |
+| 选手代码目录 | **默认 `~/Desktop/<准考证号>`**（`{desktop}` 按运行账号的家目录展开），下发根默认 `~/Desktop` | 产品决定；见 [04-server.md §4.5](04-server.md)（[`ADR-0010`](../decisions/ADR-0010-run-user-owns-path-templates.md)） |
 | Agent 运行账号 | **默认 = 跑安装的那个账号**（显式 `--user` 才创建专用账号）；状态目录属主跟着它 | 代码与下发文件都在那个账号的桌面下，跨用户授权在现场容易装成"服务起来了但什么都不传"（[`ADR-0010`](../decisions/ADR-0010-run-user-owns-path-templates.md)） |
 | 界面文案 | 页面上**禁止**声明式/解释式语句，只留动作、破坏性后果与实时数据 | 见 [05-api-and-frontend.md §5.3](05-api-and-frontend.md)（[`ADR-0004`](../decisions/ADR-0004-ui-copy-and-notice.md)） |
-
-> 表里只留**结论**，论证在它指向的那一节与那篇 ADR 里 —— 免得同一个道理写两遍，
-> 然后随着时间慢慢不一致。

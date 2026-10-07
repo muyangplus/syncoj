@@ -1,6 +1,6 @@
 ## 2. 核心协议：`tick`
 
-整个系统只有一个关键接口。**服务端持有全部状态，Agent 零状态** —— 这是轮询方案的支点。
+整个系统只有一个关键接口。**服务端持有全部状态，Agent 零状态。**
 完整字段规范见 [`docs/reference/protocol.md`](../reference/protocol.md)。
 
 ```jsonc
@@ -21,7 +21,7 @@
 // 响应
 {
   "server_time": 1767225600,
-  "next_tick_seconds": 20,              // 自适应：有活 2s，空闲 60s
+  "next_tick_seconds": 20,              // 自适应：有活 2s，空闲 30s（管理端可改）
   "need_upload": ["main.cpp"],          // 服务端没有 / 版本落后的文件
   "deploy_jobs": [
     {"asset_id": 42, "url": "/api/v1/agent/assets/42",
@@ -30,13 +30,15 @@
   ],
   "cancel_assets": [],
   "upgrade": null,                      // 或 {version, url, sha256, sig}
-  "config": {"scan_interval": 60, "max_file_size": 2097152}
+  "config": {"scan_interval": 30, "max_file_size": 2097152}
 }
 ```
 
-**为什么每次 tick 上报全量索引**：50 个文件 × ~100 字节 = **5KB/次**，20s 一次可忽略。收益：
+每次 tick 上报全量索引：50 个文件 × ~100 字节 = **5KB/次**，20s 一次，带宽与 CPU 成本可忽略。收益：
 
-- 服务端**免费**得到完整文件台账（谁有什么、何时变更、什么版本）
-- **删除检测免费**：上一轮有、这一轮没了 = 选手删了 → 记审计事件
-- 比 inotify 更可靠：Agent 停机期间的事件不会丢，因为比对的是快照而非事件流
-- 不需要 `fs.inotify.max_user_watches` 调优（Ubuntu 20.04 默认仅 8192）
+| 收益 | 说明 |
+|---|---|
+| 免费得到完整文件台账 | 谁有什么、何时变更、什么版本 |
+| 删除检测免费 | 上一轮有、这一轮没了 = 选手删了 → 记审计事件 |
+| 比 inotify 更可靠 | Agent 停机期间的事件不会丢：比对的是快照而非事件流 |
+| 不依赖 inotify 限额 | 无需调优 `fs.inotify.max_user_watches`（Ubuntu 20.04 默认仅 8192） |

@@ -1,6 +1,6 @@
 # SyncOJ — Online Sync Judge
 
-通用编程考试与竞赛模拟的**在线同步评测**系统。不绑定任何特定赛事。
+通用编程考试与竞赛模拟的**在线同步评测**系统。
 - **代码自动回收**：选手端静默扫描代码目录，自动同步到服务端 `source/<场次>/<选手编号>/`
 - **文件主动下发**：教师上传题面、测试点，按选手或全量下发
 - **在线状态管理**：实时维护在线/离线状态与最后心跳
@@ -28,7 +28,7 @@ python -m venv .venv && .venv/Scripts/pip install -e "server[dev]"   # Linux: .v
 
 ## 文档地图
 
-**不知道从哪看起就进 [`docs/README.md`](docs/README.md)** —— 它按"我是谁"分流。
+入口是 [`docs/README.md`](docs/README.md)，按「我是谁」分流。
 
 | 我是谁 | 去哪 |
 |---|---|
@@ -36,5 +36,5 @@ python -m venv .venv && .venv/Scripts/pip install -e "server[dev]"   # Linux: .v
 | 开发者：接口、字段与配置 | [`docs/reference/`](docs/reference/) |
 | 想改设计、想知道"当初否掉了什么" | [`docs/design/`](docs/design/) · [`docs/decisions/`](docs/decisions/) |
 老文档里的 `DESIGN.md §X.Y` 引用仍然有效：[`DESIGN.md`](DESIGN.md) 只剩一张「§ 编号
-→ 新文件」的映射表。这一版刻意不同于"教科书式"做法的地方（零依赖、轮询、每次 tick
-上报全量索引…）与它们的理由都在 ADR 里；`docs/**` 下每个文件都列在 `docs/README.md`。
+→ 新文件」的映射表。与教科书式做法不同的三处（零依赖、轮询、每次 tick 上报全量
+索引）及其理由见 ADR。`docs/**` 下每个文件都列在 `docs/README.md`。

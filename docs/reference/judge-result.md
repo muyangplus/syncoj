@@ -172,12 +172,23 @@ curl -H "Authorization: Bearer <管理员令牌>" \
 
 ```json
 {
-  "problems": ["p1", "p2"],
+  "contest_id": 1,
+  "columns": [
+    {"ident": "p1", "title": null, "declared": false},
+    {"ident": "p2", "title": null, "declared": false}
+  ],
   "rows": [
-    {"player_no": "S001", "total": 150,
+    {"player_id": 1, "player_no": "S001", "player_name": "张三", "total": 100,
      "cells": [
-       {"problem": "p1", "score": 100, "max_score": 100, "parse_status": "ok"},
-       {"problem": "p2", "score": 50,  "max_score": 100, "parse_status": "unparsed",
-        "detail": "没有解析器认得这个格式"}
+       {"problem": "p1", "score": 100, "max_score": 100, "status": "AC",
+        "parse_status": "ok", "submitted": false, "detail": "json：JSON 直接字段",
+        "updated_at": "2026-10-07T09:58:45Z"},
+       {"problem": "p2", "score": null, "max_score": null, "status": null,
+        "parse_status": "unparsed", "submitted": false,
+        "detail": "没有解析器认得这个格式", "updated_at": "2026-10-07T09:58:45Z"}
      ]}
   ],
+  "unparsed": 1,
+  "complete": false
+}
+```

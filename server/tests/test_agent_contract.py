@@ -29,6 +29,7 @@ from syncoj_server.schemas import (
     ScanEntry,
     TickRequest,
 )
+from syncoj_server.services import runtime_settings
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 AGENT_DIR = REPO_ROOT / "agent"
@@ -110,9 +111,19 @@ def test_tick_partials_are_valid(fixture: dict) -> None:
 
 def test_tick_stats_are_valid(fixture: dict) -> None:
     stats = fixture["tick"]["stats"]
-    assert set(stats) == {"disk_free", "last_error", "queue"}, (
+    # 字段集**逐个列出**而不是"包含"：服务端多一个不认的字段会让整台机器的心跳
+    # 422（``extra="forbid"``），而那种故障只在真机上看得见
+    assert set(stats) <= {"disk_free", "last_error", "queue", "scan_missing"}, (
+        "stats 里出现了服务端 TickStats 不认的字段；两侧模型需同步"
+    )
+    assert {"disk_free", "last_error", "queue"} <= set(stats), (
         "stats 字段集变化了；服务端 TickStats 需同步"
     )
+    # scan_missing 是本轮新增的"当前不存在的扫描根"。它必须**显式存在**，
+    # 否则"没报"与"没有缺失"在服务端看起来一样，而目录没建只能靠报文学到。
+    assert "scan_missing" in stats, "tick 请求体缺少 scan_missing"
+    model = TickRequest.model_validate(fixture["tick"])
+    assert model.stats.scan_missing == stats["scan_missing"]
 
 
 def test_scan_complete_flag_is_present(fixture: dict) -> None:
@@ -152,9 +163,16 @@ def test_agent_policy_defaults_match_server(fixture: dict) -> None:
 
     不一致的后果很隐蔽：Agent 首轮用内置默认值扫描，第二轮的策略才来自服务端。
     若两边默认值不同，同一个文件可能在两轮之间"凭空出现或消失"。
+
+    ``scan_interval`` 取服务端那份**出厂默认**（``runtime_settings.DEFAULTS``），
+    不写字面量：两边各写一个数就是这条测试要防的那种漂。
     """
     agent_policy = fixture["policy_defaults"]
-    server_policy = build_policy(max_file_size=2 * 1024 * 1024, scan_interval=60, max_files=5000)
+    server_policy = build_policy(
+        max_file_size=2 * 1024 * 1024,
+        scan_interval=runtime_settings.DEFAULTS["tick_idle_seconds"],
+        max_files=5000,
+    )
 
     list_keys = ("extensions", "exclude_dirs", "exclude_suffixes")
     scalar_keys = ("max_file_size", "scan_interval", "max_files")

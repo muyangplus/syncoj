@@ -631,7 +631,17 @@ function handleCommand(
             <el-tooltip v-if="row.agent?.last_error" :content="row.agent.last_error">
               <span class="error-text">{{ row.agent.last_error }}</span>
             </el-tooltip>
-            <span v-else class="muted">—</span>
+            <!--
+              「选手目录还没建」：机器在跑、但扫描根不存在 —— 那种情况下扫出来
+              零个文件，与"选手还没开始写"长得一模一样。只写事实与下一步。
+            -->
+            <div v-if="row.agent?.scan_missing?.length" class="scan-missing">
+              选手目录还没建：
+              <span class="mono">{{ row.agent.scan_missing.join('、') }}</span>
+            </div>
+            <span v-if="!row.agent?.last_error && !row.agent?.scan_missing?.length" class="muted">
+              —
+            </span>
           </template>
         </el-table-column>
 
@@ -867,5 +877,13 @@ function handleCommand(
   text-overflow: ellipsis;
   white-space: nowrap;
   vertical-align: middle;
+}
+
+/* 「选手目录还没建」：事实 + 下一步，用中性色而不是红色 —— 它是个待办，不是故障 */
+.scan-missing {
+  color: #e6a23c;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-all;
 }
 </style>

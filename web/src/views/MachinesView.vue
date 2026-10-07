@@ -2,13 +2,14 @@
 import { ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
-import { bootstrapKeyApi, machineApi } from '@/api'
+import { bootstrapKeyApi, machineApi, settingsApi } from '@/api'
 import { GLOBAL_CONFIRM } from '@/api/endpoints'
 import type {
   BootstrapKeyIssuedOut,
   BootstrapKeyOut,
   CloneAlertOut,
   PendingMachineOut,
+  RuntimeSettingsOut,
 } from '@/api/types'
 import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
 import DataTable from '@/components/DataTable.vue'
@@ -17,6 +18,7 @@ import PageShell from '@/components/PageShell.vue'
 import RosterPersonPicker from '@/components/RosterPersonPicker.vue'
 import { useList } from '@/composables/useList'
 import { useMutation } from '@/composables/useMutation'
+import { describeError } from '@/api/crud'
 import { useContestStore } from '@/stores/contest'
 import { formatSince, formatTime } from '@/utils/format'
 
@@ -127,6 +129,48 @@ const bindByCode = useMutation(
 // --------------------------------------------------------------------------- //
 
 const settingsOpen = ref(false)
+
+// --------------------------------------------------------------------------- //
+// 运行参数（心跳节奏与离线判定）
+//
+// 放在这一页的工具栏里：它与「装机设置」一样是"整间机房一次"的动作，而这一页
+// 管的就是这类事。改完一轮心跳内生效，不用重启服务端。
+// --------------------------------------------------------------------------- //
+
+const runtimeOpen = ref(false)
+const runtimeLoading = ref(false)
+const runtimeError = ref<string | null>(null)
+const runtime = ref<RuntimeSettingsOut | null>(null)
+
+/** 对话框里的三个输入。打开时用服务端的当前值填。 */
+const runtimeForm = ref<RuntimeSettingsOut>({
+  tick_idle_seconds: 30,
+  tick_active_seconds: 2,
+  offline_after_seconds: 90,
+})
+
+async function openRuntime(): Promise<void> {
+  runtimeOpen.value = true
+  runtimeLoading.value = true
+  runtimeError.value = null
+  try {
+    runtime.value = await settingsApi.runtime()
+    runtimeForm.value = { ...runtime.value }
+  } catch (error) {
+    runtimeError.value = describeError(error)
+    runtime.value = null
+  } finally {
+    runtimeLoading.value = false
+  }
+}
+
+const saveRuntime = useMutation(() => settingsApi.saveRuntime(runtimeForm.value), {
+  onDone: async (result) => {
+    runtime.value = result
+    runtimeForm.value = { ...result }
+    runtimeOpen.value = false
+  },
+})
 
 // --------------------------------------------------------------------------- //
 // 移除待配对的机器
@@ -290,6 +334,7 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
       </el-button>
       <!-- 手里有码、但列表里找不到那台机器时的入口（次要路径，所以是普通按钮） -->
       <el-button size="small" @click="byCodeOpen = true">按码配对</el-button>
+      <el-button size="small" @click="openRuntime">运行参数</el-button>
       <el-button size="small" @click="settingsOpen = true">装机设置</el-button>
     </template>
 
@@ -518,6 +563,72 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
       </template>
       </DataTable>
     </el-drawer>
+
+    <!--
+      运行参数：心跳节奏与离线判定。三项都**整间机房生效**，所以对话框顶部先写清
+      影响面 —— 教师改之前得知道这一下动的是所有机器。
+    -->
+    <FormDialog
+      v-model="runtimeOpen"
+      title="运行参数"
+      :submitting="saveRuntime.pending.value"
+      confirm-text="保存"
+      @submit="saveRuntime.run(undefined)"
+    >
+      <el-alert
+        v-if="runtimeError"
+        type="error"
+        :closable="false"
+        show-icon
+        :title="runtimeError"
+        style="margin-bottom: 12px"
+      />
+      <el-alert type="warning" :closable="false" show-icon style="margin-bottom: 12px">
+        <template #title>整间机房生效</template>
+        <template #default>改完下一轮心跳就按新节奏走，不用重启服务端。</template>
+      </el-alert>
+
+      <el-form label-width="140px" v-loading="runtimeLoading">
+        <el-form-item label="空闲心跳 / 本地扫描">
+          <el-input-number
+            v-model="runtimeForm.tick_idle_seconds"
+            :min="5"
+            :max="3600"
+            :controls="false"
+            style="width: 110px"
+          />
+          <span class="cell-sub" style="margin-left: 8px">秒</span>
+          <div class="cell-sub">没有活干时的心跳周期；本地扫描与它同周期。</div>
+        </el-form-item>
+        <el-form-item label="有活心跳">
+          <el-input-number
+            v-model="runtimeForm.tick_active_seconds"
+            :min="1"
+            :max="60"
+            :controls="false"
+            style="width: 110px"
+          />
+          <span class="cell-sub" style="margin-left: 8px">秒</span>
+          <div class="cell-sub">有待上传或待下发时用这个周期。</div>
+        </el-form-item>
+        <el-form-item label="离线判定">
+          <el-input-number
+            v-model="runtimeForm.offline_after_seconds"
+            :min="10"
+            :max="86400"
+            :controls="false"
+            style="width: 110px"
+          />
+          <span class="cell-sub" style="margin-left: 8px">秒</span>
+          <div class="cell-sub">超过这个秒数没有心跳，机器在列表里显示为离线。</div>
+        </el-form-item>
+      </el-form>
+
+      <p v-if="runtime" class="cell-sub" style="margin: 0">
+        当前：空闲 {{ runtime.tick_idle_seconds }} 秒 · 有活
+        {{ runtime.tick_active_seconds }} 秒 · 离线 {{ runtime.offline_after_seconds }} 秒
+      </p>
+    </FormDialog>
 
     <!-- 移除待配对机器：机器是结构性数据，按约定要打一遍主机名 -->
     <ConfirmByNameDialog

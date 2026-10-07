@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import keys
+from .services import runtime_settings
 
 __all__ = ["Settings", "default_settings"]
 
@@ -125,13 +126,24 @@ class Settings:
     )
 
     # ---- 轮询节奏（下发给 Agent，Agent 不得自行决定）----
-    # 空闲时放宽到 60s：50 台机器 -> 约 0.8 req/s
-    tick_idle_seconds: int = 60
-    # 有活干时收紧到 2s，把下发/上传的感知延迟压到秒级
-    tick_active_seconds: int = 2
-    # 距上次 tick 超过该秒数即判定离线。必须大于 tick_idle_seconds，
-    # 否则空闲状态的机器会被误判为掉线。
-    offline_after_seconds: int = 180
+    #
+    # **这三个数只能有一处定义**：``services/runtime_settings.py::DEFAULTS``。
+    # 这里只是引用它 —— 三个值同时要在"出厂默认"和"管理端当前值"两处出现，各写
+    # 一份必然漂，而漂的方向是"界面显示 30 秒、实际按 60 秒跑"。
+    #
+    # ``tick_idle_seconds``：空闲心跳周期（下发给 Agent）。30 秒时 50 台机器约
+    # 1.7 req/s，对单机 SQLite 很轻松；本地扫描与它同周期。
+    # ``tick_active_seconds``：有活干时收紧，把下发/上传的感知延迟压到秒级。
+    # ``offline_after_seconds``：距上次心跳超过它就判离线，必须大于空闲心跳。
+    tick_idle_seconds: int = field(
+        default_factory=lambda: runtime_settings.DEFAULTS["tick_idle_seconds"]
+    )
+    tick_active_seconds: int = field(
+        default_factory=lambda: runtime_settings.DEFAULTS["tick_active_seconds"]
+    )
+    offline_after_seconds: int = field(
+        default_factory=lambda: runtime_settings.DEFAULTS["offline_after_seconds"]
+    )
 
     # ---- 文件策略（作为默认值下发给 Agent，Agent 侧有等价内置默认）----
     max_file_size: int = 2 * 1024 * 1024

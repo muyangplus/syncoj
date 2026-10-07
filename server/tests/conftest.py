@@ -103,7 +103,13 @@ def scan_entry(path: str, data: bytes, mtime: int = 1767225500) -> dict:
 
 
 def do_tick(client, token: str, entries, *, machine_id: str, **kwargs) -> dict:
-    """发一次 tick 并断言成功，返回响应体。"""
+    """发一次 tick 并断言成功，返回响应体。
+
+    ``stats`` 可以整体覆盖（"扫描根不存在"那条链路要往里面塞 ``scan_missing``），
+    其余字段与 Agent 的上报形状保持一致。
+    """
+    stats = {"disk_free": 10 ** 10, "last_error": None, "queue": 0}
+    stats.update(kwargs.pop("stats", {}) or {})
     payload = {
         "agent_version": "0.1.0",
         "machine_id": machine_id,
@@ -111,7 +117,7 @@ def do_tick(client, token: str, entries, *, machine_id: str, **kwargs) -> dict:
         "scan_root": "/home/student/code",
         "scan": entries,
         "partials": [],
-        "stats": {"disk_free": 10 ** 10, "last_error": None, "queue": 0},
+        "stats": stats,
     }
     payload.update(kwargs)
     response = client.post("/api/v1/agent/tick", json=payload, headers=agent_headers(token))

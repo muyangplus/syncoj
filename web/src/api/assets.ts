@@ -25,13 +25,28 @@ export const assetApi = {
   /**
    * 上传一个待下发文件。
    *
-   * 服务端**原样落盘、不解压**：题面与样例都是 zip，密码由教师当成普通资产
-   * 一起下发（`password.txt`）。系统不碰密码，也不需要知道它。
+   * 默认**原样落盘、不解压**：题面与样例本来就是 zip，密码由教师当成普通资产
+   * 一起下发（`password.txt`）。
+   *
+   * `packaging.packageZip=true` 时反过来：服务端直接把字节包成 zip 再落盘
+   * （成员名 = 原文件名，资产名 = `<原基名>.zip`），并写/更新一份
+   * `password.txt`。`zipPassword` 留空 = 服务端生成一个随机密码；上传回执是
+   * `AssetOut`，里面**没有**密码字段 —— 想抄下来只能去读那份 `password.txt`。
    */
-  upload: (contestId: number, file: File, kind = 'testdata') => {
+  upload: (
+    contestId: number,
+    file: File,
+    kind = 'testdata',
+    packaging: { packageZip?: boolean; zipPassword?: string } = {},
+  ) => {
     const form = new FormData()
     form.append('file', file)
     form.append('kind', kind)
+    // 不打包就不带这两个字段：服务端的默认值就是"不打包"。
+    if (packaging.packageZip) {
+      form.append('package_zip', 'true')
+      if (packaging.zipPassword) form.append('zip_password', packaging.zipPassword)
+    }
     return request<AssetOut>(paths.contestAssets(contestId), { method: 'POST', form })
   },
 
@@ -83,20 +98,25 @@ export const assetApi = {
   /**
    * 这个 zip 现在有没有密码。
    *
-   * 只读 zip 的标志位（服务端不解压、不解密任何成员）。不是 zip 的文件会拿到
-   * 400 `asset_not_zip`，所以界面应当在**打开对话框之前**先问一次 —— 否则会出现
-   * "弹出密码框、输完才说这不是 zip"。
+   * 只读 zip 的标志位（服务端不解压、不解密任何成员）。**不是 zip 的文件会拿到
+   * 400 `asset_not_zip`** —— 那不是失败，而是"该走打包"的信号（见
+   * `setZipPassword`）。界面应当在打开对话框之前先问一次，而不是拿扩展名猜：
+   * 一个叫 `.pdf` 的文件可能真是个包，一个叫 `.zip` 的文件也可能不是。
    */
   getZipPassword: (contestId: number, assetId: number) =>
     request<AssetZipPasswordOut>(paths.assetZipPassword(contestId, assetId)),
 
   /**
-   * 给 zip 打密码 / 改密码（InfoZIP 传统加密，学生机上的 Archive Manager 认这一种）。
+   * 给 zip 打密码 / 改密码；**资产本来不是 zip 时，先把它打包成 zip**。
    *
    * 已经加密的包必须给 `old_password`（旧密码就在之前那份 password.txt 里）；
    * `generate=true` 时服务端用 `secrets` 生成一个不含易混字符的随机密码。
    * 回执里的 `password` 是**唯一一次**回显 —— 之后想再查只能读
    * `password_asset` 那份 password.txt（服务端不另存密码）。
+   *
+   * `packaged` 区分这次是"打包"还是"改密码"：只有打包会把
+   * `asset.filename` 换成 `<原基名>.zip`（zip 里的成员名仍是原文件名），
+   * 回执与界面提示都要跟着它说，否则教师会以为文件"自己改名了"。
    *
    * **这是弱加密**：挡得住随手翻看，挡不住有心人。别把它当成保护机密数据的手段。
    */

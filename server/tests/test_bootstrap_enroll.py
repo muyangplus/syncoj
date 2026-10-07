@@ -248,7 +248,7 @@ def test_unclaimed_tick_says_not_claimed(
     body = do_tick(client, enrolled["token"], machine_id="m-1")
     assert body["claimed"] is False
     assert body["bound"] is False
-    assert body["next_tick_seconds"] == 60, "它本来就没事可做，用空闲周期"
+    assert body["next_tick_seconds"] == 30, "它本来就没事可做，用空闲周期"
 
 
 def test_unclaimed_machine_cannot_upload(

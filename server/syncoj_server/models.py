@@ -50,6 +50,7 @@ __all__ = [
     "DeployTarget",
     "JudgeRun",
     "EventLog",
+    "RuntimeSetting",
     "AgentRelease",
     "ContestStatus",
     "DeployStatus",
@@ -87,15 +88,15 @@ def iso_utc(value: Optional[datetime]) -> Optional[str]:
 
 
 def local_clock(value: datetime) -> str:
-    """把库里的 naive UTC 折算成**服务端本机时钟**的 ``HH:MM``。
+    """把库里的 naive UTC 折算成**显示时区**的 ``HH:MM``。
 
-    只给日志与提示语用（"本场考试已于 11:30 结束"）。库里一律是 naive UTC，
-    但这句话是给人看的：东八区的考场直接印 UTC 会看到早 8 小时的时间，而
-    "几点结束"恰恰是照着这句话行动的人唯一需要的数。服务端与考试机在同一间屋、
-    同时区，所以折算成本机时间就是墙上那只钟。
+    真正的实现在 :mod:`syncoj_server.timeutil`（那里解释了为什么不能再用进程
+    本地时区、以及 ``SYNCOJ_TZ`` 怎么配）。这里留一层转出，是为了让 ``models``
+    的读者仍然一眼看得到"这个模块提供哪些时间工具"，同时避免两处各写一份格式化。
     """
-    aware = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
-    return aware.astimezone().strftime("%H:%M")
+    from .timeutil import local_clock as _render
+
+    return _render(value)
 
 
 class ContestStatus:
@@ -316,8 +317,10 @@ class Problem(Base, TimestampMixin):
 
     **代码路径规范是可配的**：``file_patterns`` 是一组 glob 模式，用于把回收
     上来的文件归到这道题。留空表示用服务端配置的默认模式
-    （``default_file_pattern``，出厂值是 ``{ident}/**``）。改标识时模式里的
-    ``{ident}`` 会跟着走，不用手工同步。
+    （``default_file_pattern``，出厂值是 ``{ident}/{ident}.cpp`` —— 只认"题目
+    目录下与题目同名的那个源文件"。默认要窄：``{ident}/**`` 会把题面、数据、
+    说明一起当成选手代码收上来，而那是**教师显式写它**才该发生的事）。
+    改标识时模式里的 ``{ident}`` 会跟着走，不用手工同步。
     """
 
     __tablename__ = "problem"
@@ -406,6 +409,12 @@ class Agent(Base, TimestampMixin):
     #: 排查时那个时间比自己记一个状态位有用。心跳报告为"没有"时会被清空 ——
     #: 信任锚是会被卸载脚本删掉的东西，不能只增不减。
     release_public_key_at = Column(DateTime, nullable=True)
+    #: 最近一次心跳报告的"本机上不存在的扫描根"（JSON 数组，绝对路径，最多 5 条）。
+    #:
+    #: 存下来而不是只放内存，是因为服务端要用它做**状态变化**的判据：缺失出现时
+    #: 记一条 warning、恢复时记一条 info，而"这一次和上一次比有没有变"必须有上一次
+    #: 的值。列表为空与列是 NULL 在这里是同一件事（没有已知的缺失）。
+    scan_missing_json = Column(Text, nullable=True)
     #: 最近一次请求的**来源 IP**。
     #:
     #: 它存在的唯一理由是选手页的"自动匹配本机"：选手不输任何东西，服务端就靠
@@ -607,6 +616,27 @@ class EventLog(Base):
         Index("ix_event_ts", "ts"),
         Index("ix_event_contest_ts", "contest_id", "ts"),
     )
+
+
+class RuntimeSetting(Base):
+    """一项**运行参数**（心跳节奏、离线判定）。
+
+    为什么是 key-value 而不是"每个参数一列"：这三项是同一类东西（都是秒数、都由
+    同一个对话框改、都在同一个地方校验），而它们以后还会长（教师可能还要调
+    扫描上限之类）。一列一个参数的写法每加一项都要改表结构，而 key-value 只要
+    在 ``services/runtime_settings.py`` 的 ``DEFAULTS`` 里加一行。
+
+    代价是这一列没有类型约束 —— 所以读取侧一律走 ``load()``，它在那边做范围校验，
+    坏值退回出厂值，不让整个心跳 500。
+
+    **改完立即生效**：使用处每次现读，不缓存到启动时（见 ``load`` 的说明）。
+    """
+
+    __tablename__ = "runtime_setting"
+
+    key = Column(String(64), primary_key=True)
+    value = Column(String(64), nullable=False)
+    updated_at = Column(DateTime, default=utcnow, nullable=False)
 
 
 class AgentRelease(Base, TimestampMixin):

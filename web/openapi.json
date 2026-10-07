@@ -173,6 +173,13 @@
             "title": "Player No",
             "type": "string"
           },
+          "scan_missing": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Scan Missing",
+            "type": "array"
+          },
           "scan_root": {
             "anyOf": [
               {
@@ -509,10 +516,15 @@
       },
       "AssetZipPasswordSavedOut": {
         "additionalProperties": false,
-        "description": "打密码 / 改密码的回执。\n\n* ``asset``：重新打包后的 zip（同一个 asset id，``sha256``/``size`` 变了）。\n* ``password``：这次生效的密码（生成的或教师给的）—— 界面要立刻显示给教师\n  抄下来。这是它**唯一**一次被回显：之后想再查只能去读 ``password.txt``。\n* ``password_asset``：同步写好的 ``password.txt`` 文本资产。下发它仍然是\n  教师自己的动作（没有\"考试开始时自动下发\"那套机制），这里只是把入口指出来。\n* ``requeued``：**zip 这一个资产**被重排的机器台数（``done`` → ``pending``）。\n  ``password.txt`` 自己如果已经发出去过，也会被重排（同一套\"改内容\"语义），\n  但不计入这个数字 —— 界面那句\"包已重新排队给 N 台机器\"说的是包。",
+        "description": "打密码 / 改密码的回执。\n\n* ``asset``：重新打包后的 zip（同一个 asset id，``sha256``/``size`` 变了）。\n* ``password``：这次生效的密码（生成的或教师给的）—— 界面要立刻显示给教师\n  抄下来。这是它**唯一**一次被回显：之后想再查只能去读 ``password.txt``。\n* ``password_asset``：同步写好的 ``password.txt`` 文本资产。下发它仍然是\n  教师自己的动作（没有\"考试开始时自动下发\"那套机制），这里只是把入口指出来。\n* ``requeued``：**zip 这一个资产**被重排的机器台数（``done`` → ``pending``）。\n  ``password.txt`` 自己如果已经发出去过，也会被重排（同一套\"改内容\"语义），\n  但不计入这个数字 —— 界面那句\"包已重新排队给 N 台机器\"说的是包。\n* ``packaged``：这次是**把它打包成 zip**（原资产不是 zip）还是**给已有的 zip\n  改密码**。只有前者会把 ``asset.filename`` 换成 ``<原基名>.zip``，界面要靠\n  这个字段说清回执里的\"打包\"与\"改密码\"是两件事。",
         "properties": {
           "asset": {
             "$ref": "#/components/schemas/AssetOut"
+          },
+          "packaged": {
+            "default": false,
+            "title": "Packaged",
+            "type": "boolean"
           },
           "password": {
             "title": "Password",
@@ -629,6 +641,16 @@
           "kind": {
             "default": "testdata",
             "title": "Kind",
+            "type": "string"
+          },
+          "package_zip": {
+            "default": false,
+            "title": "Package Zip",
+            "type": "boolean"
+          },
+          "zip_password": {
+            "default": "",
+            "title": "Zip Password",
             "type": "string"
           }
         },
@@ -1680,7 +1702,7 @@
       },
       "FileClearIn": {
         "additionalProperties": false,
-        "description": "清代码台账。\n\n``purge=False``（默认）只打墓碑 —— 行还在、``?include_deleted=true`` 仍能\n查到，导出里也仍然带着（见 ``docs/api-conventions.md`` §5.2）。\n``purge=True`` 才连行一起删，只在\"这些记录本来就是误传\"时才该用。",
+        "description": "清代码台账。\n\n``purge=False``（默认）只打墓碑 —— 行还在、``?include_deleted=true`` 仍能\n查到，导出里也仍然带着（见 ``docs/reference/api-conventions.md`` §5.2）。\n``purge=True`` 才连行一起删，只在\"这些记录本来就是误传\"时才该用。",
         "properties": {
           "confirm": {
             "maxLength": 200,
@@ -2072,6 +2094,24 @@
           "problem"
         ],
         "title": "ManualScoreIn",
+        "type": "object"
+      },
+      "MetaOut": {
+        "additionalProperties": false,
+        "description": "全站共用的运行时元信息（免登录）。\n\n``display_utc_offset_minutes`` 是**服务端与前端唯一那个要一致的数**：界面上\n所有时间字符串都按它渲染，而不是按浏览器所在时区。教师从不与考区同时区的\n机器上打开管理界面时，后者会让整页时间差几个小时，而页面上完全看不出来。\n\n回的是**固定的分钟偏移**而不是 IANA 名：前端要能只靠一个数算出钟点；\nIANA 名需要一整个时区数据库才能解释，那是浏览器上的第二个真相源。",
+        "properties": {
+          "display_timezone": {
+            "default": "+08:00",
+            "title": "Display Timezone",
+            "type": "string"
+          },
+          "display_utc_offset_minutes": {
+            "default": 480,
+            "title": "Display Utc Offset Minutes",
+            "type": "integer"
+          }
+        },
+        "title": "MetaOut",
         "type": "object"
       },
       "Page_AgentRuntimeOut_": {
@@ -2739,7 +2779,7 @@
       },
       "PlayerImportOut": {
         "additionalProperties": false,
-        "description": "批量导入选手的结果。\n\n这是**动作结果**，不是集合读取 —— 所以它**不用列表信封**（见\n``docs/api-conventions.md`` §2：信封只属于 GET 集合）。\n返回 ``players`` 是因为调用方（导入界面）要拿到新建行的 id 才能\n接着做\"给这几个人应用名单\"\"批量配对\"之类的动作。",
+        "description": "批量导入选手的结果。\n\n这是**动作结果**，不是集合读取 —— 所以它**不用列表信封**（见\n``docs/reference/api-conventions.md`` §2：信封只属于 GET 集合）。\n返回 ``players`` 是因为调用方（导入界面）要拿到新建行的 id 才能\n接着做\"给这几个人应用名单\"\"批量配对\"之类的动作。",
         "properties": {
           "created": {
             "default": 0,
@@ -3143,7 +3183,7 @@
       },
       "ProblemUpsert": {
         "additionalProperties": false,
-        "description": "登记一道题。\n\n``ident`` 会同时成为目录名、代码文件名与成绩矩阵的列名，\n所以要按路径段的规则校验（服务端会做）。\n\n``file_patterns`` 是用于把回收的代码归到这道题的 glob 模式。\n留空表示用服务端的默认模式（出厂值 ``{ident}/**``）。",
+        "description": "登记一道题。\n\n``ident`` 会同时成为目录名、代码文件名与成绩矩阵的列名，\n所以要按路径段的规则校验（服务端会做）。\n\n``file_patterns`` 是用于把回收的代码归到这道题的 glob 模式。\n留空表示用服务端的默认模式（出厂值 ``{ident}/{ident}.cpp``：只认\"题目目录下\n与题目同名的那个源文件\"。要连整个题目目录一起收，显式写 ``{ident}/**``）。",
         "properties": {
           "file_patterns": {
             "items": {
@@ -3790,6 +3830,82 @@
         "title": "RosterOut",
         "type": "object"
       },
+      "RuntimeSettingsOut": {
+        "additionalProperties": false,
+        "description": "运行参数：心跳节奏与离线判定。\n\n三项都是**整间机房生效**的（服务端按它们决定下发给每台机器什么节奏、\n多久没心跳算离线），所以界面上要说清影响面。\n\n单位统一是秒。``tick_idle_seconds`` **同时是本地扫描周期** —— 这两件事在\nAgent 那边绑在一起（扫描发生在心跳里），界面上必须写成一项，不能拆成两个\n各自可调的旋钮（拆开会让\"心跳快了扫描也快了\"这件事从界面上消失）。",
+        "properties": {
+          "offline_after_seconds": {
+            "default": 90,
+            "maximum": 86400.0,
+            "minimum": 10.0,
+            "title": "Offline After Seconds",
+            "type": "integer"
+          },
+          "tick_active_seconds": {
+            "default": 2,
+            "maximum": 60.0,
+            "minimum": 1.0,
+            "title": "Tick Active Seconds",
+            "type": "integer"
+          },
+          "tick_idle_seconds": {
+            "default": 30,
+            "maximum": 3600.0,
+            "minimum": 5.0,
+            "title": "Tick Idle Seconds",
+            "type": "integer"
+          }
+        },
+        "title": "RuntimeSettingsOut",
+        "type": "object"
+      },
+      "RuntimeSettingsUpdate": {
+        "additionalProperties": false,
+        "description": "改运行参数。只放要改的项，没提到的保持当前值。\n\n这样界面改一项不必把另外两项也带上 —— 带上就得担心\"界面显示的旧值覆盖了\n别人刚改的值\"。\n\n**范围校验在这里做（422），跨字段那条在服务端做（400）**：范围是每一项自己的\n事，跨字段（离线必须大于空闲心跳）要看的是**改完之后**那一组值，而它取决于\n库里当前的另外两项 —— 那只能由服务端算。",
+        "properties": {
+          "offline_after_seconds": {
+            "anyOf": [
+              {
+                "maximum": 86400.0,
+                "minimum": 10.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Offline After Seconds"
+          },
+          "tick_active_seconds": {
+            "anyOf": [
+              {
+                "maximum": 60.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tick Active Seconds"
+          },
+          "tick_idle_seconds": {
+            "anyOf": [
+              {
+                "maximum": 3600.0,
+                "minimum": 5.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tick Idle Seconds"
+          }
+        },
+        "title": "RuntimeSettingsUpdate",
+        "type": "object"
+      },
       "ScanEntry": {
         "additionalProperties": false,
         "description": "一条扫描结果。**不含文件内容**，只有索引。",
@@ -4351,6 +4467,13 @@
             "minimum": 0.0,
             "title": "Queue",
             "type": "integer"
+          },
+          "scan_missing": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Scan Missing",
+            "type": "array"
           }
         },
         "title": "TickStats",
@@ -5436,7 +5559,7 @@
         ]
       },
       "post": {
-        "description": "上传一个待下发文件。\n\n走与服务端回收同一套内容寻址存储：相同内容只占一份磁盘。因此\"给全场下发\n同一份 500MB 测试点\"实际只消耗 500MB，而不是 50 × 500MB。",
+        "description": "上传一个待下发文件。\n\n走与服务端回收同一套内容寻址存储：相同内容只占一份磁盘。因此\"给全场下发\n同一份 500MB 测试点\"实际只消耗 500MB，而不是 50 × 500MB。\n\n``package_zip=true`` 时**磁盘上直接只存打包后的 zip**：成员名是原文件名，\n资产文件名是 ``<原基名>.zip``，并同步写/更新一份 ``password.txt``。这里刻意\n不做\"先把原文件存下来再改\"：那会凭空留下一份谁都不引用的原始 blob，而\"这个\n资产是什么\"从落盘那一刻起就只能是那个 zip。",
         "operationId": "upload_asset_api_v1_admin_contests__contest_id__assets_post",
         "parameters": [
           {
@@ -5654,7 +5777,7 @@
     },
     "/api/v1/admin/contests/{contest_id}/assets/{asset_id}/zip-password": {
       "get": {
-        "description": "这个 zip 现在有没有密码。\n\n判据是标志位（读 zip 目录，不读成员正文）。不是 zip 一律 400 而不是回\n``encrypted=false``：后者会让界面给一个非 zip 文件也画上「密码」按钮，\n点下去必然失败，而那时教师已经在输密码了。",
+        "description": "这个 zip 现在有没有密码。\n\n判据是标志位（读 zip 目录，不读成员正文）。不是 zip 就 400 ``asset_not_zip``：\n这一条 GET 回答的是\"包里有没有密码\"，对一份 pdf 它没有答案。界面拿到这个\n错误码会把动作切成「打包成 zip」（POST 对非 zip 是打包，不是拒绝）——\n「是不是 zip」由**内容**判定，比列表行上的扩展名可靠。",
         "operationId": "get_asset_zip_password_api_v1_admin_contests__contest_id__assets__asset_id__zip_password_get",
         "parameters": [
           {
@@ -5704,7 +5827,7 @@
         ]
       },
       "post": {
-        "description": "给 zip 打密码 / 改密码，并同步写一份 ``password.txt``。\n\n**这个密码是弱加密**：InfoZIP 传统加密（ZipCrypto）只挡得住随手翻看，\n挡不住有心人 —— 选它是因为学生机上的 Archive Manager 只认这一种\n（AES-256 的 zip 它打不开）。界面文案与这里的口径必须一致，不许写\"安全加密\"。\n\n**服务端不另外保存密码明文**：密码只写进 ``password.txt`` 那份文本资产，\n没有新增的密码列/表。因此\"密码丢了\"的答案就是\"去「文件下发」页读\npassword.txt\" —— 它是普通文本资产，教师随时能读回来、能看到、能再发一遍。\n审计事件里也刻意不写密码，否则等于多存了一份明文。\n\n改内容的语义与「在线改正文」完全一致（同一套 ``_requeue_done_targets``）：\n同一个 asset id 换 ``sha256``/``size``、把已经 ``done`` 的目标重排回\n``pending`` 并清零续传偏移、写一条审计事件。区别只是\"新内容\"不是一段文本，\n而是\"用新密码重新打包的 zip\"。",
+        "description": "给 zip 打密码 / 改密码；不是 zip 时先把它打包成 zip，并同步写 ``password.txt``。\n\n**这个密码是弱加密**：InfoZIP 传统加密（ZipCrypto）只挡得住随手翻看，\n挡不住有心人 —— 选它是因为学生机上的 Archive Manager 只认这一种\n（AES-256 的 zip 它打不开）。界面文案与这里的口径必须一致，不许写\"安全加密\"。\n\n**服务端不另外保存密码明文**：密码只写进 ``password.txt`` 那份文本资产，\n没有新增的密码列/表。因此\"密码丢了\"的答案就是\"去「文件下发」页读\npassword.txt\" —— 它是普通文本资产，教师随时能读回来、能看到、能再发一遍。\n审计事件里也刻意不写密码，否则等于多存了一份明文。\n\n改内容的语义与「在线改正文」完全一致（同一套 ``_requeue_done_targets``）：\n同一个 asset id 换 ``sha256``/``size``、把已经 ``done`` 的目标重排回\n``pending`` 并清零续传偏移、写一条审计事件。区别只是\"新内容\"不是一段文本，\n而是\"用新密码重新打包的 zip\"。资产本来不是 zip 时，除了重新打包，文件名还会\n换成 ``<原基名>.zip``（zip 里的成员名仍是原文件名）—— 这是**同一个资产**的\n就地替换，不是新建一条；回执里的 ``packaged`` 说明这次走的是哪条路。",
         "operationId": "set_asset_zip_password_api_v1_admin_contests__contest_id__assets__asset_id__zip_password_post",
         "parameters": [
           {
@@ -6077,7 +6200,7 @@
     },
     "/api/v1/admin/contests/{contest_id}/files/clear": {
       "post": {
-        "description": "清理代码台账。\n\n这是**软删除**（打墓碑）的批量版本：行先删掉，``blobs/`` 里的内容只在\n没有任何记录再引用它时才释放 —— 见 ``docs/api-conventions.md`` §5.2。\n\n默认 ``purge=false``：只清掉**已经消失**的墓碑记录（选手删了文件之后留下的\n那些），这不会影响任何还在的东西 —— 也是这个操作最常见的用途。\n\n``purge=true`` 会连活的一起删，但**机器还在报的文件下一轮就会回来**，\n所以它只适合\"比赛结束后归档完毕、准备清场\"。界面上的按钮要写明这一点。\n\n确认内容是**场次 slug**。",
+        "description": "清理代码台账。\n\n这是**软删除**（打墓碑）的批量版本：行先删掉，``blobs/`` 里的内容只在\n没有任何记录再引用它时才释放 —— 见 ``docs/reference/api-conventions.md`` §5.2。\n\n默认 ``purge=false``：只清掉**已经消失**的墓碑记录（选手删了文件之后留下的\n那些），这不会影响任何还在的东西 —— 也是这个操作最常见的用途。\n\n``purge=true`` 会连活的一起删，但**机器还在报的文件下一轮就会回来**，\n所以它只适合\"比赛结束后归档完毕、准备清场\"。界面上的按钮要写明这一点。\n\n确认内容是**场次 slug**。",
         "operationId": "clear_source_files_api_v1_admin_contests__contest_id__files_clear_post",
         "parameters": [
           {
@@ -6602,7 +6725,7 @@
         ]
       },
       "post": {
-        "description": "批量导入/更新选手。按 ``player_no`` 幂等 upsert。\n\n**这不是集合读取，所以不用列表信封**（``docs/api-conventions.md`` §2）：\n它返回的是\"这次导入干了什么\"，前端要显示的是 ``created``/``updated``。\n顺带回传受影响的行，是因为导入之后常常紧接着\"应用名单\"\"批量配对\"，\n调用方需要那些 id，不该再查一次。",
+        "description": "批量导入/更新选手。按 ``player_no`` 幂等 upsert。\n\n**这不是集合读取，所以不用列表信封**（``docs/reference/api-conventions.md`` §2）：\n它返回的是\"这次导入干了什么\"，前端要显示的是 ``created``/``updated``。\n顺带回传受影响的行，是因为导入之后常常紧接着\"应用名单\"\"批量配对\"，\n调用方需要那些 id，不该再查一次。",
         "operationId": "import_players_api_v1_admin_contests__contest_id__players_post",
         "parameters": [
           {
@@ -8890,6 +9013,68 @@
         ]
       }
     },
+    "/api/v1/admin/settings/runtime": {
+      "get": {
+        "description": "当前生效的运行参数。\n\n这三项决定\"机器多久心跳一次\"与\"多久没心跳算离线\"，都是**整间机房**的节奏，\n所以界面要能一眼看到当前值 —— 否则教师只能靠列表上的刷新间隔去猜。",
+        "operationId": "get_runtime_settings_api_v1_admin_settings_runtime_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeSettingsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Runtime Settings",
+        "tags": [
+          "admin"
+        ]
+      },
+      "put": {
+        "description": "改运行参数。**改完立即生效，不用重启。**\n\n心跳处理与离线判定每次都现读这三项（``services/runtime_settings.py`` 的\n``load``），所以下一轮心跳就按新节奏走；下发给 Agent 的策略本来每轮都带，\n机器那边也跟着换。\n\n改一行配置会改变整间机房的节奏，所以**记一条审计**（谁、把哪一项从多少改成\n多少）—— 事后看到\"心跳突然变密了\"时，这是唯一能回答\"谁动的\"的东西。",
+        "operationId": "update_runtime_settings_api_v1_admin_settings_runtime_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RuntimeSettingsUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeSettingsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Runtime Settings",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/api/v1/agent/assets/{asset_id}": {
       "get": {
         "operationId": "download_asset_api_v1_agent_assets__asset_id__get",
@@ -9245,6 +9430,28 @@
         "summary": "Tick",
         "tags": [
           "agent"
+        ]
+      }
+    },
+    "/api/v1/meta": {
+      "get": {
+        "description": "全站共用的运行时元信息。\n\n``display_utc_offset_minutes`` 是**服务端与前端必须一致**的那个数：界面上\n所有时间字符串都按它渲染。让前端自己猜（例如拿浏览器时区）的后果是教师的\n笔记本不在东八区时，整页时间都差几个小时 —— 而页面上完全看不出来。",
+        "operationId": "get_meta_api_v1_meta_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetaOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Meta",
+        "tags": [
+          "meta"
         ]
       }
     },

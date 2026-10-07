@@ -71,9 +71,15 @@ export type AssetTextEditIn = S['AssetTextEditIn']
 export type AssetTextSavedOut = S['AssetTextSavedOut']
 /** zip 的加密状态。GET 只读标志位（不解压、不解密）—— 不是 zip 会拿到 400。 */
 export type AssetZipPasswordOut = S['AssetZipPasswordOut']
-/** 给 zip 打密码/改密码。已经加密时必须给 `old_password`。 */
+/**
+ * 给 zip 打密码/改密码。已经加密时必须给 `old_password`；资产本来不是 zip 时，
+ * 服务端会先把它打包成 zip（同一个 asset id，文件名换成 `<原基名>.zip`）。
+ */
 export type AssetZipPasswordIn = S['AssetZipPasswordIn']
-/** 回执：新密码、重新打包后的资产、以及同步写好的 password.txt。 */
+/**
+ * 回执：新密码、重新打包后的资产、以及同步写好的 password.txt。
+ * `packaged` 区分这次是"打包成 zip"还是"给已有 zip 改密码"。
+ */
 export type AssetZipPasswordSavedOut = S['AssetZipPasswordSavedOut']
 export type DeployCreate = S['DeployCreate']
 export type DeployTaskOut = S['DeployTaskOut']
@@ -94,6 +100,13 @@ export type InstallLedgerOut = S['InstallLedgerOut']
 export type UpgradeStatusOut = S['UpgradeStatusOut']
 
 export type SimpleAck = S['SimpleAck']
+
+/** 全站运行时常量（`GET /api/v1/meta`）。免登录，三个前台页面都读它。 */
+export type MetaOut = S['MetaOut']
+
+/** 运行参数：心跳节奏与离线判定。整间机房生效，改完立即生效。 */
+export type RuntimeSettingsOut = S['RuntimeSettingsOut']
+export type RuntimeSettingsUpdate = S['RuntimeSettingsUpdate']
 
 /** 成绩单元格的解析状态。定义在后端 `models.JudgeRun.parse_status`。 */
 export type ParseStatus = 'ok' | 'unparsed' | 'manual' | 'missing'

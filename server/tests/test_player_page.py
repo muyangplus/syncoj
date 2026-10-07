@@ -526,6 +526,194 @@ def test_页面上能看见开考与结束时间(client, contest, admin_headers,
     assert body["contest"]["ends_at"] == "2026-03-01T03:00:00Z"
 
 
+def test_派发即可见_机器还没下载完也能看到公告(client, contest, admin_headers, player):
+    """公告**派发即可见**，不等机器下载完成。
+
+    现场那句话是"下发的同时也显示在选手页面上"。少实现这一半的后果很具体：教师
+    刚发完通知，学生在页面上一片空白，于是全场举手问"老师是不是还没发" —— 而公告
+    常常是"XX 号同学请留下"这类有时效的话。
+
+    这条同时把 ``DeployTarget.status`` 钉在"还没完成"上：断言的是"没下载也能看见"，
+    而不是"恰好这次能看见"。
+    """
+    body = "# 考场须知\n\n开考 30 分钟内不准离场。"
+    asset = text_asset(client, contest, admin_headers, "NOTICE.md", body)
+    deploy_to(client, contest, admin_headers, asset["id"], [player["id"]])
+
+    payload = fetch(client).json()
+
+    assert payload["notice"] == {"filename": "NOTICE.md", "content": body}
+    # 这台机器一次心跳都还没来过 —— 下发目标停在 pending，而公告已经在页面上
+    assert [item["status"] for item in payload["assets"]] == ["pending"]
+
+
+def test_机器收完之后公告照旧在(client, contest, admin_headers, player, enrolled):
+    """反过来那一半：下发完成之后公告不会消失（判据与下载状态无关）。"""
+    body = "考前 15 分钟进场。"
+    asset = text_asset(client, contest, admin_headers, "NOTICE.md", body)
+    deploy_to(client, contest, admin_headers, asset["id"], [player["id"]])
+
+    # 机器报一次心跳，声明这个资产已经下载完整 —— 服务端把目标标成 done
+    tick(
+        client,
+        enrolled["token"],
+        [],
+        machine_id=enrolled["machine_id"],
+        completed_assets=[asset["id"]],
+    )
+
+    payload = fetch(client).json()
+
+    assert payload["notice"]["content"] == body
+    assert [item["status"] for item in payload["assets"]] == ["done"]
+
+
+def test_没派发公告时整块不存在(client, contest, admin_headers, player):
+    """一份都没派发 → ``notice`` 是 ``null``，页面整块不渲染（不是空标题）。"""
+    payload = fetch(client).json()
+
+    # 连一个"有公告但内容为空"的对象都不该出现 —— 前端只判一次"有没有"
+    assert "notice" in payload
+    assert payload["notice"] is None
+
+
+def test_下发别的文件不算公告(client, contest, admin_headers, player):
+    """只有 ``NOTICE.md`` 才算公告；其它文件再多也不该点亮那一块。"""
+    asset = upload_asset(client, contest, admin_headers, "须知.txt", b"not a notice")
+    deploy_to(client, contest, admin_headers, asset["id"], [player["id"]])
+
+    payload = fetch(client).json()
+
+    assert payload["notice"] is None
+    assert [item["filename"] for item in payload["assets"]] == ["须知.txt"]
+
+
+# --------------------------------------------------------------------------- #
+# 倒计时：基准必须是服务端时间
+# --------------------------------------------------------------------------- #
+
+
+def _epoch(iso: str) -> int:
+    """带 ``Z`` 的 ISO → Unix 秒。与前端那句 ``new Date(iso).getTime() / 1000`` 同一个意思。"""
+    from datetime import datetime, timezone
+
+    return int(
+        datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(timezone.utc).timestamp()
+    )
+
+
+def set_window(client, admin_headers, contest, starts_at, ends_at):
+    patch = client.patch(
+        "/api/v1/admin/contests/%d" % contest["id"],
+        json={"starts_at": starts_at, "ends_at": ends_at},
+        headers=admin_headers,
+    )
+    assert patch.status_code == 200, patch.text
+
+
+def countdown_state(server_now: int, client_now: int, starts: int, ends: int) -> str | None:
+    """把选手页 ``PlayerView.vue`` 里那段倒计时**按同一套算法**再写一遍。
+
+    纯函数，形参就是"服务端此刻的 Unix 秒"与"这台机器自己以为的 Unix 秒"：
+
+    * 页面拿到响应时算出 ``offset = server_time - Date.now()``；
+    * 之后每秒只动本机时钟：``serverNow = clientNow + offset``。
+
+    于是无论本机时钟快还是慢，``clientNow + offset`` 都等于服务端那一刻往后走的
+    真实秒数 —— 这就是"考生改本机时钟骗不到倒计时"的全部依据。
+
+    返回三态之一（与页面上那三句话一一对应），不适用时返回 ``None``。
+    """
+    offset = server_now - client_now
+    now = client_now + offset
+    if now < starts:
+        return "before"
+    if now >= ends:
+        return "ended"
+    return "running"
+
+
+def countdown_text(server_now: int, client_now: int, starts: int, ends: int) -> str | None:
+    """同上的"显示成什么"。用于断言跨日/大数不出现负数或溢出。"""
+    offset = server_now - client_now
+    now = client_now + offset
+    if now < starts:
+        return "距开考 %d" % (starts - now)
+    if now >= ends:
+        return "已结束"
+    return "距结束 %d" % (ends - now)
+
+
+def test_未开考时基准是服务端时间而不是本机时钟(client, contest, admin_headers, player):
+    """倒计时的**基准**必须是 ``server_time``，不是浏览器那只钟。
+
+    选手把本机时钟往前拨两小时不该让"距开考"变短 —— 页面上的剩余秒数只由
+    **服务端时间**与开考时刻决定。所以这里拿同一个响应，模拟客户端时钟快/慢
+    各一小时（以及跨日、跨年），三态与剩余秒数必须完全一样。
+    """
+    set_window(client, admin_headers, contest, "2999-01-01T00:00:00Z", "2999-01-01T03:00:00Z")
+
+    body = fetch(client).json()
+    server_now = body["server_time"]
+    starts = _epoch(body["contest"]["starts_at"])
+    ends = _epoch(body["contest"]["ends_at"])
+
+    assert starts > server_now, "这一档要求还没开考"
+    baseline = countdown_text(server_now, server_now, starts, ends)
+
+    for skew in (-7200, -3600, 0, 3600, 7200):
+        client_now = server_now + skew
+        assert countdown_state(server_now, client_now, starts, ends) == "before"
+        # 本机时钟偏多少，显示出来的"距开考"都必须一模一样
+        assert countdown_text(server_now, client_now, starts, ends) == baseline
+
+
+def test_进行中时该算的是距结束(client, contest, admin_headers, player):
+    """进行中 = 已经开考、还没结束 → 页面上是"距结束"，而且客户端偏多少都一样。"""
+    set_window(client, admin_headers, contest, "2000-01-01T00:00:00Z", "2999-01-01T03:00:00Z")
+
+    body = fetch(client).json()
+    server_now = body["server_time"]
+    starts = _epoch(body["contest"]["starts_at"])
+    ends = _epoch(body["contest"]["ends_at"])
+
+    assert starts <= server_now < ends, "这一档要求现在就在时间窗之内"
+    baseline = countdown_text(server_now, server_now, starts, ends)
+
+    for skew in (-3600, 0, 3600):
+        client_now = server_now + skew
+        assert countdown_state(server_now, client_now, starts, ends) == "running"
+        assert countdown_text(server_now, client_now, starts, ends) == baseline
+        assert "距结束" in countdown_text(server_now, client_now, starts, ends)
+
+
+def test_已结束时不再给剩余时间(client, contest, admin_headers, player):
+    """已结束 = ``now >= ends_at`` → 页面上写「已结束」，不给负数倒计时。"""
+    set_window(client, admin_headers, contest, "2000-01-01T00:00:00Z", "2000-01-01T03:00:00Z")
+
+    body = fetch(client).json()
+    server_now = body["server_time"]
+    starts = _epoch(body["contest"]["starts_at"])
+    ends = _epoch(body["contest"]["ends_at"])
+
+    assert server_now >= ends
+    for skew in (-3600, 0, 3600):
+        client_now = server_now + skew
+        assert countdown_state(server_now, client_now, starts, ends) == "ended"
+        assert countdown_text(server_now, client_now, starts, ends) == "已结束"
+
+
+def test_倒计时三态在边界上不重不漏() -> None:
+    """开考那一刻与结束那一刻的归属必须唯一 —— 两边都用闭区间会让"距结束"闪一下负数。"""
+    starts, ends = 1_800_000_000, 1_800_003_600
+
+    # 服务端时间 = 开考前 1 秒 / 开考那一刻 / 结束前 1 秒 / 结束那一刻
+    assert countdown_state(starts - 1, starts - 1, starts, ends) == "before"
+    assert countdown_state(starts, starts, starts, ends) == "running"
+    assert countdown_state(ends - 1, ends - 1, starts, ends) == "running"
+    assert countdown_state(ends, ends, starts, ends) == "ended"
+
+
 def test_服务端时间是真正的_unix_秒(client, contest, player):
     """``utcnow()`` 是 naive UTC，取 epoch 前必须补回 tzinfo。
 

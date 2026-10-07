@@ -136,6 +136,16 @@ ERROR_CODES = {
     "zip_password_required": "这个包已经有密码了，改密码要先给旧密码",
     "zip_password_wrong": "旧密码不对，这个包没有被改动",
     "zip_password_failed": "重新打包这个 zip 失败",
+    #: ``password.txt`` 是系统自己生成的密码文件，**不许再被打成 zip**：
+    #: 打包会同步写一份新的 ``password.txt``，于是这个文件能自己滚下去
+    #: （password.zip → 新的 password.txt → 再打包 → …）。界面已经不出那个动作了，
+    #: 这个码守的是"绕过界面直接调接口"那条路。
+    "asset_is_password_file": "password.txt 是系统生成的密码文件，不打成 zip",
+    #: 下面两个码是 zip 那半引入的，但一直没登记进清单 —— 双向守卫（
+    #: ``test_errors.py::test_every_code_sent_by_the_server_is_registered``）
+    #: 在本次改动里把它们抓了出来：源码里在抛，清单里没有。
+    "asset_not_found": "这个资产不在台账里",
+    "zip_package_failed": "打包这个 zip 失败",
     "release_not_signed": "服务端没有配置发布签名私钥，无法提供升级",
     "release_trust_anchor_missing": "本机没有要内嵌进包里的发布公钥，打出的包机器验不了签名",
     "release_source_missing": "本机没有可用于构建的 Agent 源码",
@@ -239,6 +249,10 @@ FIELD_LABELS = {
     "confirm": "确认名称",
     "confirm_name": "确认名称",
     "kind": "种类",
+    # 运行参数（心跳节奏与离线判定）
+    "tick_idle_seconds": "空闲心跳（秒）",
+    "tick_active_seconds": "有活心跳（秒）",
+    "offline_after_seconds": "离线判定（秒）",
     # 题目
     "ident": "题目标识",
     "title": "标题",

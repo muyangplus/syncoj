@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "description": "SyncOJ 管理界面",
+  "license": "Apache-2.0",
   "scripts": {
     "dev": "vite",
     "build": "npm run check:routes && npm run typecheck && vite build",

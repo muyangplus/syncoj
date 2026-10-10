@@ -37,4 +37,4 @@ python -m venv .venv && .venv/Scripts/pip install -e "server[dev]"   # Linux: .v
 | 想改设计、想知道"当初否掉了什么" | [`docs/design/`](docs/design/) · [`docs/decisions/`](docs/decisions/) |
 老文档里的 `DESIGN.md §X.Y` 引用仍然有效：[`DESIGN.md`](DESIGN.md) 只剩一张「§ 编号
 → 新文件」的映射表。与教科书式做法不同的三处（零依赖、轮询、每次 tick 上报全量
-索引）及其理由见 ADR。`docs/**` 下每个文件都列在 `docs/README.md`。
+索引）及其理由见 ADR。`docs/**` 下每个文件都列在 `docs/README.md`。许可证 Apache-2.0（[`LICENSE`](LICENSE)）；怎么改这个仓库见 [`CONTRIBUTING.md`](CONTRIBUTING.md)，安全问题怎么报见 [`SECURITY.md`](SECURITY.md)。

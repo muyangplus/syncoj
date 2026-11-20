@@ -21,6 +21,7 @@ import base64
 import hashlib
 import json
 import logging
+import re
 import os
 import shutil
 import subprocess
@@ -36,10 +37,33 @@ __all__ = [
     "generate_keypair",
     "openssl_available",
     "parse_version",
+    "validate_release_version",
     "write_public_key_json",
     "b64url_encode",
     "b64url_decode",
 ]
+
+
+#: 发布版本号的形状白名单：数字段 + 可选 ``-rc1`` / ``+build.7`` 后缀。
+#:
+#: Agent 会把版本号直接拼进路径（下载落点、``releases/<v>/``），所以它那边
+#: 对形状有一道白名单（``syncoj_agent.upgrade.RELEASE_VERSION_RE``），不合形状的
+#: 清单**整份拒收**。这里在发布时用同一个形状把关：否则教师能发出一个
+#: "服务端接受、所有机器静默拒收"的版本。两边是**独立实现**，由
+#: ``test_signing`` 里的对账用例守住一致。
+RELEASE_VERSION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)*(?:[-+][0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$")
+MAX_RELEASE_VERSION_LENGTH = 64
+
+
+def validate_release_version(text: str) -> Tuple[int, ...]:
+    """形状合法且可比较则返回 :func:`parse_version` 的结果，否则抛 ``ValueError``。"""
+    if not isinstance(text, str):
+        raise ValueError("版本号必须是字符串")
+    if len(text) > MAX_RELEASE_VERSION_LENGTH or not RELEASE_VERSION_RE.match(text):
+        raise ValueError(
+            "版本号形状不合法：%r（只允许数字段加可选的 -rc1 / +build.7 这类后缀）" % text[:80]
+        )
+    return parse_version(text)
 
 
 def parse_version(text: str) -> Tuple[int, ...]:

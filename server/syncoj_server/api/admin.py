@@ -159,7 +159,7 @@ from ..services import (
     zipcrypto,
 )
 from ..services.deploy import validate_dest_template
-from ..services.signing import parse_version
+from ..services.signing import validate_release_version
 from ..storage import BlobTooLarge, HashMismatch
 from .deps import PageParams, get_ctx
 
@@ -5408,7 +5408,7 @@ def build_release(
     if not version:
         raise HTTPException(status_code=400, detail="必须指定版本号")
     try:
-        parse_version(version)
+        validate_release_version(version)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="版本号不合法: %s" % exc)
 
@@ -5554,7 +5554,7 @@ def upload_release(
         raise HTTPException(status_code=400, detail="必须指定版本号")
 
     try:
-        parse_version(version)
+        validate_release_version(version)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="版本号不合法: %s" % exc)
 

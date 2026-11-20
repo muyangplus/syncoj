@@ -4036,6 +4036,22 @@ export interface components {
             /** Size */
             size: number;
         };
+        /**
+         * ScanIdentity
+         * @description 这一轮的扫描根是按哪个身份展开的（Agent 的 ``{player_no}`` / ``{contest_slug}``）。
+         */
+        ScanIdentity: {
+            /**
+             * Contest Slug
+             * @default
+             */
+            contest_slug: string;
+            /**
+             * Player No
+             * @default
+             */
+            player_no: string;
+        };
         /** ScoreCellOut */
         ScoreCellOut: {
             /** Detail */
@@ -4171,6 +4187,7 @@ export interface components {
             scan_complete: boolean;
             /** Scan Root */
             scan_root?: string | null;
+            scanned_for?: components["schemas"]["ScanIdentity"] | null;
             stats?: components["schemas"]["TickStats"];
             /** Ts */
             ts: number;

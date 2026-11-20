@@ -83,6 +83,8 @@ def build_fixture() -> Dict[str, Any]:
             "scan_missing": ["/home/student/notyet"],
         },
         completed_assets=[7],
+        # 扫描根按哪个身份展开：放一份真实取值，服务端的 ScanIdentity 才有东西可校验
+        scanned_for={"player_no": "S001", "contest_slug": "mock-1"},
     )
 
     return {

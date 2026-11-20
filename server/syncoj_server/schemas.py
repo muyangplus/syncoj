@@ -188,6 +188,13 @@ class TickStats(_Base):
     scan_missing: List[str] = Field(default_factory=list)
 
 
+class ScanIdentity(_Base):
+    """这一轮的扫描根是按哪个身份展开的（Agent 的 ``{player_no}`` / ``{contest_slug}``）。"""
+
+    player_no: str = Field(default="", max_length=64)
+    contest_slug: str = Field(default="", max_length=128)
+
+
 class TickRequest(_Base):
     agent_version: Optional[str] = Field(default=None, max_length=32)
     machine_id: str = Field(min_length=1, max_length=128)
@@ -216,6 +223,11 @@ class TickRequest(_Base):
     #: 缺省 ``False`` 是有意的：老版本 Agent 不报这个字段，而"没报"与"没有"
     #: 在这里该得到同一个结论（当作验不了），不能乐观地假定它有。
     release_public_key: bool = False
+    #: 这一轮的扫描根按哪个身份展开。与服务端此刻解析出的身份不同 = 机器刚被
+    #: 改派 / 换了场次，这份扫描是**上一个人**的目录：服务端拒收本轮对账（不把
+    #: 它记进新身份的台账、不要求上传），响应里带上新身份，Agent 重算扫描根。
+    #: 缺省（老 Agent、测试夹具）按"一致"处理。
+    scanned_for: Optional[ScanIdentity] = None
     stats: TickStats = Field(default_factory=TickStats)
 
 

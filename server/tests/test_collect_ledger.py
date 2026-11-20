@@ -149,3 +149,42 @@ def test_迁移_013_用_sha256_回填最近一次扫描(workdir: Path) -> None:
     engine.dispose()
     assert version >= 13
     assert [(r[0], r[2]) for r in rows] == [("a.cpp", "a" * 64), ("b.cpp", "b" * 64)]
+
+
+# --------------------------------------------------------------------------- #
+# 扫描是按别人的身份展开的（机器刚被改派）：整份不对账
+# --------------------------------------------------------------------------- #
+
+
+def test_按别人的身份展开的扫描整份拒收(client, enrolled, app) -> None:
+    """机器刚从 S001 改派到 S002 的那一轮，Agent 送来的还是 S001 目录的扫描。
+
+    服务端此刻解析出的身份是新的那个人；把这份扫描记进来，就是把上一个人的代码
+    写进新身份的台账并要求上传。这一轮必须整份拒收，响应照常带回新身份。
+    """
+    token, mid = enrolled["token"], enrolled["machine_id"]
+
+    body = tick(
+        client, token, [entry(PATH, V1)], machine_id=mid,
+        scanned_for={"player_no": "S999", "contest_slug": "mock-1"},
+    )
+
+    assert body["need_upload"] == []
+    assert body["player_no"] == "S001"
+    with app.state.ctx.db.session() as session:
+        assert session.execute(select(SourceFile)).first() is None, "上一个人的文件进了台账"
+        categories = [
+            row[0] for row in session.execute(text("SELECT category FROM event_log"))
+        ]
+    assert "scan_identity_mismatch" in categories
+
+
+def test_身份一致的扫描照常对账(client, enrolled) -> None:
+    token, mid = enrolled["token"], enrolled["machine_id"]
+
+    body = tick(
+        client, token, [entry(PATH, V1)], machine_id=mid,
+        scanned_for={"player_no": "S001", "contest_slug": "mock-1"},
+    )
+
+    assert body["need_upload"] == [PATH]

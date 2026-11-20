@@ -237,6 +237,7 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
   "scan_complete": true,
   "partials": [ { "asset_id": 42, "bytes_done": 3145728 } ],
   "completed_assets": [42],
+  "scanned_for": { "player_no": "S001", "contest_slug": "mock-1" },
   "stats": { "disk_free": 10737418240, "last_error": null, "queue": 0 }
 }
 ```
@@ -247,6 +248,7 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
 | `scan_complete` | 本次扫描是否完整覆盖了所有根目录。**为 `false` 时服务端跳过删除判定** |
 | `partials` | 本地未完成下载的已下载字节数。Agent 重启后从磁盘实况重建 |
 | `completed_assets` | 本地已确认完整的下发资源 id。**显式上报**而不由服务端从 `partials` 推断 —— "分片不见了"既可能是下完了，也可能是被清理了 |
+| `scanned_for` | 这一轮的扫描根是按**哪个身份**展开的（`{player_no}` / `{contest_slug}`）。与服务端此刻解析出的身份不同 = 机器刚被改派或换了场次，这份扫描是上一个人的目录：服务端**整份不对账**（不进台账、`need_upload` 为空，记一条 `scan_identity_mismatch`），响应照常带新身份；Agent 发现身份变了就重算扫描根、清掉哈希缓存，本轮不再上传下载。缺省按"一致"处理 |
 | `stats.queue` | 待上报审计事件数 |
 
 > ⚠️ `scan` 必须是完整扫描。若 Agent 因权限错误等原因漏扫了一批文件，

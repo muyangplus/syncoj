@@ -329,6 +329,7 @@ def build_tick_payload(
     completed_assets: Optional[List[int]] = None,
     scan_complete: bool = True,
     release_public_key: bool = False,
+    scanned_for: Optional[Dict[str, str]] = None,
 ):
     """构造 tick 请求体。
 
@@ -388,6 +389,11 @@ def build_tick_payload(
         "release_public_key": bool(release_public_key),
         "stats": final_stats,
     }
+    if scanned_for is not None:
+        # 这一轮的扫描根是按**哪个身份**展开的（{player_no} / {contest_slug}）。
+        # 机器被改派后，服务端解析出的身份已经换了，而这份扫描还是上一个人的目录：
+        # 服务端据此拒收这一轮的对账，不把上一个人的代码记进新身份的台账。
+        payload["scanned_for"] = dict(scanned_for)
     return payload, oversize, errors
 
 
@@ -436,6 +442,9 @@ class Agent:
         #: 扫描根与上报前缀。注册拿到准考证号之后才能确定，见 _resolve_roots()
         self._roots: List[Tuple[str, Path]] = []
         self._roots_ready = False
+        #: 当前扫描根是按哪个身份 ``(player_no, contest_slug)`` 展开的。tick 回来的
+        #: 身份与它不同 = 机器被改派 / 换了场次，扫描根必须重算（见 cycle）。
+        self._roots_identity: Optional[Tuple[str, str]] = None
         #: 服务端可见路径 -> 本地绝对路径。每轮扫描后重建
         self._local_paths: Dict[str, Path] = {}
         #: 上一轮结束时机器处于哪一态。**状态变化**时才报审计事件 ——
@@ -578,6 +587,7 @@ class Agent:
         if self._roots_ready:
             return
         self._roots = self._resolve_roots(player_no, contest_slug)
+        self._roots_identity = (player_no, contest_slug)
         self._roots_ready = True
         log.info(
             "扫描目录: %s",
@@ -876,6 +886,44 @@ class Agent:
             self._emit("info", "pairing_wait", message)
         return state
 
+    def _identity_changed(self, tick: Dict[str, object]) -> bool:
+        """服务端解析出的身份与扫描根所用的身份不同 → 重置扫描根，跳过本轮余下的事。
+
+        曾经 READY→READY 时根本不接新身份：机器被改派（S001 → S002）或者两场之间
+        不重启，``_ensure_roots`` 的缓存让它一直扫 ``桌面/S001``、却以 S002 的身份
+        上传 —— S001 的代码进了 S002 的 ``source/``，S002 自己的一份也收不上来。
+
+        这一轮的上传与下载都跳过：服务端算 ``need_upload`` 用的是上一个人的扫描
+        （它也会因 ``scanned_for`` 对不上而拒收对账，见服务端 tick）。下一轮按新身份
+        重新展开扫描根、重新扫。
+        """
+        player_no = str(tick.get("player_no") or "")
+        contest_slug = str(tick.get("contest_slug") or "")
+        if not player_no or self._roots_identity is None:
+            return False
+        if (player_no, contest_slug) == self._roots_identity:
+            return False
+        old_player, old_contest = self._roots_identity
+        log.warning(
+            "身份已变化（%s/%s → %s/%s），重新计算扫描目录",
+            old_contest or "-", old_player, contest_slug or "-", player_no,
+        )
+        self._emit(
+            "info", "identity_changed",
+            "身份变化：%s/%s → %s/%s，扫描目录已重算" % (
+                old_contest or "-", old_player, contest_slug or "-", player_no,
+            ),
+        )
+        self._adopt_identity(tick)
+        self._roots_ready = False
+        self._roots = []
+        self._roots_identity = None
+        self._local_paths = {}
+        # 哈希缓存按扫描根下的相对路径记：换了根，同名同大小同 mtime 的文件会拿到
+        # 上一个人那份的指纹
+        self.cache.prune_to(set())
+        return True
+
     def _adopt_identity(self, data: Dict[str, object]) -> Credential:
         """从 tick 响应里接住当前状态以及随之而来的身份。
 
@@ -939,6 +987,7 @@ class Agent:
         self.client.set_token(None)
         self._roots_ready = False
         self._roots = []
+        self._roots_identity = None
         # 把状态记忆也清掉：重新注册之后可能直接就是另一态，
         # 不清的话"未配对 -> 未配对"这种变化会被当成没变化，审计事件就不报了
         self._last_state = None
@@ -1004,6 +1053,10 @@ class Agent:
             scan_complete=scan_complete,
             # 服务端据此决定"能不能发远程卸载授权"：没有信任锚的机器一定验不了签
             release_public_key=self._has_release_public_key(),
+            scanned_for=(
+                {"player_no": self._roots_identity[0], "contest_slug": self._roots_identity[1]}
+                if self._roots_identity is not None else None
+            ),
         )
 
     # ---------------------------------------------------------------- #
@@ -1689,6 +1742,9 @@ class Agent:
             # 同步状态并退回等待路径 —— 继续扫下去只会每轮都失败。
             log.warning("服务端报告状态为 %s，退回等待", remote_state)
             self._adopt_identity(tick)
+            return self._clamp_wait(tick.get("next_tick_seconds"))
+
+        if self._identity_changed(tick):
             return self._clamp_wait(tick.get("next_tick_seconds"))
 
         remote_config = tick.get("config")

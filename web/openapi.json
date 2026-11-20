@@ -4002,6 +4002,26 @@
         "title": "ScanEntry",
         "type": "object"
       },
+      "ScanIdentity": {
+        "additionalProperties": false,
+        "description": "这一轮的扫描根是按哪个身份展开的（Agent 的 ``{player_no}`` / ``{contest_slug}``）。",
+        "properties": {
+          "contest_slug": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Contest Slug",
+            "type": "string"
+          },
+          "player_no": {
+            "default": "",
+            "maxLength": 64,
+            "title": "Player No",
+            "type": "string"
+          }
+        },
+        "title": "ScanIdentity",
+        "type": "object"
+      },
       "ScoreCellOut": {
         "additionalProperties": false,
         "properties": {
@@ -4359,6 +4379,16 @@
               }
             ],
             "title": "Scan Root"
+          },
+          "scanned_for": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScanIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "stats": {
             "$ref": "#/components/schemas/TickStats"

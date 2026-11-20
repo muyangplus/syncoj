@@ -68,7 +68,7 @@ from ..services import (
     scan_missing,
     uninstall,
 )
-from ..services.collect import reconcile_scan, record_events
+from ..services.collect import CollectResult, reconcile_scan, record_events
 from ..services.deploy import collect_deploy_jobs
 from ..services.ratelimit import RateLimitExceeded
 from .deps import (
@@ -336,18 +336,44 @@ def tick(
     #: _take_diagnostics_request），所以下面两个 tick 分支各取一次。
     diagnostics_request = False
 
+    # 扫描根是按别人的身份展开的（机器刚被改派 / 换了场次）：这份扫描是上一个人的
+    # 目录，**整份不对账** —— 记进来就是把 S001 的代码写进 S002 的台账、再要求上传。
+    # 响应照常带上新身份，Agent 收到后重算扫描根，下一轮再扫。
+    scanned_for = payload.scanned_for
+    foreign_scan = scanned_for is not None and (
+        scanned_for.player_no != identity.player_no
+        or scanned_for.contest_slug != identity.contest_slug
+    )
+
     with ctx.db.session() as session:
-        # 「严格按题目预设回收」：只有**这一场配了题目**时才拿模式去过滤，
-        # 一场都没配就照旧全收（理由见 services/collect.reconcile_scan 的 docstring）
-        rules = problem_rules.rules_for(session, identity.contest_id, ctx.settings)
-        collect = reconcile_scan(
-            session,
-            identity.player_id,
-            payload.scan,
-            ctx.settings,
-            scan_complete=payload.scan_complete,
-            rules=rules,
-        )
+        if foreign_scan:
+            collect = CollectResult()
+            collect.events.append((
+                "info",
+                "scan_identity_mismatch",
+                "本轮扫描按 %s/%s 展开，当前身份是 %s/%s：已拒收，等机器重算扫描目录" % (
+                    scanned_for.contest_slug or "-", scanned_for.player_no,
+                    identity.contest_slug, identity.player_no,
+                ),
+                {
+                    "scanned_for": {
+                        "player_no": scanned_for.player_no,
+                        "contest_slug": scanned_for.contest_slug,
+                    },
+                },
+            ))
+        else:
+            # 「严格按题目预设回收」：只有**这一场配了题目**时才拿模式去过滤，
+            # 一场都没配就照旧全收（理由见 services/collect.reconcile_scan 的 docstring）
+            rules = problem_rules.rules_for(session, identity.contest_id, ctx.settings)
+            collect = reconcile_scan(
+                session,
+                identity.player_id,
+                payload.scan,
+                ctx.settings,
+                scan_complete=payload.scan_complete,
+                rules=rules,
+            )
         record_events(
             session,
             player_id=identity.player_id,
@@ -372,21 +398,24 @@ def tick(
             if payload.agent_version:
                 agent.agent_version = payload.agent_version
             _note_release_public_key(agent, payload.release_public_key, now)
-            _note_scan_missing(
-                session,
-                agent,
-                payload.stats.scan_missing,
-                player_id=identity.player_id,
-                contest_id=identity.contest_id,
-                now=now,
-            )
-            _note_scan_skipped(
-                session,
-                agent,
-                collect,
-                player_id=identity.player_id,
-                contest_id=identity.contest_id,
-            )
+            if not foreign_scan:
+                # 缺失的扫描根、被题目预设挡掉的文件都是"上一个人的目录"的事实，
+                # 拒收的那一轮不拿它们改写这台机器的状态
+                _note_scan_missing(
+                    session,
+                    agent,
+                    payload.stats.scan_missing,
+                    player_id=identity.player_id,
+                    contest_id=identity.contest_id,
+                    now=now,
+                )
+                _note_scan_skipped(
+                    session,
+                    agent,
+                    collect,
+                    player_id=identity.player_id,
+                    contest_id=identity.contest_id,
+                )
             uninstall_token = _pending_uninstall_token(ctx, agent, now)
             # 一次性标记在这里取走：本轮响应会带 true，库里同步清空
             diagnostics_request = _take_diagnostics_request(agent)

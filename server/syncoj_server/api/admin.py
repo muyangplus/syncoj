@@ -37,6 +37,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from ..services.player_no import player_no_problem
 from ..services.ratelimit import RateLimitExceeded
 from .. import keys
 from ..config import Settings
@@ -769,13 +770,10 @@ def import_roster_entries(
         for offset, item in enumerate(payload):
             line_no = offset + 1
             player_no = item.player_no.strip()
-            if not player_no:
+            problem = player_no_problem(player_no)
+            if problem:
                 result.skipped += 1
-                result.errors.append("第 %d 行：选手编号为空" % line_no)
-                continue
-            if len(player_no) > 64:
-                result.skipped += 1
-                result.errors.append("第 %d 行：选手编号超过 64 字符" % line_no)
+                result.errors.append("第 %d 行：%s" % (line_no, problem))
                 continue
             # 姓名字段在库里是 VARCHAR(64/32)，超了 SQLite 也不会报错，只会静默
             # 存进去。宁可在这里逐条拒绝 —— 同一份名单重新导一次就能修好
@@ -822,10 +820,9 @@ def update_roster_entry(
             raise HTTPException(status_code=404, detail="名单条目不存在")
 
         player_no = payload.player_no.strip()
-        if not player_no:
-            raise HTTPException(status_code=400, detail="选手编号不能为空")
-        if len(player_no) > 64:
-            raise HTTPException(status_code=400, detail="选手编号超过 64 字符")
+        problem = player_no_problem(player_no)
+        if problem:
+            raise HTTPException(status_code=400, detail=problem)
         too_long = _first_overlong(
             (payload.name, 64, "姓名"), (payload.seat, 32, "座位"), (payload.group_name, 64, "分组")
         )
@@ -1509,12 +1506,22 @@ def import_players(
         touched: List[Player] = []
         created = 0
         updated = 0
+        # 考号先整批验：这个接口没有逐条报错的回执，宁可整批拒绝，也不写进去一半
+        problems = [
+            "第 %d 条：%s" % (index + 1, problem)
+            for index, item in enumerate(payload)
+            for problem in [player_no_problem(item.player_no.strip())]
+            if problem
+        ]
+        if problems:
+            raise ApiError(400, "bad_request", "；".join(problems[:20]), {"errors": problems[:50]})
         for item in payload:
-            row = existing.get(item.player_no)
+            number = item.player_no.strip()
+            row = existing.get(number)
             if row is None:
-                row = Player(contest_id=contest_id, player_no=item.player_no)
+                row = Player(contest_id=contest_id, player_no=number)
                 session.add(row)
-                existing[item.player_no] = row
+                existing[number] = row
                 created += 1
             else:
                 updated += 1
@@ -1634,10 +1641,9 @@ def update_player(
             raise HTTPException(status_code=404, detail="选手不存在")
 
         player_no = payload.player_no.strip()
-        if not player_no:
-            raise HTTPException(status_code=400, detail="选手编号不能为空")
-        if len(player_no) > 64:
-            raise HTTPException(status_code=400, detail="选手编号超过 64 字符")
+        problem = player_no_problem(player_no)
+        if problem:
+            raise HTTPException(status_code=400, detail=problem)
         too_long = _first_overlong(
             (payload.name, 64, "姓名"), (payload.seat, 32, "座位"), (payload.group_name, 64, "分组")
         )

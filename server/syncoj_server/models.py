@@ -517,8 +517,9 @@ class AgentDiagnostic(Base):
 class SourceFile(Base):
     """回收到的文件的最新版本。
 
-    ``revision`` 递增，用于丢弃"迟到的旧版本"：Agent 断网重传时可能把旧内容
-    送到，服务端比对 revision 后直接丢弃，避免覆盖更新的版本。
+    ``revision`` 在每次存下新内容时递增。"迟到的旧版本"（Agent 断网重传时可能把
+    旧内容送到）靠比对 ``scanned_sha256`` 丢弃：送来的不是最近一次扫描到的那一版，
+    就以 409 拒绝，避免覆盖更新的版本。
     """
 
     __tablename__ = "source_file"
@@ -526,13 +527,24 @@ class SourceFile(Base):
     id = Column(Integer, primary_key=True)
     player_id = Column(Integer, ForeignKey("player.id", ondelete="CASCADE"), nullable=False)
     rel_path = Column(String(1024), nullable=False)
+    #: **已存下的**那一版的内容指纹（``content_stored`` 为真时，blobs/ 与 source/ 里
+    #: 就是它）。下载、导出、blob 引用计数读的都是它。尚未存过任何一版时，它暂记
+    #: 最近一次扫描到的值（``content_stored`` 为假，没有读者会把它当成"已存"）。
     sha256 = Column(String(64), nullable=False)
+    #: **最近一次扫描**到的内容指纹。与 ``sha256`` 不同 = 选手改过、新内容还没传上来，
+    #: tick 会一直把它放进 ``need_upload`` 直到传上来为止。
+    #:
+    #: 为什么要单独一列：曾经 tick 在**上传之前**就把 ``sha256`` 改成新扫描值、却不
+    #: 复位 ``content_stored`` —— 那一轮只要没传上（断网、重启、截断、409），下一轮
+    #: 就判成"没变、已存"，再也不要求上传：``source/`` 停在旧版本，台账却显示新指纹。
+    #: 可空只为老库：迁移 013 用 ``sha256`` 回填；读的一侧把 NULL 当成 ``sha256``。
+    scanned_sha256 = Column(String(64), nullable=True)
     size = Column(BigInteger, nullable=False, default=0)
     mtime = Column(BigInteger, nullable=False, default=0)
     revision = Column(Integer, nullable=False, default=0)
     first_seen_at = Column(DateTime, default=utcnow, nullable=False)
     last_seen_at = Column(DateTime, default=utcnow, nullable=False)
-    # 服务端已收到内容（blobs 中有该 sha256）才置 True
+    # 服务端已收到内容（blobs 中有 sha256 那一版）才置 True
     content_stored = Column(Boolean, nullable=False, default=False)
     # 非 NULL 表示该文件已从扫描结果中消失（选手删除/改名）
     deleted_at = Column(DateTime, nullable=True)

@@ -519,6 +519,26 @@ def _migration_012_agent_diagnostics(engine: Engine) -> None:
     _add_column(engine, "agent", "diagnostics_requested_at", "DATETIME")
 
 
+def _migration_013_source_scanned_sha(engine: Engine) -> None:
+    """台账把"最近一次扫描到的"与"已存下的"内容指纹分开（``source_file.scanned_sha256``）。
+
+    曾经只有一列 ``sha256``，tick 在**上传之前**就把它改成新扫描值、却不复位
+    ``content_stored``：那一轮只要没传上，之后就再也不要求上传（见模型上的说明）。
+
+    回填：老行的"最近一次扫描"就是 ``sha256`` —— 老代码每次 tick 都会把它改成
+    扫描值。对于 ``content_stored=1`` 却已经被那个缺陷改坏了指纹的行，回填之后
+    两列相等，仍然判成"已存"：坏掉的那一版找不回来（内容从没到过服务端），
+    但**下一次**选手保存就会被正确地要求上传。
+    """
+    if "source_file" not in _tables(engine):
+        return
+    _add_column(engine, "source_file", "scanned_sha256", "VARCHAR(64)")
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE source_file SET scanned_sha256 = sha256 WHERE scanned_sha256 IS NULL")
+        )
+
+
 MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
     (1, "统一密钥注册 + 名单库所需的结构", _migration_001_enrollment),
     (2, "机器永久绑定名单条目；去掉注册码链路", _migration_002_roster_binding),
@@ -563,6 +583,11 @@ MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
         12,
         "诊断回传：机器的一次性请求标记与诊断包表",
         _migration_012_agent_diagnostics,
+    ),
+    (
+        13,
+        "代码台账分开记录最近一次扫描与已存下的内容指纹",
+        _migration_013_source_scanned_sha,
     ),
 ]
 

@@ -966,6 +966,12 @@ def upload_file(
         raise HTTPException(status_code=400, detail=str(exc))
 
     now = utcnow()
+    contest_dir = Path(ctx.settings.source_root) / identity.contest_slug / identity.player_no
+    try:
+        dest = safe_join(contest_dir, rel_path, max_length=ctx.settings.max_relpath_length)
+    except PathValidationError as exc:
+        raise HTTPException(status_code=400, detail="落盘路径不合法: %s" % exc)
+
     with ctx.db.session() as session:
         row = session.execute(
             select(SourceFile).where(
@@ -974,6 +980,30 @@ def upload_file(
             )
         ).scalar_one_or_none()
 
+        if row is not None:
+            # 只收**最近一次扫描到的**那一版。送来的不是它 = 迟到的旧内容（断网补传、
+            # 乱序重传）或者已经又改过了：409，下一轮 tick 会要真正的那一版。
+            # 判据曾经是"已存的 sha256 ≠ 送来的"，而 sha256 在上传前就被 tick 改写，
+            # 于是"那一轮没传上"的新内容永远不会再被要求（见 SourceFile.scanned_sha256）。
+            expected = row.scanned_sha256 or row.sha256
+            if expected != actual_sha:
+                raise ApiError(
+                    409,
+                    "stale_upload",
+                    "该内容已不是当前版本，已在下一轮 tick 中请求最新版本",
+                    {"reason": "stale", "expected": expected},
+                )
+
+        # **先物化、后改台账**（提交在 with 结束时）。反过来的话，台账先记成
+        # "已存下"、物化却失败（磁盘满、source/ 里同名路径是个目录），下一轮就不会
+        # 再要求上传 —— source/ 永远缺这个文件。现在物化失败台账不动，下一轮照常再要；
+        # 物化成功而提交失败时，下一轮也照常再要（重复上传同一份内容是幂等的）。
+        try:
+            materialize(ctx.blobs.path_for(actual_sha), dest)
+        except OSError as exc:
+            log.exception("物化到 source/ 失败: %s", rel_path)
+            raise HTTPException(status_code=500, detail="落盘失败: %s" % exc)
+
         if row is None:
             # 台账里还没有：Agent 比服务端先看到了这个文件。
             # 这不危险（路径与内容都已校验），建一条即可。
@@ -981,6 +1011,7 @@ def upload_file(
                 player_id=identity.player_id,
                 rel_path=rel_path,
                 sha256=actual_sha,
+                scanned_sha256=actual_sha,
                 size=size,
                 mtime=0,
                 revision=0,
@@ -989,15 +1020,9 @@ def upload_file(
                 last_seen_at=now,
             )
             session.add(row)
-        elif row.content_stored and row.sha256 != actual_sha:
-            raise ApiError(
-                409,
-                "stale_upload",
-                "该内容已不是当前版本，已在下一轮 tick 中请求最新版本",
-                {"reason": "stale", "expected": row.sha256},
-            )
 
         row.sha256 = actual_sha
+        row.scanned_sha256 = actual_sha
         row.size = size
         row.revision += 1
         row.content_stored = True
@@ -1005,17 +1030,6 @@ def upload_file(
         row.last_seen_at = now
         session.flush()
         revision = row.revision
-
-    # 物化到评测器可读的目录：source/<场次>/<选手>/<相对路径>
-    contest_dir = Path(ctx.settings.source_root) / identity.contest_slug / identity.player_no
-    try:
-        dest = safe_join(contest_dir, rel_path, max_length=ctx.settings.max_relpath_length)
-        materialize(ctx.blobs.path_for(actual_sha), dest)
-    except PathValidationError as exc:
-        raise HTTPException(status_code=400, detail="落盘路径不合法: %s" % exc)
-    except OSError as exc:
-        log.exception("物化到 source/ 失败: %s", rel_path)
-        raise HTTPException(status_code=500, detail="落盘失败: %s" % exc)
 
     return UploadResult(path=rel_path, sha256=actual_sha, revision=revision, stored=True)
 

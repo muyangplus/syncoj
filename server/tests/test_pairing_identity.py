@@ -75,3 +75,44 @@ def test_两份名单里的同一个考号不能各绑一台机器(client, admin
 
     assert response.status_code == 409, response.text
     assert response.json()["code"] == "roster_entry_taken"
+
+
+def test_发码时不与仍有效的码重复(app, monkeypatch) -> None:
+    """六位数字的码在 50 台机器里撞上的概率约千分之一；发码时查重。"""
+    from datetime import timedelta
+
+    from syncoj_server.models import Agent, utcnow
+    from syncoj_server.security import hash_pair_code
+    from syncoj_server.services import enrollment
+
+    now = utcnow()
+    codes = iter(["111111", "111111", "222222"])
+    monkeypatch.setattr(enrollment, "_new_pair_code", lambda length: next(codes))
+    with app.state.ctx.db.session() as session:
+        session.add(Agent(
+            token_hash="t" * 64, machine_id="m-held", pair_code_hash=hash_pair_code("111111"),
+            pair_code_expires_at=now + timedelta(minutes=5),
+            enrolled_at=now, last_enrolled_at=now, last_seen_at=now,
+        ))
+        session.flush()
+        assert enrollment.unique_pair_code(session, now, 6) == "222222"
+
+
+def test_同一个码对上两台机器时拒绝按码绑定(client, admin_headers, bootstrap_key, roster_entry, app) -> None:
+    """曾经静默绑第一台 —— 把 A 的身份绑给了 B。"""
+    from syncoj_server.models import Agent
+    from syncoj_server.security import hash_pair_code
+
+    one = enroll_machine(client, bootstrap_key, hostname="pc-a")
+    two = enroll_machine(client, bootstrap_key, hostname="pc-b")
+    with app.state.ctx.db.session() as session:
+        for agent_id in (one["agent_id"], two["agent_id"]):
+            session.get(Agent, agent_id).pair_code_hash = hash_pair_code("123456")
+
+    response = client.post(
+        "/api/v1/admin/machines/bind-by-code",
+        json={"pair_code": "123456", "roster_entry_id": roster_entry["id"]},
+        headers=admin_headers,
+    )
+
+    assert response.status_code == 409, response.text

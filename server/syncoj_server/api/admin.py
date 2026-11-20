@@ -1123,7 +1123,18 @@ def bind_machine_by_code(
         if entry is None:
             raise HTTPException(status_code=404, detail="名单条目不存在")
 
-        agent = enrollment.find_unbound_by_pair_code(session, payload.pair_code, now)
+        matches = enrollment.find_unbound_by_pair_code(session, payload.pair_code, now)
+        if len(matches) > 1:
+            # 同一个码对上了好几台：绑哪一台都是猜。宁可让教师在列表里按机器绑
+            raise ApiError(
+                409,
+                "conflict",
+                "这个配对码同时对上了 %d 台机器，没法确定是哪一台。"
+                "请在「待配对机器」列表里直接选那台机器绑定，或让它重启 Agent 换一个码。"
+                % len(matches),
+                {"matches": len(matches)},
+            )
+        agent = matches[0] if matches else None
         if agent is None:
             # 不区分"没这个码"和"码过期了"：对外说法一致，
             # 免得有人拿它当预言机去猜码

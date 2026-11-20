@@ -56,7 +56,7 @@ from ..schemas import (
     UpgradeInfo,
     UploadResult,
 )
-from ..security import hash_token, new_pair_code, new_token
+from ..security import hash_token, new_token
 from ..storage import BlobTooLarge, HashMismatch, materialize
 from ..services import (
     diagnostics,
@@ -221,9 +221,12 @@ def enroll(
     rate_limit(ctx, request, payload)
 
     raw_token = new_token(ctx.settings.token_bytes)
-    raw_pair_code = new_pair_code(ctx.settings.pair_code_length)
 
     with ctx.db.session() as session:
+        # 与所有仍有效的码都不同（同码多台会让"按码绑定"绑错机器）
+        raw_pair_code = enrollment.unique_pair_code(
+            session, utcnow(), ctx.settings.pair_code_length
+        )
         try:
             outcome = enrollment.enroll_machine(
                 session,
@@ -556,7 +559,9 @@ def _tick_pending(
 
                 if pair_code is None:
                     # 第一次（缓存没了）、过期了、或者刚被解绑 —— 发一个新的
-                    pair_code = new_pair_code(ctx.settings.pair_code_length)
+                    pair_code = enrollment.unique_pair_code(
+                        session, now, ctx.settings.pair_code_length
+                    )
                     enrollment.issue_pair_code(
                         agent, now, pair_code, ctx.settings.pair_code_ttl_seconds
                     )

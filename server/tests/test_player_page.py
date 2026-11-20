@@ -183,10 +183,12 @@ def test_清单只包含下发给他的资产(client, contest, admin_headers, pl
         "starts_at": None,
         "ends_at": None,
     }
+    # 手填查找（explicit）只回考号：知道"场次 + 考号"的不一定是本人，姓名、座位是
+    # 别人的个人信息（曾经一个循环就能拿到全班座位表）。按来源 IP 认出本机才回全部。
     assert body["player"] == {
         "player_no": "S001",
-        "name": "张三",
-        "seat": "A1",
+        "name": None,
+        "seat": None,
         "group_name": None,
     }
     # 没有下发公告：这一份清单里只有题面
@@ -989,3 +991,13 @@ def test_升级库与全新库在两张表上结构一致(workdir: Path):
 
     fresh.dispose()
     upgraded.dispose()
+
+
+
+def test_手填查找按_ip_限速(client, contest, player, app) -> None:
+    """考号通常连号：不限速的话一个循环就能把整场的下发清单都翻一遍。"""
+    app.state.ctx.player_lookup_limiter.limit = 3
+    query = {"contest": "mock-1", "player_no": "S001"}
+    codes = [client.get("/api/v1/player/context", params=query).status_code for _ in range(5)]
+    assert codes[:3] == [200, 200, 200]
+    assert codes[3:] == [429, 429]

@@ -54,6 +54,8 @@ class RateLimiter:
 
     #: 每个窗口允许的次数
     limit: int
+    #: 窗口长度（秒）。注册是"每秒 N 次"；登录、选手页手填是"每分钟 N 次"。
+    window: float = _WINDOW
     #: 每个 key 的记录：``(窗口起点, 计数)``
     _buckets: Dict[str, Tuple[float, int]] = field(default_factory=dict)
     _lock: Lock = field(default_factory=Lock)
@@ -65,7 +67,7 @@ class RateLimiter:
 
         with self._lock:
             start, count = self._buckets.get(key, (now, 0))
-            if now - start >= _WINDOW:
+            if now - start >= self.window:
                 start, count = now, 0
             count += 1
             self._buckets[key] = (start, count)
@@ -81,7 +83,7 @@ class RateLimiter:
         self._buckets = {
             key: value
             for key, value in self._buckets.items()
-            if now - value[0] < _WINDOW or key == keep_key
+            if now - value[0] < self.window or key == keep_key
         }
 
     def reset(self) -> None:

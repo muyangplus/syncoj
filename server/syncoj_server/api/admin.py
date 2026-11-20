@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import shutil
 import tempfile
 import zipfile
@@ -36,6 +37,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from ..services.ratelimit import RateLimitExceeded
 from .. import keys
 from ..config import Settings
 from ..context import AppContext
@@ -307,7 +309,19 @@ def require_admin(request: Request, ctx: AppContext = Depends(get_ctx)) -> Admin
 
 
 @router.post("/login", response_model=LoginResponse)
-def login(payload: LoginRequest, ctx: AppContext = Depends(get_ctx)) -> LoginResponse:
+def login(
+    payload: LoginRequest, request: Request, ctx: AppContext = Depends(get_ctx)
+) -> LoginResponse:
+    # 按来源 IP 限速：scrypt 让单次尝试变慢，但不限次数的话局域网里可以一直试下去
+    client_ip = request.client.host if request.client else "unknown"
+    try:
+        ctx.login_limiter.check(client_ip, time.monotonic())
+    except RateLimitExceeded as exc:
+        log.warning("管理员登录被限速：ip=%s", client_ip)
+        raise ApiError(
+            429, "rate_limited", "登录尝试太频繁，请一分钟后再试",
+            {"retry_after": exc.retry_after},
+        )
     now = utcnow()
     raw_token = new_token(ctx.settings.token_bytes)
     expires_at = now + timedelta(seconds=ctx.settings.admin_session_ttl_seconds)

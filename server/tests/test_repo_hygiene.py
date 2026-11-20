@@ -374,3 +374,43 @@ def test_pin_check_actually_catches_a_missing_pin() -> None:
     assert effective_eol("docs/protocol.md", rules) is None
     # 后面的规则覆盖前面的
     assert effective_eol("web/x.py", [("*.py", ["eol=lf"]), ("web/**", ["eol=crlf"])]) == "crlf"
+
+
+# ---------------------------------------------------------------------------
+# 可执行位
+# ---------------------------------------------------------------------------
+#
+# 文档里的入口写的是 ``./scripts/check.sh``。可执行位只存在于 git 的索引里
+# （``100755``），在 Windows 上 checkout 不会体现、也不会被编辑器保留，所以
+# 那边提交的文件很容易落成 ``100644`` —— 于是 Linux / CI 上照文档敲命令直接
+# "Permission denied"。这里看的是**索引里的模式**，所以在哪个平台上跑结论都一样。
+
+#: 必须带可执行位的入口脚本（相对仓库根）。``bootstrap.sh`` 不在其列：它从来是
+#: ``curl ... | sh`` 管道执行，不靠文件模式。
+EXECUTABLE_ENTRYPOINTS = ("scripts/check.sh",)
+
+
+def _index_modes() -> "dict":
+    result = subprocess.run(
+        ["git", "ls-files", "-s", "--", *EXECUTABLE_ENTRYPOINTS],
+        cwd=str(REPO_ROOT), capture_output=True, text=True, check=True,
+    )
+    modes = {}
+    for line in result.stdout.splitlines():
+        meta, _tab, name = line.partition("\t")
+        modes[name] = meta.split()[0]
+    return modes
+
+
+def test_entry_scripts_are_executable_in_the_index() -> None:
+    try:
+        modes = _index_modes()
+    except (OSError, subprocess.CalledProcessError) as exc:  # pragma: no cover
+        pytest.skip("拿不到 git 索引: %s" % exc)
+    wrong = {name: mode for name, mode in modes.items() if mode != "100755"}
+    missing = [name for name in EXECUTABLE_ENTRYPOINTS if name not in modes]
+    assert not missing, "入口脚本没有被 git 跟踪：%r" % missing
+    assert not wrong, (
+        "这些入口脚本在 git 索引里没有可执行位，照文档 ./scripts/check.sh 会 Permission denied。"
+        "修法：git update-index --chmod=+x <文件>：%r" % wrong
+    )

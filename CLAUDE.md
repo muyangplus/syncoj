@@ -26,7 +26,7 @@ python agent/run_agent.py --once
 测试与检查：
 
 ```bash
-./scripts/check.sh                                               # 全部检查；提交前必须全绿
+./scripts/check.sh                                               # 全部检查；提交前必须全绿（--list / --only <步骤> / --skip-web）
 python server/tools/parallel_tests.py --root server --jobs 8     # 服务端测试，按文件并行
 python server/tools/parallel_tests.py --root agent  --jobs 8     # Agent 测试
 python server/tools/parallel_tests.py --root server --pattern "tests/test_docs.py"   # --pattern 是相对 root 的 glob
@@ -36,7 +36,7 @@ python server/tools/dump_openapi.py && (cd web && npm run gen:types)   # 改了�
 ```
 
 服务端测试串行很慢（每个用例都造真 app + 真库），优先用 `parallel_tests.py` 或只跑相关文件。
-`scripts/check.sh` 与 `scripts/check.ps1` 步骤一一对应，改一个就要改另一个；`.ps1` 必须保留 UTF-8 BOM。
+检查步骤只写在 `scripts/check.py`；`check.sh` / `check.ps1` 只是挑 Python 的壳，`.ps1` 必须保留 UTF-8 BOM 与 CRLF。
 
 ## 架构
 

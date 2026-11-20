@@ -414,3 +414,22 @@ def test_entry_scripts_are_executable_in_the_index() -> None:
         "这些入口脚本在 git 索引里没有可执行位，照文档 ./scripts/check.sh 会 Permission denied。"
         "修法：git update-index --chmod=+x <文件>：%r" % wrong
     )
+
+
+def test_check_entrypoints_only_delegate_to_check_py() -> None:
+    """``check.sh`` / ``check.ps1`` 只是挑 Python 的壳，步骤只写在 ``check.py`` 里。
+
+    两个壳曾经各写一遍全部步骤、靠约定同步，结果漂开了（一边设了
+    ``SYNCOJ_STATE_DIR``，同一套测试在两个入口下结果不同）。这里守住"壳里不再长出
+    步骤"：出现了直接调测试 / 构建的命令，就说明有人又把步骤写回壳里了。
+    """
+    shells = {
+        "scripts/check.sh": (REPO_ROOT / "scripts" / "check.sh").read_text(encoding="utf-8"),
+        "scripts/check.ps1": (REPO_ROOT / "scripts" / "check.ps1").read_text(encoding="utf-8-sig"),
+    }
+    step_markers = ("parallel_tests", "pytest", "npm ", "dump_openapi", "check_py38")
+    for name, text in shells.items():
+        assert "check.py" in text, "%s 没有转给 scripts/check.py" % name
+        code = [line for line in text.splitlines() if not line.lstrip().startswith("#")]
+        leaked = [m for m in step_markers if any(m in line for line in code)]
+        assert not leaked, "%s 里又写进了检查步骤 %r —— 步骤只放 scripts/check.py" % (name, leaked)

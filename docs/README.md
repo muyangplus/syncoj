@@ -112,7 +112,7 @@ SyncOJ/
 │   ├── packaging/            幂等安装器 / 打包器 / 在线自举
 │   ├── tools/                py38 兼容门禁、协议 fixture 生成
 │   └── tests/
-├── scripts/                  一键跑全部检查（check.sh / check.ps1，步骤一一对应）
+├── scripts/                  一键跑全部检查（check.py 写步骤；check.sh / check.ps1 只是壳）
 └── web/                      管理界面（Vue3 + TS + Vite + Element Plus）
     ├── src/api/              client + resource 声明 + 从 OpenAPI 生成的类型
     ├── src/composables/      useList / useMutation —— 所有页面共用的数据层
@@ -143,7 +143,7 @@ SyncOJ/
   python server/tools/dump_openapi.py && (cd web && npm run gen:types)
   ```
 
-  `scripts/check.sh` 会校验 `web/openapi.json` 是否已同步，不同步直接失败。
+  `scripts/check.py` 会校验 `web/openapi.json` 是否已同步，不同步直接失败。
 
 ## 跑全部检查
 
@@ -155,22 +155,28 @@ SyncOJ/
 .\scripts\check.ps1            # Windows PowerShell 5.1 与 pwsh 7 都能跑
 ```
 
-两个脚本**步骤一一对应**，只换执行方式：改了其中一个就要改另一个，否则两个平台
-给出的"通过"含义不同。
+步骤只写在 `scripts/check.py` 一处（只用标准库、能在 Python 3.8 上跑）。两个壳只做
+一件事：挑一个**真的能跑**的 Python 3.8+，把参数原样转过去。两者都先找仓库里的
+`.venv`（装着 `server[dev]`），再退回系统解释器；也可以用环境变量 `PYTHON` 指定。
 
-- `check.sh` 自动挑可用的 Python：先 `python3`，不行就退回仓库里的 `.venv`。
-  Windows 上 `python3` 常常指向应用商店的占位程序（`command -v` 找得到、执行直接
-  失败），所以判据是"**真的能跑起来**且 ≥3.8"，不是"命令存在"。实测在 Git bash 里
-  可以直接跑通全程。
-- `check.ps1` 是 Windows 原生入口，少跨一层 msys 路径翻译，出错信息更直白。
+> 为什么收成一份：两个 shell 入口曾经各写一遍全部步骤、靠"一一对应"的约定同步，
+> 实际已经漂开 —— `check.ps1` 全局设了 `SYNCOJ_STATE_DIR` 而 `check.sh` 没设，于是
+> 有两条用例只在其中一个入口下能过；两边都建了一个从未用到的 `basetemp`；
+> 前端类型检查跑了两遍。
+
+- **默认跑完全部步骤再汇总**，`--fail-fast` 才在第一处失败时停。旧脚本 `set -e`，
+  Agent 测试一红，后面的服务端测试与前端构建就都不跑了，"红了几处"永远只看得见第一处。
+- `--list` 列出步骤名，`--only <步骤>` 只跑某几步，`--skip-web` 跳过前端两步。
+- Windows 上 `python3` 常常指向应用商店的占位程序（`command -v` 找得到、执行直接
+  失败），所以 `check.sh` 的判据是"**真的能跑起来**且 ≥3.8"，不是"命令存在"。
 
 > **`.ps1` 必须带 UTF-8 BOM。** Windows PowerShell 5.1 在**没有 BOM** 时按当前
 > ANSI 代码页（简体中文 Windows 上是 GBK）解码脚本文件，于是仓库里这些中文注释
 > 会让它**整个脚本解析失败**，报的还是"字符串缺少终止符"这种指向完全无关位置的
 > 错。PS 7 认 BOM，所以带上两边都对。编辑类工具保存时**不会保留 BOM** ——
-> 改一行中文注释就可能把它弄丢，所以这件事由 `check.sh` 里一步专门守着。
+> 改一行中文注释就可能把它弄丢，所以这件事由 `check.py` 的 `ps1-bom` 一步专门守着。
 
-检查内容：`PowerShell` 脚本编码 → py38 兼容门禁 → Agent 测试 → 服务端测试
+检查内容：py38 兼容门禁 → `PowerShell` 脚本编码 → Agent 测试 → 服务端测试
 → `openapi.json` 是否已同步 → `schema.d.ts` 是否与 `openapi.json` 一致
 （**重新生成一遍再逐字节比对**）→ 前端入口对账 + `typecheck` + `build`。
 

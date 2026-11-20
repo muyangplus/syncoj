@@ -2,7 +2,8 @@
 
 ## 先跑检查
 
-提交之前跑一遍仓库自带的检查。两个入口**步骤一一对应**（Linux / Git bash 与 Windows）：
+提交之前跑一遍仓库自带的检查。步骤只写在 `scripts/check.py` 一处；两个壳只负责
+挑一个能用的 Python 再把参数转过去（Linux / Git bash 与 Windows）：
 
 ```bash
 ./scripts/check.sh
@@ -12,15 +13,18 @@
 .\scripts\check.ps1
 ```
 
-依次跑：py38 兼容门禁（Agent 与服务端各一遍）→ PowerShell 脚本编码 → Agent 测试 →
-服务端测试 → `web/openapi.json` 是否与 schema 同步 → `schema.d.ts` 是否与
-`openapi.json` 同步 → 前端入口对账 + typecheck + build。
+依次跑：py38 兼容门禁（Agent、服务端与 `scripts/` 各一遍）→ PowerShell 脚本编码 →
+Agent 测试 → 服务端测试 → `web/openapi.json` 是否与 schema 同步 → `schema.d.ts` 是否与
+`openapi.json` 同步 → 前端入口对账 + typecheck + build。**某一步红了也会把后面的跑完**，
+最后汇总；要旧的"第一步失败就停"加 `--fail-fast`。
 
 只跑一部分：
 
 ```bash
-python server/tools/parallel_tests.py --root server --jobs 8      # 按文件并行
-python server/tools/parallel_tests.py --root server --pattern 关键字   # 挑文件
+./scripts/check.sh --list                     # 列出步骤名
+./scripts/check.sh --only server-tests        # 只跑某几步（可重复）
+./scripts/check.sh --skip-web                 # 没装 web/node_modules 时
+python server/tools/parallel_tests.py --root server --pattern "tests/test_docs.py"   # 挑文件（glob）
 ```
 
 ## 几条会撞上的硬规则

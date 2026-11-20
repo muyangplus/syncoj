@@ -55,7 +55,7 @@ def _basetemp_must_not_be_our_workdir_root(pytestconfig) -> None:
         "--basetemp（%s）把 TMP_ROOT（%s）包住了，或者就等于它。\n"
         "pytest 会清空 basetemp，于是这里正在用的临时目录会被一起删掉；\n"
         "表现是 Windows 上删文件失败引发的 PermissionError。\n"
-        "请在 scripts/check.sh 里把 basetemp 指到 .pytest-tmp/basetemp/ 这类独立目录。"
+        "请在 scripts/check.py 里把 basetemp 指到 .pytest-tmp/basetemp/ 这类独立目录。"
         % (base, ours)
     )
 

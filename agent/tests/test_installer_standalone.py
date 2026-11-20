@@ -65,6 +65,16 @@ from syncoj_server.services.signing import (  # noqa: E402
 HAS_OPENSSL = openssl_available() is not None
 requires_openssl = pytest.mark.skipif(not HAS_OPENSSL, reason="需要 openssl")
 
+#: 以 root 跑**真安装**（非 dry-run）的子进程用例会写宿主系统路径：
+#: ``install.py`` 的远程卸载辅助件（``/usr/local/lib/syncoj``、``/etc/sudoers.d``）
+#: 是写死的常量，子进程里 conftest 的沙箱补丁够不着。在安装器的所有路径改由
+#: ``Layout(root)`` 派生之前（重构计划阶段 2），root 下跳过这些用例。
+#: 非 root 时安装器本来就写不进那些路径（失败会被报成警告），所以照常跑。
+IS_ROOT = getattr(os, "geteuid", lambda: -1)() == 0
+not_as_root = pytest.mark.skipif(
+    IS_ROOT, reason="以 root 跑真安装会写宿主的 /etc/sudoers.d（待 Layout 派生全部路径后收回）"
+)
+
 #: 发现协议里那段被签名的文本前缀。**手写**，故意不 import 任何一端 ——
 #: 这里要能发现"某一边把前缀改了"，而不是跟着它一起改。
 DISCOVERY_SIGNATURE_PREFIX = "syncoj-discovery-v1"
@@ -94,6 +104,9 @@ class Standalone:
         self.env = dict(os.environ)
         # 真机上没有 PYTHONPATH；清掉它，"repo 在 sys.path 里"这条退路就不存在了
         self.env.pop("PYTHONPATH", None)
+        # conftest 的沙箱在 root 下会设 SUDO_USER；子进程不该继承它 —— 否则 root
+        # 身份的安装器会把它当成"用 sudo 装机的人"，越过 preflight 去写真实系统路径
+        self.env.pop("SUDO_USER", None)
         # 管道里也按 UTF-8 写，下面按文案断言才可靠
         self.env["PYTHONIOENCODING"] = "utf-8"
         self.env["PYTHONUNBUFFERED"] = "1"
@@ -331,6 +344,7 @@ class FakeDiscovery:
 # --------------------------------------------------------------------------- #
 
 
+@not_as_root
 @requires_openssl
 def test_脱离仓库也能验签成功(standalone: Standalone) -> None:
     """走到"_verify_signature_if_possible"那一步并**真的验过**。
@@ -362,6 +376,7 @@ def test_脱离仓库也能验签成功(standalone: Standalone) -> None:
         assert result.returncode == 0, text
 
 
+@not_as_root
 @requires_openssl
 def test_脱离仓库也真的验签_签名不对就拒绝(standalone: Standalone) -> None:
     """自包含实现不能是"永远返回 True"的空壳：别人签的必须被拒。"""

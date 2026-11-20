@@ -22,6 +22,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 AGENT_ROOT = REPO_ROOT / "agent"
 if str(AGENT_ROOT) not in sys.path:
@@ -94,6 +96,7 @@ def test_只看路径指令_每条要么带减号要么是存在的目录(instal
     assert seen == ["ReadWritePaths"], seen
 
 
+@pytest.mark.real_system_paths
 def test_白名单只有带减号的_家目录与安装器自建目录(installer_module) -> None:
     text = unit_of(installer_module)
     lines = [line for line in text.splitlines() if line.startswith("ReadWritePaths=")]
@@ -105,6 +108,7 @@ def test_白名单只有带减号的_家目录与安装器自建目录(installer
     assert "~" not in text
 
 
+@pytest.mark.real_system_paths
 def test_远程卸载那四条都是带减号的可写目录(installer_module) -> None:
     """**(a) 变体的核心**：sudo 出来的 root 子进程在**同一个 mount namespace** 里，
     不放开这四条，删 ``/etc/syncoj`` / 单元文件 / ``sudoers`` / 辅助脚本全是 ``EROFS``。
@@ -204,6 +208,7 @@ def test_不放开_AF_UNIX(installer_module) -> None:
     assert "AF_UNIX" not in text
 
 
+@pytest.mark.real_system_paths
 def test_sudoers_白名单是无参数的固定路径(installer_module) -> None:
     """sudoers 那一行一旦带上参数或通配符，"白名单"就变成"任何东西"。"""
     line = installer_module.render_uninstall_sudoers("noi")

@@ -34,14 +34,15 @@ requires_symlinks = pytest.mark.skipif(
 )
 
 
-@pytest.fixture(scope="module")
-def installer():
-    """把 install.py 当模块加载。它不是包的一部分，只能走 importlib。"""
-    spec = importlib.util.spec_from_file_location("syncoj_installer", PACKAGING / "install.py")
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+@pytest.fixture()
+def installer(installer_module):
+    """``install.py`` 模块本身。
+
+    统一走 conftest 的 ``installer_module``（会话内只此一份）：这里曾经自己再加载
+    一份，于是 conftest 打在那一份上的沙箱补丁（系统路径、``systemctl``）对这个
+    文件不生效 —— 以 root 跑时整机安装用例会写到宿主的 ``/etc/sudoers.d``。
+    """
+    return installer_module
 
 
 @pytest.fixture()
@@ -464,6 +465,7 @@ def test_render_config_with_insecure_tls(installer) -> None:
     assert "verify_tls = false" in text
 
 
+@pytest.mark.real_system_paths
 def test_render_unit_permissions_follow_contestant_user(installer) -> None:
     """systemd 的读写白名单必须跟着"Agent 以选手身份运行"这个前提走。
 
@@ -609,6 +611,7 @@ def test_bundle_contains_launcher(workdir: Path) -> None:
     assert "syncoj_agent/main.py" in names
 
 
+@pytest.mark.real_system_paths
 def test_render_unit_without_extra_paths(installer) -> None:
     """没配额外路径时，白名单只剩 %h 与安装器自建的目录 —— 但 %h 必须在。
 

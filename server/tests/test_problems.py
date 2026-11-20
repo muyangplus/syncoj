@@ -520,9 +520,11 @@ def report_files(client: TestClient, enrolled: dict, paths: dict) -> None:
     """让 Agent 报告一批文件（内容已上传）。"""
     machine = enrolled["machine_id"]
     scan = [entry(path, data) for path, data in paths.items()]
-    tick(client, enrolled["token"], scan, machine_id=machine)
-    for path, data in paths.items():
-        assert upload(client, enrolled["token"], path, data).status_code == 200
+    body = tick(client, enrolled["token"], scan, machine_id=machine)
+    # 只传 tick 要过的：上传端点不收不在待上传列表里的路径（upload_not_requested），
+    # 不属于任何题目的文件在配了题目的场次里本来就不会被要
+    for path in body["need_upload"]:
+        assert upload(client, enrolled["token"], path, paths[path]).status_code == 200
 
 
 def list_files(client: TestClient, contest: dict, headers: dict) -> List[dict]:
@@ -548,7 +550,10 @@ def test_files_are_annotated_with_their_problem(
     by_path = {row["rel_path"]: row["problem"] for row in list_files(client, contest, admin_headers)}
     assert by_path["p1/p1.cpp"] == "p1"
     assert by_path["p2/p2.cpp"] == "p2"
-    assert by_path["misc/notes.txt"] is None, "认不出来就说认不出来，别硬塞给某道题"
+    # 配了题目的场次只收匹配得上的文件：认不出来的既不进台账、也不会被硬塞给某道题。
+    # （这条曾断言它"在列表里、题目为空" —— 那个状态只有绕过对账直接上传才到得了，
+    # 而上传端点现在不再允许那样做。）
+    assert "misc/notes.txt" not in by_path
 
 
 def test_file_problem_follows_pattern_changes_without_reupload(

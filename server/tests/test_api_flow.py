@@ -313,7 +313,7 @@ def test_upload_lands_in_source_tree(
     token = enrolled["token"]
     content = b"#include <cstdio>\nint main(){puts(\"hi\");}\n"
 
-    response = upload(client, token, "src/main.cpp", content)
+    response = scan_and_upload(client, token, enrolled["machine_id"], "src/main.cpp", content)
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["stored"] is True
@@ -346,6 +346,13 @@ def test_upload_revision_increments_on_content_change(
 def test_upload_rejects_hash_mismatch(client: TestClient, enrolled: dict) -> None:
     """客户端声明的 sha256 与实际内容不符 —— 必须拒绝，不能存进去。"""
     token = enrolled["token"]
+    # tick 声明的就是这个（假的）指纹 —— 过了"在不在待上传列表里"那一关，
+    # 才走得到"内容与声明的指纹对不上"这一关
+    tick(
+        client, token,
+        [{"path": "main.cpp", "sha256": "0" * 64, "size": 14, "mtime": 1}],
+        machine_id=enrolled["machine_id"],
+    )
     response = client.post(
         "/api/v1/agent/files",
         data={"path": "main.cpp", "sha256": "0" * 64},
@@ -364,14 +371,18 @@ def test_upload_rejects_traversal_path(client: TestClient, enrolled: dict) -> No
 
 def test_upload_rejects_oversized_file(client: TestClient, app, enrolled: dict) -> None:
     app.state.ctx.settings.max_file_size = 1024
-    response = upload(client, enrolled["token"], "big.cpp", b"x" * 4096)
+    response = scan_and_upload(
+        client, enrolled["token"], enrolled["machine_id"], "big.cpp", b"x" * 4096
+    )
     assert response.status_code == 413
 
 
 def test_stale_upload_is_rejected(client: TestClient, enrolled: dict) -> None:
     """断网补传场景：客户端送来的是已被取代的旧版本，必须拒绝而不是覆盖。"""
     token = enrolled["token"]
-    assert upload(client, token, "main.cpp", b"newer").status_code == 200
+    assert scan_and_upload(
+        client, token, enrolled["machine_id"], "main.cpp", b"newer"
+    ).status_code == 200
 
     response = upload(client, token, "main.cpp", b"older")
     assert response.status_code == 409

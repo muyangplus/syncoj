@@ -126,6 +126,26 @@ def do_tick(client, token: str, entries, *, machine_id: str, **kwargs) -> dict:
     return response.json()
 
 
+def declared_upload(client, enrolled: dict, path: str, content: bytes, filename: str = None):
+    """按协议上传一个文件：先用一次 tick 声明它，再 POST /files。
+
+    上传端点只收"台账里正在等上传"的路径（``upload_not_requested``），所以测试
+    不能再跳过 tick 直接传。声明用的 tick 报 ``scan_complete=false``：只声明这一个
+    文件，不让服务端把别的文件判成删除。时间窗之外 tick 不对账，上传随后由门禁
+    以 contest_ended / contest_not_started 拒绝 —— 与真机上的顺序一致。
+    """
+    do_tick(
+        client, enrolled["token"], [scan_entry(path, content)],
+        machine_id=enrolled["machine_id"], scan_complete=False,
+    )
+    return client.post(
+        "/api/v1/agent/files",
+        data={"path": path, "sha256": sha256_of(content)},
+        files={"file": (filename or path.rsplit("/", 1)[-1], content, "application/octet-stream")},
+        headers=agent_headers(enrolled["token"]),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # 新配对模型的公共动作
 #

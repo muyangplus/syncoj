@@ -4360,6 +4360,7 @@
             "items": {
               "$ref": "#/components/schemas/ScanEntry"
             },
+            "maxItems": 50000,
             "title": "Scan",
             "type": "array"
           },

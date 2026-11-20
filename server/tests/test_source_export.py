@@ -151,7 +151,14 @@ def test_export_manifest_carries_exact_sizes_and_hashes(
     """清单是核对的唯一依据：字节数与 SHA256 必须与实际内容一致。"""
     first = b"int main(){return 0;}\n"
     second = b"#include <bits/stdc++.h>\n"
-    add_problem(client, admin_headers, contest, "p1")
+    # 两个文件都要收：显式把整个题目目录归到 p1（出厂模式只认 p1/p1.cpp）。
+    # 曾经靠"上传端点不管题目规则"把 util.h 塞进台账 —— 那条路已经堵上了。
+    response = client.post(
+        "/api/v1/admin/contests/%d/problems" % contest["id"],
+        json=[{"ident": "p1", "file_patterns": ["{ident}/**"]}],
+        headers=admin_headers,
+    )
+    assert response.status_code == 200, response.text
     report_files(client, enrolled, {"p1/p1.cpp": first, "p1/util.h": second})
 
     with read_export(client, admin_headers, contest) as archive:

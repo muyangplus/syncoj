@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional
 from fastapi.testclient import TestClient
 from sqlalchemy import inspect, select
 
-from conftest import agent_headers, do_tick, sha256_of
+from conftest import agent_headers, do_tick, sha256_of, declared_upload
 
 from syncoj_server.api import agent as agent_api
 from syncoj_server.models import Contest, ContestStatus, EventLog, utcnow
@@ -149,7 +149,7 @@ def test_no_window_means_no_restriction(
     state = contest_state(app, contest["id"])
     assert state["starts_at"] is None and state["ends_at"] is None
 
-    response = upload(client, enrolled["token"], "code.cpp", b"int main() { return 0; }")
+    response = declared_upload(client, enrolled, "code.cpp", b"int main() { return 0; }")
 
     assert response.status_code == 200, response.text
 
@@ -173,7 +173,7 @@ def test_ends_at_passed_rejects_upload_without_any_audit_event(
     monkeypatch.setattr(flush, "flush_once", lambda ctx: 0)
     put_ends_at(app, contest["id"], utcnow() - timedelta(minutes=1))
 
-    response = upload(client, enrolled["token"], "code.cpp", b"int main() { return 0; }")
+    response = declared_upload(client, enrolled, "code.cpp", b"int main() { return 0; }")
 
     assert response.status_code == 409, response.text
     body = response.json()
@@ -198,7 +198,7 @@ def test_starts_at_in_the_future_rejects_upload(
         client, admin_headers, contest["id"], starts_at=iso(utcnow() + timedelta(minutes=30))
     )
 
-    response = upload(client, enrolled["token"], "code.cpp", b"int main() { return 0; }")
+    response = declared_upload(client, enrolled, "code.cpp", b"int main() { return 0; }")
 
     assert response.status_code == 409, response.text
     body = response.json()
@@ -222,7 +222,7 @@ def test_ends_at_exactly_now_counts_as_ended(
     # "结束时间早于上传时刻"这种宽松情形）
     monkeypatch.setattr(agent_api, "utcnow", lambda: moment)
 
-    response = upload(client, enrolled["token"], "code.cpp", b"int main() { return 0; }")
+    response = declared_upload(client, enrolled, "code.cpp", b"int main() { return 0; }")
 
     assert response.status_code == 409, response.text
     assert response.json()["code"] == "contest_ended"
@@ -241,13 +241,13 @@ def test_only_starts_at_configured(
     set_window(
         client, admin_headers, contest["id"], starts_at=iso(utcnow() - timedelta(minutes=1))
     )
-    assert upload(client, enrolled["token"], "a.cpp", b"a").status_code == 200
+    assert declared_upload(client, enrolled, "a.cpp", b"a").status_code == 200
 
     # 同一个场次把开考时间推到未来 → 立刻变成"还没开始"
     set_window(
         client, admin_headers, contest["id"], starts_at=iso(utcnow() + timedelta(minutes=1))
     )
-    response = upload(client, enrolled["token"], "b.cpp", b"b")
+    response = declared_upload(client, enrolled, "b.cpp", b"b")
 
     assert response.status_code == 409
     assert response.json()["code"] == "contest_not_started"
@@ -261,10 +261,10 @@ def test_only_ends_at_configured(
     set_window(
         client, admin_headers, contest["id"], ends_at=iso(utcnow() + timedelta(hours=1))
     )
-    assert upload(client, enrolled["token"], "a.cpp", b"a").status_code == 200
+    assert declared_upload(client, enrolled, "a.cpp", b"a").status_code == 200
 
     put_ends_at(app, contest["id"], utcnow() - timedelta(minutes=1))
-    response = upload(client, enrolled["token"], "b.cpp", b"b")
+    response = declared_upload(client, enrolled, "b.cpp", b"b")
 
     assert response.status_code == 409
     assert response.json()["code"] == "contest_ended"
@@ -528,4 +528,4 @@ def test_ended_contest_still_allows_tick_assets_and_events(
     assert reported.status_code == 200, reported.text
 
     # 而代码上传是唯一被挡住的那一个
-    assert upload(client, enrolled["token"], "code.cpp", b"x").status_code == 409
+    assert declared_upload(client, enrolled, "code.cpp", b"x").status_code == 409

@@ -85,6 +85,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     app.include_router(admin_api.router)
 
     _install_public_port_gate(app)
+    _install_agent_body_limits(app)
     _remember_public_url(app, ctx)
 
     @app.exception_handler(PathValidationError)
@@ -236,6 +237,43 @@ def _install_public_port_gate(app: FastAPI) -> None:
             # 回 404 而不是 403：这个端口上**没有**这个接口，不是"你不配"。
             # 后者等于告诉你"管理接口在别处，去另一个端口试试"。
             return errors.error_response(404, "not_found", "Not Found")
+        return await call_next(request)
+
+
+def _install_agent_body_limits(app: FastAPI) -> None:
+    """Agent 的两个"大请求体"端点：按 ``Content-Length`` 在**读请求体之前**挡掉。
+
+    FastAPI 解析 multipart / JSON 时会先把整个请求体收下来，处理函数里的大小检查
+    来得太晚 —— 那时内存与临时文件已经被占满了。Agent 的凭据属于选手账号，选手
+    读得到 token，所以这里按"对端不可信"设防：
+
+    * 没有 ``Content-Length``（分块传输）一律拒收：Agent 从来都带长度，
+      不带长度的只可能是别的东西；
+    * 超过上限回 413（``payload_too_large``）。
+
+    上限：上传 = ``max_upload_request_bytes``（曾经只是配置里的一个数，没有任何
+    代码读它）；tick = ``max_tick_request_bytes``。
+    """
+    #: 路径 -> 配置项名。**每个请求现读**，不在装配时把数值抄下来。
+    limits = {
+        "/api/v1/agent/files": "max_upload_request_bytes",
+        "/api/v1/agent/tick": "max_tick_request_bytes",
+    }
+
+    @app.middleware("http")
+    async def _limit_agent_bodies(request: Request, call_next):
+        key = limits.get(request.url.path) if request.method == "POST" else None
+        if key is not None:
+            limit = int(getattr(request.app.state.ctx.settings, key))
+            raw = request.headers.get("content-length")
+            if raw is None or not raw.isdigit():
+                return errors.error_response(
+                    411, "bad_request", "请求必须带 Content-Length"
+                )
+            if int(raw) > limit:
+                return errors.error_response(
+                    413, "payload_too_large", "请求体 %s 字节，超过上限 %d" % (raw, limit)
+                )
         return await call_next(request)
 
 

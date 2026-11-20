@@ -203,7 +203,9 @@ class TickRequest(_Base):
     hostname: Optional[str] = Field(default=None, max_length=128)
     ts: int = Field(ge=0)
     scan_root: Optional[str] = Field(default=None, max_length=512)
-    scan: List[ScanEntry] = Field(default_factory=list)
+    #: 上限是兜底的形状约束（请求体大小另有闸门）：服务端的 max_files_per_scan
+    #: 默认 5000，超出部分本来就会被截断；这里挡的是"几十万条先被逐条校验一遍"。
+    scan: List[ScanEntry] = Field(default_factory=list, max_length=50000)
     #: 本次扫描是否完整覆盖了扫描根目录。
     #: 若 Agent 中途遇到 PermissionError 等错误导致扫描不完整，必须置 False，
     #: 服务端会因此**跳过删除判定** —— 否则会把"没扫到"误判成"被删了"。

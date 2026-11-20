@@ -97,6 +97,10 @@ ERROR_CODES = {
     "machine_already_bound": "这台机器已经配对给别人了",
     "machine_mismatch": "凭据与这台机器对不上（凭据可能被复制到了别的机器）",
     "stale_upload": "这份内容已经过期，服务端手上是更新的版本",
+    #: 上传了一个台账里**没有在等上传**的路径：没被扫描上报过、不属于任何题目、
+    #: 或者已经存好了。上传端点只收 tick 要过的东西 —— 选手账号读得到 token，
+    #: 不能让它绕过对账往 source/ 里写任意路径。
+    "upload_not_requested": "这个文件当前不在待上传列表里",
     "roster_entry_taken": "这个人已经有一台机器了",
     "no_active_contest": "还没有包含你的场次",
     "ambiguous_contest": "你同时在多个进行中的场次里，需要先指定一个",

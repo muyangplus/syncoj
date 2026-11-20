@@ -95,6 +95,34 @@ _RANGE_CHUNK = 256 * 1024
 MAX_NEED_UPLOAD = 500
 
 
+def _window_violation(contest: Optional[Contest], now) -> Optional[ApiError]:
+    """场次时间窗之外则返回那个要抛的 ``ApiError``，窗口内（或没设窗口）返回 ``None``。
+
+    判据是服务端时间；窗口左闭右开 ``[starts_at, ends_at)``。理由见
+    :func:`_reject_outside_window`。tick（只看在不在窗口里）与上传（抛出去）共用
+    这一份判断。
+    """
+    if contest is None:  # pragma: no cover - 外键约束下不会发生
+        return None
+    starts_at = contest.starts_at
+    ends_at = contest.ends_at
+    if ends_at is not None and now >= ends_at:
+        return ApiError(
+            409,
+            "contest_ended",
+            "本场考试已于 %s 结束，代码不再接收" % local_clock(ends_at),
+            {"reason": "ended", "starts_at": iso_utc(starts_at), "ends_at": iso_utc(ends_at)},
+        )
+    if starts_at is not None and now < starts_at:
+        return ApiError(
+            409,
+            "contest_not_started",
+            "本场考试还没开始（%s 开考），代码暂时不接收" % local_clock(starts_at),
+            {"reason": "not_started", "starts_at": iso_utc(starts_at), "ends_at": iso_utc(ends_at)},
+        )
+    return None
+
+
 def _reject_outside_window(ctx: AppContext, identity: AgentIdentity, now) -> None:
     """场次时间窗之外不收代码：还没开考、或者已经结束。
 
@@ -113,34 +141,9 @@ def _reject_outside_window(ctx: AppContext, identity: AgentIdentity, now) -> Non
     Agent 不必去解析上面那句中文（中文是给人看的）。
     """
     with ctx.db.session() as session:
-        contest = session.get(Contest, identity.contest_id)
-        if contest is None:  # pragma: no cover - 外键约束下不会发生
-            return
-        starts_at = contest.starts_at
-        ends_at = contest.ends_at
-
-        if ends_at is not None and now >= ends_at:
-            raise ApiError(
-                409,
-                "contest_ended",
-                "本场考试已于 %s 结束，代码不再接收" % local_clock(ends_at),
-                {
-                    "reason": "ended",
-                    "starts_at": iso_utc(starts_at),
-                    "ends_at": iso_utc(ends_at),
-                },
-            )
-        if starts_at is not None and now < starts_at:
-            raise ApiError(
-                409,
-                "contest_not_started",
-                "本场考试还没开始（%s 开考），代码暂时不接收" % local_clock(starts_at),
-                {
-                    "reason": "not_started",
-                    "starts_at": iso_utc(starts_at),
-                    "ends_at": iso_utc(ends_at),
-                },
-            )
+        violation = _window_violation(session.get(Contest, identity.contest_id), now)
+    if violation is not None:
+        raise violation
 
 
 def _agent_config(ctx: AppContext) -> Dict[str, Any]:
@@ -346,8 +349,14 @@ def tick(
     )
 
     with ctx.db.session() as session:
-        if foreign_scan:
+        # 时间窗之外不对账：不改写台账、不要求上传、走空闲节奏。曾经这里照常对账，
+        # 只在上传端点 409 —— 于是开考前每台机器每 2 秒把全部文件整包传一遍再被
+        # 拒（multipart 在进入处理函数前已经整包收下），结束之后的修改还会改写
+        # 台账上的"最近一次扫描"。
+        outside_window = _window_violation(session.get(Contest, identity.contest_id), now)
+        if foreign_scan or outside_window is not None:
             collect = CollectResult()
+        if foreign_scan:
             collect.events.append((
                 "info",
                 "scan_identity_mismatch",
@@ -362,7 +371,7 @@ def tick(
                     },
                 },
             ))
-        else:
+        elif outside_window is None:
             # 「严格按题目预设回收」：只有**这一场配了题目**时才拿模式去过滤，
             # 一场都没配就照旧全收（理由见 services/collect.reconcile_scan 的 docstring）
             rules = problem_rules.rules_for(session, identity.contest_id, ctx.settings)
@@ -400,7 +409,8 @@ def tick(
             _note_release_public_key(agent, payload.release_public_key, now)
             if not foreign_scan:
                 # 缺失的扫描根、被题目预设挡掉的文件都是"上一个人的目录"的事实，
-                # 拒收的那一轮不拿它们改写这台机器的状态
+                # 拒收的那一轮不拿它们改写这台机器的状态。（时间窗外照记缺失的根：
+                # 开考前"目录还没建"正是教师要看见的。）
                 _note_scan_missing(
                     session,
                     agent,
@@ -409,6 +419,8 @@ def tick(
                     contest_id=identity.contest_id,
                     now=now,
                 )
+            if not foreign_scan and outside_window is None:
+                # 只有真的对过账，"被题目预设挡掉几个"才有意义
                 _note_scan_skipped(
                     session,
                     agent,
@@ -957,6 +969,31 @@ def install_bootstrap(ctx: AppContext = Depends(get_ctx)) -> Response:
         raise ApiError(404, "installer_unavailable", "%s发不出去：%s" % ("自举脚本", exc.detail))
     return FileResponse(str(path), media_type="text/x-sh", filename="bootstrap.sh")
 
+def _precheck_upload(ctx: AppContext, identity: AgentIdentity, rel_path: str, claimed: str) -> None:
+    with ctx.db.session() as session:
+        row = session.execute(
+            select(SourceFile).where(
+                SourceFile.player_id == identity.player_id,
+                SourceFile.rel_path == rel_path,
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise ApiError(
+                409,
+                "upload_not_requested",
+                "这个文件当前不在待上传列表里：%s" % rel_path,
+                {"reason": "not_requested"},
+            )
+        expected = row.scanned_sha256 or row.sha256
+        if expected != claimed:
+            raise ApiError(
+                409,
+                "stale_upload",
+                "该内容已不是当前版本，已在下一轮 tick 中请求最新版本",
+                {"reason": "stale", "expected": expected},
+            )
+
+
 @router.post("/files", response_model=UploadResult)
 def upload_file(
     request: Request,
@@ -984,6 +1021,10 @@ def upload_file(
     # 一个字节。放晚了（比如放到写台账那一步）虽然接口也返回 409，但磁盘上已经
     # 多了一份内容、而且会被后续的"内容寻址去重"当成合法版本。
     _reject_outside_window(ctx, identity, utcnow())
+    # 先按**声称的** sha256 对一遍台账，再往 blobs/ 里写：不在待上传列表里的、
+    # 过期的内容，一个字节都不该落盘（落了就是没有任何引用的孤儿 blob）。
+    # 写完之后在事务里还会按**实际**内容再判一次 —— 这里只是省掉白写。
+    _precheck_upload(ctx, identity, rel_path, sha256.lower())
 
     try:
         actual_sha, size = ctx.blobs.put_stream(
@@ -1009,19 +1050,38 @@ def upload_file(
             )
         ).scalar_one_or_none()
 
-        if row is not None:
-            # 只收**最近一次扫描到的**那一版。送来的不是它 = 迟到的旧内容（断网补传、
-            # 乱序重传）或者已经又改过了：409，下一轮 tick 会要真正的那一版。
-            # 判据曾经是"已存的 sha256 ≠ 送来的"，而 sha256 在上传前就被 tick 改写，
-            # 于是"那一轮没传上"的新内容永远不会再被要求（见 SourceFile.scanned_sha256）。
-            expected = row.scanned_sha256 or row.sha256
-            if expected != actual_sha:
-                raise ApiError(
-                    409,
-                    "stale_upload",
-                    "该内容已不是当前版本，已在下一轮 tick 中请求最新版本",
-                    {"reason": "stale", "expected": expected},
-                )
+        if row is None:
+            # 台账里没有 = tick 从没要过它（没被扫描上报过，或者不属于任何题目）。
+            # 选手账号读得到 token；不挡的话，它可以绕过对账与题目规则往 source/
+            # 里写任意路径。曾经这里直接建一条。
+            raise ApiError(
+                409,
+                "upload_not_requested",
+                "这个文件当前不在待上传列表里：%s" % rel_path,
+                {"reason": "not_requested"},
+            )
+        if (
+            row.content_stored
+            and row.sha256 == actual_sha
+            and (row.scanned_sha256 or row.sha256) == actual_sha
+        ):
+            # 已经存好的同一份内容（比如上一次提交成功、响应却丢了，Agent 重试）：
+            # 幂等成功，不再落盘、不加版本号
+            return UploadResult(
+                path=rel_path, sha256=actual_sha, revision=row.revision, stored=True
+            )
+        # 只收**最近一次扫描到的**那一版。送来的不是它 = 迟到的旧内容（断网补传、
+        # 乱序重传）或者已经又改过了：409，下一轮 tick 会要真正的那一版。
+        # 判据曾经是"已存的 sha256 ≠ 送来的"，而 sha256 在上传前就被 tick 改写，
+        # 于是"那一轮没传上"的新内容永远不会再被要求（见 SourceFile.scanned_sha256）。
+        expected = row.scanned_sha256 or row.sha256
+        if expected != actual_sha:
+            raise ApiError(
+                409,
+                "stale_upload",
+                "该内容已不是当前版本，已在下一轮 tick 中请求最新版本",
+                {"reason": "stale", "expected": expected},
+            )
 
         # **先物化、后改台账**（提交在 with 结束时）。反过来的话，台账先记成
         # "已存下"、物化却失败（磁盘满、source/ 里同名路径是个目录），下一轮就不会
@@ -1032,23 +1092,6 @@ def upload_file(
         except OSError as exc:
             log.exception("物化到 source/ 失败: %s", rel_path)
             raise HTTPException(status_code=500, detail="落盘失败: %s" % exc)
-
-        if row is None:
-            # 台账里还没有：Agent 比服务端先看到了这个文件。
-            # 这不危险（路径与内容都已校验），建一条即可。
-            row = SourceFile(
-                player_id=identity.player_id,
-                rel_path=rel_path,
-                sha256=actual_sha,
-                scanned_sha256=actual_sha,
-                size=size,
-                mtime=0,
-                revision=0,
-                content_stored=False,
-                first_seen_at=now,
-                last_seen_at=now,
-            )
-            session.add(row)
 
         row.sha256 = actual_sha
         row.scanned_sha256 = actual_sha

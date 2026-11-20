@@ -530,3 +530,53 @@ def test_scores_require_admin(judge_setup, client: TestClient) -> None:
         "/api/v1/admin/contests/%d/scores" % judge_setup["contest_id"]
     )
     assert response.status_code == 401
+
+
+# --------------------------------------------------------------------------- #
+# 手工成绩与并发扫描
+# --------------------------------------------------------------------------- #
+
+
+def test_扫描途中教师录入的手工成绩不会被覆盖(client, admin_headers, contest, player, app, monkeypatch) -> None:
+    """审计 S1：扫描器先把已有成绩读进内存、解析文件、再赋值 flush。教师恰好在这中间
+    录了手工分，扫描器的 UPDATE 只写"相对加载时变了的列" —— 分数被改写成文件里的，
+    ``parse_status`` 没变不写，于是这一格显示"20 / 教师手工录入"。
+
+    现在写入带 ``WHERE parse_status != 'manual'``：解析期间被改成手工的，写不进去。
+    """
+    import json as json_module
+    import os
+
+    from syncoj_server.services import judge as judge_module
+    from syncoj_server.tasks.judge import scan_all_contests
+
+    ctx = app.state.ctx
+    folder = Path(ctx.settings.judge_result_root) / contest["slug"] / player["player_no"] / "p1"
+    folder.mkdir(parents=True)
+    result = folder / "result.json"
+    result.write_text(json_module.dumps({"score": 10}), encoding="utf-8")
+    scan_all_contests(ctx)
+
+    result.write_text(json_module.dumps({"score": 20}), encoding="utf-8")
+    later = result.stat().st_mtime + 5
+    os.utime(str(result), (later, later))
+
+    original = judge_module.parse_result_file
+
+    def teacher_enters_a_score_meanwhile(path):
+        response = client.put(
+            "/api/v1/admin/contests/%d/judge/score" % contest["id"],
+            json={"player_id": player["id"], "problem": "p1", "score": 99},
+            headers=admin_headers,
+        )
+        assert response.status_code == 200, response.text
+        return original(path)
+
+    monkeypatch.setattr(judge_module, "parse_result_file", teacher_enters_a_score_meanwhile)
+    scan_all_contests(ctx)
+
+    matrix = client.get(
+        "/api/v1/admin/contests/%d/scores" % contest["id"], headers=admin_headers
+    ).json()
+    cell = matrix["rows"][0]["cells"][0]
+    assert (cell["score"], cell["parse_status"]) == (99, "manual")

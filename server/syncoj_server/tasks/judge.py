@@ -17,7 +17,7 @@ from sqlalchemy import select
 
 from ..context import AppContext
 from ..models import Contest, ContestStatus
-from ..services.judge import scan_contest_results
+from ..services.judge import SCAN_LOCK, scan_contest_results
 
 __all__ = ["run_judge_scan_loop", "scan_all_contests"]
 
@@ -37,24 +37,36 @@ async def run_judge_scan_loop(ctx: AppContext) -> None:
 
 
 def scan_all_contests(ctx: AppContext, force: bool = False) -> int:
-    """扫描所有未归档场次的结果目录，返回更新的条数。"""
-    updated = 0
+    """扫描所有未归档场次的结果目录，返回更新的条数。
+
+    **每个场次一个短事务**：曾经一个会话扫完所有场次，第一个有变更的场次 flush
+    之后，SQLite 的写锁一直持有到最后一个场次扫完（期间还在遍历目录、读文件），
+    把心跳、上传、管理端写操作都挡在 busy_timeout 上。与"重新扫描"接口共用
+    ``SCAN_LOCK``。
+    """
     with ctx.db.session() as session:
-        contests = list(
-            session.execute(
+        contests = [
+            (contest.id, contest.slug)
+            for contest in session.execute(
                 select(Contest).where(Contest.status != ContestStatus.CLOSED)
             ).scalars()
-        )
-        for contest in contests:
-            try:
+        ]
+
+    updated = 0
+    for contest_id, slug in contests:
+        try:
+            with SCAN_LOCK, ctx.db.session() as session:
+                contest = session.get(Contest, contest_id)
+                if contest is None:
+                    continue
                 report = scan_contest_results(session, ctx.settings, contest, force=force)
-            except Exception as exc:  # pragma: no cover - 单个场次出错不影响其他
-                log.exception("扫描场次 %s 的成绩失败: %s", contest.slug, exc)
-                continue
-            if report.parsed or report.unparsed:
-                log.info(
-                    "场次 %s 成绩扫描：解析 %d、未解析 %d、未变化 %d",
-                    contest.slug, report.parsed, report.unparsed, report.unchanged,
-                )
-            updated += report.parsed + report.unparsed
+        except Exception as exc:  # pragma: no cover - 单个场次出错不影响其他
+            log.exception("扫描场次 %s 的成绩失败: %s", slug, exc)
+            continue
+        if report.parsed or report.unparsed:
+            log.info(
+                "场次 %s 成绩扫描：解析 %d、未解析 %d、未变化 %d",
+                slug, report.parsed, report.unparsed, report.unchanged,
+            )
+        updated += report.parsed + report.unparsed
     return updated

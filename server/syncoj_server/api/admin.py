@@ -4905,9 +4905,10 @@ def rescan_judge_results(
     admin: AdminIdentity = Depends(require_admin),
 ) -> JudgeScanOut:
     """立即重扫成绩目录（忽略 mtime 缓存）。"""
-    from ..services.judge import scan_contest_results
+    from ..services.judge import SCAN_LOCK, scan_contest_results
 
-    with ctx.db.session() as session:
+    # 与后台扫描循环共用一把锁：两边同时给同一格插新行会撞唯一约束
+    with SCAN_LOCK, ctx.db.session() as session:
         contest = session.get(Contest, contest_id)
         if contest is None:
             raise HTTPException(status_code=404, detail="场次不存在")

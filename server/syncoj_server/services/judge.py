@@ -26,12 +26,14 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from ..config import Settings
@@ -447,6 +449,11 @@ def _candidate_sort_key(path: Path) -> Tuple[int, float, str]:
     return (rank, -mtime, path.name)
 
 
+#: 后台扫描循环与管理端"重新扫描"共用的进程内锁：两边同时给同一个
+#: (场次, 选手, 题目) 插新行会撞 uq_judge_run（曾经直接 500）。
+SCAN_LOCK = threading.Lock()
+
+
 def scan_contest_results(
     session: Session,
     settings: Settings,
@@ -458,6 +465,17 @@ def scan_contest_results(
 
     ``force=False`` 时，mtime 未变化的 (选手, 题目) 会被跳过 —— 默认每 10 秒跑
     一次，不能每次都把几百个文件重新解析一遍。
+
+    **先读、后写，写的时候用条件语句**。曾经的做法是一开始把已有成绩整批读进
+    ORM、读文件解析、再给内存里的行赋值 flush：教师在这中间手工录了分，扫描器的
+    UPDATE 只写"相对加载时变了的列" —— 分数被改写、``parse_status`` 没变不写，
+    于是库里留着 ``manual``，错误的分数还带着"教师手工录入"的标签（违反"手工
+    录入永不被自动扫描覆盖"）。现在：
+
+    * 解析阶段只读（已有成绩的快照只用来判"手工的跳过"与"mtime 没变跳过"）；
+    * 写的时候每一条都带 ``WHERE parse_status != 'manual'``，新行用
+      ``INSERT … ON CONFLICT DO UPDATE … WHERE parse_status != 'manual'`` ——
+      解析期间被教师改成手工的，写不进去；同时插入同一行也不会撞唯一约束。
     """
     report = ScanReport()
     contest_root = Path(settings.judge_result_root) / contest.slug
@@ -465,7 +483,7 @@ def scan_contest_results(
         return report
 
     players = {
-        player.player_no: player
+        player.player_no: player.id
         for player in session.execute(
             select(Player).where(Player.contest_id == contest.id)
         ).scalars()
@@ -473,18 +491,23 @@ def scan_contest_results(
     if not players:
         return report
 
-    existing = {
-        (row.player_id, row.problem): row
-        for row in session.execute(
-            select(JudgeRun).where(JudgeRun.contest_id == contest.id)
-        ).scalars()
+    snapshot = {
+        (player_id, problem): (run_id, parse_status, source_mtime)
+        for run_id, player_id, problem, parse_status, source_mtime in session.execute(
+            select(
+                JudgeRun.id, JudgeRun.player_id, JudgeRun.problem,
+                JudgeRun.parse_status, JudgeRun.source_mtime,
+            ).where(JudgeRun.contest_id == contest.id)
+        )
     }
 
+    # ---- 解析阶段：只读 ----
+    pending: List[Tuple[int, str, Dict[str, Any], Optional[int]]] = []
     for result in _iter_problem_dirs(contest_root, report):
         player_no, problem, problem_dir = result
 
-        player = players.get(player_no)
-        if player is None:
+        player_id = players.get(player_no)
+        if player_id is None:
             report.skipped += 1
             # 目录名对不上任何选手：可能是教师建错了目录名，也可能是导入了旧数据。
             # 明说出来，别让它静默消失。
@@ -506,17 +529,14 @@ def scan_contest_results(
             report.skipped += 1
             continue
 
-        row = existing.get((player.id, problem))
-
+        known = snapshot.get((player_id, problem))
         # 教师手工录入的成绩**永远优先**，连 force 重扫也不例外。
-        # 否则教师点一下"重新扫描"，自己刚修正的分数就被静默改回去了 ——
-        # 而"重扫"这个动作在教师看来只是想刷新一下，不该有破坏性。
+        # 否则教师点一下"重新扫描"，自己刚修正的分数就被静默改回去了。
         # 要清除手工值必须走显式的删除接口。
-        if row is not None and row.parse_status == "manual":
+        if known is not None and known[1] == "manual":
             report.manual += 1
             continue
-
-        if row is not None and not force and row.source_mtime == int(newest_mtime):
+        if known is not None and not force and known[2] == int(newest_mtime):
             report.unchanged += 1
             continue
 
@@ -526,34 +546,55 @@ def scan_contest_results(
         except ValueError:
             relative = chosen.as_posix()
 
-        if row is None:
-            row = JudgeRun(
-                contest_id=contest.id,
-                player_id=player.id,
-                problem=problem,
-                scanned_at=utcnow(),
-            )
-            session.add(row)
-            existing[(player.id, problem)] = row
-
-        row.source_path = relative[:1024]
-        row.source_mtime = int(newest_mtime)
-        row.updated_at = utcnow()
-
+        now = utcnow()
+        values: Dict[str, Any] = {
+            "source_path": relative[:1024],
+            "source_mtime": int(newest_mtime),
+            "updated_at": now,
+        }
         if parsed is None:
             # 保留上一次成功解析的分数，只更新"没解析出来"的标记 ——
             # 评测器重新导出一个损坏文件不该把已有成绩抹掉
-            row.parse_status = "unparsed"
-            row.detail = (reason or "无法解析")[:512]
-            report.unparsed += 1
+            values.update(parse_status="unparsed", detail=(reason or "无法解析")[:512])
         else:
-            row.score = parsed.score
-            row.max_score = parsed.max_score
-            row.status = parsed.status
-            row.parse_status = "ok"
-            row.detail = ("%s：%s" % (parser_name, reason or ""))[:512]
-            row.raw_json = None
+            values.update(
+                score=parsed.score,
+                max_score=parsed.max_score,
+                status=parsed.status,
+                parse_status="ok",
+                detail=("%s：%s" % (parser_name, reason or ""))[:512],
+                raw_json=None,
+            )
+        pending.append((player_id, problem, values, known[0] if known else None))
+
+    # ---- 写入阶段：条件语句，手工成绩写不进去 ----
+    not_manual = JudgeRun.__table__.c.parse_status != "manual"
+    for player_id, problem, values, run_id in pending:
+        if run_id is not None:
+            written = session.execute(
+                update(JudgeRun)
+                .where(JudgeRun.id == run_id, JudgeRun.parse_status != "manual")
+                .values(**values)
+                .execution_options(synchronize_session=False)
+            ).rowcount
+        else:
+            row = dict(values, contest_id=contest.id, player_id=player_id, problem=problem,
+                       scanned_at=values["updated_at"])
+            row.setdefault("parse_status", "unparsed")
+            statement = sqlite_insert(JudgeRun.__table__).values(**row)
+            statement = statement.on_conflict_do_update(
+                index_elements=["contest_id", "player_id", "problem"],
+                set_=values,
+                where=not_manual,
+            )
+            written = session.execute(statement).rowcount
+        if not written:
+            # 解析期间被教师改成了手工成绩：保留手工的
+            report.manual += 1
+        elif values.get("parse_status") == "ok":
             report.parsed += 1
+        else:
+            report.unparsed += 1
 
     session.flush()
     return report

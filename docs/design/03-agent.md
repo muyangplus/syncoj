@@ -97,6 +97,8 @@ StandardOutput=null            # 静默：不往终端/日志设备写任何东�
 StandardError=journal
 Restart=on-failure             # 自卸载成功时 Agent 以 exit 0 退出，always 会把它拉回来
 RestartSec=5
+SuccessExitStatus=75           # 切换版本（自更新激活 / 守卫回滚）的专用退出码：不算 failed
+RestartForceExitStatus=75      # ……但仍然要重启，拉起新版本
 User=<运行账号>                 # 默认 = 跑安装的那个账号；刻意不写 Group=（交给 NSS）
 PrivateTmp=yes
 PrivateDevices=yes
@@ -136,6 +138,11 @@ ReadWritePaths=-/var/lib/syncoj
   `always` 会立刻把它重新拉起来 —— 而那时 `/opt/syncoj`、`/etc/syncoj` 都已经删了，
   拉起来只会刷一堆"找不到文件"，现场看起来像"卸载失败"。崩溃仍然自愈；
   "反复起不来"的上限交给 `StartLimit*`（真机上见到过重启到 249 次）。
+* **切换版本用专用退出码 75，不是 0**：自更新激活新版本、启动守卫回滚之后，Agent
+  要退出让 systemd 拉起新代码。`on-failure` 不重启 exit 0 —— 曾经就是 0，于是铺开
+  一个版本整个机房停摆到重启机器。非 0 让旧单元也能拉起；新单元再用
+  `SuccessExitStatus=75` 不显示 failed、`RestartForceExitStatus=75` 保证重启。
+  代码里是 `main.EXIT_RESTART` 与 `install.py:AGENT_EXIT_RESTART`，测试对账。
 * **刻意不写 `Group=`**：systemd 按 NSS 解析该账号的主组。写死 `Group=<账号名>`
   会在"主组与账号名不同"的机器上撞 `217/GROUP`。
 * **刻意不要 `NoNewPrivileges=yes`**：它会让 setuid 的 sudo 无法提权，

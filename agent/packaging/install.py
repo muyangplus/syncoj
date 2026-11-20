@@ -1519,7 +1519,7 @@ class Installer:
         """替换当前激活版本之前停一次服务。
 
         不停的话，进程可能运行在"一半旧一半新"的目录上（目录被逐个替换），而
-        systemd 的 ``Restart=always`` 还会立刻把它拉起来。换完由 ``run()`` 里
+        崩溃之后 systemd（``Restart=on-failure``）还会立刻把它拉起来。换完由 ``run()`` 里
         "启动服务"那一步照常拉起。
         """
         self.report.note("被替换的是当前激活版本，先停服务再换目录")
@@ -3515,6 +3515,10 @@ def _writable_paths(
 #: 自卸载脚本与验签脚本的固定目录。**必须在 ``current`` 软链之外**：sudo 的
 #: NOPASSWD 白名单按字面路径匹配、**不解析符号链接**，放在链接下等于白名单
 #: 永远匹配不上，整条授权链就是哑的。
+#: Agent "为切换版本而退出"的退出码，必须与 ``syncoj_agent.main.EXIT_RESTART``
+#: 一致（``test_installer_unit_paths`` 对账）。
+AGENT_EXIT_RESTART = 75
+
 HELPER_DIR = Path("/usr/local/lib/syncoj")
 SELF_UNINSTALL_PATH = HELPER_DIR / "self_uninstall.sh"
 VERIFY_TOKEN_PATH = HELPER_DIR / "verify_uninstall_token.py"
@@ -3979,6 +3983,13 @@ def render_unit(
         # Restart，规则与这里无关，别一起改。
         "Restart=on-failure",
         "RestartSec=5",
+        # 版本切换（自更新激活 / 启动守卫回滚）以专用退出码退出，要求 systemd
+        # 拉起新版本：**不能是 0**（on-failure 不会重启正常退出 —— 曾经铺开一个
+        # 版本就让整个机房停摆）。SuccessExitStatus 让它不显示 failed，
+        # RestartForceExitStatus 保证它仍会重启。与 main.EXIT_RESTART 同值，
+        # 由测试对账（安装器是单文件分发，不能 import Agent 包）。
+        "SuccessExitStatus=%d" % AGENT_EXIT_RESTART,
+        "RestartForceExitStatus=%d" % AGENT_EXIT_RESTART,
         "",
         "# ---- 权限隔离 ----",
         "User=%s" % run_user,

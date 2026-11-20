@@ -26,6 +26,11 @@
 `Restart=on-failure` 那条还连着一条：**"反复起不来"的上限交给 `StartLimit*`** ——
 真机上见过重启到 249 次。
 
+它还连着另一条（后补）：**主动退出让 systemd 拉起新版本时，退出码不能是 0**。
+`on-failure` 不重启正常退出，而自更新激活 / 启动守卫回滚曾经都以 exit 0 退出 ——
+铺开一个版本就让所有机器停在那里。现在用专用退出码 75，并在单元里写
+`SuccessExitStatus=75`（不记 failed）与 `RestartForceExitStatus=75`（照样重启）。
+
 ## 后果
 
 - 运行时确实会往 journal 里留痕（`StandardError=journal`），但 **stdout 是 `null`**：

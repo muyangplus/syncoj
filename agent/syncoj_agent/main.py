@@ -102,6 +102,15 @@ log = logging.getLogger("syncoj.agent")
 
 #: 出错后的退避上限。网络长时间不通时不要疯狂重连
 MAX_BACKOFF = 300.0
+
+#: "为切换版本而退出"的进程退出码（BSD ``EX_TEMPFAIL``）。
+#:
+#: 曾经这里是 ``exit 0``，而服务单元是 ``Restart=on-failure`` —— 正常退出不会被
+#: 重新拉起：铺开一个版本后，所有机器激活、退出，然后**一直停着**直到重启机器。
+#: 自动回滚之后也一样。非 0 退出码让**已经装好的**单元（不带下面两行）照样把
+#: 新版本拉起来；新单元再用 ``SuccessExitStatus=`` 把它记成"正常"（不显示
+#: failed）、用 ``RestartForceExitStatus=`` 保证重启。见 ``install.py:render_unit``。
+EXIT_RESTART = 75
 #: 事件积压上限，防止长时间离线导致内存里堆一堆事件
 MAX_PENDING_EVENTS = 200
 
@@ -413,6 +422,10 @@ class Agent:
         self._credential: Optional[Credential] = None
         #: 收到"激活新版本"后置位，主循环据此退出让 systemd 重启
         self._restart_requested = False
+        #: 本进程内已经**处理完**（失败、或 stage 模式下已暂存）的发布
+        #: ``(version, sha256)``。同一份清单不再每轮重下（50 台 × 每 30 秒一次几十
+        #: MB 的下载 + 一条事件）；换了版本或内容、或者进程重启之后才会再处理一次。
+        self._handled_release: Optional[Tuple[str, str]] = None
         #: 连续成功周期计数，用于确认新版本可用后清掉回滚状态
         self._healthy_cycles = 0
         self._public_key = self._load_release_public_key()
@@ -1278,6 +1291,11 @@ class Agent:
             self._emit("warning", "upgrade_bad_manifest", "发布清单不合法：%s" % exc)
             return
 
+        attempt_key = (manifest.version, manifest.sha256)
+        if self._handled_release == attempt_key:
+            log.debug("发布 %s 本进程内已处理过，不再重复下载", manifest.version)
+            return
+
         install_root = self.config.install_root
         running = current_release(install_root) or __version__
 
@@ -1329,7 +1347,11 @@ class Agent:
             log.info("已下载发布包 %s（%d 字节），开始校验", manifest.version, size)
             verify_bundle(public_key, bundle, manifest)
             stage_release(install_root, manifest.version, bundle)
-        except (UpgradeError, AgentError) as exc:
+        except (UpgradeError, AgentError, OSError) as exc:
+            # OSError 也在内：最常见的是运行账号写不进安装根（/opt/syncoj 属 root）。
+            # 它曾经穿出 cycle()，被 run_forever 的兜底接住 —— 这一轮的事件不落、
+            # 哈希缓存不存、退避一路涨到 300 秒，而且每轮都这样。
+            self._handled_release = attempt_key
             log.error("升级包处理失败: %s", exc)
             self._emit("warning", "upgrade_failed", "升级 %s 失败：%s" % (version, exc))
             # 升级失败是典型的"必须留现场"：下一轮就把诊断包补上（受 60 秒
@@ -1339,6 +1361,7 @@ class Agent:
 
         log.info("版本 %s 已暂存到 %s", manifest.version, install_root)
         if mode != UpgradeMode.APPLY:
+            self._handled_release = attempt_key
             self._emit(
                 "info", "upgrade_staged",
                 "版本 %s 已下载并通过签名校验，等待激活（当前 mode=stage）" % manifest.version,
@@ -1377,7 +1400,8 @@ class Agent:
                 ),
             )
             activate_release(install_root, manifest.version)
-        except UpgradeError as exc:
+        except (UpgradeError, OSError) as exc:
+            self._handled_release = attempt_key
             log.error("激活版本 %s 失败: %s", manifest.version, exc)
             self._emit("error", "upgrade_activate_failed", "激活失败：%s" % exc)
             self.request_diagnostics("error")
@@ -1392,8 +1416,8 @@ class Agent:
             "warning", "upgrade_activated",
             "已升级到 %s 并重启（原版本 %s）" % (manifest.version, previous or "无"),
         )
-        # 由 systemd 的 Restart=always 拉起新版本 —— 不需要我们自己调 systemctl，
-        # 那会要求额外的 polkit 授权，平白扩大 Agent 的权限面
+        # 以 EXIT_RESTART 退出、由 systemd 拉起新版本 —— 不需要我们自己调
+        # systemctl，那会要求额外的 polkit 授权，平白扩大 Agent 的权限面
         self._restart_requested = True
 
     # ---------------------------------------------------------------- #
@@ -1786,8 +1810,9 @@ class Agent:
         # 反复起不来，应当立刻回滚退出，而不是先联网折腾一圈
         try:
             if self._guard_boot():
+                # 已回滚到上一版本：同样要让 systemd 把（回滚后的）版本拉起来
                 self.client.close()
-                return 0
+                return EXIT_RESTART
         except Exception:
             log.exception("启动守卫执行失败，继续正常运行")
 
@@ -1799,9 +1824,11 @@ class Agent:
         if not watchdog_supported():
             log.debug("这个平台没有 SIGALRM/setitimer，整轮看门狗不可用（不影响功能）")
 
+        exit_code = 0
         while not self._stop:
             if self._restart_requested:
-                log.info("为应用新版本而退出，systemd 将以新版本重新拉起")
+                log.info("为应用新版本而退出（退出码 %d），systemd 将以新版本重新拉起", EXIT_RESTART)
+                exit_code = EXIT_RESTART
                 break
             # **整轮看门狗**：每轮开始上闹钟、结束撤掉（finally）。任何一次阻塞
             # 调用都不能让心跳停摆超过 watchdog_seconds —— 现场那次卡在一次 socket
@@ -1887,7 +1914,7 @@ class Agent:
 
         log.info("Agent 已停止")
         self.client.close()
-        return 0
+        return exit_code
 
     def _try_rediscover(self) -> None:
         """连不上服务端时，去局域网里问一次：它是不是换地址了？

@@ -64,6 +64,10 @@ def make_bundle(path: Path, version: str = "1.2.3", extra: List[Tuple[str, str, 
     entries = [
         ("syncoj_agent/__init__.py", '__version__ = "%s"\n' % version, "file"),
         ("syncoj_agent/main.py", "print('hi')\n", "file"),
+        # 发布根上的启动器：安装器要求它存在（单元的 ExecStart 指向它）。这份夹具
+        # 曾经漏了它，而用到它的整机安装用例都挂着 ``requires_symlinks`` —— 在
+        # Windows 开发机上被跳过，于是"安装器加了这条要求"之后它们红了没人发现。
+        ("run_agent.py", "print('launcher')\n", "file"),
     ]
     entries.extend(extra or [])
     with tarfile.open(str(path), "w:gz") as archive:
@@ -97,7 +101,7 @@ def test_safe_extract_normal(installer, workdir: Path) -> None:
     dest = workdir / "out"
     tops = installer.safe_extract(bundle, dest)
 
-    assert tops == ["syncoj_agent"]
+    assert sorted(tops) == ["run_agent.py", "syncoj_agent"]
     assert (dest / "syncoj_agent" / "main.py").read_text(encoding="utf-8") == "print('hi')\n"
 
 
@@ -709,8 +713,13 @@ def test_full_install_and_idempotency(installer, workdir: Path) -> None:
     assert (release / "syncoj_agent" / "main.py").is_file()
     assert installer.current_version(prefix) == "1.0.0"
     assert (config_dir / "agent.ini").is_file()
-    assert (workdir / "units" / "syncoj-agent.service").is_file()
+    # ``--skip-service`` = "不碰 systemd"：主单元不写（``install_unit`` 第一行就返回）。
+    # 这条曾断言主单元**存在** —— 与实现相反，而它挂着 ``requires_symlinks``，在
+    # Windows 开发机上一直被跳过，所以没人发现。
+    assert not (workdir / "units" / "syncoj-agent.service").exists()
     assert (config_dir / "bootstrap.key").is_file()
+    # 注册单元目前**不受** ``--skip-service`` 约束（已知不一致，见重构计划第 15 步：
+    # 届时 ``--skip-service`` 统一覆盖所有单元，这一条跟着改）。
     assert (workdir / "units" / "syncoj-agent-enroll.service").is_file()
 
     # 第二次执行：结果必须一致

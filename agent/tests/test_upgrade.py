@@ -510,8 +510,12 @@ def test_prune_keeps_recent_versions(workdir: Path) -> None:
     activate_release(install, "2.0.0")
     removed = prune_releases(install, keep=2)
 
-    assert removed == ["1.0.0", "1.1.0"]
-    assert list_releases(install) == ["1.2.0", "2.0.0"]
+    # ``keep`` 是"除受保护版本（正在运行的 2.0.0）之外再留几个最新的"，**不是**
+    # 总数上限（见 ``prune_releases`` 的 docstring）：留 1.1.0、1.2.0，外加 2.0.0。
+    # 这条曾按"总数 = keep"断言，语义改了之后它红着 —— 但挂着 requires_symlinks，
+    # 在没开开发者模式的 Windows 上被跳过，所以一直没人看见。
+    assert removed == ["1.0.0"]
+    assert list_releases(install) == ["1.1.0", "1.2.0", "2.0.0"]
 
 
 @requires_symlinks

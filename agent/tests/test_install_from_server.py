@@ -280,7 +280,11 @@ def test_台账里的签名被改一个字符也过不去(make_installer, workdi
 
     write_public_key_json(pub, key)
     ledger = make_ledger(BUNDLE, key=key)
-    ledger["signature"] = "A" + ledger["signature"][1:]
+    # 换掉第一个字符 —— 必须**保证真的换了**：签名本来就以 "A" 开头的概率约 1/64，
+    # 原先固定写成 "A" 时那一次就等于没改，用例随机地"验签居然过了"而红。
+    original = ledger["signature"]
+    ledger["signature"] = ("B" if original[0] == "A" else "A") + original[1:]
+    assert ledger["signature"] != original
     instance = make_installer("--from-server", "--public-key", str(pub))
     with fake_server(ledger, BUNDLE) as server:
         instance.options.server = server.base

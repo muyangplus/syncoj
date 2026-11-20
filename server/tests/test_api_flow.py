@@ -506,6 +506,7 @@ def test_machine_id_mismatch_is_rejected(client: TestClient, enrolled: dict) -> 
             "machine_id": "some-other-machine",
             "ts": 1,
             "scan": [],
+            "scan_complete": True,
             "partials": [],
             "stats": {},
         },

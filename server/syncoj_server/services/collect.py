@@ -116,6 +116,10 @@ def reconcile_scan(
             )
         )
         entries = entries[: settings.max_files_per_scan]
+        # 截掉的那部分服务端没看见 —— 它们不是"被删了"。曾经这里仍按 Agent 报的
+        # scan_complete 做删除判定，被截掉的文件全被标成已删除（多扫描根时 Agent
+        # 按根各算上限，总数可以超过这里）。
+        scan_complete = False
 
     # 一次性读出该选手的全部台账，避免逐文件查库（N+1）
     rows: List[SourceFile] = list(

@@ -188,3 +188,36 @@ def test_身份一致的扫描照常对账(client, enrolled) -> None:
     )
 
     assert body["need_upload"] == [PATH]
+
+
+def test_服务端截断扫描时不把截掉的文件判成删除(client, enrolled, app) -> None:
+    """扫描超过 max_files_per_scan 被截断时，截掉的那部分服务端根本没看见。
+
+    曾经仍按 Agent 报的 scan_complete=true 做删除判定 —— 被截掉的文件全被标成
+    "选手删除了"（审计已复现：上限 3、上报 6 个，f3..f5 全被标删）。
+    """
+    token, mid = enrolled["token"], enrolled["machine_id"]
+    ctx = app.state.ctx
+    files = [entry("d/f%d.cpp" % i, b"x%d" % i) for i in range(6)]
+    tick(client, token, files, machine_id=mid)
+
+    ctx.settings.max_files_per_scan = 3
+    tick(client, token, files, machine_id=mid, scan_complete=True)
+
+    with ctx.db.session() as session:
+        deleted = [
+            row.rel_path for row in session.execute(select(SourceFile)).scalars()
+            if row.deleted_at is not None
+        ]
+    assert deleted == []
+
+
+def test_scan_complete_是必填字段(client, enrolled) -> None:
+    """它曾缺省为 true —— 漏写字段的报文被当成"完整扫描"，恰好是会误删的那一边。"""
+    token, mid = enrolled["token"], enrolled["machine_id"]
+    response = client.post(
+        "/api/v1/agent/tick",
+        json={"machine_id": mid, "ts": 1, "scan": [], "partials": [], "stats": {}},
+        headers=agent_headers(token),
+    )
+    assert response.status_code == 422

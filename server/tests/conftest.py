@@ -116,6 +116,7 @@ def do_tick(client, token: str, entries, *, machine_id: str, **kwargs) -> dict:
         "ts": 1767225600,
         "scan_root": "/home/student/code",
         "scan": entries,
+        "scan_complete": True,
         "partials": [],
         "stats": stats,
     }

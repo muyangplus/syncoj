@@ -106,6 +106,7 @@ def tick_payload(**kwargs) -> Dict:
         "ts": 1767225600,
         "scan_root": "/home/student/code",
         "scan": [],
+        "scan_complete": True,
         "partials": [],
         "stats": {"disk_free": 10 ** 10, "last_error": None, "queue": 0},
     }

@@ -207,7 +207,10 @@ class TickRequest(_Base):
     #: 本次扫描是否完整覆盖了扫描根目录。
     #: 若 Agent 中途遇到 PermissionError 等错误导致扫描不完整，必须置 False，
     #: 服务端会因此**跳过删除判定** —— 否则会把"没扫到"误判成"被删了"。
-    scan_complete: bool = True
+    #:
+    #: **必填**：它曾经缺省为 True —— 漏写这个字段的报文被当成"完整扫描"，
+    #: 恰好是会误删的那一边。报文必须自己说清楚。
+    scan_complete: bool
     partials: List[PartialDownload] = Field(default_factory=list)
     #: 本地已确认完整的下发资源。服务端据此把对应的 deploy_target 标为完成。
     #: 刻意由 Agent 显式上报而不是服务端从 partials 推断 —— "分片不见了" 既可能

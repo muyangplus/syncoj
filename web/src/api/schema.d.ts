@@ -4180,10 +4180,7 @@ export interface components {
             release_public_key: boolean;
             /** Scan */
             scan?: components["schemas"]["ScanEntry"][];
-            /**
-             * Scan Complete
-             * @default true
-             */
+            /** Scan Complete */
             scan_complete: boolean;
             /** Scan Root */
             scan_root?: string | null;

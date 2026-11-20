@@ -4364,7 +4364,6 @@
             "type": "array"
           },
           "scan_complete": {
-            "default": true,
             "title": "Scan Complete",
             "type": "boolean"
           },
@@ -4401,7 +4400,8 @@
         },
         "required": [
           "machine_id",
-          "ts"
+          "ts",
+          "scan_complete"
         ],
         "title": "TickRequest",
         "type": "object"

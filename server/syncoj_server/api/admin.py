@@ -1190,6 +1190,10 @@ def revoke_pending_machine(
 
     作废它的凭据 —— 那台机器下次心跳会拿到 401，然后等下一次开机由注册单元
     重新注册。真正的垃圾机器应该先吊销统一密钥，否则它会一直回来。
+
+    **硬删**，与 :func:`revoke_agent` 同理：曾经只打 ``revoked_at`` 标记，而
+    ``machine_uuid`` 有唯一约束、认回时又不看作废的行 —— 同一台机器再注册就撞约束
+    500，"它下次开机还会回来"这句话不成立。
     """
     with ctx.db.session() as session:
         agent = session.get(Agent, agent_id)
@@ -1198,7 +1202,7 @@ def revoke_pending_machine(
         # 主机名可能是空的（Agent 读不到 hostname 时），退回 machine_id 作为标识 ——
         # 空字符串会让"原样输入"变成一个谁都不用输入的空操作
         require_confirm(agent.hostname or agent.machine_id, confirm, "机器名")
-        agent.revoked_at = utcnow()
+        session.delete(agent)
     ctx.registry.forget(agent_id)
     ctx.pair_codes.forget(agent_id)
     return SimpleAck(ok=True, detail="已移除")
@@ -1228,9 +1232,9 @@ def clear_pending_machines(
                 )
             ).scalars()
         )
-        now = utcnow()
+        # 硬删（理由见 revoke_pending_machine）：打标记会让整批机器永久回不来
         for agent in rows:
-            agent.revoked_at = now
+            session.delete(agent)
         if rows:
             session.add(
                 EventLog(
@@ -1907,13 +1911,11 @@ def rebind_agent(
         if current is not None and current.id == entry.id:
             return SimpleAck(ok=True, detail="这台机器本来就属于 %s" % entry.player_no)
 
-        clash = session.execute(
-            select(Agent).where(
-                Agent.roster_entry_id == entry.id,
-                Agent.revoked_at.is_(None),
-                Agent.id != agent_id,
-            )
-        ).scalar_one_or_none()
+        # 按考号判，不按名单条目判（理由见 machines_holding_player_no）
+        holders = enrollment.machines_holding_player_no(
+            session, entry.player_no, exclude_agent_id=agent_id
+        )
+        clash = holders[0] if holders else None
         if clash is not None:
             raise ApiError(
                 409,

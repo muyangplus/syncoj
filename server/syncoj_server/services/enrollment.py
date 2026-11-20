@@ -168,6 +168,26 @@ def find_unbound_by_pair_code(
 # --------------------------------------------------------------------------- #
 
 
+def machines_holding_player_no(
+    session: Session, player_no: str, exclude_agent_id: Optional[int] = None
+) -> List[Agent]:
+    """已经绑到**这个考号**（不论哪份名单里的条目）的未作废机器。
+
+    "一人一机"必须按考号判，不能按名单条目判：机器的身份解析按 ``player_no``
+    跨名单、跨场次找人（``api/deps.resolve_machine``），而班级名单和考场名单同时
+    含同一个人是常态。按条目判时，两台机器分别绑到两份名单里的 S001，tick 出来
+    都是 S001 —— 正是"两台机器往同一个 source/ 目录静默写代码"。
+    """
+    stmt = (
+        select(Agent)
+        .join(RosterEntry, Agent.roster_entry_id == RosterEntry.id)
+        .where(RosterEntry.player_no == player_no, Agent.revoked_at.is_(None))
+    )
+    if exclude_agent_id is not None:
+        stmt = stmt.where(Agent.id != exclude_agent_id)
+    return list(session.execute(stmt).scalars())
+
+
 def _machine_by_uuid(session: Session, machine_uuid: Optional[str]) -> Optional[Agent]:
     if not machine_uuid:
         return None
@@ -294,6 +314,17 @@ def enroll_machine(
             matched_by = None
 
     if agent is None:
+        if machine_uuid:
+            # 早先的"移除待配对"只打 revoked_at、把行留着；而 machine_uuid 有唯一约束、
+            # 认回时又不看被作废的行 —— 于是那台机器再注册就撞约束 500，永远回不来。
+            # 新建之前把同一个 UUID 的**已作废**行清掉（未作废的会在上面被认回）。
+            for stale in session.execute(
+                select(Agent).where(
+                    Agent.machine_uuid == machine_uuid, Agent.revoked_at.is_not(None)
+                )
+            ).scalars():
+                session.delete(stale)
+            session.flush()
         agent = Agent(
             token_hash=token_hash,
             machine_id=machine_id,
@@ -389,13 +420,7 @@ def bind_machine(
             code="machine_already_bound",
         )
 
-    taken = session.execute(
-        select(Agent).where(
-            Agent.roster_entry_id == entry.id,
-            Agent.revoked_at.is_(None),
-            Agent.id != agent.id,
-        )
-    ).scalars().all()
+    taken = machines_holding_player_no(session, entry.player_no, exclude_agent_id=agent.id)
     if taken:
         raise BootstrapRejected(
             "%s 已经有一台机器了（%s）。要换机器请先作废那一台，或用「改派」。"

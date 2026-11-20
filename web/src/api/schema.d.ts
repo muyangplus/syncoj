@@ -1305,6 +1305,10 @@ export interface paths {
          *
          *     作废它的凭据 —— 那台机器下次心跳会拿到 401，然后等下一次开机由注册单元
          *     重新注册。真正的垃圾机器应该先吊销统一密钥，否则它会一直回来。
+         *
+         *     **硬删**，与 :func:`revoke_agent` 同理：曾经只打 ``revoked_at`` 标记，而
+         *     ``machine_uuid`` 有唯一约束、认回时又不看作废的行 —— 同一台机器再注册就撞约束
+         *     500，"它下次开机还会回来"这句话不成立。
          */
         delete: operations["revoke_pending_machine_api_v1_admin_machines_pending__agent_id__delete"];
         options?: never;

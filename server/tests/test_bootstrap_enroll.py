@@ -435,7 +435,9 @@ def test_revoked_machine_credential_stops_working(
         headers=agent_headers(enrolled["token"]),
     )
     assert response.status_code == 401, response.text
-    assert response.json()["code"] == "machine_revoked"
+    # 移除改为硬删之后，这枚 token 在库里已经不存在 —— 码是 unauthorized；Agent 对
+    # 任何 401 的处理都一样（清掉本地凭据、等注册单元重新注册）
+    assert response.json()["code"] in ("unauthorized", "machine_revoked")
 
 
 def test_clear_pending_machines_requires_the_whole_word(

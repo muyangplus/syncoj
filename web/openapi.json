@@ -8136,7 +8136,7 @@
     },
     "/api/v1/admin/machines/pending/{agent_id}": {
       "delete": {
-        "description": "把一台待配对的机器从列表里去掉（认错机器、测试机、刷注册的垃圾）。\n\n作废它的凭据 —— 那台机器下次心跳会拿到 401，然后等下一次开机由注册单元\n重新注册。真正的垃圾机器应该先吊销统一密钥，否则它会一直回来。",
+        "description": "把一台待配对的机器从列表里去掉（认错机器、测试机、刷注册的垃圾）。\n\n作废它的凭据 —— 那台机器下次心跳会拿到 401，然后等下一次开机由注册单元\n重新注册。真正的垃圾机器应该先吊销统一密钥，否则它会一直回来。\n\n**硬删**，与 :func:`revoke_agent` 同理：曾经只打 ``revoked_at`` 标记，而\n``machine_uuid`` 有唯一约束、认回时又不看作废的行 —— 同一台机器再注册就撞约束\n500，\"它下次开机还会回来\"这句话不成立。",
         "operationId": "revoke_pending_machine_api_v1_admin_machines_pending__agent_id__delete",
         "parameters": [
           {

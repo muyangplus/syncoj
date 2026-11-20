@@ -838,3 +838,74 @@ def test_读超时到点就抛_不会挂住(workdir: Path) -> None:
         "底层应当是读超时：%r" % (excinfo.value.__cause__,)
     )
     assert elapsed < 4.0, "等了 %.1f 秒 —— 超时没有生效" % elapsed
+
+
+class BodyReadingConnection(ScriptedConnection):
+    """像真 ``http.client`` 一样在 ``request()`` 里把流式请求体读到底。
+
+    剧本里的异常在**发送阶段**抛（``BrokenPipeError`` 就发生在这里：对端已关，
+    请求体写不进去），这正是 ``ScriptedConnection`` 只在 ``getresponse`` 里抛
+    覆盖不到的那条路。
+    """
+
+    sent_bodies: list = []
+
+    def request(self, method, url, body=None, headers=None) -> None:
+        self.requests += 1
+        data = b""
+        if hasattr(body, "read"):
+            while True:
+                chunk = body.read(7)
+                if not chunk:
+                    break
+                data += chunk
+        self.sent_bodies.append(data)
+        if self.queue and isinstance(self.queue[0], BrokenPipeError):
+            raise self.queue.pop(0)
+
+
+def test_发请求时撞上_broken_pipe_重连后重发完整的请求体(monkeypatch, workdir: Path) -> None:
+    """Linux 上空闲连接被服务端关掉后，下一次写请求体先撞 EPIPE。
+
+    两件事都要成立：``BrokenPipeError`` 算"长连接竞态"、值得重连再试；
+    重试时 multipart 请求体**从头**再发一遍（不复位的话第二次只剩空串，
+    服务端会按 Content-Length 干等到超时）。
+    """
+    from syncoj_agent.client import AgentClient
+
+    source = workdir / "a.cpp"
+    source.write_bytes(b"int main(){}\n" * 50)
+
+    client = AgentClient("https://127.0.0.1:8000")
+    queue = [BrokenPipeError(32, "Broken pipe"),
+             FakeResponse(payload=b'{"stored": true}')]
+    made = []
+    BodyReadingConnection.sent_bodies = []
+
+    def new_connection(timeout):
+        connection = BodyReadingConnection(queue)
+        made.append(connection)
+        return connection
+
+    monkeypatch.setattr(client, "_new_connection", new_connection)
+    try:
+        client.upload_file("p/a.cpp", source, "0" * 64)
+    finally:
+        client.close()
+
+    first, second = BodyReadingConnection.sent_bodies
+    assert len(made) == 2, "应当丢掉坏连接、新建一条"
+    assert second == first and len(second) > len(source.read_bytes()), (
+        "重试必须重发完整的请求体：第一次 %d 字节，第二次 %d 字节" % (len(first), len(second))
+    )
+
+
+def test_multipart_rewind_replays_the_same_bytes(workdir: Path) -> None:
+    source = workdir / "f.bin"
+    source.write_bytes(bytes(range(256)) * 9)
+    body = MultipartBody("b", {"path": "x"}, "file", "f.bin", source)
+    once = body.read()
+    body.rewind()
+    again = body.read()
+    body.close()
+    assert once == again and len(once) == len(body)

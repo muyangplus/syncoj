@@ -64,10 +64,18 @@ DIAGNOSTICS_TIMEOUT_SECONDS = 15
 #: Windows 上直接是"主机中的软件中止了一个已建立的连接"。跨端回归测试
 #: （``server/tests/test_e2e_agent.py`` 里那条 keep-alive 用例）会在 Windows 上
 #: 走到这条路 —— 不带上它，那条用例在开发机上是红的、目标机上才是绿的。
+#:
+#: ``BrokenPipeError`` 是**同一类竞态在 Linux 上的另一种表现**：对端关掉之后，
+#: 如果请求体（tick 的 JSON、上传的 multipart）还没写完，``send`` 先撞上 EPIPE，
+#: 根本走不到读响应那一步。空闲节奏 30s 远大于 uvicorn 的 5s keep-alive，所以
+#: 空闲时几乎每一轮的第一条请求都会撞上它；漏掉它，那条 keep-alive 回归用例在
+#: Linux 上恒红（而在 Windows 上恒绿 —— 那边报的是 Reset/Aborted）。
+#: 请求根本没送达服务端，重发是安全的。
 RETRYABLE_CONNECTION_ERRORS = (
     http.client.RemoteDisconnected,
     ConnectionResetError,
     ConnectionAbortedError,
+    BrokenPipeError,
     http.client.BadStatusLine,
     http.client.IncompleteRead,
 )
@@ -245,6 +253,16 @@ class MultipartBody:
 
     def __len__(self) -> int:
         return self._length
+
+    def rewind(self) -> None:
+        """回到流的开头，供连接竞态后的重试重新发送。
+
+        ``http.client`` 会把请求体读到底；不复位的话，重试只发出请求头和一个
+        声称 N 字节的 Content-Length，服务端干等到超时 —— 那一轮被白白拖住。
+        """
+        self.close()
+        self._index = 0
+        self._offset = 0
 
     def read(self, size: int = -1) -> bytes:
         if size is None or size < 0:
@@ -502,6 +520,9 @@ class AgentClient:
         last_error: Optional[BaseException] = None
         for attempt in range(retries + 1):
             connection = self._connection(transfer, timeout)
+            if attempt and hasattr(body, "rewind"):
+                # 流式请求体（multipart）在上一次尝试里已经被读过了
+                body.rewind()  # type: ignore[union-attr]
             try:
                 connection.request(method, url, body=body, headers=sent_headers)
                 response = connection.getresponse()

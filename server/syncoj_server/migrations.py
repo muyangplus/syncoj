@@ -539,6 +539,18 @@ def _migration_013_source_scanned_sha(engine: Engine) -> None:
         )
 
 
+def _migration_014_deploy_failure_count(engine: Engine) -> None:
+    """下发目标记连续失败次数（``deploy_target.failure_count``）。
+
+    机器的下载失败曾经只发一条事件、从不回写目标：失败的目标永远显示"进行中"，
+    管理端的"重试"按钮几乎用不上。只加一列可空整数：老行没有失败记录，
+    NULL 读作 0 就是正确的初始状态。
+    """
+    if "deploy_target" not in _tables(engine):
+        return
+    _add_column(engine, "deploy_target", "failure_count", "INTEGER")
+
+
 MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
     (1, "统一密钥注册 + 名单库所需的结构", _migration_001_enrollment),
     (2, "机器永久绑定名单条目；去掉注册码链路", _migration_002_roster_binding),
@@ -588,6 +600,11 @@ MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
         13,
         "代码台账分开记录最近一次扫描与已存下的内容指纹",
         _migration_013_source_scanned_sha,
+    ),
+    (
+        14,
+        "下发目标记连续下载失败次数",
+        _migration_014_deploy_failure_count,
     ),
 ]
 

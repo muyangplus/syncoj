@@ -17,7 +17,6 @@ __all__ = [
     "EnrollRequest",
     "EnrollResponse",
     "ScanEntry",
-    "PartialDownload",
     "TickStats",
     "TickRequest",
     "DeployJob",
@@ -166,11 +165,29 @@ class ScanEntry(_Base):
     mtime: int = Field(ge=0)
 
 
-class PartialDownload(_Base):
-    """客户端本地未完成的下载，服务端据此回填 offset。"""
+class DeployProgress(_Base):
+    """一个下发目标在本机的进度（分片里已经有多少字节）。"""
 
-    asset_id: int
+    target_id: int
     bytes_done: int = Field(ge=0)
+
+
+class DeployDone(_Base):
+    """一个下发目标已经在本机落地，落地的是**哪一份内容**。
+
+    带 ``sha256`` 是为了让服务端只认"当前这一版"的回执：教师在线改了正文 /
+    改了 zip 密码之后，迟到的旧版回执不能把新内容标成已完成。
+    """
+
+    target_id: int
+    sha256: str = Field(min_length=64, max_length=64)
+
+
+class DeployFailed(_Base):
+    """一个下发目标本轮没下成，以及原因（给教师看的）。"""
+
+    target_id: int
+    reason: str = Field(default="", max_length=300)
 
 
 class TickStats(_Base):
@@ -213,11 +230,20 @@ class TickRequest(_Base):
     #: **必填**：它曾经缺省为 True —— 漏写这个字段的报文被当成"完整扫描"，
     #: 恰好是会误删的那一边。报文必须自己说清楚。
     scan_complete: bool
-    partials: List[PartialDownload] = Field(default_factory=list)
-    #: 本地已确认完整的下发资源。服务端据此把对应的 deploy_target 标为完成。
-    #: 刻意由 Agent 显式上报而不是服务端从 partials 推断 —— "分片不见了" 既可能
-    #: 是下完了，也可能是被清理了，推断会误判。
-    completed_assets: List[int] = Field(default_factory=list)
+    #: 下发作业**按目标**（``target_id``）回报。曾经按 ``asset_id``：同一资产发到
+    #: 同一个人的两个目录时，一条回执把两个目标一起标完成（另一个其实没落地）。
+    #:
+    #: * ``deploy_progress``：本机分片里已有多少字节（管理端的进度条）；
+    #: * ``deploy_done``：已落地，连同落地内容的 sha256 —— 服务端只认与资产当前
+    #:   内容一致的回执；
+    #: * ``deploy_failed``：本轮没下成及原因 —— 连续失败若干次服务端判 FAILED，
+    #:   教师在管理端看得见、点得了重试。
+    #:
+    #: 刻意由 Agent 显式上报"完成"，而不是服务端从"没有进度了"去推断 ——
+    #: "分片不见了"既可能是下完了，也可能是被清理了。
+    deploy_progress: List[DeployProgress] = Field(default_factory=list, max_length=1000)
+    deploy_done: List[DeployDone] = Field(default_factory=list, max_length=1000)
+    deploy_failed: List[DeployFailed] = Field(default_factory=list, max_length=1000)
     #: 这台机器上**有没有可用的发布公钥**（``/etc/syncoj/release-key.pub.json``，
     #: 也就是升级信任锚）。
     #:
@@ -237,12 +263,16 @@ class TickRequest(_Base):
 
 
 class DeployJob(_Base):
+    #: 回执与进度都按它报（不是 asset_id —— 同一资产可以有多个目标）
+    target_id: int
     asset_id: int
     url: str
     sha256: str
     size: int
     dest: str
-    offset: int = 0
+    #: 曾经还有一个 ``offset``（服务端回填的续传位置）。续传位置以 Agent 本地分片
+    #: 为准，服务端那份没人用；更糟的是"本地分片满长"时服务端据它**跳过派发**，
+    #: 而 Agent 只在收到作业时才会完成最后的落盘 —— 任务永远卡在进行中。
     mode: str = "overwrite"
 
 
@@ -266,7 +296,6 @@ class TickResponse(_Base):
     next_tick_seconds: int
     need_upload: List[str] = Field(default_factory=list)
     deploy_jobs: List[DeployJob] = Field(default_factory=list)
-    cancel_assets: List[int] = Field(default_factory=list)
     upgrade: Optional[UpgradeInfo] = None
     #: 教师请求过卸载、且这台机器报过有发布公钥时，这里是一次性卸载授权令牌；
     #: 其余时候是 ``null``。Agent 拿它去验签，验过才执行删除。

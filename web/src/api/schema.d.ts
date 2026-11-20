@@ -2680,6 +2680,32 @@ export interface components {
              */
             target_kind: string;
         };
+        /**
+         * DeployDone
+         * @description 一个下发目标已经在本机落地，落地的是**哪一份内容**。
+         *
+         *     带 ``sha256`` 是为了让服务端只认"当前这一版"的回执：教师在线改了正文 /
+         *     改了 zip 密码之后，迟到的旧版回执不能把新内容标成已完成。
+         */
+        DeployDone: {
+            /** Sha256 */
+            sha256: string;
+            /** Target Id */
+            target_id: number;
+        };
+        /**
+         * DeployFailed
+         * @description 一个下发目标本轮没下成，以及原因（给教师看的）。
+         */
+        DeployFailed: {
+            /**
+             * Reason
+             * @default
+             */
+            reason: string;
+            /** Target Id */
+            target_id: number;
+        };
         /** DeployJob */
         DeployJob: {
             /** Asset Id */
@@ -2691,17 +2717,24 @@ export interface components {
              * @default overwrite
              */
             mode: string;
-            /**
-             * Offset
-             * @default 0
-             */
-            offset: number;
             /** Sha256 */
             sha256: string;
             /** Size */
             size: number;
+            /** Target Id */
+            target_id: number;
             /** Url */
             url: string;
+        };
+        /**
+         * DeployProgress
+         * @description 一个下发目标在本机的进度（分片里已经有多少字节）。
+         */
+        DeployProgress: {
+            /** Bytes Done */
+            bytes_done: number;
+            /** Target Id */
+            target_id: number;
         };
         /** DeployTargetOut */
         DeployTargetOut: {
@@ -3382,16 +3415,6 @@ export interface components {
              * @default 0
              */
             total: number;
-        };
-        /**
-         * PartialDownload
-         * @description 客户端本地未完成的下载，服务端据此回填 offset。
-         */
-        PartialDownload: {
-            /** Asset Id */
-            asset_id: number;
-            /** Bytes Done */
-            bytes_done: number;
         };
         /**
          * PendingMachineOut
@@ -4165,14 +4188,16 @@ export interface components {
         TickRequest: {
             /** Agent Version */
             agent_version?: string | null;
-            /** Completed Assets */
-            completed_assets?: number[];
+            /** Deploy Done */
+            deploy_done?: components["schemas"]["DeployDone"][];
+            /** Deploy Failed */
+            deploy_failed?: components["schemas"]["DeployFailed"][];
+            /** Deploy Progress */
+            deploy_progress?: components["schemas"]["DeployProgress"][];
             /** Hostname */
             hostname?: string | null;
             /** Machine Id */
             machine_id: string;
-            /** Partials */
-            partials?: components["schemas"]["PartialDownload"][];
             /**
              * Release Public Key
              * @default false
@@ -4196,8 +4221,6 @@ export interface components {
              * @default false
              */
             bound: boolean;
-            /** Cancel Assets */
-            cancel_assets?: number[];
             /**
              * Claimed
              * @default true

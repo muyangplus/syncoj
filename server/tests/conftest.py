@@ -110,6 +110,11 @@ def do_tick(client, token: str, entries, *, machine_id: str, **kwargs) -> dict:
     """
     stats = {"disk_free": 10 ** 10, "last_error": None, "queue": 0}
     stats.update(kwargs.pop("stats", {}) or {})
+    completed = kwargs.pop("completed_assets", None)
+    if completed:
+        # 测试里的简写："这几个资产已经下好了"。协议早已改成按**下发目标**回报、
+        # 并带落地内容的 sha256，这里替测试把它翻译成真回执（服务端只认本人的目标）。
+        kwargs.setdefault("deploy_done", done_receipts(client, completed))
     payload = {
         "agent_version": "0.1.0",
         "machine_id": machine_id,
@@ -117,13 +122,31 @@ def do_tick(client, token: str, entries, *, machine_id: str, **kwargs) -> dict:
         "scan_root": "/home/student/code",
         "scan": entries,
         "scan_complete": True,
-        "partials": [],
         "stats": stats,
     }
     payload.update(kwargs)
     response = client.post("/api/v1/agent/tick", json=payload, headers=agent_headers(token))
     assert response.status_code == 200, response.text
     return response.json()
+
+
+def done_receipts(client, asset_ids) -> list:
+    """这些资产的全部"还在派发中"的下发目标 → ``deploy_done`` 回执（带当前内容 sha256）。"""
+    from sqlalchemy import select
+
+    from syncoj_server.models import Asset, DeployStatus, DeployTarget, DeployTask
+
+    with client.app.state.ctx.db.session() as session:
+        rows = session.execute(
+            select(DeployTarget.id, Asset.sha256)
+            .join(DeployTask, DeployTarget.task_id == DeployTask.id)
+            .join(Asset, DeployTask.asset_id == Asset.id)
+            .where(
+                DeployTask.asset_id.in_(list(asset_ids)),
+                DeployTarget.status.in_((DeployStatus.PENDING, DeployStatus.READY)),
+            )
+        ).all()
+    return [{"target_id": int(target_id), "sha256": sha} for target_id, sha in rows]
 
 
 def declared_upload(client, enrolled: dict, path: str, content: bytes, filename: str = None):

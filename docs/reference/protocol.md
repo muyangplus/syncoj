@@ -236,8 +236,9 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
     { "path": "code/main.cpp", "sha256": "ab12…", "size": 1234, "mtime": 1767225500 }
   ],
   "scan_complete": true,
-  "partials": [ { "asset_id": 42, "bytes_done": 3145728 } ],
-  "completed_assets": [42],
+  "deploy_progress": [ { "target_id": 42, "bytes_done": 3145728 } ],
+  "deploy_done": [ { "target_id": 7, "sha256": "cd34…" } ],
+  "deploy_failed": [ { "target_id": 9, "reason": "写盘失败: [Errno 28] No space left on device" } ],
   "scanned_for": { "player_no": "S001", "contest_slug": "mock-1" },
   "stats": { "disk_free": 10737418240, "last_error": null, "queue": 0 }
 }
@@ -247,8 +248,9 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
 |---|---|
 | `scan` | **全量**文件索引，不含内容。路径 = `<扫描根目录名>/<相对路径>`，**NFC 归一化**（服务端按 NFC 存、按 NFC 回 `need_upload`；Agent 上传时按本地真实文件名打开）。文件名不是合法 UTF-8 的文件不进 `scan`，只在 `stats.last_error` 里说一声 |
 | `scan_complete` | **必填**。本次扫描是否完整覆盖了所有根目录。**为 `false` 时服务端跳过删除判定**。服务端因 `scan` 超过上限而截断时，按 `false` 处理（截掉的文件服务端没看见，不是被删了）。Agent 的 `max_files` 是**整台机器**的总数，不是每个根各一份 |
-| `partials` | 本地未完成下载的已下载字节数。Agent 重启后从磁盘实况重建 |
-| `completed_assets` | 本地已确认完整的下发资源 id。**显式上报**而不由服务端从 `partials` 推断 —— "分片不见了"既可能是下完了，也可能是被清理了 |
+| `deploy_progress` | 上一轮派下来的作业在本机分片里已有多少字节（**按下发目标** `target_id`）。只用于管理端的进度条 |
+| `deploy_done` | 已落地的下发目标，**连同落地内容的 sha256**。服务端只认与资产**当前**内容一致的回执：教师在线改了正文之后，迟到的旧版回执不会把新内容标成已完成。**显式上报**而不由服务端从"没有进度了"推断 —— "分片不见了"既可能是下完了，也可能是被清理了 |
+| `deploy_failed` | 本轮没下成的目标与原因（≤300 字）。连续失败 5 次服务端判 `failed`、不再派发，原因显示在管理端；内容变更或手工重试清零 |
 | *(时间窗)* | 场次设了开考 / 结束时间时，窗口 `[starts_at, ends_at)` 之外的 tick **不对账**：台账不动、`need_upload` 为空、按空闲节奏回 `next_tick_seconds`。机器照常在线、照常拿下发文件 |
 | `scanned_for` | 这一轮的扫描根是按**哪个身份**展开的（`{player_no}` / `{contest_slug}`）。与服务端此刻解析出的身份不同 = 机器刚被改派或换了场次，这份扫描是上一个人的目录：服务端**整份不对账**（不进台账、`need_upload` 为空，记一条 `scan_identity_mismatch`），响应照常带新身份；Agent 发现身份变了就重算扫描根、清掉哈希缓存，本轮不再上传下载。缺省按"一致"处理 |
 | `stats.queue` | 待上报审计事件数 |
@@ -265,16 +267,15 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
   "need_upload": ["code/main.cpp"],
   "deploy_jobs": [
     {
+      "target_id": 42,
       "asset_id": 42,
       "url": "/api/v1/agent/assets/42",
       "sha256": "cd34…",
       "size": 10485760,
       "dest": "题面.zip",
-      "offset": 3145728,
       "mode": "overwrite"
     }
   ],
-  "cancel_assets": [],
   "upgrade": null,
   "diagnostics_request": false,
   "config": { "…见 §7…" },
@@ -286,6 +287,13 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
   "contest_slug": "mock-1"
 }
 ```
+
+**下发作业按下发目标（`target_id`）派发**，回执也按它报（同一资产可以发到同一个人
+的两个目录，按资产计的话一条回执会把两个都标完成）。作业**不带续传偏移**：续传位置
+只看 Agent 本地分片（`deploy_root/.syncoj-parts/<sha256>.part`，按内容命名，内容一换
+自然从头来）。服务端在收到 `deploy_done` 之前**每一轮都派发**，哪怕机器报的进度已经
+满长 —— 落盘前崩溃过一次的机器只有再收到作业才会完成最后一步。已取消的目标不再派发，
+下载接口也不再给。
 
 **`diagnostics_request` 是一次性字段**：管理端点过「要一份」之后，这个字段在
 **下一次**心跳里为 `true`，服务端在返回它的同时就把标记清掉 —— 机器没收到就让教师

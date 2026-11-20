@@ -14,11 +14,14 @@ from pathlib import Path
 from typing import List, Optional
 
 from conftest import make_tree
+import time
+
 from syncoj_agent.download import (
     PART_SUFFIX,
+    PARTS_DIRNAME,
     download_asset,
-    find_partial_sizes,
     part_path_for,
+    part_size,
 )
 
 
@@ -74,6 +77,14 @@ class FakeClient:
         pass
 
 
+def seed_part(deploy_root: Path, digest: str, data: bytes) -> Path:
+    """在本机分片目录里放一份"上次下到一半"的分片。"""
+    part = part_path_for(deploy_root, digest)
+    part.parent.mkdir(parents=True, exist_ok=True)
+    part.write_bytes(data)
+    return part
+
+
 def make_job(content: bytes, dest: str = "exam/data.zip", **overrides) -> dict:
     job = {
         "asset_id": 7,
@@ -81,7 +92,7 @@ def make_job(content: bytes, dest: str = "exam/data.zip", **overrides) -> dict:
         "sha256": sha(content),
         "size": len(content),
         "dest": dest,
-        "offset": 0,
+        "target_id": 70,
         "mode": "overwrite",
     }
     job.update(overrides)
@@ -166,8 +177,7 @@ def test_resumes_from_local_partial(workdir: Path) -> None:
     dest.parent.mkdir(parents=True)
 
     already = 20000
-    part = part_path_for(dest, 7)
-    part.write_bytes(content[:already])
+    seed_part(deploy_root, sha(content), content[:already])
 
     client = FakeClient(content)
     outcome = download_asset(client, make_job(content), deploy_root)
@@ -177,14 +187,14 @@ def test_resumes_from_local_partial(workdir: Path) -> None:
     assert dest.read_bytes() == content
 
 
-def test_resumes_ignoring_server_reported_offset(workdir: Path) -> None:
-    """本地磁盘才是事实：本地分片比服务端以为的更多时，用本地的。"""
+def test_resumes_from_local_part_regardless_of_job_fields(workdir: Path) -> None:
+    """本地磁盘才是事实：作业里即使带着别的字段（老服务端的 offset），也只看本地分片。"""
     content = b"X" * 50000
     deploy_root = workdir / "deploy"
     dest = deploy_root / "exam" / "data.zip"
     dest.parent.mkdir(parents=True)
     local_have = 30000
-    part_path_for(dest, 7).write_bytes(content[:local_have])
+    seed_part(deploy_root, sha(content), content[:local_have])
 
     client = FakeClient(content)
     # 服务端以为我们只有 1000 字节
@@ -200,7 +210,7 @@ def test_restarts_when_server_ignores_range(workdir: Path) -> None:
     deploy_root = workdir / "deploy"
     dest = deploy_root / "exam" / "data.zip"
     dest.parent.mkdir(parents=True)
-    part_path_for(dest, 7).write_bytes(content[:5000])
+    seed_part(deploy_root, sha(content), content[:5000])
 
     client = FakeClient(content, ignore_range=True)
     outcome = download_asset(client, make_job(content), deploy_root)
@@ -224,7 +234,7 @@ def test_incomplete_transfer_keeps_part_for_next_round(workdir: Path) -> None:
 
     assert outcome.status == "failed"
     assert "未完成" in (outcome.error or "")
-    part = part_path_for(dest, 7)
+    part = part_path_for(deploy_root, sha(content))
     assert part.is_file(), "中断后应当保留分片以便续传"
     assert part.stat().st_size == 10000
     assert not dest.exists(), "没下完绝不能出现在最终位置"
@@ -241,7 +251,7 @@ def test_progress_accumulates_across_rounds(workdir: Path) -> None:
     for limit in (10000, 20000, 30000):
         client.fail_after = limit
         outcome = download_asset(client, make_job(content), deploy_root)
-        sizes.append(part_path_for(dest, 7).stat().st_size)
+        sizes.append(part_path_for(deploy_root, sha(content)).stat().st_size)
 
     assert sizes == sorted(sizes) and sizes[-1] > sizes[0], (
         "每轮的已下载量必须单调递增，实际为 %r" % sizes
@@ -260,7 +270,7 @@ def test_stale_part_larger_than_expected_is_discarded(workdir: Path) -> None:
     dest = deploy_root / "exam" / "data.zip"
     dest.parent.mkdir(parents=True)
     # 分片比声称的总大小还大 = 属于另一个版本或已损坏
-    part_path_for(dest, 7).write_bytes(b"W" * 5000)
+    seed_part(deploy_root, sha(content), b"W" * 5000)
 
     outcome = download_asset(FakeClient(content), make_job(content), deploy_root)
 
@@ -300,7 +310,7 @@ def test_shorter_than_expected_keeps_part(workdir: Path) -> None:
 
     assert outcome.status == "failed"
     assert "未完成" in (outcome.error or "")
-    assert part_path_for(dest, 7).stat().st_size == 5
+    assert part_path_for(deploy_root, sha(content)).stat().st_size == 5
 
 
 def test_longer_than_expected_discards_part(workdir: Path) -> None:
@@ -314,7 +324,7 @@ def test_longer_than_expected_discards_part(workdir: Path) -> None:
 
     assert outcome.status == "failed"
     assert "超出预期" in (outcome.error or "")
-    assert not part_path_for(dest, 7).exists()
+    assert not part_path_for(deploy_root, sha(content)).exists()
 
 
 def test_invalid_sha_length_rejected_before_transfer(workdir: Path) -> None:
@@ -383,35 +393,112 @@ def test_missing_fields_fail_gracefully(workdir: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 分片发现
+# 分片按内容命名、集中存放
 # --------------------------------------------------------------------------- #
 
 
-def test_find_partial_sizes_reports_asset_ids(workdir: Path) -> None:
+def test_part_size_reports_local_progress_by_content(workdir: Path) -> None:
     deploy_root = workdir / "deploy"
-    dest_a = deploy_root / "exam" / "a.zip"
-    dest_b = deploy_root / "exam" / "sub" / "b.zip"
-    dest_a.parent.mkdir(parents=True)
-    dest_b.parent.mkdir(parents=True)
-    part_path_for(dest_a, 11).write_bytes(b"x" * 1234)
-    part_path_for(dest_b, 22).write_bytes(b"y" * 5678)
+    content = b"abc" * 100
+    part = part_path_for(deploy_root, sha(content))
+    part.parent.mkdir(parents=True)
+    part.write_bytes(content[:120])
 
-    sizes = find_partial_sizes(deploy_root)
-
-    assert sizes == {11: 1234, 22: 5678}
+    assert part.parent.name == PARTS_DIRNAME
+    assert part_size(deploy_root, sha(content)) == 120
+    assert part_size(deploy_root, "0" * 64) == 0
 
 
-def test_find_partial_sizes_ignores_foreign_files(workdir: Path) -> None:
+def test_content_change_never_resumes_from_the_old_part(workdir: Path) -> None:
+    """教师在线改了正文：同一个 asset、新内容。曾经分片按 asset_id 命名，会拿旧分片
+    去续新内容。按 sha256 命名之后，新内容有自己的分片，从头下。"""
+    old = b"O" * 5000
+    new = b"N" * 5000
     deploy_root = workdir / "deploy"
-    deploy_root.mkdir(parents=True)
-    (deploy_root / "not-a-part.zip").write_bytes(b"x")
-    (deploy_root / ".garbage.syncoj-part").write_bytes(b"x")
+    old_part = part_path_for(deploy_root, sha(old))
+    old_part.parent.mkdir(parents=True)
+    old_part.write_bytes(old[:3000])
 
-    assert find_partial_sizes(deploy_root) == {}
+    client = FakeClient(new)
+    outcome = download_asset(client, make_job(new), deploy_root)
+
+    assert outcome.status == "ok", outcome.error
+    assert client.requests == [0], "新内容必须从头下，不能续旧内容的分片"
+    assert (deploy_root / "exam" / "data.zip").read_bytes() == new
 
 
-def test_find_partial_sizes_on_missing_root(workdir: Path) -> None:
-    assert find_partial_sizes(workdir / "nope") == {}
+def test_outcome_carries_target_and_content_for_the_receipt(workdir: Path) -> None:
+    content = b"receipt"
+    outcome = download_asset(FakeClient(content), make_job(content), workdir / "deploy")
+
+    assert outcome.status == "ok"
+    assert outcome.target_id == 70
+    assert outcome.sha256 == sha(content)
+
+
+class ExplodingResponse(FakeResponse):
+    """读到一半抛异常（连接被重置），并记下被读了多少次。"""
+
+    def __init__(self, data: bytes, explode_after_reads: int) -> None:
+        super().__init__(data)
+        self.reads = 0
+        self.explode_after = explode_after_reads
+
+    def read(self, size: int = -1) -> bytes:
+        self.reads += 1
+        if self.reads > self.explode_after:
+            raise ConnectionResetError(104, "Connection reset by peer")
+        return super().read(size)
+
+
+def test_error_mid_transfer_drops_the_connection_instead_of_draining(workdir: Path) -> None:
+    """曾经 finally 里 _drain(response)：出错之后还要把剩下的几百 MB 读完再扔掉。"""
+    content = b"D" * (256 * 1024 * 8)
+    response = ExplodingResponse(content, explode_after_reads=2)
+
+    class Client(FakeClient):
+        def open_download(self, asset_id, offset=0):
+            self.requests.append(offset)
+            return 200, {}, response
+
+    client = Client(content)
+    outcome = download_asset(client, make_job(content), workdir / "deploy")
+
+    assert outcome.status == "failed"
+    assert client.dropped == 1, "出错必须丢连接"
+    assert response.reads == 3, "出错之后不该再读剩下的响应体"
+    assert part_size(workdir / "deploy", sha(content)) == 2 * 256 * 1024, "已写下的保留续传"
+
+
+def test_deadline_stops_with_partial_and_keeps_the_part(workdir: Path) -> None:
+    content = b"T" * (256 * 1024 * 4)
+    deploy_root = workdir / "deploy"
+
+    outcome = download_asset(
+        FakeClient(content), make_job(content), deploy_root, deadline=time.monotonic() - 1
+    )
+
+    assert outcome.status == "partial"
+    assert not (deploy_root / "exam" / "data.zip").exists()
+
+
+def test_disk_full_is_flagged(workdir: Path, monkeypatch) -> None:
+    import errno as errno_module
+
+    content = b"F" * 1000
+    deploy_root = workdir / "deploy"
+    real_open = open
+
+    def full_open(path, mode="r", *args, **kwargs):
+        if str(path).endswith(PART_SUFFIX) and "b" in mode and ("w" in mode or "a" in mode):
+            raise OSError(errno_module.ENOSPC, "No space left on device")
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", full_open)
+    outcome = download_asset(FakeClient(content), make_job(content), deploy_root)
+
+    assert outcome.status == "failed"
+    assert outcome.disk_full is True
 
 
 # --------------------------------------------------------------------------- #

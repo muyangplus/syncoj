@@ -3469,11 +3469,14 @@ def _requeue_done_targets(session: Session, asset_id: int) -> int:
         .join(DeployTask, DeployTarget.task_id == DeployTask.id)
         .where(
             DeployTask.asset_id == asset_id,
-            DeployTarget.status == DeployStatus.DONE,
+            # 失败过的也给一次新机会：失败的可能正是旧内容（比如旧 zip 坏了）
+            DeployTarget.status.in_((DeployStatus.DONE, DeployStatus.FAILED)),
         )
     ).all():
         target.status = DeployStatus.PENDING
         target.bytes_done = 0
+        target.failure_count = 0
+        target.last_error = None
         target.updated_at = utcnow()
         requeued += 1
         tasks[int(task.id)] = task
@@ -4311,6 +4314,7 @@ def retry_deploy(
         ).scalars():
             target.status = DeployStatus.PENDING
             target.retry_count += 1
+            target.failure_count = 0
             target.last_error = None
             affected += 1
         if affected:

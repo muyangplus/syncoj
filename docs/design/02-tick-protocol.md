@@ -14,7 +14,9 @@
   "scan": [                             // 本周期全量扫描的索引，不含内容
     {"path": "main.cpp", "sha256": "ab12...", "size": 1234, "mtime": 1767225500}
   ],
-  "partials": [{"asset_id": 42, "bytes_done": 3145728}],  // 未完成的下载
+  "deploy_progress": [{"target_id": 42, "bytes_done": 3145728}],  // 本机分片进度
+  "deploy_done": [{"target_id": 7, "sha256": "cd34..."}],          // 已落地（带内容指纹）
+  "deploy_failed": [],                                             // 本轮没下成的与原因
   "stats": {"disk_free": 10737418240, "last_error": null, "queue": 0}
 }
 
@@ -24,11 +26,10 @@
   "next_tick_seconds": 20,              // 自适应：有活 2s，空闲 30s（管理端可改）
   "need_upload": ["main.cpp"],          // 服务端没有 / 版本落后的文件
   "deploy_jobs": [
-    {"asset_id": 42, "url": "/api/v1/agent/assets/42",
+    {"target_id": 42, "asset_id": 42, "url": "/api/v1/agent/assets/42",
      "sha256": "cd34...", "size": 10485760,
-     "dest": "exam/testdata.zip", "offset": 3145728}   // 断点续传位置
+     "dest": "exam/testdata.zip"}      // 续传位置只看本机分片，不由服务端给
   ],
-  "cancel_assets": [],
   "upgrade": null,                      // 或 {version, url, sha256, sig}
   "diagnostics_request": false,         // 一次性：教师点过「要一份」就回一次 true
   "config": {"scan_interval": 30, "max_file_size": 2097152}

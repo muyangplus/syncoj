@@ -518,7 +518,6 @@ def test_machine_id_mismatch_is_rejected(client: TestClient, enrolled: dict) -> 
             "ts": 1,
             "scan": [],
             "scan_complete": True,
-            "partials": [],
             "stats": {},
         },
         headers=agent_headers(enrolled["token"]),

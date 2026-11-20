@@ -22,7 +22,7 @@
 ```python
 while True:
     files  = scan(root)                       # os.scandir + sha256(mtime/size 缓存)
-    tick   = post("/agent/tick", files, partials, stats)
+    tick   = post("/agent/tick", files, deploy_progress/done/failed, stats)
     for f in tick["need_upload"]:
         upload(f)                             # ThreadPoolExecutor 并发 2
     for j in tick["deploy_jobs"]:

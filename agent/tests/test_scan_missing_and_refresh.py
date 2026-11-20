@@ -185,7 +185,6 @@ def test_scan_missing_最多五条且排序稳定(workdir: Path) -> None:
         agent_version="1.0.0",
         scan_root="x",
         results=[],
-        partials=[],
         stats={"scan_missing": raw},
     )
 
@@ -203,7 +202,6 @@ def test_超过五条时日志里说明(workdir: Path, logs) -> None:
         agent_version="1.0.0",
         scan_root="x",
         results=[],
-        partials=[],
         stats={"scan_missing": raw},
     )
 
@@ -273,13 +271,16 @@ def test_只有写成功才碰_mtime(
     nudged = []
     monkeypatch.setattr(agent, "_nudge_after_write", lambda dest: nudged.append(dest))
 
-    def fake_download(client, job, deploy_root, on_progress=None):
+    def fake_download(client, job, deploy_root, on_progress=None, deadline=None):
         return SimpleNamespace(
             status=job["status"],
             asset_id=1,
+            target_id=1,
+            sha256="a" * 64,
             dest=job["dest"],
             bytes_written=10,
             error=None,
+            disk_full=False,
         )
 
     monkeypatch.setattr(main_module, "download_asset", fake_download)

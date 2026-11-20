@@ -390,37 +390,126 @@ def test_tick_returns_pending_deploy_job(client: TestClient, contest: dict, admi
     assert job["dest"] == "exam/testdata.zip"
     assert job["sha256"] == sha256_of(data)
     assert job["size"] == len(data)
-    assert job["offset"] == 0
+    assert "offset" not in job, "续传位置只看 Agent 本地分片"
     assert job["url"].endswith("/assets/%d" % asset["id"])
 
 
-def test_tick_job_offset_reflects_reported_partial(client: TestClient, contest: dict,
-                                                   admin_headers: dict, enrolled: dict) -> None:
+def test_jobs_are_keyed_by_target_and_carry_no_offset(client: TestClient, contest: dict,
+                                                      admin_headers: dict, enrolled: dict) -> None:
+    """作业按下发目标派发（回执也按它报），续传位置只看 Agent 本地分片。"""
     data = b"x" * 4096
     asset = upload_asset(client, contest, admin_headers, "big.zip", data).json()
     make_deploy(client, contest, admin_headers, asset["id"])
 
-    body = tick(
-        client, enrolled["token"], [],
-        machine_id=enrolled["machine_id"],
-        partials=[{"asset_id": asset["id"], "bytes_done": 1024}],
-    )
-    assert body["deploy_jobs"][0]["offset"] == 1024
+    job = tick(client, enrolled["token"], [], machine_id=enrolled["machine_id"])["deploy_jobs"][0]
+
+    assert job["target_id"] > 0
+    assert "offset" not in job
 
 
-def test_tick_drops_job_when_already_fully_downloaded(client: TestClient, contest: dict,
-                                                      admin_headers: dict, enrolled: dict) -> None:
-    """客户端报告已下载全部字节时不该再下发 —— 它在等自己上报完成。"""
+def test_job_keeps_coming_until_a_receipt_arrives(client: TestClient, contest: dict,
+                                                  admin_headers: dict, enrolled: dict) -> None:
+    """审计 D1：曾经本地分片报满长就**不再派发**，而 Agent 只在收到作业时才做最后的
+    落盘 —— 落盘前崩溃 / 改名失败过一次，任务就永远卡在进行中。现在只有回执算数。"""
     data = b"y" * 500
     asset = upload_asset(client, contest, admin_headers, "full.zip", data).json()
     make_deploy(client, contest, admin_headers, asset["id"])
+    job = tick(client, enrolled["token"], [], machine_id=enrolled["machine_id"])["deploy_jobs"][0]
 
     body = tick(
         client, enrolled["token"], [],
         machine_id=enrolled["machine_id"],
-        partials=[{"asset_id": asset["id"], "bytes_done": len(data)}],
+        deploy_progress=[{"target_id": job["target_id"], "bytes_done": len(data)}],
     )
+    assert [j["target_id"] for j in body["deploy_jobs"]] == [job["target_id"]]
+
+
+def test_stale_receipt_for_old_content_does_not_complete(client: TestClient, contest: dict,
+                                                         admin_headers: dict, enrolled: dict) -> None:
+    """审计 D3：回执带落地内容的 sha256，与资产当前内容不一致的不算完成。"""
+    asset = upload_asset(client, contest, admin_headers, "p.zip", b"data").json()
+    make_deploy(client, contest, admin_headers, asset["id"])
+    job = tick(client, enrolled["token"], [], machine_id=enrolled["machine_id"])["deploy_jobs"][0]
+
+    body = tick(
+        client, enrolled["token"], [],
+        machine_id=enrolled["machine_id"],
+        deploy_done=[{"target_id": job["target_id"], "sha256": "0" * 64}],
+    )
+    assert [j["target_id"] for j in body["deploy_jobs"]] == [job["target_id"]]
+
+
+def test_one_receipt_completes_only_its_own_target(client: TestClient, contest: dict,
+                                                   admin_headers: dict, enrolled: dict) -> None:
+    """审计 D2：同一资产发到同一个人的两个目录，一条回执曾把两个目标一起标完成。"""
+    asset = upload_asset(client, contest, admin_headers, "p.zip", b"data").json()
+    make_deploy(client, contest, admin_headers, asset["id"], dest_dir="a")
+    make_deploy(client, contest, admin_headers, asset["id"], dest_dir="b")
+    jobs = tick(client, enrolled["token"], [], machine_id=enrolled["machine_id"])["deploy_jobs"]
+    assert len(jobs) == 2
+    first = jobs[0]
+
+    body = tick(
+        client, enrolled["token"], [],
+        machine_id=enrolled["machine_id"],
+        deploy_done=[{"target_id": first["target_id"], "sha256": first["sha256"]}],
+    )
+    remaining = [j["target_id"] for j in body["deploy_jobs"]]
+    assert remaining == [jobs[1]["target_id"]]
+
+
+def test_repeated_failures_mark_the_target_failed(client: TestClient, contest: dict,
+                                                  admin_headers: dict, enrolled: dict) -> None:
+    """失败曾经从不回写：失败的目标永远显示"进行中"。现在连续失败到上限判 FAILED，
+    原因留给教师看；手工重试清零。"""
+    from syncoj_server.services.deploy import MAX_CONSECUTIVE_FAILURES
+
+    asset = upload_asset(client, contest, admin_headers, "p.zip", b"data").json()
+    task = make_deploy(client, contest, admin_headers, asset["id"]).json()
+    job = tick(client, enrolled["token"], [], machine_id=enrolled["machine_id"])["deploy_jobs"][0]
+    failure = [{"target_id": job["target_id"], "reason": "写盘失败: No space left on device"}]
+
+    for _ in range(MAX_CONSECUTIVE_FAILURES):
+        body = tick(client, enrolled["token"], [], machine_id=enrolled["machine_id"],
+                    deploy_failed=failure)
+
     assert body["deploy_jobs"] == []
+    detail = client.get("/api/v1/admin/deploys/%d" % task["id"], headers=admin_headers).json()
+    assert detail["targets"][0]["status"] == "failed"
+    assert "No space left" in (detail["targets"][0]["last_error"] or "")
+
+    assert client.post("/api/v1/admin/deploys/%d/retry" % task["id"],
+                       headers=admin_headers).status_code == 200
+    body = tick(client, enrolled["token"], [], machine_id=enrolled["machine_id"],
+                deploy_failed=failure)
+    assert body["deploy_jobs"], "重试之后计数清零，一次失败不该又判 FAILED"
+
+
+def test_progress_is_written_back_for_the_admin(client: TestClient, contest: dict,
+                                                admin_headers: dict, enrolled: dict) -> None:
+    data = b"z" * 2048
+    asset = upload_asset(client, contest, admin_headers, "p.zip", data).json()
+    task = make_deploy(client, contest, admin_headers, asset["id"]).json()
+    job = tick(client, enrolled["token"], [], machine_id=enrolled["machine_id"])["deploy_jobs"][0]
+
+    tick(client, enrolled["token"], [], machine_id=enrolled["machine_id"],
+         deploy_progress=[{"target_id": job["target_id"], "bytes_done": 1000}])
+
+    detail = client.get("/api/v1/admin/deploys/%d" % task["id"], headers=admin_headers).json()
+    assert detail["targets"][0]["bytes_done"] == 1000
+
+
+def test_cancelled_target_can_no_longer_be_downloaded(client: TestClient, contest: dict,
+                                                      admin_headers: dict, enrolled: dict) -> None:
+    asset = upload_asset(client, contest, admin_headers, "p.zip", b"data").json()
+    task = make_deploy(client, contest, admin_headers, asset["id"]).json()
+    tick(client, enrolled["token"], [], machine_id=enrolled["machine_id"])
+    assert client.post("/api/v1/admin/deploys/%d/cancel" % task["id"],
+                       headers=admin_headers).status_code == 200
+
+    response = client.get("/api/v1/agent/assets/%d" % asset["id"],
+                          headers={"Authorization": "Bearer " + enrolled["token"]})
+    assert response.status_code == 403
 
 
 def test_cancel_stops_further_delivery(client: TestClient, contest: dict, admin_headers: dict,

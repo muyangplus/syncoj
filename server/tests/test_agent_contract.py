@@ -25,7 +25,6 @@ from syncoj_server.policy import build_policy
 from syncoj_server.schemas import (
     AgentEvent,
     EnrollRequest,
-    PartialDownload,
     ScanEntry,
     TickRequest,
 )
@@ -102,11 +101,13 @@ def test_tick_scan_entries_are_valid(fixture: dict) -> None:
         assert len(entry.sha256) == 64
 
 
-def test_tick_partials_are_valid(fixture: dict) -> None:
-    for raw in fixture["tick"]["partials"]:
-        partial = PartialDownload.model_validate(raw)
-        assert partial.asset_id > 0
-        assert partial.bytes_done >= 0
+def test_tick_deploy_reports_are_valid(fixture: dict) -> None:
+    """下发回报按目标（target_id），三个列表都要过服务端模型。"""
+    tick = fixture["tick"]
+    model = TickRequest.model_validate(tick)
+    assert [p.target_id for p in model.deploy_progress] == [42]
+    assert model.deploy_progress[0].bytes_done == 3145728
+    assert model.deploy_failed and model.deploy_failed[0].reason
 
 
 def test_tick_stats_are_valid(fixture: dict) -> None:
@@ -134,12 +135,12 @@ def test_scan_complete_flag_is_present(fixture: dict) -> None:
     assert fixture["tick"]["scan_complete"] is False, "样本中有扫描不完整的根目录"
 
 
-def test_completed_assets_field_is_present(fixture: dict) -> None:
-    """这个字段缺失会让服务端永远收不到"下载完成"的回报，下发任务卡在进行中。"""
-    assert "completed_assets" in fixture["tick"], "tick 请求体缺少 completed_assets"
-    assert fixture["tick"]["completed_assets"], "样本应当携带至少一个已完成的 asset"
+def test_deploy_done_receipts_carry_the_content_hash(fixture: dict) -> None:
+    """完成回执缺字段 → 服务端永远收不到"下载完成"，任务卡在进行中；
+    不带 sha256 → 迟到的旧版回执能把新内容标成已完成。两样都要在。"""
+    assert "deploy_done" in fixture["tick"], "tick 请求体缺少 deploy_done"
     model = TickRequest.model_validate(fixture["tick"])
-    assert model.completed_assets == [7]
+    assert [(d.target_id, d.sha256) for d in model.deploy_done] == [(7, "ab" * 32)]
 
 
 def test_event_payload_shape(fixture: dict) -> None:

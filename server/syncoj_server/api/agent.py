@@ -69,7 +69,7 @@ from ..services import (
     uninstall,
 )
 from ..services.collect import CollectResult, reconcile_scan, record_events
-from ..services.deploy import collect_deploy_jobs
+from ..services.deploy import apply_deploy_reports, collect_deploy_jobs
 from ..services.ratelimit import RateLimitExceeded
 from .deps import (
     AgentIdentity,
@@ -391,13 +391,19 @@ def tick(
             events=collect.events,
         )
 
-        partials = {p.asset_id: int(p.bytes_done) for p in payload.partials}
-        jobs = collect_deploy_jobs(
-            session, identity.player_id, identity.player_no, partials
+        # 先收回执、再派作业：本轮刚报完成的不该再出现在作业里
+        changed_tasks = apply_deploy_reports(
+            session,
+            identity.player_id,
+            payload.deploy_progress,
+            payload.deploy_done,
+            payload.deploy_failed,
+            now,
         )
-
-        if payload.completed_assets:
-            _mark_deployments_done(session, identity.player_id, payload.completed_assets)
+        session.flush()
+        for task_id in changed_tasks:
+            _refresh_task_status(session, task_id)
+        jobs = collect_deploy_jobs(session, identity.player_id, identity.player_no)
 
         upgrade = _pending_upgrade(session, ctx)
 
@@ -455,7 +461,6 @@ def tick(
         next_tick_seconds=next_tick,
         need_upload=collect.need_upload[:MAX_NEED_UPLOAD],
         deploy_jobs=jobs,
-        cancel_assets=[],
         upgrade=upgrade,
         uninstall_token=uninstall_token,
         diagnostics_request=diagnostics_request,
@@ -715,39 +720,6 @@ def _pending_uninstall_token(ctx: AppContext, agent: Agent, now) -> Optional[str
         nonce=pending.nonce,
         issued_at=pending.issued_at,
     )
-
-
-def _mark_deployments_done(
-    session, player_id: int, asset_ids: List[int]
-) -> None:
-    """把该选手的这些资源对应的下发目标标记为完成，并同步任务整体状态。"""
-    if not asset_ids:
-        return
-    targets = list(
-        session.execute(
-            select(DeployTarget)
-            .join(DeployTask, DeployTarget.task_id == DeployTask.id)
-            .where(
-                DeployTarget.player_id == player_id,
-                DeployTask.asset_id.in_(asset_ids[:200]),
-                DeployTarget.status.in_((DeployStatus.PENDING, DeployStatus.READY)),
-            )
-        ).scalars()
-    )
-    if not targets:
-        return
-
-    now = utcnow()
-    affected_tasks = set()
-    for target in targets:
-        target.status = DeployStatus.DONE
-        target.last_error = None
-        target.updated_at = now
-        affected_tasks.add(target.task_id)
-
-    session.flush()
-    for task_id in affected_tasks:
-        _refresh_task_status(session, task_id)
 
 
 def _refresh_task_status(session, task_id: int) -> None:
@@ -1131,6 +1103,9 @@ def download_asset(
             .where(
                 DeployTask.asset_id == asset_id,
                 DeployTarget.player_id == identity.player_id,
+                # 取消了的不再给：曾经只看"有没有这条目标"，取消之后照样能拖走
+                DeployTarget.status != DeployStatus.CANCELLED,
+                DeployTask.status != DeployStatus.CANCELLED,
             )
         ).first()
         if authorized is None:

@@ -1291,6 +1291,49 @@
         "title": "DeployCreate",
         "type": "object"
       },
+      "DeployDone": {
+        "additionalProperties": false,
+        "description": "一个下发目标已经在本机落地，落地的是**哪一份内容**。\n\n带 ``sha256`` 是为了让服务端只认\"当前这一版\"的回执：教师在线改了正文 /\n改了 zip 密码之后，迟到的旧版回执不能把新内容标成已完成。",
+        "properties": {
+          "sha256": {
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Sha256",
+            "type": "string"
+          },
+          "target_id": {
+            "title": "Target Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "target_id",
+          "sha256"
+        ],
+        "title": "DeployDone",
+        "type": "object"
+      },
+      "DeployFailed": {
+        "additionalProperties": false,
+        "description": "一个下发目标本轮没下成，以及原因（给教师看的）。",
+        "properties": {
+          "reason": {
+            "default": "",
+            "maxLength": 300,
+            "title": "Reason",
+            "type": "string"
+          },
+          "target_id": {
+            "title": "Target Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "target_id"
+        ],
+        "title": "DeployFailed",
+        "type": "object"
+      },
       "DeployJob": {
         "additionalProperties": false,
         "properties": {
@@ -1307,11 +1350,6 @@
             "title": "Mode",
             "type": "string"
           },
-          "offset": {
-            "default": 0,
-            "title": "Offset",
-            "type": "integer"
-          },
           "sha256": {
             "title": "Sha256",
             "type": "string"
@@ -1320,12 +1358,17 @@
             "title": "Size",
             "type": "integer"
           },
+          "target_id": {
+            "title": "Target Id",
+            "type": "integer"
+          },
           "url": {
             "title": "Url",
             "type": "string"
           }
         },
         "required": [
+          "target_id",
           "asset_id",
           "url",
           "sha256",
@@ -1333,6 +1376,27 @@
           "dest"
         ],
         "title": "DeployJob",
+        "type": "object"
+      },
+      "DeployProgress": {
+        "additionalProperties": false,
+        "description": "一个下发目标在本机的进度（分片里已经有多少字节）。",
+        "properties": {
+          "bytes_done": {
+            "minimum": 0.0,
+            "title": "Bytes Done",
+            "type": "integer"
+          },
+          "target_id": {
+            "title": "Target Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "target_id",
+          "bytes_done"
+        ],
+        "title": "DeployProgress",
         "type": "object"
       },
       "DeployTargetOut": {
@@ -2538,27 +2602,6 @@
           }
         },
         "title": "Page[SourceFileOut]",
-        "type": "object"
-      },
-      "PartialDownload": {
-        "additionalProperties": false,
-        "description": "客户端本地未完成的下载，服务端据此回填 offset。",
-        "properties": {
-          "asset_id": {
-            "title": "Asset Id",
-            "type": "integer"
-          },
-          "bytes_done": {
-            "minimum": 0.0,
-            "title": "Bytes Done",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "asset_id",
-          "bytes_done"
-        ],
-        "title": "PartialDownload",
         "type": "object"
       },
       "PendingMachineOut": {
@@ -4319,11 +4362,28 @@
             ],
             "title": "Agent Version"
           },
-          "completed_assets": {
+          "deploy_done": {
             "items": {
-              "type": "integer"
+              "$ref": "#/components/schemas/DeployDone"
             },
-            "title": "Completed Assets",
+            "maxItems": 1000,
+            "title": "Deploy Done",
+            "type": "array"
+          },
+          "deploy_failed": {
+            "items": {
+              "$ref": "#/components/schemas/DeployFailed"
+            },
+            "maxItems": 1000,
+            "title": "Deploy Failed",
+            "type": "array"
+          },
+          "deploy_progress": {
+            "items": {
+              "$ref": "#/components/schemas/DeployProgress"
+            },
+            "maxItems": 1000,
+            "title": "Deploy Progress",
             "type": "array"
           },
           "hostname": {
@@ -4343,13 +4403,6 @@
             "minLength": 1,
             "title": "Machine Id",
             "type": "string"
-          },
-          "partials": {
-            "items": {
-              "$ref": "#/components/schemas/PartialDownload"
-            },
-            "title": "Partials",
-            "type": "array"
           },
           "release_public_key": {
             "default": false,
@@ -4414,13 +4467,6 @@
             "default": false,
             "title": "Bound",
             "type": "boolean"
-          },
-          "cancel_assets": {
-            "items": {
-              "type": "integer"
-            },
-            "title": "Cancel Assets",
-            "type": "array"
           },
           "claimed": {
             "default": true,

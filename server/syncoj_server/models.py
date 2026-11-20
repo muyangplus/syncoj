@@ -602,9 +602,14 @@ class DeployTarget(Base):
     task_id = Column(Integer, ForeignKey("deploy_task.id", ondelete="CASCADE"), nullable=False)
     player_id = Column(Integer, ForeignKey("player.id", ondelete="CASCADE"), nullable=False)
     status = Column(String(16), nullable=False, default=DeployStatus.PENDING)
-    # 服务端记录已传字节数，用于重连后下发 offset 提示
+    #: 机器上报的本地进度（分片里已有多少字节），只供管理端显示。
     bytes_done = Column(BigInteger, nullable=False, default=0)
+    #: 教师在管理端手工"重试"过几次。
     retry_count = Column(Integer, nullable=False, default=0)
+    #: **连续**下载失败的次数（机器回报的）。到 ``deploy.MAX_CONSECUTIVE_FAILURES``
+    #: 判 FAILED，不再派发 —— 曾经下载失败从不回写，失败的目标永远显示"进行中"。
+    #: 成功、内容变更、手工重试都清零。可空只为老库（迁移 014），读作 0。
+    failure_count = Column(Integer, nullable=True, default=0)
     last_error = Column(Text, nullable=True)
     updated_at = Column(DateTime, default=utcnow, nullable=False)
 

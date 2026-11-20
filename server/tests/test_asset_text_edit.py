@@ -343,7 +343,7 @@ def test_已下发的目标被重排且偏移清零(
         machine_id=enrolled["machine_id"],
         completed_assets=[asset["id"]],
     )
-    assert target_states(client, asset["id"]) == [(DeployStatus.DONE, 0)]
+    assert [state for state, _ in target_states(client, asset["id"])] == [DeployStatus.DONE]  # 完成时进度记满长
 
     # 非零偏移：服务端没有任何路径会写这个字段，不亲手钉就没有东西可清零
     pin_bytes_done(client, asset["id"], 64 * 1024)
@@ -364,7 +364,7 @@ def test_已下发的目标被重排且偏移清零(
     job = next(j for j in jobs if j["asset_id"] == asset["id"])
     assert job["sha256"] == body["asset"]["sha256"]
     assert job["size"] == body["asset"]["size"]
-    assert job["offset"] == 0
+    assert "offset" not in job  # 续传位置只看 Agent 本地分片（按内容 sha256 命名，换内容自然从头）
 
 
 def test_还没落地的目标不被重排也不被清零(

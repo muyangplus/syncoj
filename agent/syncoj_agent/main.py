@@ -51,7 +51,7 @@ from .config import (
     ConfigError,
     expand_placeholders,
 )
-from .download import download_asset, find_partial_sizes, sweep_stale_parts
+from .download import download_asset, part_size, sweep_stale_parts
 from .policy import DEFAULT_POLICY, merge_policy
 from .rsa import RSAPublicKey, SignatureError
 from .scan import ScanOutcome, ScanPolicy, scan_directory
@@ -186,6 +186,11 @@ DIAGNOSTICS_WARN_AFTER_FAILURES = 3
 #: （见 ``Agent._watchdog_paused``）：下载上百 MB 的包、切软链、交给 systemd
 #: 重启，本来就该花更久，拿"单轮 120 秒"去掐它是误伤。
 WATCHDOG_MIN_SECONDS = 120.0
+
+#: 一轮里下载最多花多久。到点保留分片、下一轮接着续（不算失败）。下载在整轮看门狗
+#: **之外**计时：曾经下载跑在 120 秒的整轮看门狗里，50 台同时拉几百 MB 的测试数据时
+#: 每轮只有 120 秒的数据有效，超时后还要把剩下的响应体读完再扔掉。
+DOWNLOAD_ROUND_SECONDS = 300.0
 
 
 class RoundTimeout(Exception):
@@ -324,9 +329,10 @@ def build_tick_payload(
     agent_version: str,
     scan_root: str,
     results,
-    partials: List[dict],
     stats: Dict[str, object],
-    completed_assets: Optional[List[int]] = None,
+    deploy_progress: Optional[List[dict]] = None,
+    deploy_done: Optional[List[dict]] = None,
+    deploy_failed: Optional[List[dict]] = None,
     scan_complete: bool = True,
     release_public_key: bool = False,
     scanned_for: Optional[Dict[str, str]] = None,
@@ -379,10 +385,12 @@ def build_tick_payload(
         "scan": entries,
         # 扫描不完整时服务端会跳过删除判定，避免把漏扫误判成删除
         "scan_complete": complete,
-        "partials": list(partials),
-        # 本地已确认完整的下发资源。服务端据此把下发目标标为完成 ——
-        # 由 Agent 显式上报，而不是让服务端从"partials 里没有它"去推断
-        "completed_assets": list(completed_assets or []),
+        # 下发回报**按目标**（target_id）：进度、已落地（带落地内容的 sha256 ——
+        # 服务端只认与资产当前内容一致的）、失败（带原因）。完成由 Agent 显式上报，
+        # 而不是让服务端从"没有进度了"去推断。
+        "deploy_progress": list(deploy_progress or []),
+        "deploy_done": list(deploy_done or []),
+        "deploy_failed": list(deploy_failed or []),
         # 本机有没有可用的发布公钥（升级信任锚）。服务端据此决定"能不能下发
         # 远程卸载授权"：没有公钥的机器一定验不了签，发了也是白发。
         # 只报"在不在"，不含任何密钥内容。
@@ -424,7 +432,13 @@ class Agent:
         self._backoff = 0.0
         self._pending_events: List[dict] = []
         #: 已确认完整、待上报给服务端的下发资源
-        self._completed_assets: List[int] = []
+        #: 待下一轮 tick 回报的下发结果（tick 成功后清空）
+        self._deploy_done: List[dict] = []
+        self._deploy_failed: Dict[int, str] = {}
+        #: 上一轮服务端派下来的作业：进度就按它们去分片目录里看，不再遍历整个桌面
+        self._deploy_jobs: List[dict] = []
+        #: 每个目标最近一次失败的原因：只在原因变化时发审计事件（否则每轮一条）
+        self._deploy_fail_reason: Dict[int, str] = {}
         self._credential: Optional[Credential] = None
         #: 收到"激活新版本"后置位，主循环据此退出让 systemd 重启
         self._restart_requested = False
@@ -1051,10 +1065,6 @@ class Agent:
             results=results,
             # 未完成下载的偏移量从磁盘实况收集，不依赖上一轮作业列表 ——
             # Agent 重启后照样能续上
-            partials=[
-                {"asset_id": asset_id, "bytes_done": bytes_done}
-                for asset_id, bytes_done in find_partial_sizes(self.config.deploy_root).items()
-            ],
             stats={
                 "disk_free": _disk_free(self.config.state_dir),
                 "queue": len(self._pending_events),
@@ -1068,7 +1078,12 @@ class Agent:
             # 上一轮下载完成的结果在这里回报。差一轮无所谓 —— 而且服务端在收到
             # 回报前会继续下发该作业，Agent 会走 "内容已一致" 的跳过分支并再次
             # 上报，这恰好让"回报丢失"能自愈。
-            completed_assets=self._completed_assets,
+            deploy_progress=self._deploy_progress(),
+            deploy_done=self._deploy_done,
+            deploy_failed=[
+                {"target_id": target_id, "reason": reason[:300]}
+                for target_id, reason in self._deploy_failed.items()
+            ],
             scan_complete=scan_complete,
             # 服务端据此决定"能不能发远程卸载授权"：没有信任锚的机器一定验不了签
             release_public_key=self._has_release_public_key(),
@@ -1133,46 +1148,93 @@ class Agent:
     # 下载
     # ---------------------------------------------------------------- #
 
+    def _deploy_progress(self) -> List[dict]:
+        """上一轮派下来的作业在本机分片里各有多少字节（只看分片目录，不遍历桌面）。"""
+        progress = []
+        for job in self._deploy_jobs:
+            try:
+                target_id = int(job.get("target_id") or 0)
+                sha = str(job.get("sha256") or "")
+            except (TypeError, ValueError):
+                continue
+            if not target_id or len(sha) != 64:
+                continue
+            have = part_size(self.config.deploy_root, sha)
+            if have:
+                progress.append({"target_id": target_id, "bytes_done": have})
+        return progress
+
     def _download(self, jobs: List[dict]) -> Tuple[int, int]:
+        """执行下发作业，结果攒到下一轮 tick 回报。
+
+        有自己的截止时间（:data:`DOWNLOAD_ROUND_SECONDS`），并且在整轮看门狗之外：
+        到点就停、分片留着下一轮续。磁盘满时剩下的作业不再尝试（它们也会失败）。
+        """
         ok = 0
         failed = 0
-        for job in jobs:
-            if self._stop:
-                break
-            try:
-                outcome = download_asset(
-                    self.client, job, self.config.deploy_root, on_progress=None
-                )
-            except Exception as exc:  # pragma: no cover - download_asset 已兜底
-                failed += 1
-                log.exception("下发作业执行异常: %s", exc)
-                continue
+        deadline = time.monotonic() + DOWNLOAD_ROUND_SECONDS
+        with self._watchdog_paused():
+            for job in jobs:
+                if self._stop:
+                    break
+                if time.monotonic() > deadline:
+                    break
+                try:
+                    outcome = download_asset(
+                        self.client, job, self.config.deploy_root,
+                        on_progress=None, deadline=deadline,
+                    )
+                except Exception as exc:  # pragma: no cover - download_asset 已兜底
+                    failed += 1
+                    log.exception("下发作业执行异常: %s", exc)
+                    continue
 
-            if outcome.status == "ok":
-                ok += 1
-                self._note_completed(outcome.asset_id)
-                log.info(
-                    "下发完成 %s（%d 字节）",
-                    outcome.dest, outcome.bytes_written,
-                )
-                # 只有**确实写进去**才碰目录 mtime（跳过/失败都不碰）：
-                # 目的是让文件管理器立刻显示出新文件，而不是替它做轮询
-                self._nudge_after_write(outcome.dest)
-            elif outcome.status == "skipped":
-                ok += 1
-                # 内容已一致也算完成 —— Agent 重启后正是靠这条路径把"其实早就
-                # 下好了"的事实补报给服务端，避免任务永远停在"进行中"
-                self._note_completed(outcome.asset_id)
-                log.debug("下发跳过 %s（内容已一致）", outcome.dest)
-            else:
-                failed += 1
-                log.warning("下发失败 %s：%s", outcome.dest, outcome.error)
-                self._emit(
-                    "warning", "deploy_failed",
-                    "下发 %s 失败：%s" % (outcome.dest, outcome.error),
-                    {"asset_id": outcome.asset_id, "dest": outcome.dest},
-                )
+                if outcome.status in ("ok", "skipped"):
+                    ok += 1
+                    # 内容已一致（skipped）也算完成 —— Agent 重启后正是靠这条路径
+                    # 把"其实早就下好了"的事实补报给服务端
+                    self._note_deploy_done(outcome)
+                    if outcome.status == "ok":
+                        log.info("下发完成 %s（%d 字节）", outcome.dest, outcome.bytes_written)
+                        # 只有**确实写进去**才碰目录 mtime（跳过/失败都不碰）
+                        self._nudge_after_write(outcome.dest)
+                    else:
+                        log.debug("下发跳过 %s（内容已一致）", outcome.dest)
+                elif outcome.status == "partial":
+                    log.info("下发 %s 本轮时间用完，分片保留，下一轮续传", outcome.dest)
+                    break
+                else:
+                    failed += 1
+                    self._note_deploy_failed(outcome)
+                    if outcome.disk_full:
+                        log.warning("磁盘已满，本轮剩下的下发作业不再尝试")
+                        break
         return ok, failed
+
+    def _note_deploy_done(self, outcome) -> None:
+        if not outcome.target_id:
+            return
+        self._deploy_failed.pop(outcome.target_id, None)
+        self._deploy_fail_reason.pop(outcome.target_id, None)
+        receipt = {"target_id": outcome.target_id, "sha256": outcome.sha256}
+        if receipt not in self._deploy_done:
+            self._deploy_done.append(receipt)
+
+    def _note_deploy_failed(self, outcome) -> None:
+        reason = outcome.error or "下载失败"
+        log.warning("下发失败 %s：%s", outcome.dest, reason)
+        if not outcome.target_id:
+            return
+        self._deploy_failed[outcome.target_id] = reason
+        if self._deploy_fail_reason.get(outcome.target_id) != reason:
+            # 只在原因变化时进审计：失败本身已经由 tick 回报写进服务端的目标上了
+            self._deploy_fail_reason[outcome.target_id] = reason
+            self._emit(
+                "warning", "deploy_failed",
+                "下发 %s 失败：%s" % (outcome.dest, reason),
+                {"target_id": outcome.target_id, "asset_id": outcome.asset_id,
+                 "dest": outcome.dest},
+            )
 
     # ---------------------------------------------------------------- #
     # 桌面刷新（best-effort）
@@ -1213,11 +1275,6 @@ class Agent:
     # ---------------------------------------------------------------- #
     # 事件
     # ---------------------------------------------------------------- #
-    def _note_completed(self, asset_id: int) -> None:
-        """记录一个已确认完整的下发资源，等待下一轮 tick 上报。"""
-        if asset_id and asset_id not in self._completed_assets:
-            self._completed_assets.append(asset_id)
-
     # ---------------------------------------------------------------- #
     # 自更新
     # ---------------------------------------------------------------- #
@@ -1741,9 +1798,10 @@ class Agent:
             self._mark_unbound(exc.code or "pairing_required")
             return self._clamp_wait(None)
 
-        # tick 成功 = 本轮携带的完成项已被服务端接收，可以清空。
-        # 必须在 tick 之后、下载之前清 —— 下载新产生的完成项属于下一轮。
-        del self._completed_assets[:]
+        # tick 成功 = 本轮携带的下发回报已被服务端接收，可以清空。
+        # 必须在 tick 之后、下载之前清 —— 下载新产生的回报属于下一轮。
+        del self._deploy_done[:]
+        self._deploy_failed.clear()
 
         # 诊断包需要的几个计数：tick 成功一轮、服务端给的下一轮间隔、最近一次错误
         self._diag_tick_count += 1
@@ -1780,6 +1838,7 @@ class Agent:
 
         jobs = tick.get("deploy_jobs") or []
         need_upload = tick.get("need_upload") or []
+        self._deploy_jobs = [job for job in jobs if isinstance(job, dict)]
 
         if jobs:
             self._download(jobs)

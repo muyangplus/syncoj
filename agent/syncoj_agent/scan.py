@@ -18,11 +18,12 @@ from __future__ import annotations
 
 import logging
 import os
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Set
 
-from .state import HashCache, sha256_file
+from .state import HashCache, file_fingerprint, sha256_file
 
 __all__ = ["FileEntry", "ScanOutcome", "scan_directory", "ScanPolicy"]
 
@@ -48,10 +49,14 @@ class ScanPolicy:
 
 @dataclass
 class FileEntry:
+    #: 上报用的相对路径（**NFC 归一化**之后；服务端也按 NFC 存）
     path: str
     sha256: str
     size: int
     mtime: int
+    #: 本地真实路径。上传必须按它打开 —— 磁盘上的名字可能是 NFD，
+    #: 与 ``path`` 拼回去的 NFC 名字在 Linux 上是**另一个文件**。
+    local: Optional[Path] = None
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -72,6 +77,8 @@ class ScanOutcome:
     oversize: List[str] = field(default_factory=list)
     #: 命中大小上限而被截断（文件数超限）
     truncated: bool = False
+    #: 本轮用到的哈希缓存键（调用方汇总所有根之后统一 prune）
+    cache_keys: Set[str] = field(default_factory=set)
 
     @property
     def total_bytes(self) -> int:
@@ -83,8 +90,16 @@ def scan_directory(
     policy: ScanPolicy,
     cache: Optional[HashCache] = None,
     max_files: int = 5000,
+    cache_namespace: str = "",
 ) -> ScanOutcome:
-    """扫描一个根目录，返回全部符合条件的文件索引。"""
+    """扫描一个根目录，返回全部符合条件的文件索引。
+
+    ``cache_namespace`` 区分不同扫描根在哈希缓存里的键（同一相对路径在两个根里
+    是两个文件）。本函数**不** prune 缓存：调用方扫完全部根之后，拿各根的
+    ``cache_keys`` 合起来 prune 一次 —— 逐根 prune 会把别的根的条目清掉。
+
+    ``max_files`` 是这一个根还能收多少个；正好收满不算截断。
+    """
     outcome = ScanOutcome(root=root.as_posix())
     try:
         base = root.resolve()
@@ -101,7 +116,7 @@ def scan_directory(
     exclude_dirs = set(policy.exclude_dirs)
     exclude_suffixes = tuple(policy.exclude_suffixes)
     extensions = set(policy.extensions)
-    seen_this_round = set()
+    seen_paths: Set[str] = set()
 
     # 显式栈而非递归：选手可能建出很深的目录树，递归会栈溢出
     stack: List[Path] = [base]
@@ -124,7 +139,8 @@ def scan_directory(
                         cache=cache,
                         outcome=outcome,
                         stack=stack,
-                        seen_this_round=seen_this_round,
+                        seen_paths=seen_paths,
+                        cache_namespace=cache_namespace,
                         exclude_dirs=exclude_dirs,
                         exclude_suffixes=exclude_suffixes,
                         extensions=extensions,
@@ -134,15 +150,15 @@ def scan_directory(
                     # 但必须标记不完整，否则该文件会被误判为"已删除"
                     outcome.complete = False
                     outcome.errors.append("处理 %s 失败: %s" % (entry.name, exc))
-                if len(outcome.entries) >= max_files:
+                if len(outcome.entries) > max_files:
+                    # 多出来的那一个才说明"还有没收的"；正好收满不是截断
+                    outcome.entries.pop()
                     outcome.truncated = True
                     outcome.complete = False
                     outcome.errors.append("文件数超过上限 %d，已截断" % max_files)
                     stack = []
                     break
 
-    if cache is not None:
-        cache.prune_to(seen_this_round)
     return outcome
 
 
@@ -153,12 +169,24 @@ def _handle_entry(
     cache: Optional[HashCache],
     outcome: ScanOutcome,
     stack: List[Path],
-    seen_this_round: set,
+    seen_paths: Set[str],
+    cache_namespace: str,
     exclude_dirs: set,
     exclude_suffixes: tuple,
     extensions: set,
 ) -> None:
     name = entry.name
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError:
+        # 文件名不是合法 UTF-8（Python 用代理字符表示那几个字节）。它进了报文，
+        # json.dumps(...).encode("utf-8") 就抛异常 —— 曾经因此**每一轮** tick
+        # 都失败，这台机器从此一个文件都收不上来。跳过它并说出来；不影响
+        # complete（服务端从来没收到过它，谈不上"漏扫被当成删除"）。
+        outcome.errors.append(
+            "文件名不是合法 UTF-8，已跳过: %s" % name.encode("utf-8", "replace").decode("utf-8")
+        )
+        return
     lower = name.lower()
 
     # 隐藏文件与目录整个跳过（.git 等已在 exclude_dirs 里，这里兜住其余）
@@ -189,26 +217,42 @@ def _handle_entry(
         outcome.oversize.append(entry.name)
         return
 
-    rel_path = _relative_posix(Path(entry.path), base)
-    if rel_path is None:
+    raw_rel = _relative_posix(Path(entry.path), base)
+    if raw_rel is None:
         outcome.complete = False
         outcome.errors.append("无法计算相对路径: %s" % entry.path)
         return
 
-    seen_this_round.add(rel_path)
-    mtime = int(stat.st_mtime)
-    size = int(stat.st_size)
+    # 上报 NFC：服务端按 NFC 存、按 NFC 回 need_upload。曾经原样上报 NFD 名字，
+    # 服务端回的是 NFC，Agent 用它查不到本地文件 —— 那个文件永远收不上来、
+    # tick 一直停在"有活"的 2 秒节奏。本地仍按真实名字打开（FileEntry.local）。
+    rel_path = unicodedata.normalize("NFC", raw_rel)
+    if rel_path in seen_paths:
+        # 两个磁盘名字归一化后相同（一个 NFC、一个 NFD）：只能收一个，说出来
+        outcome.errors.append("归一化后与另一个文件同名，已跳过: %s" % rel_path)
+        return
+    seen_paths.add(rel_path)
+
+    fingerprint = file_fingerprint(stat)
+    cache_key = "%s\x00%s" % (cache_namespace, raw_rel)
+    outcome.cache_keys.add(cache_key)
 
     digest: Optional[str] = None
     if cache is not None:
-        digest = cache.lookup(rel_path, mtime, size)
+        digest = cache.lookup(cache_key, fingerprint)
     if digest is None:
         digest = sha256_file(Path(entry.path))
         if cache is not None:
-            cache.store(rel_path, mtime, size, digest)
+            cache.store(cache_key, fingerprint, digest)
 
     outcome.entries.append(
-        FileEntry(path=rel_path, sha256=digest, size=size, mtime=mtime)
+        FileEntry(
+            path=rel_path,
+            sha256=digest,
+            size=int(stat.st_size),
+            mtime=int(stat.st_mtime),
+            local=Path(entry.path),
+        )
     )
 
 

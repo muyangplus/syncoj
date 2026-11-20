@@ -54,7 +54,7 @@ from .config import (
 from .download import download_asset, find_partial_sizes, sweep_stale_parts
 from .policy import DEFAULT_POLICY, merge_policy
 from .rsa import RSAPublicKey, SignatureError
-from .scan import ScanPolicy, scan_directory
+from .scan import ScanOutcome, ScanPolicy, scan_directory
 from .state import (
     STATE_READY,
     STATE_UNCLAIMED,
@@ -1013,15 +1013,34 @@ class Agent:
         local_paths: Dict[str, Path] = {}
         skipped = 0
 
+        cache_keys: set = set()
+        budget = max_files
         for name, root in self._roots:
             if self._root_problem(root) is not None:
                 skipped += 1
                 continue
-            outcome = scan_directory(root, scan_policy, self.cache, max_files=max_files)
+            if budget <= 0:
+                # max_files 是**整台机器**的上限，不是每个根各一份（服务端按总数截断，
+                # 多根时按根计会让总数超过服务端的上限，被截掉的文件又被判成删除）
+                outcome = ScanOutcome(root=root.as_posix(), complete=False, truncated=True)
+                outcome.errors.append("文件数已达上限 %d，此目录未扫描" % max_files)
+                results.append((name, outcome))
+                continue
+            outcome = scan_directory(
+                root, scan_policy, self.cache, max_files=budget,
+                # 命名空间用根的绝对路径：前缀可以为空（scan_prefix=none）
+                cache_namespace=str(root),
+            )
+            budget -= len(outcome.entries)
             results.append((name, outcome))
+            cache_keys |= outcome.cache_keys
             for entry in outcome.entries:
-                local_paths[join_report_path(name, entry.path)] = root / entry.path
+                local_paths[join_report_path(name, entry.path)] = (
+                    entry.local if entry.local is not None else root / entry.path
+                )
 
+        # 整轮扫完只 prune 一次：逐根 prune 会把别的根的条目清掉，每轮全量重算
+        self.cache.prune_to(cache_keys)
         return results, local_paths, skipped
 
     def _build_tick_payload(self, results, local_paths, scan_complete: bool = True):

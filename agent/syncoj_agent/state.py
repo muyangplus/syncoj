@@ -19,10 +19,11 @@ import os
 import platform
 import re
 import socket
+import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 __all__ = [
     "Credential",
@@ -375,13 +376,45 @@ def save_credential(path: Path, credential: Credential) -> None:
 # --------------------------------------------------------------------------- #
 
 
+#: 指纹：``(st_mtime_ns, st_ctime_ns, st_ino, st_size)``。
+Fingerprint = Tuple[int, int, int, int]
+
+#: mtime 落在"现在往前这么多纳秒"之内的文件**不进缓存**（git 的 racy-clean 做法）。
+#: 同一时间粒度里紧接着的第二次保存，指纹可能与第一次完全相同；把第一次的哈希
+#: 记下来，第二次的内容就会被当成"没变"。只看 mtime 就够：任何一次写内容都会刷新
+#: 它，所以"刚写过"的文件一定进不了缓存；而"内容变了、mtime 被人改回去"由指纹里的
+#: ctime 兜住（ctime 改不回去）。
+RACY_WINDOW_NS = 2 * 1000 * 1000 * 1000
+
+HASH_CACHE_VERSION = 2
+
+
+def file_fingerprint(stat: "os.stat_result") -> Fingerprint:
+    return (
+        int(stat.st_mtime_ns),
+        int(stat.st_ctime_ns),
+        int(stat.st_ino),
+        int(stat.st_size),
+    )
+
+
 @dataclass
 class HashCache:
-    """``(路径, mtime, size) -> sha256`` 的缓存。
+    """``(键, 文件指纹) -> sha256`` 的缓存。
 
     代码目录里绝大多数文件在绝大多数轮次里都没变。没有缓存的话，每轮 tick 都
     要把全部文件重新读一遍算 SHA-256 —— 50 个文件或许还能忍，但如果选手目录
     里堆了几百 MB 的测试数据，纯属浪费 IO。有了缓存，稳态下几乎不读盘。
+
+    两处曾经的缺陷决定了现在的形状：
+
+    * **指纹**曾经是"秒级 mtime + size"。只改一个数字（``n=100`` → ``n=200``）这种
+      等长保存在同一秒内发生时，缓存返回旧哈希，直到下一次修改为止 —— 如果那恰好
+      是最后一次保存，最终版就丢了。现在用纳秒级 mtime、ctime、inode 与 size，
+      并且 mtime 太新的文件不进缓存（:data:`RACY_WINDOW_NS`）。
+    * **键**曾经是"扫描根下的相对路径"，所有根共用一份：两个根里同路径、同指纹的
+      文件拿到错误的哈希；每个根扫完各自 ``prune_to``，又把别的根的条目清掉。
+      现在键由调用方带上根的命名空间，整轮扫完只 prune 一次。
     """
 
     entries: Dict[str, List[object]] = field(default_factory=dict)
@@ -391,7 +424,8 @@ class HashCache:
     @classmethod
     def load(cls, path: Path) -> "HashCache":
         data = _read_json(path)
-        if not data:
+        if not data or data.get("version") != HASH_CACHE_VERSION:
+            # 老格式（秒级指纹）一律丢弃：重算一遍哈希的代价远小于信错一次
             return cls()
         raw = data.get("entries")
         if not isinstance(raw, dict):
@@ -400,33 +434,41 @@ class HashCache:
         for key, value in raw.items():
             if (
                 isinstance(value, list)
-                and len(value) == 3
-                and isinstance(value[2], str)
-                and len(value[2]) == 64
+                and len(value) == 5
+                and all(isinstance(item, int) for item in value[:4])
+                and isinstance(value[4], str)
+                and len(value[4]) == 64
             ):
                 entries[key] = value
         return cls(entries=entries)
 
     def save(self, path: Path) -> None:
-        payload = {"version": 1, "entries": self.entries}
+        payload = {"version": HASH_CACHE_VERSION, "entries": self.entries}
         atomic_write_text(path, json.dumps(payload), mode=0o600)
 
-    def lookup(self, rel_path: str, mtime: int, size: int) -> Optional[str]:
-        value = self.entries.get(rel_path)
-        if value is None:
-            self._misses += 1
-            return None
-        if value[0] == mtime and value[1] == size and isinstance(value[2], str):
+    def lookup(self, key: str, fingerprint: Fingerprint) -> Optional[str]:
+        value = self.entries.get(key)
+        if value is not None and tuple(value[:4]) == tuple(fingerprint):
             self._hits += 1
-            return value[2]
+            return value[4]  # type: ignore[return-value]
         self._misses += 1
         return None
 
-    def store(self, rel_path: str, mtime: int, size: int, digest: str) -> None:
-        self.entries[rel_path] = [mtime, size, digest]
+    def store(
+        self, key: str, fingerprint: Fingerprint, digest: str, now_ns: Optional[int] = None
+    ) -> None:
+        """记下一条；指纹太新（还在 racy 窗口里）时**不记**，下一轮重算。"""
+        now = time.time_ns() if now_ns is None else now_ns
+        if now - fingerprint[0] < RACY_WINDOW_NS:
+            self.entries.pop(key, None)
+            return
+        self.entries[key] = [fingerprint[0], fingerprint[1], fingerprint[2], fingerprint[3], digest]
 
     def prune_to(self, keep: Optional[set]) -> None:
-        """丢弃本轮未出现的条目，防止改名/删除的残留无限堆积。"""
+        """丢弃本轮未出现的条目，防止改名/删除的残留无限堆积。
+
+        调用方必须传**整轮所有扫描根**的键（每个根各 prune 一次会互相清掉）。
+        """
         if keep is None:
             return
         self.entries = {k: v for k, v in self.entries.items() if k in keep}

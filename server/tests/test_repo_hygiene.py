@@ -371,7 +371,7 @@ def test_pin_check_actually_catches_a_missing_pin() -> None:
     assert effective_eol("web/src/api/index.ts", rules) == "crlf"
     assert effective_eol("server/syncoj_server/main.py", rules) == "lf"
     # 没有规则管它 → 没有生效的 eol，也算"没钉死"
-    assert effective_eol("docs/protocol.md", rules) is None
+    assert effective_eol("docs/reference/protocol.md", rules) is None
     # 后面的规则覆盖前面的
     assert effective_eol("web/x.py", [("*.py", ["eol=lf"]), ("web/**", ["eol=crlf"])]) == "crlf"
 

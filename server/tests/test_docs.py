@@ -27,7 +27,7 @@ import configparser
 import re
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Sequence, Set, Tuple
+from typing import Dict, Iterable, List, Sequence, Set, Tuple
 
 import pytest
 
@@ -540,6 +540,47 @@ STALE_DOC_PATHS = {
 }
 
 
+#: 守卫自己所在的文件（它的映射表与说明里必然写着旧路径）。
+STALE_GUARD_SELF = "server/tests/test_docs.py"
+
+
+def find_stale_doc_paths(rels: Iterable[str]) -> List[str]:
+    """返回 ``文件:行号  内容`` 形式的过期引用。
+
+    文件清单交给 ``all_doc_bearing_files()``：它会剪掉 ``node_modules`` /
+    ``.venv`` / ``dist``。这条检查第一版自己 ``rglob`` 整棵树，既慢、又会扫进
+    依赖目录；更糟的是它把**测试自身**（映射表、拿旧路径当样本的用例）也算成了
+    违规，于是从加进来那天起就是红的，红到没人再看它。
+    """
+    found: List[str] = []
+    for rel in rels:
+        text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+        for lineno, line in enumerate(text.splitlines(), 1):
+            # 例外：文档里刻意留档说明"旧路径是哪个"的地方
+            if "重建之前" in line:
+                continue
+            for old in STALE_DOC_PATHS:
+                # `docs/reference/protocol.md` 里也含 `protocol.md`，但不含
+                # `docs/protocol.md` —— 子串判断对新路径天然不误伤
+                if old in line:
+                    found.append("%s:%d  %s" % (rel, lineno, line.strip()[:100]))
+                    break
+    return found
+
+
+def test_stale_doc_path_scanner_catches_old_paths(workdir: Path) -> None:
+    """自证：扫描器真的认得旧路径、也不误伤新路径。"""
+    sample = workdir / "sample.ts"
+    sample.write_text(
+        "// 见 docs/api-conventions.md §2\n"
+        "// 见 docs/reference/api-conventions.md §2\n",
+        encoding="utf-8",
+    )
+    rel = sample.relative_to(REPO_ROOT).as_posix()
+    hits = find_stale_doc_paths([rel])
+    assert len(hits) == 1 and hits[0].startswith(rel + ":1 ")
+
+
 def test_doc_paths_are_not_stale() -> None:
     """文档里不该再用行内代码指着旧的 `docs/*.md` 路径。
 
@@ -548,29 +589,14 @@ def test_doc_paths_are_not_stale() -> None:
     `` `docs/api-conventions.md` ``（行内代码），它不会被链接检查抓到。
     那三份文档搬进了 `docs/reference/`，老写法就成了指向空处的指路。
     """
-    stale_lines: List[str] = []
-    for rel in ("docs", "README.md", "DESIGN.md", "agent", "server", "web"):
-        base = REPO_ROOT / rel
-        if base.is_file():
-            paths = [base]
-        elif base.is_dir():
-            paths = [p for p in base.rglob("*") if p.is_file()]
-        else:
-            continue
-        for path in paths:
-            if path.suffix not in (".md", ".py", ".ts", ".vue"):
-                continue
-            for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-                # 例外：文档里刻意留档说明"旧路径是哪个"的地方
-                if "重建之前" in line or "STALE_DOC_PATHS" in line:
-                    continue
-                for old in STALE_DOC_PATHS:
-                    if old in line:
-                        stale_lines.append("%s:%d  %s" % (path.relative_to(REPO_ROOT), lineno, line.strip()[:100]))
-
-    # 仓库里确实还留着"旧路径"的**记录**（README/DESIGN 里说明搬家前后），
-    # 所以这里只要求它不再出现在代码注释里。
-    code_stale = [item for item in stale_lines if item.startswith(("server/", "agent/", "web/"))]
+    code_stale = find_stale_doc_paths(
+        rel for rel in all_doc_bearing_files()
+        # 仓库里确实还留着"旧路径"的**记录**（README/DESIGN 里说明搬家前后），
+        # 所以这里只要求它不再出现在代码注释里。
+        if rel.startswith(("server/", "agent/", "web/"))
+        # 本守卫自己必须写出旧路径（映射表、说明），它不是"指路"
+        and rel != STALE_GUARD_SELF
+    )
     assert not code_stale, (
         "代码注释里还在指这些已经搬走的文档路径：\n"
         + "\n".join("  %s" % item for item in code_stale)

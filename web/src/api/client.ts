@@ -7,7 +7,7 @@
  * 这里**唯一**的职责是把服务端的约定翻译成异常对象：`detail` 永远是一句能
  * 直接显示给人看的中文，`code` 是稳定的短标识符（要分支判断就用它，不要拿
  * `detail` 做字符串比较 —— 那句话随时会被改得更通顺）。见
- * `docs/api-conventions.md` §3。
+ * `docs/reference/api-conventions.md` §3。
  */
 
 const TOKEN_KEY = 'syncoj.token'

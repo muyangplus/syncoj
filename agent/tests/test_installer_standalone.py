@@ -65,14 +65,16 @@ from syncoj_server.services.signing import (  # noqa: E402
 HAS_OPENSSL = openssl_available() is not None
 requires_openssl = pytest.mark.skipif(not HAS_OPENSSL, reason="需要 openssl")
 
-#: 以 root 跑**真安装**（非 dry-run）的子进程用例会写宿主系统路径：
-#: ``install.py`` 的远程卸载辅助件（``/usr/local/lib/syncoj``、``/etc/sudoers.d``）
-#: 是写死的常量，子进程里 conftest 的沙箱补丁够不着。在安装器的所有路径改由
-#: ``Layout(root)`` 派生之前（重构计划阶段 2），root 下跳过这些用例。
-#: 非 root 时安装器本来就写不进那些路径（失败会被报成警告），所以照常跑。
-IS_ROOT = getattr(os, "geteuid", lambda: -1)() == 0
-not_as_root = pytest.mark.skipif(
-    IS_ROOT, reason="以 root 跑真安装会写宿主的 /etc/sudoers.d（待 Layout 派生全部路径后收回）"
+#: 子进程里跑**真安装**（非 dry-run）的用例，在 POSIX 上一律跳过。
+#:
+#: ``install.py`` 的远程卸载辅助件路径是写死的常量（``/usr/local/lib/syncoj``、
+#: ``/etc/sudoers.d``），子进程里 conftest 的沙箱补丁够不着：以 root 跑会写宿主，
+#: 不以 root 跑则写不进去而**整次安装失败**（不是警告 —— CI 的非 root runner 上实测）。
+#: Windows 上安装器会跳过这一步，所以那边照常跑。等安装器的所有路径改由
+#: ``Layout(root)`` 派生（重构计划第 15 步）后收回。
+needs_layout = pytest.mark.skipif(
+    os.name == "posix",
+    reason="真安装会写死系统路径 /usr/local/lib/syncoj（待 Layout 派生全部路径后收回）",
 )
 
 #: 发现协议里那段被签名的文本前缀。**手写**，故意不 import 任何一端 ——
@@ -344,7 +346,7 @@ class FakeDiscovery:
 # --------------------------------------------------------------------------- #
 
 
-@not_as_root
+@needs_layout
 @requires_openssl
 def test_脱离仓库也能验签成功(standalone: Standalone) -> None:
     """走到"_verify_signature_if_possible"那一步并**真的验过**。
@@ -376,7 +378,7 @@ def test_脱离仓库也能验签成功(standalone: Standalone) -> None:
         assert result.returncode == 0, text
 
 
-@not_as_root
+@needs_layout
 @requires_openssl
 def test_脱离仓库也真的验签_签名不对就拒绝(standalone: Standalone) -> None:
     """自包含实现不能是"永远返回 True"的空壳：别人签的必须被拒。"""

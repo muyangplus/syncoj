@@ -188,6 +188,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--only", action="append", default=[], metavar="STEP",
         help="只跑这一步（可重复）。步骤名见 --list",
     )
+    parser.add_argument(
+        "--skip", action="append", default=[], metavar="STEP",
+        help="跳过这一步（可重复）。步骤名见 --list",
+    )
     parser.add_argument("--list", action="store_true", help="列出步骤名后退出")
     parser.add_argument(
         "--jobs", default=os.environ.get("SYNCOJ_TEST_JOBS", DEFAULT_JOBS),
@@ -204,7 +208,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         for name, title, _fn, _web in STEPS:
             print("%-14s %s" % (name, title))
         return 0
-    unknown = [name for name in args.only if name not in names]
+    unknown = [name for name in args.only + args.skip if name not in names]
     if unknown:
         print("未知步骤：%s（可选：%s）" % (", ".join(unknown), ", ".join(names)), file=sys.stderr)
         return 2
@@ -220,6 +224,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     skipped: List[str] = []
     started = time.monotonic()
     for name, title, fn, is_web in STEPS:
+        if name in args.skip:
+            skipped.append(name)
+            continue
         if args.only and name not in args.only:
             continue
         if is_web and not web_ready:
@@ -236,8 +243,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     _banner("汇总（%.0f 秒）" % (time.monotonic() - started))
     if skipped:
-        reason = "--skip-web" if args.skip_web else "未安装 npm 或 web/node_modules 不存在"
-        print("跳过：%s（%s）" % (", ".join(skipped), reason))
+        print("跳过：%s" % ", ".join(skipped))
     if failed:
         for name, reason in failed:
             print("失败：%-14s %s" % (name, reason))

@@ -48,8 +48,12 @@ jobs:
         run: python -m pip install -e "server[dev]"
       - name: 真 3.8 解释器编译全部代码
         run: python -m compileall -q agent/syncoj_agent agent/packaging agent/run_agent.py agent/tools server/syncoj_server scripts
-      - name: 全量检查（不含前端）
-        run: ./scripts/check.sh --skip-web
+      # openapi.json 是生成物，只在规范环境（latest 那一路的最新依赖）里对账：
+      # 3.8 只能装到较老的 pydantic，生成结果有无害差异（如 additionalProperties）。
+      - name: 全量检查（不含前端与 OpenAPI 对账）
+        env:
+          SYNCOJ_SKIP_OPENAPI_PARITY: "1"
+        run: ./scripts/check.sh --skip-web --skip openapi
 
   latest:
     name: 最新 Python + 前端

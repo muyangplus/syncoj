@@ -81,6 +81,18 @@ def files() -> List[Path]:
         pytest.skip("拿不到 git 文件清单: %s" % exc)
 
 
+def _label(path: Path) -> str:
+    """仓库内的文件给相对路径，仓库外（测试造的临时文件）给原样。
+
+    不用 ``Path.is_relative_to``：它是 Python 3.9+，而测试也要在目标机的 3.8 上跑
+    （CI 的 py38 那一路第一次跑就在这里炸了）。
+    """
+    try:
+        return str(path.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
 def find_bom_offenders(paths: List[Path]) -> List[str]:
     """挑出以 UTF-8 BOM 开头的文件。抽成函数是为了能被单独验证 —— 一个
     永远不会红的检查等于没有检查。"""
@@ -89,7 +101,7 @@ def find_bom_offenders(paths: List[Path]) -> List[str]:
         if path.suffix not in BOM_SENSITIVE_SUFFIXES or not path.is_file():
             continue
         if path.read_bytes()[:3] == b"\xef\xbb\xbf":
-            offenders.append(str(path.relative_to(REPO_ROOT)) if path.is_relative_to(REPO_ROOT) else str(path))
+            offenders.append(_label(path))
     return offenders
 
 
@@ -101,7 +113,7 @@ def find_cr_offenders(paths: List[Path]) -> List[str]:
             continue
         data = path.read_bytes()
         if b"\r" in data:
-            label = str(path.relative_to(REPO_ROOT)) if path.is_relative_to(REPO_ROOT) else str(path)
+            label = _label(path)
             offenders.append("%s（%d 处 CR）" % (label, data.count(b"\r")))
     return offenders
 
@@ -186,7 +198,7 @@ def find_missing_bom(paths: List[Path]) -> List[str]:
             continue
         if path.read_bytes()[:3] != b"\xef\xbb\xbf":
             offenders.append(
-                str(path.relative_to(REPO_ROOT)) if path.is_relative_to(REPO_ROOT) else str(path)
+                _label(path)
             )
     return offenders
 

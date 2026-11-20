@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -530,6 +531,11 @@ def test_placeholders_are_declared_once(spec: Dict[str, Any]) -> None:
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.skipif(
+    os.environ.get("SYNCOJ_SKIP_OPENAPI_PARITY") == "1",
+    reason="web/openapi.json 是在规范环境（最新依赖）下生成的；pydantic 版本不同时"
+           "生成结果会有无害差异（如 additionalProperties），CI 的 py38 那一路显式跳过",
+)
 def test_openapi_json_matches_the_current_code(spec: Dict[str, Any]) -> None:
     """`web/openapi.json` 必须与当前代码一致。
 

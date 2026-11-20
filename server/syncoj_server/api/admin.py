@@ -65,6 +65,7 @@ from ..models import (
 )
 from ..paths import PathValidationError, safe_join, slugify, validate_relpath
 from ..schemas import (
+    AdminHealthOut,
     GLOBAL_CONFIRM,
     AdminInfo,
     AgentRuntimeOut,
@@ -294,7 +295,10 @@ def require_admin(request: Request, ctx: AppContext = Depends(get_ctx)) -> Admin
             raise _unauthorized("登录已过期，请重新登录", code="token_expired")
         if not admin.is_active:
             raise _unauthorized("账号已停用")
-        return AdminIdentity(id=admin.id, username=admin.username)
+    # 告诉"对外地址"学习中间件：这个请求是**登录了的教师**发的（见
+    # main._remember_public_url —— 只从这种请求的 Host 头学）
+    request.state.admin_authenticated = True
+    return AdminIdentity(id=admin.id, username=admin.username)
 
 
 # --------------------------------------------------------------------------- #
@@ -2910,15 +2914,23 @@ def _count(session, model, *conditions) -> int:
     )
 
 
-@router.get("/health")
-def health(ctx: AppContext = Depends(get_ctx)) -> Dict[str, Any]:
+@router.get("/health", response_model=AdminHealthOut)
+def health(
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> AdminHealthOut:
+    """管理端探活（要登录）。
+
+    曾经不鉴权：匿名就能拿到 ``data_root`` 的绝对路径，而且它恒回 200，于是匿名
+    请求能借它的 Host 头改写"对外地址"（见 main._remember_public_url）。
+    """
     agents = ctx.registry.all()
-    return {
-        "ok": ctx.db.healthcheck(),
-        "agents_total": len(agents),
-        "agents_online": sum(1 for a in agents if a.online),
-        "data_root": str(ctx.settings.data_root),
-    }
+    return AdminHealthOut(
+        ok=ctx.db.healthcheck(),
+        agents_total=len(agents),
+        agents_online=sum(1 for a in agents if a.online),
+        data_root=str(ctx.settings.data_root),
+    )
 
 
 # --------------------------------------------------------------------------- #

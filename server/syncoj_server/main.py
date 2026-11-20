@@ -122,27 +122,27 @@ def _remember_public_url(app: FastAPI, ctx: AppContext) -> None:
 
     * **回环**（``127.0.0.1`` / ``localhost``）永远不记。把它当成对外地址是这里
       最坏的一种错：50 台机器会各自连自己，现场只有"注册不上"，没有任何线索。
-    * **只记成功的请求**（``< 400``）。少了这一条，局域网里任何人都能发一个
-      ``Host: 1.2.3.4:9`` 的匿名请求把这里污染掉 —— 之后所有新打的包都会内嵌
-      那个地址、发现应答也会报它，等于让外人替我们挑服务器地址。
+    * **只记登录了的教师发来的请求**（``require_admin`` 通过时会在
+      ``request.state`` 上留标记）。曾经的判据是"成功的管理端或探活请求"，而
+      ``/healthz`` 与 ``/admin/health`` 都不鉴权、恒回 200 —— 局域网里任何一个
+      学生发一个 ``Host: 6.6.6.6:9`` 的匿名请求就能把这里污染掉，之后打的离线包
+      会内嵌那个地址、发现应答也会报它，等于让学生替全机房挑服务器。
       （更可信的那一路是"从来源 IP 反推本机地址"，它由内核给出，伪造不了，
       在 :func:`discovery.describe_advertised_url` 里排在前面。）
-    * 只认管理端与探活路径：Agent 的 Host 也可能到达，但那不能当权威 ——
-      手工填错的地址只会被拒，不会成为真相。
+    * 协议一律按 ``http`` 记，不信 ``X-Forwarded-Proto``：服务端本身不跑 TLS，
+      这个头只可能是客户端自己写的。
 
     只记最后一个，不做多数投票：教师在考场上换一次网线（比如从 Wi-Fi 换到
     有线）之后，**新的那个**才是对的。
     """
-    observed_prefixes = ("/api/v1/admin", "/healthz")
 
     @app.middleware("http")
     async def _capture_host(request: Request, call_next):
         response = await call_next(request)
-        if response.status_code < 400 and request.url.path.startswith(observed_prefixes):
+        if response.status_code < 400 and getattr(request.state, "admin_authenticated", False):
             host = (request.headers.get("host") or "").strip()
             if host and not _is_loopback_host(host):
-                scheme = (request.headers.get("x-forwarded-proto") or "http").split(",")[0].strip()
-                new_hint = "%s://%s" % (scheme or "http", host)
+                new_hint = "http://%s" % host
                 if new_hint != ctx.public_url_hint:
                     ctx.public_url_hint = new_hint
                     # **把算出来的地址直接打出来**：现场第一个问题永远是"这台服务端

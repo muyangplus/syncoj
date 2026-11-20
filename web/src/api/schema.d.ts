@@ -1144,7 +1144,13 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Health */
+        /**
+         * Health
+         * @description 管理端探活（要登录）。
+         *
+         *     曾经不鉴权：匿名就能拿到 ``data_root`` 的绝对路径，而且它恒回 200，于是匿名
+         *     请求能借它的 Host 头改写"对外地址"（见 main._remember_public_url）。
+         */
         get: operations["health_api_v1_admin_health_get"];
         put?: never;
         post?: never;
@@ -2072,6 +2078,20 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * AdminHealthOut
+         * @description 管理端探活：概览卡片直接要用的几个数。
+         */
+        AdminHealthOut: {
+            /** Agents Online */
+            agents_online: number;
+            /** Agents Total */
+            agents_total: number;
+            /** Data Root */
+            data_root: string;
+            /** Ok */
+            ok: boolean;
+        };
         /** AdminInfo */
         AdminInfo: {
             /** Is Active */
@@ -6175,9 +6195,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["AdminHealthOut"];
                 };
             };
         };

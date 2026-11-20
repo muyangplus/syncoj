@@ -573,6 +573,15 @@ class ApplyRosterOut(_Base):
 # --------------------------------------------------------------------------- #
 
 
+class AdminHealthOut(_Base):
+    """管理端探活：概览卡片直接要用的几个数。"""
+
+    ok: bool
+    agents_total: int
+    agents_online: int
+    data_root: str
+
+
 class PendingMachineOut(_Base):
     """一台注册上来、还没配对到人的机器。"""
 

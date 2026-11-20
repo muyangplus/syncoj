@@ -11,6 +11,8 @@ import type { components } from './schema'
 type S = components['schemas']
 
 export type AdminInfo = S['AdminInfo']
+/** `/admin/health`：类型来自 OpenAPI（曾经在 auth.ts 里手写，违反"前端类型绝不手写"）。 */
+export type AdminHealth = S['AdminHealthOut']
 export type LoginRequest = S['LoginRequest']
 export type LoginResponse = S['LoginResponse']
 

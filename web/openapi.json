@@ -1,6 +1,36 @@
 {
   "components": {
     "schemas": {
+      "AdminHealthOut": {
+        "additionalProperties": false,
+        "description": "管理端探活：概览卡片直接要用的几个数。",
+        "properties": {
+          "agents_online": {
+            "title": "Agents Online",
+            "type": "integer"
+          },
+          "agents_total": {
+            "title": "Agents Total",
+            "type": "integer"
+          },
+          "data_root": {
+            "title": "Data Root",
+            "type": "string"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok",
+          "agents_total",
+          "agents_online",
+          "data_root"
+        ],
+        "title": "AdminHealthOut",
+        "type": "object"
+      },
       "AdminInfo": {
         "additionalProperties": false,
         "properties": {
@@ -7845,15 +7875,14 @@
     },
     "/api/v1/admin/health": {
       "get": {
+        "description": "管理端探活（要登录）。\n\n曾经不鉴权：匿名就能拿到 ``data_root`` 的绝对路径，而且它恒回 200，于是匿名\n请求能借它的 Host 头改写\"对外地址\"（见 main._remember_public_url）。",
         "operationId": "health_api_v1_admin_health_get",
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Health Api V1 Admin Health Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/AdminHealthOut"
                 }
               }
             },

@@ -14,7 +14,7 @@
 |---|---|
 | 考试机 | **NOI Linux 2.0**（Ubuntu 20.04 / glibc 2.31 / systemd 245 / Python 3.8.10） |
 | 服务端 | 单机内网部署，Python 3.8+ |
-| 通信 | 内网 HTTPS，HTTP 自适应轮询（无 WebSocket） |
+| 通信 | 内网**明文 HTTP**（只限可信二层，见 `docs/design/06-security.md` §6.2），自适应轮询（无 WebSocket） |
 
 ## 三条命令
 

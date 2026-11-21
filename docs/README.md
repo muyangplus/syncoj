@@ -45,7 +45,7 @@
 | [`design/03-agent.md`](design/03-agent.md) | 客户端 Agent：零依赖、主循环、扫描、注册、systemd unit、py38 清单（原 §3） |
 | [`design/04-server.md`](design/04-server.md) | 服务端：目录、数据模型、写入策略、成绩回写、代码归题、注册配对、名单、迁移（原 §4） |
 | [`design/05-api-and-frontend.md`](design/05-api-and-frontend.md) | 接口约定与前端：契约测试、信封、前端架构、文案口径、删除语义、公开端口（原 §5） |
-| [`design/06-security.md`](design/06-security.md) | 安全面清单与签名算法选型（原 §6） |
+| [`design/06-security.md`](design/06-security.md) | 安全面清单、签名算法选型、信任边界现状（明文 HTTP、自举链、发布私钥）（原 §6） |
 | [`design/07-ops-and-install.md`](design/07-ops-and-install.md) | 运维与装机：`.key/`、发布、安装策略三档、服务端发现、远程卸载（原 §7） |
 | [`design/08-milestones-and-open.md`](design/08-milestones-and-open.md) | 里程碑、待补信息、待办与被明确否决的想法（原 §8 / §9 / §10） |
 

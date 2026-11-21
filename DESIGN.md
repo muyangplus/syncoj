@@ -40,9 +40,10 @@
 | §4.5 代码归题与目录约定 / §4.6 注册与配对 / §4.7 名单 / §4.8 库结构演进 | [`docs/design/04-server.md`](docs/design/04-server.md) |
 | §5.1 契约测试 / §5.2 信封与错误体 / §5.3 前端架构 / §5.4 删除语义 | [`docs/design/05-api-and-frontend.md`](docs/design/05-api-and-frontend.md) |
 | §5.5 下发资产不解压 / §5.6 两个免登录页面 / §5.7 公开端口 | [`docs/design/05-api-and-frontend.md`](docs/design/05-api-and-frontend.md) |
-| §6.1 为什么签名不是 Ed25519 | [`docs/design/06-security.md`](docs/design/06-security.md) |
+| §6.1 为什么签名不是 Ed25519 / §6.2 信任边界的现状 | [`docs/design/06-security.md`](docs/design/06-security.md) |
 | §7.1 密钥从哪来 / §7.2 发布当前版本 / §7.2.1 安装策略 | [`docs/design/07-ops-and-install.md`](docs/design/07-ops-and-install.md) |
 | §7.3 机器怎么知道服务端在哪 / §7.4 远程卸载 | [`docs/design/07-ops-and-install.md`](docs/design/07-ops-and-install.md) |
+| §10.5 重构遗留 | [`docs/design/08-milestones-and-open.md`](docs/design/08-milestones-and-open.md) |
 
 **"为什么这么定"在 ADR 里**（[`docs/decisions/`](docs/decisions/)）：`design/` 记
 现在是什么样，ADR 记当初否掉了什么、代价是什么。§0 那张表里每一行都指向对应的 ADR。

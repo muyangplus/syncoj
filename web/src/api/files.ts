@@ -46,13 +46,13 @@ export const fileApi = {
   download: (fileId: number, fallbackName: string) =>
     download(paths.fileContent(fileId), fallbackName),
 
-  /** 软删除（墓碑）。行还在，`include_deleted=true` 时还能看到。 */
+  /** 硬删这一行（无人引用的内容一并删掉）；`include_deleted=true` 也看不到了。 */
   remove: (fileId: number) => softRemoveItem(paths.file(fileId)),
 
   /**
    * 清空台账。`confirm` 是**场次标识**。
    *
-   * `purge=false`（默认）只清已经消失的墓碑记录 —— 不影响任何还在的东西。
+   * `purge=false`（默认）只删扫描对账标成「已消失」的行 —— 不影响任何还在的东西。
    * `purge=true` 会连没消失的一起删，但机器还在报的文件下一轮就会回来。
    */
   clear: (

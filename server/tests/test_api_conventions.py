@@ -52,8 +52,8 @@ API_PREFIXES = (
 MIN_ENVELOPE_ENDPOINTS = 14
 
 #: 结构性数据（名单/场次/选手/机器/题目）的**单对象**删除，必须带 `confirm`。
-#: 显式列出而不是"凡是 DELETE 都查"：产品数据（代码文件、资产）是软删除，
-#: 刻意不要求确认，见 §5.2。
+#: 显式列出而不是"凡是 DELETE 都查"：产品数据（代码文件、资产）的单删
+#: 刻意不要求确认（它们也是硬删，但只删一行、内容按引用回收），见 §5.2。
 SINGLE_DELETES_NEEDING_CONFIRM = {
     "/api/v1/admin/rosters/{roster_id}",
     "/api/v1/admin/roster-entries/{entry_id}",

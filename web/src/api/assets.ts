@@ -92,7 +92,7 @@ export const assetApi = {
       body: { content } satisfies AssetTextEditIn,
     }),
 
-  /** 软删除（墓碑）。已经落到选手机器上的文件不会撤回。 */
+  /** 硬删（下发任务级联删掉）。已经落到选手机器上的文件不会撤回。 */
   remove: (assetId: number) => softRemoveItem(paths.asset(assetId)),
 
   /**

@@ -248,4 +248,11 @@ def _run_checker(box, archive, case, output: bytes, keep: List[str]):
     message = _truncate((_read(box, "chk.err", 1 << 16) or b"").strip())[:500]
     if run.status in (sb.TLE, sb.MLE, sb.OLE) or (run.signal is not None):
         raise sb.SandboxError("checker 自己出错（%s）：%s" % (run.status, message))
-    return (AC if run.exit_code == 0 else WA), message
+    # testlib 的退出码：0 通过、1 答案错、2 格式错、3 FAIL（checker 或答案文件本身有问题）、
+    # 7 部分分（这里不支持，按错算）。3 与不认识的码绝不能当成"选手错了" —— 那会让一份坏数据
+    # 把全场判成 WA 而没人察觉；交给评测机记 SE、重试、最后在进度里显示原因。
+    if run.exit_code == 0:
+        return AC, message
+    if run.exit_code in (1, 2, 7):
+        return WA, message
+    raise sb.SandboxError("checker 报告自身失败（退出码 %s）：%s" % (run.exit_code, message))

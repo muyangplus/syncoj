@@ -1050,3 +1050,35 @@ def test_handoff_slot_is_not_overwritten_except_by_uninstall(agent_config: Agent
 
     assert agent._write_handoff({"kind": "uninstall", "token": "t"}, replace=True) is True
     assert json.loads(request.read_text(encoding="utf-8"))["kind"] == "uninstall"
+
+
+def test_rounds_failing_on_the_network_still_count_as_healthy(agent_config: AgentConfig) -> None:
+    """服务端没开时的那几轮也算"这一版跑得起来"：只数成功心跳的话，两次没有服务端的
+    开机就会让启动守卫把好好的新版本回滚掉、并永久记进 rolled-back.json。"""
+    from syncoj_agent.client import NetworkError
+    from syncoj_agent.main import HEALTHY_CYCLES_BEFORE_TRUST
+
+    server = FakeServer()
+    provision(agent_config, server)
+    agent = service(agent_config, server)
+    server.tick_error = NetworkError("connection refused")
+    reported = []
+    agent._report_healthy = lambda: reported.append(True)  # type: ignore[assignment]
+    agent._try_rediscover = lambda: None  # type: ignore[assignment]
+
+    run_rounds(agent, HEALTHY_CYCLES_BEFORE_TRUST)
+
+    assert reported, "连不上服务端的轮次也要算平稳"
+
+
+def test_unexpected_crashes_do_not_count_as_healthy(agent_config: AgentConfig) -> None:
+    server = FakeServer()
+    provision(agent_config, server)
+    agent = service(agent_config, server)
+    server.tick_error = RuntimeError("新版本的 bug")
+    reported = []
+    agent._report_healthy = lambda: reported.append(True)  # type: ignore[assignment]
+
+    run_rounds(agent, 5)
+
+    assert not reported, "一跑就崩的版本不能被当成平稳"

@@ -217,3 +217,11 @@ def test_isolate_meta解析() -> None:
     assert box._result_from_meta({"status": "XX", "message": "x"}, limits).status == "SE"
     assert box._result_from_meta({"cg-oom-killed": "1", "status": "SG", "exitsig": "9"}, limits).status == "MLE"
     assert box._result_from_meta({"status": "SG", "exitsig": "25"}, limits).status == "OLE"
+
+
+@needs_gcc
+def test_checker报告自身失败不能当成选手错(tmp_path) -> None:
+    """testlib 的退出码 3（FAIL）是 checker / 答案文件坏了：交给评测机记 SE，不判 WA。"""
+    data = ab_data(tmp_path, {"checker.cpp": "int main(){return 3;}"})
+    with pytest.raises(sandbox.SandboxError, match="退出码 3"):
+        judge(tmp_path, AB, data)

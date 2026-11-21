@@ -1566,6 +1566,13 @@ class Agent:
                 manifest.sha256[:12],
             )
 
+        if mode == UpgradeMode.APPLY and not _writable(install_root) and (
+            Path(self.config.state_dir) / HANDOFF_DIRNAME / HANDOFF_REQUEST
+        ).exists():
+            # 交接槽里还有没处理的请求（交出去之前就看一眼）：下一轮再来，别每轮都重新下载一遍包
+            log.info("交接槽里还有没处理的请求，升级 %s 下一轮再说", manifest.version)
+            return
+
         bundle = self.config.state_dir / "upgrade" / ("%s.tar.gz" % manifest.version)
         try:
             size = self.client.download_to_file(manifest.url, bundle, MAX_BUNDLE_BYTES)
@@ -1901,9 +1908,6 @@ class Agent:
         if credential.state != STATE_READY:
             state, wait = self._pending_tick()
             if state != STATE_READY:
-                # 心跳成功也算"这一版跑得起来"：未配对的机器同样会升级，只在正常路径里
-                # 数平稳轮数的话，它的回滚状态永远清不掉，重启两次就会被守卫无端回滚
-                self._note_healthy_cycle()
                 # 待配对/无场次的机器也要能把现场交出去：这条**提前返回**的路径
                 # 从前不会走到下面那次 `_maybe_send_diagnostics`，于是服务端点
                 # 的「要一份」在一台卡在配对阶段的机器上永远没反应，周期性的
@@ -2012,9 +2016,6 @@ class Agent:
         self._flush_events()
         self.cache.save(self.config.hash_cache_path)
 
-        # 跑够几个周期说明新版本确实能用，清掉回滚状态。
-        # 连续计数而不是"启动就算成功"：起得来但一 tick 就崩的版本同样要回滚。
-        self._note_healthy_cycle()
 
         next_tick = int(tick.get("next_tick_seconds") or self.config.scan_interval)
         return float(max(5, min(next_tick, 3600)))
@@ -2124,6 +2125,8 @@ class Agent:
             # 读上 34 分钟，就是没有被兜住。
             self._watchdog_active = arm_watchdog(self.watchdog_seconds)
             round_ok = False
+            #: 这一轮失败的原因在外面（连不上、被限速、凭据被拒）—— 不是这一版代码的错
+            external_failure = False
             try:
                 self._consider_announcement()
                 delay = self.cycle()
@@ -2139,11 +2142,13 @@ class Agent:
                 )
                 delay = max(5.0, min(float(self.config.scan_interval), 3600.0))
             except AuthError as exc:
+                external_failure = True
                 # 只有这一种错误该清掉凭据重新注册（401）。403 走的是
                 # UnboundError，它在上面的循环里就被消化掉了 —— 见 client.py 的注释。
                 self._forget_credential(str(exc))
                 delay = 30.0
             except BootstrapKeyError as exc:
+                external_failure = True
                 # 密钥不对是**部署问题**，重试解决不了。这里刻意不进指数退避循环
                 # 快速刷屏，而是用最长间隔慢慢重试 —— 万一运维正好在换密钥，
                 # 一个长周期后自己就好了，不需要重启 50 台机器。
@@ -2151,6 +2156,7 @@ class Agent:
                 self._emit("error", "bootstrap_key_rejected", str(exc))
                 delay = MAX_BACKOFF
             except RateLimited as exc:
+                external_failure = True
                 # 退避节奏由服务端决定：它才知道限速窗口有多长。
                 # 按自己的节奏硬撞只会把窗口一直顶开。
                 # 上界仍由本地的 MAX_BACKOFF 兜住 —— 服务端写错一个数量级
@@ -2163,6 +2169,7 @@ class Agent:
             except ConfigError:
                 raise
             except NetworkError as exc:
+                external_failure = True
                 self._backoff = min(MAX_BACKOFF, max(5.0, self._backoff * 2 or 5.0))
                 log.warning("网络不可用，%.0f 秒后重试：%s", self._backoff, exc)
                 delay = self._backoff
@@ -2189,6 +2196,13 @@ class Agent:
                 # 连续失败计数（诊断包的 tick.consecutive_failures，也是"出错补
                 # 一份现场"的判据）。成功一轮就清零。
                 self._consecutive_failures = 0 if round_ok else self._consecutive_failures + 1
+
+            # 跑够几轮说明这一版确实能用，清掉回滚状态。"一轮"包括**因为外部原因失败**
+            # 的那些：只数成功的心跳的话，服务端没开的那两次开机就会让启动守卫把一个好好
+            # 的版本回滚掉、并记进 rolled-back.json 永不再装。未预期的异常不算 ——
+            # 起得来但一跑就崩的版本仍然要回滚。
+            if round_ok or external_failure:
+                self._note_healthy_cycle()
 
             # 连续失败攒到阈值 → 攒一份"出错包"（不是立刻发：60 秒最小间隔由
             # `_maybe_send_diagnostics` 守）。这里只记"该发"，发不发得出去不影响

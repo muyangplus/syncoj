@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import secrets
@@ -173,7 +174,7 @@ def verify_announced(
         )
         with opener.open(request, timeout=timeout) as response:
             raw = response.read(MAX_CHALLENGE_REPLY_BYTES + 1)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, http.client.HTTPException) as exc:
         log.info("核实通告失败（%s 连不上或拒绝）：%s", url, exc)
         return None
     if len(raw) > MAX_CHALLENGE_REPLY_BYTES:

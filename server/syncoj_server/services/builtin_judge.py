@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -130,9 +131,18 @@ class Lease:
         }
 
 
+#: 领任务串行化：几台评测机同时来领时，"先查后改"会在 SQLite 上撞旧快照（database is
+#: locked）或把同一个任务发给两台。服务端是单进程，进程内一把锁就够。
+_LEASE_LOCK = threading.Lock()
+
+
 def lease_next(ctx, worker_id: int, now: Optional[datetime] = None) -> Optional[Lease]:
     """领下一个任务。没交代码的、题目配置不对的就地了结，接着找下一个。"""
-    now = now or utcnow()
+    with _LEASE_LOCK:
+        return _lease_next(ctx, worker_id, now or utcnow())
+
+
+def _lease_next(ctx, worker_id: int, now: datetime) -> Optional[Lease]:
     with ctx.db.session() as session:
         while True:
             task = session.execute(

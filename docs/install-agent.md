@@ -274,17 +274,58 @@ python3 build_bundle.py --verify-signature /etc/syncoj/release-key.pem
 gzip 头里默认嵌的时间戳与文件名、tar 成员里的 mtime 都已被压平 —— 否则
 "同一版本两次打包校验和不同"，签名的确定性和"这个包是不是那个包"的判断都会失效。
 
-## 卸载
+## 重装与卸载
+
+**重装 = 再跑一次安装器**，不用先卸载（见上面「幂等性」）：`agent.ini` 与状态目录里的
+凭据都留着，所以**配对关系不变**；机器上已有的统一注册密钥会被认出来，不必再传
+`--bootstrap-key`；版本变了才重启服务。
 
 ```bash
-sudo systemctl disable --now syncoj-agent
-sudo rm -f /etc/systemd/system/syncoj-agent.service
+curl -fsSL http://<服务端>/api/v1/agent/install/bootstrap.sh \
+  | sudo sh -s -- --server http://<服务端> --user <运行账号>
+```
+
+`--user` 照旧显式给：`sudo` 下默认取 `SUDO_USER`，在考试机上那往往是管理员账号，
+不是选手。想连 `agent.ini` 一起按新默认重建，加 `--force-config`（教师改过的扫描目录会丢）。
+
+**卸载**用 `install.py --uninstall`，命令与它删什么见文末「卸载 Agent」。安装器取不回来
+（服务端已经下线）时，手工删的清单与它一致：
+
+```bash
+sudo systemctl disable --now syncoj-agent syncoj-agent-enroll
+sudo rm -f /etc/systemd/system/syncoj-agent.service \
+           /etc/systemd/system/syncoj-agent-enroll.service
 sudo systemctl daemon-reload
-sudo rm -rf /opt/syncoj /etc/syncoj
+sudo rm -f /etc/sudoers.d/syncoj-uninstall      # 远程卸载的 sudoers 白名单
+sudo rm -rf /usr/local/lib/syncoj               # 远程卸载脚本
+sudo rm -rf /opt/syncoj /etc/syncoj             # 程序；配置、统一注册密钥、升级信任锚
 # 状态目录里是凭据与日志，确认不需要留档后再删
 sudo rm -rf /var/lib/syncoj
-sudo userdel syncoj
 ```
+
+运行账号**不要删**：默认它就是选手的登录账号。安装器只删它自己用 `--user` 新建的系统
+账号（`--keep-user` 连这个也留下），手工卸载时也照此办理。
+
+### 全部重装 / 重做镜像（服务端升级到 2026-11 这一版时必做）
+
+阶段 1 的修复里有**破坏性的协议变更**：tick 上报新增 `scanned_for`，`scan_complete`
+改为必填，下发的进度与回执改按下发目标报（`deploy_progress` / `deploy_done` /
+`deploy_failed`，按 `target_id`，取代 `partials` / `completed_assets`）。服务端对报文
+是严格校验的，旧 Agent 每一次 tick 都会被 422 拒掉 —— **不收代码、不收下发，也收不到
+升级**；何况自更新在真机上本来就写不进 `/opt/syncoj`
+（[`design/08-milestones-and-open.md`](design/08-milestones-and-open.md) §10.5）。
+所以不能等它自己升上来：
+
+1. 服务端升级后，先在「Agent 发布」页构建并**铺开**新版本 —— `--from-server` 与自举脚本
+   只发已铺开的版本。
+2. **每一台**考试机按上面「重装」那条命令重跑一次安装器。配对与 `agent.ini` 都保留。
+3. **镜像里预置的东西一律重做**：
+   * 预先放进镜像的离线包（`install.py --bundle` 用的 tar.gz）是旧版本，重新打包或从
+     「Agent 发布」页下载新包，换掉再做镜像；
+   * 已经装好 Agent 再做成镜像 / 用还原卡固化的机器，每次开机都会还原回旧 Agent ——
+     在母机上重装之后**重新做镜像**（注意上面「建镜像时最容易犯的错」：做镜像前删掉
+     身份文件）。
+4. 装完在「机器配对」页看各机的 Agent 版本与最近心跳，确认没有掉队的。
 
 ## 排障
 

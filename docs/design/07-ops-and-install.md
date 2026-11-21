@@ -1,16 +1,25 @@
 ## 7. 运维与装机
 
-安装器做成**幂等三入口、同一份逻辑**：
+安装器做成**幂等多入口、同一份逻辑**：只有一个 `agent/packaging/install.py`
+（没有 `install.sh`，也没有 `--mode`），入口由"安装包从哪来"决定：
 
 ```bash
-install.sh --mode=offline|online|image
+python3 install.py --from-server --server http://<服务端>   # 从服务端拿已铺开的版本
+python3 install.py --bundle <tar.gz> --sha256 <校验和>       # 离线包 / 镜像预装
+python3 install.py --download-url <URL> --sha256 <校验和>    # 任意 URL
+python3 install.py --from-dir <已解开的 Agent 目录>
+curl … /api/v1/agent/install/bootstrap.sh | sudo sh -s -- …  # 在线自举：取回 install.py 再 --from-server
+python3 install.py --uninstall [--yes] [--dry-run]           # 卸载
 ```
+
+完整参数与步骤见 [`../install-agent.md`](../install-agent.md)。
 
 - 检测已装版本 → 存在则原地升级，不存在则全量安装
 - 幂等：重复执行结果一致；凭据丢失自动重新 enroll（配对关系**不受影响** —— 那
   是服务端按 `machine_uuid` / 硬件指纹认回来的，不依赖机器上的任何文件）
-- 离线包 = tar.gz（Agent 目录 + systemd unit + 配置模板），不需要 pip、不需要网络
-- 在线自举 = 拉 tar.gz + 校验 sha256 后走同一条路径
+- 离线包 = tar.gz（`syncoj_agent/` + `run_agent.py` 启动器，**不含安装器**；systemd 单元与
+  `agent.ini` 由安装器现场生成），不需要 pip、不需要网络
+- 在线自举 = `bootstrap.sh` 取回 `install.py`，再由它拉 tar.gz、对照台账校验 sha256 后走同一条路径
 
 装机时的三个坑（都已修，保留在这里防止改回去）：
 

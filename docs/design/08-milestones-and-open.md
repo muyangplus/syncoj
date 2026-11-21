@@ -157,87 +157,49 @@
 
 ### 10.5 重构遗留（2026-11 四路审计 + 方案盲审）
 
-阶段 0（检查链路全绿 + 自更新止血）与阶段 1（回收 / 下发 / 成绩 / 配对正确性）已完成。
-阶段 5（文档对账）已完成，阶段 2 / 3 里的两处文档部分也已完成（见各条的"✅ 已完成"）。
-下面其余是方案里**还没做**的部分，按依赖顺序排。已拍板的决策：特权模型改 root 管理单元；
-删除语义**按现状硬删**、改文档承认；传输层文档如实写明文；一人一机按考号查重（不建
-person 表）；选手页手填保留但降级（这两条已落地）。
+已拍板的决策：特权模型改 root 管理单元；删除语义**按现状硬删**、改文档承认；传输层文档
+如实写明文；一人一机按考号查重（不建 person 表）；选手页手填保留但降级。
 
-**阶段 2：特权模型与安装器**（依赖关系最强，先做）
+**已完成**（细节见各提交与对应文档）：阶段 0（检查链路全绿、自更新止血）；阶段 1（回收 /
+下发 / 成绩 / 配对正确性）；阶段 4（列表 SQL 分页与聚合、审计索引、批量清理、前端轮询与
+概览聚合接口）；阶段 5（文档对账）。阶段 2 中：发布签名覆盖版本号与大小、未配对机器也能
+升级、带密钥的包不经公开装机入口、`bootstrap.sh` 加固、协议版本 + 426、迁移前备份、单元
+家目录不再用 `%h`、辅助件路径可配置并收回 `needs_layout`、`--skip-service` 管住注册单元、
+**root 管理单元**（升级切换与远程卸载经交接目录由 root 验签执行，Agent 恢复
+`NoNewPrivileges=yes`、删 sudoers 与 `/usr/local/lib/syncoj`，见 ADR-0012「重写」）。
+阶段 3 中：边沿触发的审计事件、删 `agent_status`、`DeployTask` 状态读时聚合 + `cancelled_at`、
+blob 提交后回收（含删资产 / 选手 / 场次）、删除语义前端文案、注册表身份随解析更新与待配对
+心跳记在线、tick 运行参数每轮只读一次。
 
-* **安装器路径由 `Layout(root)` 派生**、拆成 `syncoj_install/` 包（zipapp 单文件分发，
-  先 plan 后 apply，dry-run 只打印计划）。`HELPER_DIR` / `SUDOERS_PATH` 现在写死系统路径、
-  `--skip-service` 管不住注册单元。做完后收回测试里的临时措施：
-  `agent/tests/test_installer_standalone.py` 的 `needs_layout`（POSIX 上跳过两条真安装）、
-  `agent/tests/conftest.py` 的 `_installer_never_touches_the_host` 沙箱、
-  `test_full_install_and_idempotency` 里"注册单元不受 `--skip-service` 约束"那条断言。
-  顺带：root 对选手目录递归 chown 改安全实现（`fwalk` + `follow_symlinks=False`）；重跑
-  不再无条件重启服务；`--from-dir` 与 `build_bundle` 共用文件清单；`mkdtemp` 泄漏；删
-  `--service-name`。
-* **root 管理单元**（`syncoj-agent-admin`，代码由安装器放在 `/usr/lib/syncoj/`、**升级不
-  替换**、只用标准库）：注册、切换**已验签**的升级（root 复制到自己的目录后再验签解包，
-  交接文件按不可信输入、no-follow 打开）、启动守卫与回滚（`ExecStartPre=+` 或由它执行，
-  计数文件不在 install_root 下）、远程卸载（timer + 自己向服务端拉指令；重写 ADR-0012）。
-  Agent 本体恢复 `NoNewPrivileges` 与全部加固、`Restart=always`；`agent.ini` 改
-  `root:root 0644`；删 sudoers、`/usr/local/lib/syncoj`、`config_policy` 逐键合并器；注册单元
-  不再以 root 执行发布目录里的代码。核算 `StartLimitBurst` 与守卫重启次数。
-  现状：自更新只是止血（以退出码 75 退出能被拉起、失败不拖垮主循环），运行账号仍写不进
-  `/opt/syncoj`，真机上升级"安静地失败一次并上报"；远程卸载在 systemd 245 上大概率仍不可用
-  （隐式 NoNewPrivileges 让 sudo 失败）。
-* **按 uuid 认回已配对机器**需原机离线或出示旧 token（与还原卡场景、注册重试窗口对齐）。
-  `machine_uuid` 现为 0644、旧 token 在选手可写的 state 目录里，要等 root 管理单元持有凭据。
-* ~~**发布签名覆盖版本号**；删升级清单里 Agent 不读的三个策略字段；未配对机器也能拿到
-  升级。~~ ✅ 已完成：签名对象 `syncoj-release-v1\n<版本>\n<sha256>\n<字节数>\n`，三份独立
-  实现 + 对账测试，启动时重签库里旧记录。
-* ~~**`bootstrap.key` 不进任何可公开下载的包**~~ ✅ 已完成：装机入口对带密钥的版本回 409
-  `install_bundle_has_key`，这种包只经管理端下载。
-* ~~**`bootstrap.sh`** 加固~~ ✅ 已完成：服务端嵌入自身地址（形状安全的 Host）与**安装器**
-  sha256，`mktemp -d`，不读 `agent.ini`，`--dry-run` 透传。
-* ✅「全部重装 / 重做镜像」手册，见 `docs/install-agent.md`「重装与卸载」。
-* ~~**单元里的家目录**：`ReadWritePaths=-%h` 在系统单元里是 `-/root`~~ ✅ 已改为安装时解析出的
-  绝对家目录（带 `-`），测试同步；仍放进下面的实机冒烟里验证。
-* ~~**协议版本**、迁移前自动备份库~~ ✅ 已完成：`protocol_version`（当前 2）+ 426
-  `agent_outdated`；迁移已有数据的库之前整库备份。
-* **systemd 245 实机冒烟**（Ubuntu 20.04 / NOI Linux 2.0 虚拟机）：安装、升级、回滚、卸载、
-  加固项。托管 CI runner 的 systemd 版本不对，证明不了这些。
+**还没做**：
 
-**阶段 3：结构（只做有正确性收益的）**
+* **systemd 245 实机冒烟**（Ubuntu 20.04 / NOI Linux 2.0 虚拟机）：安装、升级（经 root 管理
+  单元）、回滚、卸载、加固项、家目录可写。托管 CI runner 的 systemd 版本不对，证明不了这些。
+  在它之前，root 管理单元与 `NoNewPrivileges` / 家目录这几处都只是按说明书推断正确。
+* **启动守卫与回滚移到 root 一侧**：Agent 侧的 `_guard_boot` 要写 `install_root`，真机上写
+  不进去；改由管理单元（`ExecStartPre=+` 或切换时记录）执行，计数文件不在 install_root 下。
+  核算 `StartLimitBurst` 与守卫重启次数；主单元改 `Restart=always`。
+* **按 uuid 认回已配对机器**需原机离线或出示旧 token（与还原卡场景、注册重试窗口对齐）；
+  可由 root 管理单元持有凭据。`agent.ini` 改 `root:root 0644`、删 `config_policy` 逐键合并器、
+  注册单元不再以 root 执行发布目录里的代码。
+* **安装器拆包**：`syncoj_install/` 包 + zipapp 单文件分发，先 plan 后 apply；顺带 root 对选手
+  目录递归 chown 改安全实现（`fwalk` + `follow_symlinks=False`）、重跑不再无条件重启服务、
+  `--from-dir` 与 `build_bundle` 共用文件清单、`mkdtemp` 泄漏、删 `--service-name`；届时测试
+  宿主沙箱（`conftest._installer_never_touches_the_host`）可收回（现在留作安全网）。
+* **结构**：`api/agent.py` 拆出 `services/tick.py`（返回 `TickOutcome`）与 `services/upload.py`；
+  tar 安全解包、RSA 验签、`parse_version` 各留一份源码，安装器用构建生成的 vendored 拷贝 +
+  逐字节一致测试（路径校验除外，按硬规则保持两份独立实现）。
+* 小项：`agent/syncoj_agent/config.py` 里 "http:// + verify_tls" 告警分支是空的 `pass`；
+  `install.py` 参数组说"三选一"实际四个来源；导出接口 `include_deleted` 默认 False 而界面默认
+  True；选手删掉的文件在 `source/` 里仍留着、照样被评测（要不要清待定）。
 
-* `api/agent.py` 拆出 `services/tick.py`（返回 `TickOutcome`）与 `services/upload.py`；
-  tick 单 session、运行参数只读一次。
-* 两端审计事件统一"边沿触发"：服务端 `scan_incomplete` / `scan_rejected` 每轮写库，
-  Agent 的 `oversize_skipped` / `scan_error` / `upgrade_*` 每轮上报（`deploy_failed` 已改为
-  原因变化才报）。
-* 删只写不读的 `agent_status` 表；`DeployTask.status` 改读时聚合 + `cancelled_at`
-  （`_deploy_task_out` 把 CANCELLED 计入 pending；取消接口看的是存储的状态）。
-* tar 安全解包、RSA 验签、`parse_version` 各留一份源码，安装器用构建生成的 vendored
-  拷贝 + 逐字节一致测试（路径校验除外，按硬规则保持两份独立实现）。
-* **删除语义按决策 2 落地**：blob 改为**提交后**按引用计数回收，补上 `delete_asset` /
-  `delete_player` / `delete_contest` 等漏回收的路径；`web/src/api/crud.ts` 的
-  `softRemoveItem` 改名，`FilesView.vue` 单删确认框里"这是一条墓碑：勾上「含已删除」仍看得到"
-  这句界面文案与事实相反，要改。（✅ 已完成文档部分：ADR-0003 修订、`api-conventions` §5.2 /
-  §5.3、05 §5.4、00 决策表、CLAUDE.md、`clear_source_files` / `FileClearIn` 的 docstring 与
-  前端注释。）
-* 注册表身份随解析结果更新、pending 心跳也刷新在线（场次结束后 50 条假"离线"告警）。
+**新想法（仅记录，未评估）**：
 
-**阶段 4：性能**
-
-* 列表接口 SQL 分页 + 聚合计数（`list_deploys` N+1、`list_players` 统计全库、assets /
-  rosters / bootstrap keys 全量后切页）；`EventLog` 的 category / level 加索引；批量 `delete()`。
-* 前端轮询统一 `usePolling`（`AppLayout` 的健康轮询从不清除）；概览页改用服务端聚合接口，
-  成绩矩阵只在成绩页加载。
-
-**阶段 5：文档对账**（✅ 已完成，2026-11）
-
-* ~~`06-security`：如实写"明文、仅限可信二层；自举链对中间人无保护；发布私钥常驻在线服务端
-  等于机群 root 钥匙"（决策 3）。~~ → 06 §6.2。
-* ~~04 §4.3 的"单写连接 + 队列线程"不存在；`install-agent.md` 的卸载 / 重装两节；ADR-0007 的
-  `%h` 语义（系统实例里是 `/root`，`-%h` 是无效项）、ADR-0008、ADR-0012；
-  `docs/install-agent.md` 里不存在的 `install.sh --mode`。~~ → 04 §4.3 改写；
-  `install-agent.md`「重装与卸载」；ADR-0007 / 0008 / 0012 各加「现状（2026-11）」；
-  `install.sh --mode` 实际在 07 开头，已换成 `install.py` 的真实入口。
-  对账中发现、文档修不了的（`%h` 让家目录只读、远程卸载被隐式 `NoNewPrivileges` 挡住）
-  已并入阶段 2 的条目。
+* **不指定服务端**：服务端上线时在局域网广播自己的存在，考试端 Agent 持续监听并响应
+  （监考端广播问一次、学生端答一次，Agent 不主动扫描）。是否可行待评估 —— 现有的是反方向
+  （Agent 主动发现、服务端用发布私钥签应答，见 07 §7.3），反过来要考虑广播被伪造（仍需验签）、
+  跨网段 / 交换机隔离、Agent 常驻监听端口与沙箱 `RestrictAddressFamilies` 的关系。
+* **系统自带沙箱评测**：不依赖 LemonLime / Arbiter，服务端自己编译运行评测。
 
 **推迟（本轮不做）**：`api/admin.py` 与 `agent/main.py` 的整体拆分；zip 改密码改后台任务
 （纯 Python 约 1.9 MB/s、同步跑在请求线程）；TLS + pinning；全局 person 表；

@@ -335,7 +335,7 @@ def tick(
     """一次心跳。已认领的机器收发文件，未认领的机器只在这里"排队等叫号"。"""
     _require_protocol(payload.protocol_version)
     if isinstance(identity, MachineIdentity):
-        return _tick_pending(payload, ctx, identity)
+        return _tick_pending(payload, ctx, identity, request.client.host if request.client else None)
 
     if payload.machine_id and payload.machine_id != identity.machine_id:
         # 凭据与声明的机器不符：可能是凭据被复制到了别的机器
@@ -493,7 +493,10 @@ def tick(
 
 
 def _tick_pending(
-    payload: TickRequest, ctx: AppContext, identity: MachineIdentity
+    payload: TickRequest,
+    ctx: AppContext,
+    identity: MachineIdentity,
+    client_ip: Optional[str] = None,
 ) -> TickResponse:
     """还干不了活的机器的心跳。
 
@@ -582,6 +585,18 @@ def _tick_pending(
                         agent, now, pair_code, ctx.settings.pair_code_ttl_seconds
                     )
                     ctx.pair_codes.put(agent.id, pair_code, agent.pair_code_expires_at)
+
+    # 注册表里有它（以前能干活过）就照样记一次心跳：场次一结束，所有机器都走到
+    # 这条路，曾经这里不记，于是 offline_after 秒后整间机房 50 条"离线"告警 ——
+    # 而机器明明都在线。不在注册表里的（从没配好过）note_tick 自己会忽略。
+    ctx.registry.note_tick(
+        identity.agent_id,
+        ip=client_ip,
+        agent_version=payload.agent_version,
+        disk_free=payload.stats.disk_free,
+        last_error=payload.stats.last_error,
+        scan_missing=payload.stats.scan_missing,
+    )
 
     return TickResponse(
         server_time=unix_seconds(now),

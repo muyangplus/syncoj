@@ -133,6 +133,11 @@ class AgentRegistry:
                     contest_slug=contest_slug,
                 )
                 self._agents[agent_id] = runtime
+            # 身份随**这一次**的解析结果走：机器被改派、或者换了场次，player_id /
+            # contest_id 曾经停在第一次的值上 —— 按场次过滤的在线列表里，它还挂在
+            # 上一场下面，新场次里却一直显示"没有机器"。
+            runtime.player_id = player_id
+            runtime.contest_id = contest_id
             runtime.player_no = player_no
             runtime.player_name = player_name
             runtime.contest_slug = contest_slug

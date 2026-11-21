@@ -26,6 +26,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 __all__ = [
+    "AgentOutdated",
+    "PROTOCOL_VERSION",
     "AgentClient",
     "AgentError",
     "NetworkError",
@@ -121,12 +123,21 @@ class NetworkError(AgentError):
     """连接失败/超时/中断/5xx —— **可重试**，退避后下一轮再试。"""
 
 
+#: 协议版本：只在**破坏性**协议变更时加一，并同步服务端 ``syncoj_server/protocol.py``
+#: （``test_agent_contract`` 对账）。服务端对低于它最低要求的回 426 ``agent_outdated``。
+PROTOCOL_VERSION = 2
+
+
 class ProtocolError(AgentError):
     """服务端返回了不符合协议的内容，或一个我们不认识的 ``code``。
 
     记日志 + 等下一轮，**不要**重新注册：认不出来的东西最可能是版本不匹配，
     而重新注册会换掉凭据，把一个"看不懂"升级成"用不了"。
     """
+
+
+class AgentOutdated(ProtocolError):
+    """426 ``agent_outdated``：协议版本低于服务端的最低要求，要重装。"""
 
 
 class AuthError(AgentError):
@@ -837,6 +848,7 @@ def build_enroll_payload(
     ``machine_id`` **仅供人工辨认**，不参与身份判定。
     """
     payload: Dict[str, object] = {
+        "protocol_version": PROTOCOL_VERSION,
         "machine_id": machine_id,
         "hostname": hostname,
         "agent_version": agent_version,
@@ -988,6 +1000,11 @@ def _as_error(status: int, data: object, context: str) -> AgentError:
 
     if status == 413:
         return PayloadTooLarge(message, **kwargs)
+
+    if status == 426 or code == "agent_outdated":
+        # 服务端说这个 Agent 太旧：自己升级不了（升级清单就在 tick 响应里，而 tick
+        # 已经被拒），只能重装。记日志、按普通协议错误退避，别重新注册。
+        return AgentOutdated(message, **kwargs)
 
     if status >= 500:
         return NetworkError(message, **kwargs)

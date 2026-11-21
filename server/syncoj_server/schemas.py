@@ -103,6 +103,8 @@ class EnrollRequest(_Base):
     * ``machine_id`` —— 仅供人工辨认（列表里显示），不参与身份判定
     """
 
+    #: 协议版本（见 ``syncoj_server.protocol``）。缺省 0 = 没有这个字段的旧 Agent
+    protocol_version: int = Field(default=0, ge=0, le=10000)
     machine_id: str = Field(min_length=1, max_length=128)
     hostname: Optional[str] = Field(default=None, max_length=128)
     agent_version: Optional[str] = Field(default=None, max_length=32)
@@ -213,6 +215,8 @@ class ScanIdentity(_Base):
 
 
 class TickRequest(_Base):
+    #: 协议版本（见 ``syncoj_server.protocol``）。缺省 0 = 没有这个字段的旧 Agent
+    protocol_version: int = Field(default=0, ge=0, le=10000)
     agent_version: Optional[str] = Field(default=None, max_length=32)
     machine_id: str = Field(min_length=1, max_length=128)
     #: 主机名。每次 tick 都报 —— 待配对的机器要靠它在列表里被认出来，

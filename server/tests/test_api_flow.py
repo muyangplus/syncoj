@@ -112,7 +112,7 @@ def test_enroll_returns_the_three_states(
 def test_enroll_rejects_bad_key(client: TestClient) -> None:
     response = client.post(
         "/api/v1/agent/enroll",
-        json={"bootstrap_key": "不是密钥", "machine_id": "m1"},
+        json={"protocol_version": 2, "bootstrap_key": "不是密钥", "machine_id": "m1"},
     )
     assert response.status_code == 404, response.text
     body = response.json()
@@ -122,7 +122,7 @@ def test_enroll_rejects_bad_key(client: TestClient) -> None:
 
 def test_enroll_requires_a_key(client: TestClient) -> None:
     """没给密钥是 422（请求不合法），不是 404（密钥不存在）—— 两者排错方向不同。"""
-    response = client.post("/api/v1/agent/enroll", json={"machine_id": "m1"})
+    response = client.post("/api/v1/agent/enroll", json={"protocol_version": 2, "machine_id": "m1"})
     assert response.status_code == 422, response.text
     assert response.json()["code"] == "validation_error"
 
@@ -224,7 +224,7 @@ def _expire_last_seen(client: TestClient, agent_id: int) -> None:
 
 
 def test_tick_requires_auth(client: TestClient) -> None:
-    response = client.post("/api/v1/agent/tick", json={})
+    response = client.post("/api/v1/agent/tick", json={"protocol_version": 2, })
     assert response.status_code == 401
 
 
@@ -513,7 +513,7 @@ def test_machine_id_mismatch_is_rejected(client: TestClient, enrolled: dict) -> 
     """凭据被复制到另一台机器时，声明的 machine_id 会与凭据不符。"""
     response = client.post(
         "/api/v1/agent/tick",
-        json={
+        json={"protocol_version": 2,
             "machine_id": "some-other-machine",
             "ts": 1,
             "scan": [],

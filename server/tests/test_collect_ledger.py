@@ -217,7 +217,7 @@ def test_scan_complete_是必填字段(client, enrolled) -> None:
     token, mid = enrolled["token"], enrolled["machine_id"]
     response = client.post(
         "/api/v1/agent/tick",
-        json={"machine_id": mid, "ts": 1, "scan": [], "stats": {}},
+        json={"protocol_version": 2, "machine_id": mid, "ts": 1, "scan": [], "stats": {}},
         headers=agent_headers(token),
     )
     assert response.status_code == 422

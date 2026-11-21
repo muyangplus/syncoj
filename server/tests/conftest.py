@@ -116,6 +116,7 @@ def do_tick(client, token: str, entries, *, machine_id: str, **kwargs) -> dict:
         # 并带落地内容的 sha256，这里替测试把它翻译成真回执（服务端只认本人的目标）。
         kwargs.setdefault("deploy_done", done_receipts(client, completed))
     payload = {
+        "protocol_version": 2,
         "agent_version": "0.1.0",
         "machine_id": machine_id,
         "ts": 1767225600,
@@ -209,7 +210,7 @@ def enroll_machine(
     machine_uuid = machine_uuid or uuid.uuid4().hex
     response = client.post(
         "/api/v1/agent/enroll",
-        json={
+        json={"protocol_version": 2,
             "bootstrap_key": bootstrap_key,
             "machine_id": machine_id,
             "machine_uuid": machine_uuid,

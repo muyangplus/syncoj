@@ -57,6 +57,7 @@ from ..schemas import (
     UpgradeInfo,
     UploadResult,
 )
+from ..protocol import MIN_AGENT_PROTOCOL_VERSION, outdated_detail
 from ..security import hash_token, new_token
 from ..storage import BlobTooLarge, HashMismatch, materialize
 from ..services import (
@@ -94,6 +95,14 @@ _RANGE_CHUNK = 256 * 1024
 
 #: 响应中最多回传多少条待上传路径，避免超大目录一次性撑爆响应体
 MAX_NEED_UPLOAD = 500
+
+
+def _require_protocol(reported: int) -> None:
+    """协议太旧的 Agent 回 426 ``agent_outdated``（见 ``syncoj_server.protocol``）。"""
+    if reported < MIN_AGENT_PROTOCOL_VERSION:
+        raise ApiError(
+            426, "agent_outdated", outdated_detail(reported), {"protocol_version": reported}
+        )
 
 
 def _window_violation(contest: Optional[Contest], now) -> Optional[ApiError]:
@@ -219,6 +228,7 @@ def enroll(
     注册出来的是三种状态之一（未配对 / 配好但没场次 / 能干活），
     Agent 必须按 `claimed` 与 `bound` 分开处理。
     """
+    _require_protocol(payload.protocol_version)
     rate_limit(ctx, request, payload)
 
     raw_token = new_token(ctx.settings.token_bytes)
@@ -323,6 +333,7 @@ def tick(
     identity: Principal = Depends(require_principal),
 ) -> TickResponse:
     """一次心跳。已认领的机器收发文件，未认领的机器只在这里"排队等叫号"。"""
+    _require_protocol(payload.protocol_version)
     if isinstance(identity, MachineIdentity):
         return _tick_pending(payload, ctx, identity)
 

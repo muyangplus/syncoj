@@ -32,6 +32,7 @@ from . import __version__
 from . import diagnostics
 from . import discovery
 from .client import (
+    PROTOCOL_VERSION,
     AgentClient,
     AgentError,
     AuthError,
@@ -378,6 +379,8 @@ def build_tick_payload(
     }
 
     payload = {
+        # 协议版本：服务端对太旧的回 426 agent_outdated（见 client.PROTOCOL_VERSION）
+        "protocol_version": PROTOCOL_VERSION,
         "agent_version": agent_version,
         "machine_id": machine_id,
         "ts": int(time.time()),

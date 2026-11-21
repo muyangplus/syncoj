@@ -95,6 +95,16 @@ def test_tick_payload_matches_server_schema(fixture: dict) -> None:
     assert isinstance(model.scan, list) and model.scan
 
 
+def test_protocol_version_matches_server(fixture: dict) -> None:
+    """Agent 报的协议版本 = 服务端当前版本，且不低于服务端最低要求（否则全机房 426）。"""
+    from syncoj_server.protocol import AGENT_PROTOCOL_VERSION, MIN_AGENT_PROTOCOL_VERSION
+
+    for kind in ("enroll", "tick"):
+        reported = fixture[kind].get("protocol_version")
+        assert reported == AGENT_PROTOCOL_VERSION, "%s 报的协议版本是 %r" % (kind, reported)
+        assert reported >= MIN_AGENT_PROTOCOL_VERSION
+
+
 def test_tick_scan_entries_are_valid(fixture: dict) -> None:
     for raw in fixture["tick"]["scan"]:
         entry = ScanEntry.model_validate(raw)

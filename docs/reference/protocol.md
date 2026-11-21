@@ -66,6 +66,7 @@ Agent 只应对下面这几个 `code` 做分支，其余一律"记日志 + 等�
 | 411 | 上传 / tick 没带 `Content-Length` | 不该发生（Agent 总带长度） |
 | 410 | 服务端资源内容缺失 | 上报审计事件 |
 | 413 | 文件超过策略上限；或请求体超过 `max_upload_request_bytes` / `max_tick_request_bytes`（按 `Content-Length` 在读请求体之前就挡） | 跳过该文件，不重试 |
+| **426** | `agent_outdated`：`enroll` / `tick` 的 `protocol_version` 低于服务端最低要求（缺省按 0 算）。旧 Agent 的报文即使字段对不上（本该 422）也先判成 426 | 记日志、按协议错误退避；**自己升级不了**（升级清单就在被拒的 tick 响应里），只能重装 |
 | 429 | 触发限速，带 `Retry-After` | 按 `Retry-After` 退避 |
 | 5xx | 服务端故障 | 指数退避重试 |
 
@@ -137,6 +138,7 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
 
 ```json
 {
+  "protocol_version": 2,
   "bootstrap_key": "43 字符的镜像内置密钥",
   "machine_id": "0123456789abcdef0123456789abcdef",
   "machine_uuid": "3f2a…",
@@ -146,6 +148,10 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
   "os_info": "Linux 5.4.0 Ubuntu 20.04.6 LTS"
 }
 ```
+
+`protocol_version` 是协议版本（`enroll` 与 `tick` 都带）：只在**破坏性**协议变更时加一，
+服务端 `syncoj_server/protocol.py` 与 Agent `client.PROTOCOL_VERSION` 各一份、契约测试对账。
+2 = 2026-11 那一代（`scanned_for`、下发按目标回执、`scan_complete` 必填）。
 
 `bootstrap_key` 必填。它从 **root 只读**的单独文件读（默认
 `/etc/syncoj/bootstrap.key`），**不要**写进选手账号可读的 `agent.ini`。
@@ -227,6 +233,7 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
 
 ```json
 {
+  "protocol_version": 2,
   "agent_version": "0.1.0",
   "machine_id": "0123456789abcdef0123456789abcdef",
   "hostname": "exam-pc-01",

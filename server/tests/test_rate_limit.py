@@ -129,7 +129,7 @@ def test_enroll_is_rate_limited_per_ip(tight_client: TestClient) -> None:
     for index in range(5):
         response = tight_client.post(
             "/api/v1/agent/enroll",
-            json={"bootstrap_key": key, "machine_id": "m-%d" % index},
+            json={"protocol_version": 2, "bootstrap_key": key, "machine_id": "m-%d" % index},
         )
         codes.append(response.status_code)
 
@@ -138,7 +138,7 @@ def test_enroll_is_rate_limited_per_ip(tight_client: TestClient) -> None:
     assert codes[0] == 200 and codes[1] == 200, codes
 
     limited = tight_client.post(
-        "/api/v1/agent/enroll", json={"bootstrap_key": key, "machine_id": "m-x"}
+        "/api/v1/agent/enroll", json={"protocol_version": 2, "bootstrap_key": key, "machine_id": "m-x"}
     )
     assert limited.status_code == 429
     assert limited.headers.get("retry-after")
@@ -156,13 +156,13 @@ def test_rate_limit_does_not_break_the_first_machines(tight_client: TestClient) 
     ).json()["key"]
 
     first = tight_client.post(
-        "/api/v1/agent/enroll", json={"bootstrap_key": key, "machine_id": "m-1"}
+        "/api/v1/agent/enroll", json={"protocol_version": 2, "bootstrap_key": key, "machine_id": "m-1"}
     )
     assert first.status_code == 200, first.text
 
     # 重新注册（快照还原、服务重启）永远要能过 —— 它在服务端看是同一台机器，
     # 但仍然走同一条限速路径，所以这里验证的是"重试不会被累计惩罚"
     second = tight_client.post(
-        "/api/v1/agent/enroll", json={"bootstrap_key": key, "machine_id": "m-1"}
+        "/api/v1/agent/enroll", json={"protocol_version": 2, "bootstrap_key": key, "machine_id": "m-1"}
     )
     assert second.status_code == 200, second.text

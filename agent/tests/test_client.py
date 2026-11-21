@@ -208,6 +208,7 @@ def test_enroll_payload_fields() -> None:
         machine_fingerprint="4c4c4544-0031-3010-8043-b7c04f4d4432",
     )
     assert set(payload) == {
+        "protocol_version",
         "machine_id",
         "hostname",
         "agent_version",
@@ -246,6 +247,7 @@ def test_enroll_payload_omits_missing_values() -> None:
 
 def test_error_codes_map_to_the_right_exception() -> None:
     from syncoj_agent.client import (
+        AgentOutdated,
         BootstrapKeyError,
         PayloadTooLarge,
         ProtocolError,
@@ -267,6 +269,7 @@ def test_error_codes_map_to_the_right_exception() -> None:
         (429, "rate_limited", RateLimited),
         (409, "conflict", StaleUpload),
         (413, "too_large", PayloadTooLarge),
+        (426, "agent_outdated", AgentOutdated),
         (500, "internal_error", NetworkError),
         (400, "validation_error", ProtocolError),
     ]

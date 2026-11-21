@@ -20,6 +20,7 @@ FastAPI 默认的 ``HTTPException`` 会把 ``detail`` 原样塞进响应体，�
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Dict, Optional
 
@@ -27,6 +28,8 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from .protocol import MIN_AGENT_PROTOCOL_VERSION, VERSIONED_AGENT_PATHS, outdated_detail
 
 __all__ = [
     "ApiError",
@@ -65,6 +68,7 @@ CODE_BY_STATUS = {
     410: "gone",
     413: "payload_too_large",
     422: "validation_error",
+    426: "agent_outdated",
     429: "rate_limited",
     500: "internal_error",
     503: "unavailable",
@@ -164,6 +168,7 @@ ERROR_CODES = {
     "roster_in_use": "这份名单上还有机器绑着人，删掉会让它们全部解除配对",
     "install_unavailable": "这台服务端还没有铺开任何可装机的 Agent 版本",
     "install_bundle_has_key": "当前铺开的版本夹带了注册密钥，公开装机入口不发它",
+    "agent_outdated": "这台机器上的 Agent 协议太旧，要重新装机",
     "installer_unavailable": "这台服务端不提供安装器（它不在源码仓库里运行）",
     #: 机器不在台账里。**不是** ``not_found`` 的重复：这个码能让人一眼看出
     #: "那条记录已经不在了"，而这在机器相关的接口上是最常见的失败原因
@@ -337,6 +342,26 @@ def _field_label(loc) -> str:
     return out
 
 
+async def _outdated_agent(request: Request) -> Optional[int]:
+    """Agent 的 enroll / tick 校验失败时，先看是不是旧协议：是就返回它报的版本。
+
+    旧 Agent 的报文里有新服务端不认的字段（``extra="forbid"``），根本走不到处理
+    函数里的版本检查 —— 不在这里拦，现场看到的只是一个"请求内容不合法"。
+    """
+    if request.url.path not in VERSIONED_AGENT_PATHS:
+        return None
+    try:
+        body = json.loads((await request.body()).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(body, dict):
+        return None
+    reported = body.get("protocol_version", 0)
+    if not isinstance(reported, int) or isinstance(reported, bool):
+        return None
+    return reported if reported < MIN_AGENT_PROTOCOL_VERSION else None
+
+
 def describe_validation_error(exc: RequestValidationError) -> str:
     """把 pydantic 的 422 揉成一句话。
 
@@ -436,6 +461,9 @@ def install_error_handlers(app: FastAPI) -> None:
     async def _validation_error(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
+        outdated = await _outdated_agent(request)
+        if outdated is not None:
+            return _body(426, "agent_outdated", outdated_detail(outdated), {"protocol_version": outdated})
         # 回显原始错误列表：前端表单要据此把红框标到具体某个输入框上，
         # 而那句汇总的中文只够放在提示条的标题里
         return _body(

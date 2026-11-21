@@ -2903,6 +2903,11 @@ export interface components {
             machine_uuid?: string | null;
             /** Os Info */
             os_info?: string | null;
+            /**
+             * Protocol Version
+             * @default 0
+             */
+            protocol_version: number;
         };
         /**
          * EnrollResponse
@@ -4225,6 +4230,11 @@ export interface components {
             hostname?: string | null;
             /** Machine Id */
             machine_id: string;
+            /**
+             * Protocol Version
+             * @default 0
+             */
+            protocol_version: number;
             /**
              * Release Public Key
              * @default false

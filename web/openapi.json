@@ -1696,6 +1696,13 @@
               }
             ],
             "title": "Os Info"
+          },
+          "protocol_version": {
+            "default": 0,
+            "maximum": 10000.0,
+            "minimum": 0.0,
+            "title": "Protocol Version",
+            "type": "integer"
           }
         },
         "required": [
@@ -4433,6 +4440,13 @@
             "minLength": 1,
             "title": "Machine Id",
             "type": "string"
+          },
+          "protocol_version": {
+            "default": 0,
+            "maximum": 10000.0,
+            "minimum": 0.0,
+            "title": "Protocol Version",
+            "type": "integer"
           },
           "release_public_key": {
             "default": false,

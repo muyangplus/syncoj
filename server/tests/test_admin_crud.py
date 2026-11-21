@@ -494,7 +494,7 @@ def test_revoke_machine_requires_the_hostname(client: TestClient, admin_headers:
     # 凭据失效：401 而不是 403 —— Agent 会清掉本地凭据重新注册，正是我们要的
     ticked = client.post(
         "/api/v1/agent/tick",
-        json={"agent_version": "0.1.0", "machine_id": machine["machine_id"], "ts": 1,
+        json={"protocol_version": 2, "agent_version": "0.1.0", "machine_id": machine["machine_id"], "ts": 1,
               "scan_root": "/x", "scan": [], "scan_complete": True,
               "stats": {"disk_free": 1, "last_error": None, "queue": 0}},
         headers=agent_headers(machine["token"]),

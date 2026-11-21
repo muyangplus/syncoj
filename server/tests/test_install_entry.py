@@ -309,3 +309,20 @@ def test_路径常量与真实路由一致(env) -> None:
     assert ledger["bundle"] == agent_api.INSTALL_BUNDLE_PATH
     assert ledger["installer"] == agent_api.INSTALL_INSTALLER_PATH
     assert ledger["bootstrap"] == agent_api.INSTALL_BOOTSTRAP_PATH
+
+
+def test_夹带注册密钥的版本不经公开装机入口发(env) -> None:
+    """装机入口不鉴权、公开端口可达：带 bootstrap.key 的包从这里发等于把密钥公开。"""
+    from syncoj_server.models import AgentRelease, BootstrapKey
+
+    release = publish(env.client, env.headers, "3.1.4")
+    with env.ctx.db.session() as session:
+        key = BootstrapKey(key_hash="x" * 64, label="随包")
+        session.add(key)
+        session.flush()
+        session.get(AgentRelease, release["id"]).bootstrap_key_id = key.id
+
+    for url in (LEDGER, "/api/v1/agent/install/bundle"):
+        response = env.client.get(url)
+        assert response.status_code == 409, url
+        assert response.json()["code"] == "install_bundle_has_key"

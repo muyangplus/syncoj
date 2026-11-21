@@ -11,8 +11,9 @@
 #   root   以 root 跑 Agent 测试：容器里的 CI 通常是 root，安装器测试曾在那种环境下
 #          往宿主写 /etc/sudoers.d。这一路守住测试沙箱。
 #
-# 注意：托管 runner 上的 systemd 不是 NOI Linux 的 245，单元加固 / 退出码 / NNP
-# 这类行为证明不了 —— 那些要在 Ubuntu 20.04 虚拟机上冒烟（重构计划第 18 步）。
+# 托管 runner 上的 systemd 不是 NOI Linux 的 245：单元加固 / NNP / 路径单元这类行为
+# 由 systemd245 那一路在 Ubuntu 20.04 容器（真 systemd 当 PID 1）里冒烟证明，
+# 见 scripts/smoke_systemd245.py。
 
 name: check
 
@@ -94,3 +95,18 @@ jobs:
           test ! -e /etc/sudoers.d/syncoj-uninstall
           test ! -e /usr/local/lib/syncoj
           test ! -e /usr/lib/syncoj
+
+  systemd245:
+    name: systemd 245 冒烟（Ubuntu 20.04 容器）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+          cache: pip
+          cache-dependency-path: server/pyproject.toml
+      - name: 安装服务端
+        run: python -m pip install -e server
+      - name: 安装 → 升级（root 管理单元）→ 卸载
+        run: python scripts/smoke_systemd245.py

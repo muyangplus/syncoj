@@ -1,40 +1,39 @@
 # SyncOJ — Online Sync Judge
 
-通用编程考试与竞赛模拟的**在线同步评测**系统。
-- **代码自动回收**：选手端静默扫描代码目录，自动同步到服务端 `source/<场次>/<选手编号>/`
-- **文件主动下发**：教师上传题面、测试点，按选手或全量下发
-- **在线状态管理**：实时维护在线/离线状态与最后心跳
-- **统一管理界面**：选手列表、同步进度、下发进度、日志
-- **静默客户端**：无 GUI、无弹窗、无通知，开机自启，后台常驻
-- **评测**：`source/` 供 LemonLime / Arbiter 直接读取，或按题用自带沙箱评测（`syncoj-judge`），成绩自动回写
+考场在线同步评测：考试机静默回收代码、接收下发文件；服务端落盘到 `source/<场次>/<选手编号>/`，
+由 LemonLime / Arbiter 或自带沙箱评测（`syncoj-judge`）出成绩并回写。
 
-## 目标环境
-
-| | |
+| 角色 | 环境 |
 |---|---|
-| 考试机 | **NOI Linux 2.0**（Ubuntu 20.04 / glibc 2.31 / systemd 245 / Python 3.8.10） |
-| 服务端 | 单机内网部署，Python 3.8+ |
-| 通信 | 内网**明文 HTTP**（只限可信二层，见 `docs/design/06-security.md` §6.2），自适应轮询（无 WebSocket） |
+| 考试机 | NOI Linux 2.0（Ubuntu 20.04 / systemd 245 / Python 3.8.10） |
+| 服务端 | 内网单机，Python 3.8+；管理端口 8000，公开端口 80（装机页、选手页） |
 
-## 三条命令
+## 启动服务端
 
-```bash
-python -m venv .venv && .venv/Scripts/pip install -e "server[dev]"   # Linux: .venv/bin/pip
-.venv/Scripts/syncoj-server init            # 建库 + 建管理员 + 建好 .key/ 两把密钥
-.venv/Scripts/syncoj-server serve --host 0.0.0.0
-```
-打开 `http://<服务端>:8000` 登录。前端热更新用 `cd web && npm install && npm run dev`；
-`npm run build` 产出 `web/dist` 后由服务端托管（单进程部署，不需要 nginx）。
+1. 取代码：下载 [Releases](https://github.com/muyangplus/syncoj/releases) 里的 `syncoj-<版本>.tar.gz` 并解压（自带前端），或 `git clone` 本仓库（前端需 `cd web && npm ci && npm run build`）。
+2. 安装（必须 `-e`，服务端按目录找 `web/dist` 与 `agent/`）：
+   ```bash
+   python3 -m venv .venv && .venv/bin/pip install -e server
+   ```
+3. 初始化（建库、建管理员、生成 `.key/` 下的发布私钥与统一注册密钥；不给密码则随机生成并打印）：
+   ```bash
+   .venv/bin/syncoj-server init --admin-password <密码>
+   ```
+4. 启动（`--public-url` 填考试机能访问到的地址）：
+   ```bash
+   .venv/bin/syncoj-server serve --host 0.0.0.0 --public-url http://<服务端IP>:8000
+   ```
+5. 浏览器打开 `http://<服务端IP>:8000`，用 `admin` 登录。
 
-## 文档地图
+Windows 上把 `.venv/bin/` 换成 `.venv/Scripts/`。数据目录默认 `runtime/server`（`SYNCOJ_DATA_ROOT` 或 `--data-root` 改）。
 
-入口是 [`docs/README.md`](docs/README.md)，按「我是谁」分流。
+## 接着做
 
-| 我是谁 | 去哪 |
+| 要做的事 | 文档 |
 |---|---|
-| 教师 / 装机 / 运维 | [`quickstart.md`](docs/quickstart.md) · [`install-agent.md`](docs/install-agent.md) · [`operate.md`](docs/operate.md) |
-| 开发者：接口、字段与配置 | [`docs/reference/`](docs/reference/) |
-| 想改设计、想知道"当初否掉了什么" | [`docs/design/`](docs/design/) · [`docs/decisions/`](docs/decisions/) |
-老文档里的 `DESIGN.md §X.Y` 引用仍然有效：[`DESIGN.md`](DESIGN.md) 只剩一张「§ 编号
-→ 新文件」的映射表。与教科书式做法不同的三处（零依赖、轮询、每次 tick 上报全量
-索引）及其理由见 ADR。`docs/**` 下每个文件都列在 `docs/README.md`。许可证 Apache-2.0（[`LICENSE`](LICENSE)）；怎么改这个仓库见 [`CONTRIBUTING.md`](CONTRIBUTING.md)，安全问题怎么报见 [`SECURITY.md`](SECURITY.md)。
+| 建场次、导名单、配对机器、收成绩 | [`docs/quickstart.md`](docs/quickstart.md) |
+| 给考试机装 Agent | [`docs/install-agent.md`](docs/install-agent.md) |
+| 部署、发版、自带评测机、排障 | [`docs/operate.md`](docs/operate.md) |
+| 协议、接口、配置项 | [`docs/reference/`](docs/reference/) · 设计 [`docs/design/`](docs/design/) · 决策 [`docs/decisions/`](docs/decisions/) |
+
+全部文档清单：[`docs/README.md`](docs/README.md)。开发：[`CONTRIBUTING.md`](CONTRIBUTING.md)。安全：[`SECURITY.md`](SECURITY.md)。许可证 Apache-2.0。

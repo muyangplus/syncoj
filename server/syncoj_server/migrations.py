@@ -554,6 +554,38 @@ def _migration_014_deploy_failure_count(engine: Engine) -> None:
     _add_column(engine, "deploy_target", "failure_count", "INTEGER")
 
 
+def _migration_015_deploy_task_cancelled_at(engine: Engine) -> None:
+    """下发任务改为读时聚合状态：加 ``cancelled_at``、删掉存储的 ``status``。
+
+    ``deploy_task.status`` 曾是目标状态的一份缓存，回执、取消、重试、重排四处
+    各自去改，取消接口又按它判断 —— 对不上的时候界面与行为各说各的。现在任务
+    状态每次从目标聚合，唯一要单独记的是「教师取消过」，即 ``cancelled_at``。
+
+    三步，顺序不能换：
+
+    1. 加可空列 ``cancelled_at``；
+    2. 回填：老库里 ``status='cancelled'`` 的任务记成已取消。取消的确切时刻从没
+       记过，用建任务时间代替 —— 这一列只用来判断"取消过没有"，时刻不参与判断；
+    3. 按模型重建表，删掉 ``status``（删列只能重建，配方见 :func:`_rebuild_table`，
+       外键关着做，``deploy_target`` 的行不会被级联删掉）。
+
+    全新库由 ``create_all`` 直接建出没有 ``status`` 的表，第 2、3 步都是空操作。
+    """
+    if "deploy_task" not in _tables(engine):
+        return
+    _add_column(engine, "deploy_task", "cancelled_at", "DATETIME")
+    if "status" not in _columns(engine, "deploy_task"):
+        return
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE deploy_task SET cancelled_at = created_at "
+                "WHERE status = 'cancelled' AND cancelled_at IS NULL"
+            )
+        )
+    _rebuild_table(engine, "deploy_task")
+
+
 MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
     (1, "统一密钥注册 + 名单库所需的结构", _migration_001_enrollment),
     (2, "机器永久绑定名单条目；去掉注册码链路", _migration_002_roster_binding),
@@ -608,6 +640,11 @@ MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
         14,
         "下发目标记连续下载失败次数",
         _migration_014_deploy_failure_count,
+    ),
+    (
+        15,
+        "下发任务状态改为读时聚合：记取消时刻、删掉存储的状态列",
+        _migration_015_deploy_task_cancelled_at,
     ),
 ]
 

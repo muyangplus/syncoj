@@ -975,7 +975,9 @@ function targetKindLabel(kind: string): string {
               :stroke-width="14"
             />
             <div class="cell-sub">
-              完成 {{ row.done }} · 失败 {{ row.failed }} · 待处理 {{ row.pending }} / 共 {{ row.total }}
+              完成 {{ row.done }} · 失败 {{ row.failed }} · 待处理 {{ row.pending }}<template
+                v-if="row.cancelled"
+              > · 已取消 {{ row.cancelled }}</template> / 共 {{ row.total }}
             </div>
           </template>
         </el-table-column>

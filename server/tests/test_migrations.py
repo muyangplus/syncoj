@@ -660,3 +660,67 @@ def test_fresh_database_is_not_backed_up(workdir: Path) -> None:
     path = workdir / "fresh.db"
     migrations.migrate(make_engine(path))
     assert not list(workdir.glob("fresh.db.bak-*"))
+
+
+# --------------------------------------------------------------------------- #
+# 015：下发任务删掉存储的状态列、改记取消时刻
+# --------------------------------------------------------------------------- #
+
+
+def test_migration_015_moves_cancelled_status_to_cancelled_at(workdir: Path) -> None:
+    """老库的 ``status='cancelled'`` 回填成 ``cancelled_at``，删列重建不吃掉目标行。"""
+    engine = make_engine(workdir / "v14.db")
+    migrations.migrate(engine)
+    with engine.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO contest (id, slug, name, status, created_at) "
+            "VALUES (1, 'c', 'c', 'running', '2026-01-01 00:00:00')"
+        ))
+        conn.execute(text(
+            "INSERT INTO player (id, contest_id, player_no, name, created_at) "
+            "VALUES (1, 1, 'S001', 'n', '2026-01-01 00:00:00')"
+        ))
+        conn.execute(text(
+            "INSERT INTO asset (id, contest_id, sha256, size, filename, kind, created_at) "
+            "VALUES (1, 1, :sha, 1, 'a.txt', 'testdata', '2026-01-01 00:00:00')"
+        ), {"sha": "a" * 64})
+        # 退回"迁移 015 之前"的 deploy_task：有 status、没有 cancelled_at
+        conn.execute(text("DROP TABLE deploy_task"))
+        conn.execute(text(
+            "CREATE TABLE deploy_task ("
+            " id INTEGER NOT NULL, contest_id INTEGER NOT NULL, asset_id INTEGER NOT NULL,"
+            " target_kind VARCHAR(16) NOT NULL, target_desc VARCHAR(255),"
+            " dest_dir VARCHAR(512) NOT NULL, mode VARCHAR(16) NOT NULL,"
+            " status VARCHAR(16) NOT NULL, created_at DATETIME NOT NULL, PRIMARY KEY (id),"
+            " FOREIGN KEY(contest_id) REFERENCES contest (id) ON DELETE CASCADE,"
+            " FOREIGN KEY(asset_id) REFERENCES asset (id) ON DELETE CASCADE)"
+        ))
+        conn.execute(text(
+            "INSERT INTO deploy_task (id, contest_id, asset_id, target_kind, dest_dir, mode,"
+            " status, created_at) VALUES"
+            " (1, 1, 1, 'all', 'exam', 'overwrite', 'cancelled', '2026-01-02 00:00:00'),"
+            " (2, 1, 1, 'all', 'exam', 'overwrite', 'done', '2026-01-03 00:00:00')"
+        ))
+        conn.execute(text(
+            "INSERT INTO deploy_target (task_id, player_id, status, bytes_done, retry_count,"
+            " updated_at) VALUES (1, 1, 'cancelled', 0, 0, '2026-01-02'),"
+            " (2, 1, 'done', 1, 0, '2026-01-03')"
+        ))
+        conn.execute(text("PRAGMA user_version = 14"))
+
+    migrations.migrate(engine)
+
+    columns = {c["name"] for c in inspect(engine).get_columns("deploy_task")}
+    with engine.connect() as conn:
+        tasks = conn.execute(text(
+            "SELECT id, cancelled_at FROM deploy_task ORDER BY id"
+        )).fetchall()
+        targets = conn.execute(text(
+            "SELECT task_id, status FROM deploy_target ORDER BY task_id"
+        )).fetchall()
+    assert migrations.current_version(engine) == migrations.LATEST_VERSION
+    engine.dispose()
+
+    assert "status" not in columns and "cancelled_at" in columns
+    assert tasks[0][1] is not None and tasks[1][1] is None
+    assert [tuple(row) for row in targets] == [(1, "cancelled"), (2, "done")]

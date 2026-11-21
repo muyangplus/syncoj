@@ -578,6 +578,15 @@ class Asset(Base, TimestampMixin):
 
 
 class DeployTask(Base, TimestampMixin):
+    """一次下发。
+
+    **任务没有存储的状态列**：界面上的任务状态每次从目标聚合（见管理端
+    ``_derive_task_status``）。曾经有一列 ``status``，由回执路径重算、取消 / 重试 /
+    重排各自去改，取消接口又按它判断 —— 几处写法不一致时它就和目标对不上了
+    （迁移 015 删掉了它）。唯一需要单独记的是「教师取消过」这件事本身，
+    它不是目标能推导出来的，所以是 ``cancelled_at``。
+    """
+
     __tablename__ = "deploy_task"
 
     id = Column(Integer, primary_key=True)
@@ -589,7 +598,9 @@ class DeployTask(Base, TimestampMixin):
     dest_dir = Column(String(512), nullable=False)
     # "overwrite" | "skip_exist"
     mode = Column(String(16), nullable=False, default="overwrite")
-    status = Column(String(16), nullable=False, default=DeployStatus.PENDING)
+    #: 教师点「取消」的时刻；非空 = 已取消：不再派发、也不再给下载。
+    #: 「重试」把失败目标重新排队时清空它（重试就是重新开始下发）。
+    cancelled_at = Column(DateTime, nullable=True)
 
     asset = relationship("Asset")
     targets = relationship("DeployTarget", back_populates="task", cascade="all, delete-orphan")

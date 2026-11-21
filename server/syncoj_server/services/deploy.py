@@ -130,7 +130,7 @@ def collect_deploy_jobs(
             .where(
                 DeployTarget.player_id == player_id,
                 DeployTarget.status.in_(ACTIVE_STATUSES),
-                DeployTask.status != DeployStatus.CANCELLED,
+                DeployTask.cancelled_at.is_(None),
             )
             .order_by(DeployTarget.id)
         )

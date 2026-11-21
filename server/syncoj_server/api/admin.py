@@ -3546,30 +3546,22 @@ def _requeue_done_targets(session: Session, asset_id: int) -> int:
     迟早有一处忘了清零偏移，而那种坏文件要到选手解压时才会被发现。
     """
     requeued = 0
-    tasks: Dict[int, DeployTask] = {}
-    for target, task in session.execute(
-        select(DeployTarget, DeployTask)
+    for target in session.execute(
+        select(DeployTarget)
         .join(DeployTask, DeployTarget.task_id == DeployTask.id)
         .where(
             DeployTask.asset_id == asset_id,
             # 失败过的也给一次新机会：失败的可能正是旧内容（比如旧 zip 坏了）
             DeployTarget.status.in_((DeployStatus.DONE, DeployStatus.FAILED)),
         )
-    ).all():
+    ).scalars():
         target.status = DeployStatus.PENDING
         target.bytes_done = 0
         target.failure_count = 0
         target.last_error = None
         target.updated_at = utcnow()
         requeued += 1
-        tasks[int(task.id)] = task
-
-    # 任务状态是目标状态的聚合缓存（`_derive_task_status`），读的时候会重算，
-    # 但**写**的路径上有两处按它判断：取消接口会看它是不是 done。留在 done
-    # 会让"刚被重排的任务"报"任务已完成，无法取消"。
-    for task in tasks.values():
-        if task.status != DeployStatus.CANCELLED:
-            task.status = DeployStatus.PENDING
+    # 任务状态是读时从目标聚合的（`_derive_task_status`），这里不用、也没有可改的
     return requeued
 
 
@@ -4233,7 +4225,6 @@ def create_deploy(
             target_desc=payload.target_group or _describe_targets(payload, players),
             dest_dir=dest_dir,
             mode=payload.mode,
-            status=DeployStatus.PENDING,
         )
         session.add(task)
         session.flush()
@@ -4375,7 +4366,9 @@ def cancel_deploy(
         task = session.get(DeployTask, task_id)
         if task is None:
             raise HTTPException(status_code=404, detail="下发任务不存在")
-        if task.status == DeployStatus.DONE:
+        # 按目标的**当前**状态判断，与界面上显示的是同一个判据
+        counts = _deploy_status_counts(session, [task_id]).get(task_id, {})
+        if _derive_task_status(task, counts) == DeployStatus.DONE:
             raise HTTPException(status_code=409, detail="任务已完成，无法取消")
 
         affected = 0
@@ -4387,7 +4380,8 @@ def cancel_deploy(
         ).scalars():
             target.status = DeployStatus.CANCELLED
             affected += 1
-        task.status = DeployStatus.CANCELLED
+        if task.cancelled_at is None:
+            task.cancelled_at = utcnow()
         session.add(
             EventLog(
                 level="info",
@@ -4424,7 +4418,9 @@ def retry_deploy(
             target.last_error = None
             affected += 1
         if affected:
-            task.status = DeployStatus.PENDING
+            # 重试 = 重新开始下发：已取消的任务不撤销取消的话，这几个目标
+            # 永远不会被派发（派发只看没取消的任务），重试按钮就成了摆设
+            task.cancelled_at = None
     return SimpleAck(ok=True, detail="已重置 %d 个失败目标" % affected)
 
 
@@ -4494,33 +4490,37 @@ def _deploy_task_out(
         total=sum(counts.values()),
         done=counts.get(DeployStatus.DONE, 0),
         failed=counts.get(DeployStatus.FAILED, 0),
-        pending=(
-            counts.get(DeployStatus.PENDING, 0)
-            + counts.get(DeployStatus.READY, 0)
-            + counts.get(DeployStatus.CANCELLED, 0)
-        ),
+        pending=counts.get(DeployStatus.PENDING, 0) + counts.get(DeployStatus.READY, 0),
+        cancelled=counts.get(DeployStatus.CANCELLED, 0),
         targets=targets,
     )
 
 
 def _derive_task_status(task: DeployTask, counts: Dict[str, int]) -> str:
-    """任务状态由目标聚合得出，而不是单独维护 —— 避免两者不一致。
+    """任务状态**每次读时**由目标聚合得出，库里不存 —— 存了就会和目标对不上。
 
-    单独维护会出现的典型问题：某个目标失败后任务状态仍是 pending，Web 上
-    进度条卡在 90% 永远不动。
+    单独维护出过的问题：某个目标失败后任务状态仍是 pending，进度条卡在 90%
+    永远不动；重排过的任务仍记着 done，取消接口报"已完成，无法取消"。
+
+    判据（``counts`` 是 ``{目标状态: 台数}``）：
+
+    * 教师取消过（``cancelled_at``）→ cancelled
+    * 还有 pending / ready 的目标 → pending（还在下发）
+    * 都停了：有失败的 → failed（含部分失败）；没失败但有被取消的 → cancelled
+      （取消后又重试过、剩下的是取消那次留下的）；否则 → done
+    * 没有任何目标 → pending（建任务时就拒绝了空目标，只在目标被连带删光后出现）
     """
-    if task.status == DeployStatus.CANCELLED:
+    if task.cancelled_at is not None:
         return DeployStatus.CANCELLED
-    total = sum(counts.values())
-    if total == 0:
-        return task.status
-    if counts.get(DeployStatus.DONE, 0) == total:
-        return DeployStatus.DONE
-    if counts.get(DeployStatus.FAILED, 0) == total:
+    if not sum(counts.values()):
+        return DeployStatus.PENDING
+    if counts.get(DeployStatus.PENDING, 0) + counts.get(DeployStatus.READY, 0):
+        return DeployStatus.PENDING
+    if counts.get(DeployStatus.FAILED, 0):
         return DeployStatus.FAILED
-    if counts.get(DeployStatus.DONE, 0) + counts.get(DeployStatus.FAILED, 0) == total:
-        return DeployStatus.FAILED  # 部分失败
-    return DeployStatus.PENDING
+    if counts.get(DeployStatus.CANCELLED, 0):
+        return DeployStatus.CANCELLED
+    return DeployStatus.DONE
 
 
 @router.delete("/deploys/{task_id}", response_model=SimpleAck)

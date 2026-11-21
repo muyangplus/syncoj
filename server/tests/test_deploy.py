@@ -559,6 +559,68 @@ def test_cancel_completed_task_is_rejected(client: TestClient, contest: dict,
     assert response.status_code == 409
 
 
+def _set_target_status(app, task_id: int, status: str) -> None:
+    from sqlalchemy import select
+
+    from syncoj_server.models import DeployTarget
+
+    with app.state.ctx.db.session() as session:
+        for target in session.execute(
+            select(DeployTarget).where(DeployTarget.task_id == task_id)
+        ).scalars():
+            target.status = status
+
+
+def test_cancelled_targets_are_not_counted_as_pending(client: TestClient, contest: dict,
+                                                      admin_headers: dict, enrolled: dict) -> None:
+    """取消之后的目标不会再派发，曾经被算进「待处理」，进度看起来像还在下。"""
+    asset = upload_asset(client, contest, admin_headers, "p.zip", b"data").json()
+    task = make_deploy(client, contest, admin_headers, asset["id"]).json()
+    assert client.post("/api/v1/admin/deploys/%d/cancel" % task["id"],
+                       headers=admin_headers).status_code == 200
+
+    detail = client.get("/api/v1/admin/deploys/%d" % task["id"], headers=admin_headers).json()
+    assert detail["status"] == "cancelled"
+    assert (detail["pending"], detail["cancelled"], detail["total"]) == (0, 1, 1)
+
+
+def test_cancel_judges_by_the_targets_not_a_stored_status(
+        client: TestClient, contest: dict, admin_headers: dict, enrolled: dict, app) -> None:
+    """完成后又被重排（改了内容）的任务要能取消 —— 曾经看的是存下来的 done。"""
+    asset = upload_asset(client, contest, admin_headers, "p.zip", b"data").json()
+    task = make_deploy(client, contest, admin_headers, asset["id"]).json()
+    tick(client, enrolled["token"], [], machine_id=enrolled["machine_id"])
+    tick(client, enrolled["token"], [], machine_id=enrolled["machine_id"],
+         completed_assets=[asset["id"]])
+    detail = client.get("/api/v1/admin/deploys/%d" % task["id"], headers=admin_headers).json()
+    assert detail["status"] == "done"
+
+    _set_target_status(app, task["id"], "pending")  # 等同于改内容后的重排
+    detail = client.get("/api/v1/admin/deploys/%d" % task["id"], headers=admin_headers).json()
+    assert detail["status"] == "pending"
+    assert client.post("/api/v1/admin/deploys/%d/cancel" % task["id"],
+                       headers=admin_headers).status_code == 200
+
+
+def test_retry_after_cancel_delivers_again(client: TestClient, contest: dict,
+                                           admin_headers: dict, enrolled: dict, app) -> None:
+    """「重试」就是重新开始：取消过的任务重试后，失败的目标要真的再派发。"""
+    asset = upload_asset(client, contest, admin_headers, "p.zip", b"data").json()
+    task = make_deploy(client, contest, admin_headers, asset["id"]).json()
+    _set_target_status(app, task["id"], "failed")
+    assert client.post("/api/v1/admin/deploys/%d/cancel" % task["id"],
+                       headers=admin_headers).status_code == 200
+    detail = client.get("/api/v1/admin/deploys/%d" % task["id"], headers=admin_headers).json()
+    assert detail["status"] == "cancelled"
+
+    assert client.post("/api/v1/admin/deploys/%d/retry" % task["id"],
+                       headers=admin_headers).status_code == 200
+    detail = client.get("/api/v1/admin/deploys/%d" % task["id"], headers=admin_headers).json()
+    assert detail["status"] == "pending"
+    body = tick(client, enrolled["token"], [], machine_id=enrolled["machine_id"])
+    assert len(body["deploy_jobs"]) == 1
+
+
 # --------------------------------------------------------------------------- #
 # 进度聚合
 # --------------------------------------------------------------------------- #

@@ -2788,6 +2788,11 @@ export interface components {
         DeployTaskOut: {
             /** Asset Id */
             asset_id: number;
+            /**
+             * Cancelled
+             * @default 0
+             */
+            cancelled: number;
             /** Contest Id */
             contest_id: number;
             /** Created At */

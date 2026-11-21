@@ -442,8 +442,9 @@ def tick(
             events=_edge_triggered(ctx.registry.get(identity.agent_id), collect.events),
         )
 
-        # 先收回执、再派作业：本轮刚报完成的不该再出现在作业里
-        changed_tasks = apply_deploy_reports(
+        # 先收回执、再派作业：本轮刚报完成的不该再出现在作业里。
+        # 任务状态不用跟着改：它是管理端读的时候从目标聚合出来的，库里不存。
+        apply_deploy_reports(
             session,
             identity.player_id,
             payload.deploy_progress,
@@ -452,8 +453,6 @@ def tick(
             now,
         )
         session.flush()
-        for task_id in changed_tasks:
-            _refresh_task_status(session, task_id)
         jobs = collect_deploy_jobs(session, identity.player_id, identity.player_no)
 
         upgrade = _pending_upgrade(session, ctx)
@@ -793,34 +792,6 @@ def _pending_uninstall_token(ctx: AppContext, agent: Agent, now) -> Optional[str
         nonce=pending.nonce,
         issued_at=pending.issued_at,
     )
-
-
-def _refresh_task_status(session, task_id: int) -> None:
-    """按目标的实际状态重算任务状态。
-
-    不维护"任务状态"这个独立字段，而是每次从目标聚合 —— 两处独立维护的状态
-    迟早会不一致，典型症状是 Web 上进度条卡在 90% 永远不动。
-    """
-    task = session.get(DeployTask, task_id)
-    if task is None or task.status == DeployStatus.CANCELLED:
-        return
-
-    targets = list(
-        session.execute(
-            select(DeployTarget).where(DeployTarget.task_id == task_id)
-        ).scalars()
-    )
-    if not targets:
-        return
-
-    done = sum(1 for t in targets if t.status == DeployStatus.DONE)
-    failed = sum(1 for t in targets if t.status == DeployStatus.FAILED)
-    if done == len(targets):
-        task.status = DeployStatus.DONE
-    elif done + failed == len(targets):
-        task.status = DeployStatus.FAILED
-    else:
-        task.status = DeployStatus.PENDING
 
 
 def _pending_upgrade(session, ctx: AppContext) -> Optional[UpgradeInfo]:
@@ -1210,7 +1181,7 @@ def download_asset(
                 DeployTarget.player_id == identity.player_id,
                 # 取消了的不再给：曾经只看"有没有这条目标"，取消之后照样能拖走
                 DeployTarget.status != DeployStatus.CANCELLED,
-                DeployTask.status != DeployStatus.CANCELLED,
+                DeployTask.cancelled_at.is_(None),
             )
         ).first()
         if authorized is None:

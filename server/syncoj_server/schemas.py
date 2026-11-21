@@ -1042,12 +1042,16 @@ class DeployTaskOut(_Base):
     target_kind: str
     dest_dir: str
     mode: str
+    #: pending / done / failed / cancelled。读时从目标聚合，库里不存
     status: str
     created_at: str
     total: int = 0
     done: int = 0
     failed: int = 0
+    #: 还在下发的（pending + ready）
     pending: int = 0
+    #: 被取消时还没下完的。不计入 ``pending``：它们不会再被派发
+    cancelled: int = 0
     targets: List[DeployTargetOut] = Field(default_factory=list)
 
 

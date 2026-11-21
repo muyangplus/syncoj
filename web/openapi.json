@@ -1481,6 +1481,11 @@
             "title": "Asset Id",
             "type": "integer"
           },
+          "cancelled": {
+            "default": 0,
+            "title": "Cancelled",
+            "type": "integer"
+          },
           "contest_id": {
             "title": "Contest Id",
             "type": "integer"

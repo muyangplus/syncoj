@@ -46,12 +46,24 @@
 
 ### 4.3 写入策略（SQLite 的命门）
 
-50 台 × 每 20s 一次 tick = **2.5 req/s**。每次 tick 都要 upsert 在线状态 + 比对文件台账，**绝不能每个请求开事务写库**：
+50 台 × 每 20s 一次 tick = **2.5 req/s**。收敛高频写的办法只有"在线状态不逐请求落库"
+这一条，**没有**单写连接或写队列：
 
-- **内存优先**：`AgentRegistry` 用 dict 持有实时状态，Web 读路径走内存（后续经 SSE 推送）
-- **批量落库**：后台任务每 5s 把脏数据合并成**一个事务**刷入
-- **单写连接**：所有写操作走一个队列 + 独立线程，避免 `database is locked`
-- SQLite 参数：`journal_mode=WAL`、`synchronous=NORMAL`、`busy_timeout=5000`、`foreign_keys=ON`
+- **内存优先**：`AgentRegistry`（`registry.py`）用 dict + `threading.Lock` 持有在线状态，
+  管理端读在线状态走内存。没有 SSE，前端靠轮询
+- **批量落库**：`tasks/flush.py` 的维护循环每 `flush_interval_seconds`（默认 5s）把脏的
+  在线状态合并成**一个事务** upsert 进 `agent_status`（这张表只写不读，§10.5 阶段 3 要删）；
+  同一个循环顺带做离线判定与到点结束场次
+- **其余写照常逐请求提交**：每次 tick 本身就开一个会话（`db.py` 的 `Database.session()`，
+  退出时 commit）—— 对账文件台账、写审计事件、收下发回执、更新 `agent.last_seen_at`
+  都在里面；上传、注册、管理操作也一样。会话来自 SQLAlchemy 默认连接池，
+  `check_same_thread=False`，FastAPI 线程池里的请求**并发**拿连接，写锁由 SQLite 自己排队
+- SQLite 参数（`db.py:_install_pragmas`）：`journal_mode=WAL`、`synchronous=NORMAL`、
+  `busy_timeout=5000`、`foreign_keys=ON`、`temp_store=MEMORY`；连接本身另有 30s 超时。
+  写锁争抢靠 WAL + `busy_timeout` 兜住
+
+`db.py` 模块说明写了为什么不做写串行化（高频写已收敛、剩余的写低频），并把"单写线程 +
+队列"留到单场次超过 500 台时再说。早先这一节把它写成已经存在，是错的。
 
 ### 4.4 评测结果回写
 

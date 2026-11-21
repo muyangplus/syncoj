@@ -1,120 +1,109 @@
 # 管理端 API 约定
 
-> 本文件管的是**形状**（信封、错误体、分页、命名、删除语义），不是每个接口的语义。
-> 每个接口的字段以 `web/openapi.json`（由 `server/tools/dump_openapi.py` 生成）为准。
-> Agent 侧对应的是 `docs/reference/protocol.md`。
+- 范围：信封、错误体、分页、命名、删除语义（形状），不含各接口语义。
+- 各接口字段以 `web/openapi.json`（`server/tools/dump_openapi.py` 生成）为准。
+- Agent 侧协议见 `docs/reference/protocol.md`。
 
-## 1. 为什么要有约定
+## 1. 适用范围
 
-约定是**前端写一次数据层，所有资源共用**：集合统一走信封，错误统一带 `code`。
+| 规则 | 内容 |
+|---|---|
+| 集合 | 所有返回集合的 `GET` 用列表信封（第 2 节） |
+| 错误 | 所有错误响应用统一错误体，必带 `code`（第 3 节） |
+| 前端 | `web/src/api/` 一层消化信封与错误码（第 6 节） |
 
-同一件事在 74 个接口里有好几套写法：列表有的返回裸数组、有的返回
-`{"items": ...}`；错误有的 `{"detail": "文本"}`、有的 `{"detail": {"reason": ...}}`、
-422 又是 pydantic 的英文结构。前端只能逐个接口写适配，于是"少写一个入口"和
-"这个接口忘了处理"成了常态。
+→ 背景见 `docs/design/05-api-and-frontend.md`。
 
 ---
 
 ## 2. 列表信封
 
-**所有返回集合的 `GET` 接口**都用同一个形状：
-
 ```json
 { "items": [ … ], "total": 137, "limit": 50, "offset": 0 }
 ```
 
-| 字段 | 说明 |
-|---|---|
-| `items` | 当前页的数据 |
-| `total` | **忽略 `limit`/`offset` 后的总条数**（不是 `items.length`） |
-| `limit` | 本次生效的每页条数 |
-| `offset` | 本次生效的起始位置 |
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `items` | array | 当前页数据 |
+| `total` | int | 忽略 `limit` / `offset` 后的总条数（不是 `items.length`） |
+| `limit` | int | 本次生效的每页条数 |
+| `offset` | int | 本次生效的起始位置 |
 
-> **信封只管 GET 集合**。`POST /contests/{id}/players`（批量导入）这类**写操作**
-> 返回的是一个动作结果，不是一页数据 —— 它有自己的形状（创建/更新了几条、
-> 哪些被拒绝），硬套 `{items,total,limit,offset}` 会让字段名与含义不符
-> （导入 30 条时 `total=30, limit=50` 没有意义）。写操作的返回值见各接口
-> 的 schema，命名规则是 `XxxImportOut` / `XxxResultOut`，字段用
-> `created` / `updated` / `skipped` 这类动词。
+查询参数（每个 GET 列表接口都支持）：
 
-查询参数（**每个** GET 列表接口都支持，名字固定）：
-
-| 参数 | 默认 | 约束 | 说明 |
+| 参数 | 默认 | 约束 | 含义 |
 |---|---|---|---|
 | `limit` | `50` | `ge=1, le=500` | 每页条数 |
 | `offset` | `0` | `ge=0` | 起始位置 |
 
-> `total` 必须是真实总数。前端的分页器与"清空 N 条"的确认文案都靠它，
-> 拿 `items.length` 充数会让第二页显示"共 50 条"。
+规则：
 
-就算某个集合天然很小（场次、名单），**也照样用信封**：前端因此只需要一个表格
-组件、一套分页逻辑。参数给宽一点就行（`limit=500`）。
-
-按资源定制的过滤参数（`contest_id`、`player_id`、`status`、`q` …）一律走 query
-string，不塞进请求体 —— 否则分页链接、收藏、刷新就都没法用了。
+- 信封只用于 GET 集合；集合再小（场次、名单）也用信封。
+- 写操作（如 `POST /contests/{id}/players` 批量导入）返回动作结果，schema 命名 `XxxImportOut` / `XxxResultOut`，字段用 `created` / `updated` / `skipped` 等。
+- 资源过滤参数（`contest_id`、`player_id`、`status`、`q` …）走 query string，不放请求体。
 
 ### 分页实现
 
-- 数据在 SQL 里就能分页的（选手、代码文件、事件、评测记录、名单、统一密钥、资产、
-  下发任务）→ 真的 `LIMIT/OFFSET` 加一条独立的 `COUNT(*)`，不要先全查出来再切；
-  统计列（名单条目数、选手的机器数与文件数、资产的未完成目标数、下发任务的各状态台数）
-  只对**这一页**的主键做一次 `GROUP BY`，不对全表分组
-- 数据在 Python 里拼出来的（场次列表要算在线人数）→ 允许切 Python 列表，
-  但集合规模必须是有界的（场次数、题目数都是几十）
+- SQL 可分页的集合（选手、代码文件、事件、评测记录、名单、统一密钥、资产、下发任务）：`LIMIT/OFFSET` + 独立 `COUNT(*)`。
+- 统计列（名单条目数、选手的机器数与文件数、资产的未完成目标数、下发任务各状态台数）：只对当前页主键做一次 `GROUP BY`。
+- Python 拼出的集合（场次列表，需算在线人数）：允许切 Python 列表，集合规模须有界。
 
 ---
 
 ## 3. 错误体
 
-**所有**错误响应都是同一个形状（与管理端、Agent 侧一致）：
+所有错误响应（管理端、Agent 侧）同一形状：
 
 ```json
-{ "detail": "这句是给人看的中文", "code": "roster_entry_taken", "details": { "player_no": "S001" } }
+{ "detail": "给人看的中文", "code": "roster_entry_taken", "details": { "player_no": "S001" } }
 ```
 
-| 字段 | 必填 | 说明 |
-|---|---|---|
-| `detail` | 是 | **永远是字符串**，直接显示给人看 |
-| `code` | 是 | 稳定的短标识符，**永远存在**。要分支判断就用它 |
-| `details` | 否 | 结构化补充信息（字段名、冲突对象 id…） |
+| 字段 | 类型 | 必填 | 含义 |
+|---|---|---|---|
+| `detail` | string | 是 | 可直接显示的中文句子；不含 Markdown 标记 |
+| `code` | string | 是 | 稳定短标识符；分支判断用它 |
+| `details` | object | 否 | 结构化补充信息（字段名、冲突对象 id…） |
 
-实现见 `server/syncoj_server/errors.py`：
+实现：`server/syncoj_server/errors.py`。
 
-- 业务错误优先抛 `ApiError(409, "roster_entry_taken", "…")`，而不是 `HTTPException`
-- 仍然在抛的 `HTTPException` 由 handler 兼容：`detail` 压成字符串，
-  `code` 从状态码**推导**（见下面的 `CODE_BY_STATUS`）
-- 需要别人分支判断的地方**显式给码**，其余一律用兜底码
+- 业务错误抛 `ApiError(409, "roster_entry_taken", "…")`。
+- 遗留的 `HTTPException`：`detail` 压成字符串，`code` 按 `CODE_BY_STATUS` 推导。
+- 需要分支判断的地方显式给码，其余用兜底码。
 
 ### 码表怎么维护
 
-`ERROR_CODES` 是唯一的码清单，`CODE_BY_STATUS` 是"没显式给码时按状态码推"的兜底表。
-四条规矩由 `server/tests/test_errors.py` 静态守住（都是 AST 扫描，不是正则）：
+- `ERROR_CODES`：唯一的具名码清单（码 → 默认中文句子）。
+- `CODE_BY_STATUS`：未显式给码时的兜底表。
 
-| 规矩 | 违反了会怎样 |
+| 状态码 | 兜底 `code` |
 |---|---|
-| 源码里发出的每个码都登记在 `ERROR_CODES` 里 | 码只给一半时 `ApiError` 抛 `ValueError`，接口变成 500 |
-| `ERROR_CODES` 里的每个码源码里真的会发 | 死码**被当成契约**：前端照着写分支、文档照着写章节 |
-| `CODE_BY_STATUS` 的每个取值都登记在 `ERROR_CODES` 里 | 兜底码没文档 —— 而 400 恰是最常见的错误状态 |
-| 每个用得到的状态码都在 `CODE_BY_STATUS` 里 | 落到 `.get(status, "error")`，客户端拿到毫无含义的 `error` |
+| 400 | `bad_request` |
+| 401 | `unauthorized` |
+| 403 | `forbidden` |
+| 404 | `not_found` |
+| 409 | `conflict` |
+| 410 | `gone` |
+| 413 | `payload_too_large` |
+| 422 | `validation_error` |
+| 426 | `agent_outdated` |
+| 429 | `rate_limited` |
+| 500 | `internal_error` |
+| 503 | `unavailable` |
 
-上表最后一条有实例：`/releases` 的"该版本已撤回"和"内容缺失"三处在用 **410**，
-`CODE_BY_STATUS` 里却没有兜底码，这类响应带的是 `code: "error"` —— 既不在文档里，
-也没法 grep。
+`server/tests/test_errors.py` 静态检查（AST 扫描）：
 
-> **不许登记服务端根本发不出来的码**。这里曾登记过 8 个
-> （`contest_frozen`、`roster_in_use`、`last_admin`、`machine_unbound` …），
-> 它们描述的是"设计时觉得以后会有"的场景，而对应的校验要么压根不存在，
-> 要么当初就选了更宽容的做法（删名单是被允许的，只是把引用它的场次置空）。
-> 要加新码，请**连同产生它的那条分支一起加**。
+| 规则 | 违反后果 |
+|---|---|
+| 源码发出的每个码都登记在 `ERROR_CODES` | `ApiError` 抛 `ValueError`，接口变 500 |
+| `ERROR_CODES` 里的每个码源码都会发出 | 死码被当成契约 |
+| `CODE_BY_STATUS` 的每个取值都登记在 `ERROR_CODES` | 兜底码无文档 |
+| 用到的每个状态码都在 `CODE_BY_STATUS` | 响应落到 `code: "error"` |
+| `detail` 不夹带 Markdown 标记 | — |
 
-> `agent_not_found` 与 `diagnostics_not_found` 是"具名码比兜底码有用"的两个例子：
-> 前者是"这台机器已经不在台账里"，后者是"这台机器还没回传过诊断包" ——
-> 后者的界面表现是「诊断」对话框里的"还没有收到诊断包"这一**正常初态**，
-> 不是一句"找不到这个对象"。
+- 新增码与产生它的分支一起提交。
+- 具名码示例：`agent_not_found`（机器不在台账）、`diagnostics_not_found`（机器尚未回传诊断包，界面显示为正常初态）。
 
 ### 422 校验错误
-
-pydantic 的原始错误**不直接暴露给人**。处理器把它揉成一句话：
 
 ```json
 {
@@ -124,15 +113,12 @@ pydantic 的原始错误**不直接暴露给人**。处理器把它揉成一句�
 }
 ```
 
-- `detail` 只列**前 3 条**：教师改完第一处再提交，剩下的通常也跟着消失了，
-  而一屏滚不完的报错反而让人不知道该先动哪个
-- `details.errors` 保留原始列表，前端表单据此把红框标到具体输入框上
+- `detail` 只列前 3 条，中文。
+- `details.errors` 保留完整列表，前端据此标红具体输入框。
 
 ### 500
 
-兜底的 `Exception` handler **必须存在**。没有它时 Starlette 返回一坨纯文本
-`Internal Server Error`，前端的 `response.json()` 当场抛 `SyntaxError`，
-界面上显示的是"Unexpected token I"而不是任何有用的东西。
+- 兜底 `Exception` handler 必须存在，返回 JSON：`{"detail": …, "code": "internal_error"}`。
 
 ---
 
@@ -140,129 +126,110 @@ pydantic 的原始错误**不直接暴露给人**。处理器把它揉成一句�
 
 | 项 | 约定 | 例子 |
 |---|---|---|
-| 前缀 | 管理端 `/api/v1/admin`、Agent `/api/v1/agent` | |
-| 集合 | **复数**名词 | `/players`、`/machines`、`/assets` |
+| 前缀 | 管理端 `/api/v1/admin`、Agent `/api/v1/agent`、评测机 `/api/v1/judge` | |
+| 集合 | 复数名词 | `/players`、`/agents`、`/assets` |
 | 单对象 | `/{集合}/{id}` | `/players/12` |
 | 嵌套 | 父资源在前，最多两层 | `/contests/{id}/players` |
 | 字段 | `snake_case` | `player_no`、`machine_uuid` |
 | 时间 | ISO-8601 字符串（`*_at`）或 Unix 秒（`ts`） | `last_seen_at` |
-| 布尔 | 陈述句 | `claimed`、`bound`、`is_active` |
+| 布尔 | 陈述式 | `claimed`、`bound`、`is_active` |
 
-**状态变更用子路径动词，不用 `PATCH` 改状态字段。** `PATCH` 只用于改一堆普通
-字段（改名字、改备注）。原因：状态变更有前置条件、有副作用（作废机器要解绑、
-封榜要停回收），塞进 `PATCH` 会让"这次到底想干什么"从 URL 上消失，日志和
-权限也就无从下手。
+- `PATCH` 只改普通字段；状态变更用子路径动词。
 
 | 动作 | 形状 |
 |---|---|
 | 改普通字段 | `PATCH /players/{id}` |
-| 改状态 | `POST /players/{id}/withdraw`、`POST /contests/{id}/freeze` |
-| 绑定关系 | `POST /machines/{id}/bind` |
-| 解绑关系 | `DELETE /machines/{id}/bind` |
+| 改状态 | `POST /bootstrap-keys/{id}/revoke`、`POST /deploys/{id}/cancel`、`POST /releases/{id}/yank` |
+| 绑定关系 | `POST /machines/{agent_id}/bind` |
+| 解绑关系 | `DELETE /agents/{agent_id}/bind` |
 | 要一份诊断 | `POST /agents/{id}/diagnostics/request`（机器下一次心跳取走，一次性） |
-| 读最新诊断包 | `GET /agents/{id}/diagnostics`（没有收到过是 404 `diagnostics_not_found`） |
+| 读最新诊断包 | `GET /agents/{id}/diagnostics`（未收到过 → `404 diagnostics_not_found`） |
 
 ---
 
 ## 5. 删除语义
 
-**分两类，规则不同。** 判断标准是"删掉之后还有没有人需要它"。两类在管理端的删除
-**都是硬删**；区别在确认方式与连带回收什么（理由与历史见
-[ADR-0003](../decisions/ADR-0003-delete-semantics.md) 的「修订（2026-11）」）。
+两类数据，管理端删除都是硬删；区别在确认方式与连带回收。→ 见 [ADR-0003](../decisions/ADR-0003-delete-semantics.md)。
 
 ### 5.1 结构性数据 —— 硬删除 + 输入名称确认
 
-名单、场次、选手、机器、题目。
+名单、名单条目、场次、选手、机器、题目、成绩记录、评测机。
 
-删错了重建即可（名单还能重新导入），但误删的后果很重（成绩矩阵连同代码一起
-消失），所以**必须二次确认，而且确认内容不是"是否确定"而是把名字打一遍**。
-"是否确定"这种弹窗在连续操作里会被手指肌肉记忆点掉，打名称不会。
+- 单个删除：`confirm` 放 query，如 `DELETE /api/v1/admin/players/12?confirm=S001`。
+- 批量 / 清空：`confirm` 放 body，如 `POST /api/v1/admin/contests/3/players/clear`，体 `{"confirm": "mock-1"}`；可与 `keep_*` 等选项并列。
+- DELETE 不带请求体。
+- `confirm` 去掉首尾空格后逐字比较；不符 → `400 name_mismatch`，`details` = `{expected, given, label}`。
+- 校验在服务端完成。
 
-- 单个：`DELETE /api/v1/admin/players/12?confirm=S001`
-- 批量/清空：`POST /api/v1/admin/contests/3/players/clear`，体 `{"confirm": "mock-1"}`
+单个删除的确认值：
 
-`confirm` 必须**逐字等于**该对象的标识（选手用 `player_no`，场次用 `slug`，
-名单用 `name`，机器用 `hostname`），否则 `400` + `code=name_mismatch`。
+| 接口 | `confirm` |
+|---|---|
+| `DELETE /rosters/{id}` | 名单 `name` |
+| `DELETE /roster-entries/{id}` | 考号 `player_no` |
+| `DELETE /contests/{id}` | 场次 `slug` |
+| `DELETE /players/{id}` | 考号 `player_no` |
+| `DELETE /problems/{id}` | 题目 `ident` |
+| `DELETE /agents/{id}` | 机器 `hostname`（无则 `machine_id`） |
+| `DELETE /machines/pending/{id}` | 机器 `hostname`（无则 `machine_id`） |
+| `DELETE /contests/{id}/judge/score?player_id=&problem=` | 考号 `player_no` |
+| `DELETE /judge-workers/{id}` | 评测机 `name` |
 
-"清空所有"这类操作没有单个对象可对，用一个**固定的字面量** `all` 作为
-`confirm`：`{"confirm": "all"}`。它看起来像个魔法值，但那正是重点 ——
-打 `all` 是一个明确的、需要读一眼才能完成的动作，而 `{"confirm": true}` 不是。
-
-> `confirm` 走 query 还是 body，取决于这个动作有没有别的东西要传：
-> **单个对象删除**放 query（`?confirm=X`），**批量与清空**放 body
-> （`{"confirm": "X"}`，可以和 `keep_manual` 这类选项并列）。
-> 别把 body 塞进 DELETE —— 它对代理和缓存都是未定义行为。
-
-> 校验放在**服务端**，不只是前端弹窗。前端弹窗是给人看的提示，服务端校验是
-> 保证"没经过界面的调用也一样安全"。
+全局范围（无单个对象）用固定字面量 `all`（`schemas.GLOBAL_CONFIRM` / 前端 `GLOBAL_CONFIRM`）。
 
 ### 5.2 产物性数据 —— 硬删，内容按引用回收
 
-代码文件、下发资产。**教师删除就是硬删**，没有墓碑：
+代码文件、下发资产。不要求 `confirm`。
 
-- `DELETE /files/{id}`：删掉这一行；内容（blob）**只有在没有任何记录再引用**时才一并
-  删掉（代码、资产、Agent 发布三处共用内容寻址存储）。不要求 `confirm`
-- `DELETE /assets/{id}`：删掉资产，下发任务与逐选手进度外键级联；`Asset` 没有
-  `deleted_at`。已经落到机器上的文件不撤回
-- `source/<场次>/<考号>/` 里已经落盘的文件**任何删除都不碰**（落盘是硬链接，blob
-  删了它也还在）
+- `DELETE /files/{id}`：删该行；提交后回收不再被任何记录引用的 blob（代码、资产、Agent 发布共用内容寻址存储）。
+- `DELETE /assets/{id}`：删资产，下发任务与逐选手进度外键级联；已落到机器上的文件不撤回。
+- `source/<场次>/<考号>/` 下已落盘的文件不随任何删除改动（硬链接）。
+- `POST /contests/{id}/players/clear` 不回收 blob。
 
-唯一的墓碑来自**扫描对账**，不是删除接口：选手在机器上删掉 / 改名的文件，在扫描完整
-（`scan_complete=true`）的那一轮被置 `deleted_at`（界面上叫"已消失"），行与内容都留着；
-文件再出现时自动复原。
+扫描对账墓碑：
 
-- 列表与导出的 `?include_deleted=` 管的就是这些"已消失"的行，API 默认 `false`
-- 界面上的**导出默认传 `true`**：考场现实是"选手确实交过，只是后来在机器上删了"，
-  成绩复核时这份历史比干净的数据重要
-
-> 现状缺口（代码侧，见 `docs/design/08-milestones-and-open.md` §10.5）：blob 在**提交前**
-> 就删了；`delete_asset` / `delete_player` / `delete_contest` 级联掉的行不回收 blob。
+- 选手机器上删除 / 改名的文件，在 `scan_complete=true` 的一轮被置 `deleted_at`（界面"已消失"），行与内容保留；文件重新出现时自动复原。
+- 列表接口 `?include_deleted=` 默认 `false`。
+- 导出 `GET /contests/{id}/files/export` 的 `include_deleted` 默认 `true`。
 
 ### 5.3 清空
 
-"清空"是"范围删除"，**一律硬删、一律要确认**：清代码台账输场次 slug（默认
-`purge=false` 只删"已消失"的行，`purge=true` 连还在的一起删 —— 机器还在报的下一轮会
-回来），清选手输场次 slug。**每个清空入口都要有对应的确认**，不能因为
-"它在设置页角落"就省掉。
+清空 = 范围删除，一律硬删、一律在 body 带 `confirm`。
+
+| 接口 | `confirm` | 选项 |
+|---|---|---|
+| `POST /rosters/{id}/entries/clear` | 名单 `name` | |
+| `POST /contests/{id}/players/clear` | 场次 `slug` | `keep_with_submissions`（默认 `true`） |
+| `POST /contests/{id}/files/clear` | 场次 `slug` | `purge`（默认 `false` 只删"已消失"的行；`true` 全删，机器仍在上报的文件下一轮重新收回） |
+| `POST /contests/{id}/problems/clear` | 场次 `slug` | |
+| `POST /contests/{id}/judge/runs/clear` | 场次 `slug` | `player_id`；`keep_manual`（默认 `true`） |
+| `POST /events/clear` | 带 `contest_id` 时场次 `slug`，否则 `all` | query：`contest_id`、`level`、`older_than_days` |
+| `POST /machines/pending/clear` | `all` | |
 
 ---
 
 ## 6. 前端怎么接
 
-`web/src/api/` 一层负责把上面的约定吃掉，页面代码不应该再碰信封和错误码。
-**一个资源一个模块**，`index.ts` 只是入口（几乎全是 re-export）：
+`web/src/api/`：一个资源一个模块，页面只从 `index.ts` 导入。
 
 | 文件 | 职责 |
 |---|---|
-| `index.ts` | 入口。页面只从这里 import，所以"方法在哪个文件里"是这一层的内部事 |
-| `endpoints.ts` | **所有路径的唯一定义**（含全局确认字面量 `GLOBAL_CONFIRM`） |
-| `types.ts` | 从生成物里挑出页面要用的类型别名 |
-| `schema.d.ts` | **生成物**，来自 `web/openapi.json`，不要手改 |
-| `client.ts` | `request`/`query`/`download`，把错误体转成 `ApiError` |
-| `crud.ts` | 分页、信封、删除语义的公共实现（`listPage`/`clearCollection`…） |
-| `contests.ts`、`files.ts`… | 一个资源一个：只有「路径 + 参数 + 返回类型」的映射 |
+| `index.ts` | 入口（re-export） |
+| `endpoints.ts` | 所有路径的唯一定义（含 `GLOBAL_CONFIRM`） |
+| `types.ts` | 从生成物挑出的类型别名 |
+| `schema.d.ts` | 生成物，来自 `web/openapi.json`，不手改 |
+| `client.ts` | `request` / `query` / `download`；错误体转成 `ApiError` |
+| `crud.ts` | 分页、信封、删除语义的公共实现（`listPage` / `clearCollection` …） |
+| `contests.ts`、`files.ts` … | 每资源一个：路径 + 参数 + 返回类型 |
 
-页面只描述"这一页长什么样"，不描述"怎么取数"。新增一个资源 = 一个资源模块
-+ 一个页面（外加在 `index.ts` 里加一行转出），而不是再抄一遍
-loading/error/分页逻辑。
-
-> 列表数据层（分页、筛选、加载、刷新、批量选择）在
-> `web/src/composables/useList.ts`，不在 `api/` 里 —— 它管的是"页面怎么用数据"，
-> 而不是"接口长什么样"。
+- 新增资源 = 一个资源模块 + 一个页面 + `index.ts` 一行转出。
+- 列表数据层（分页、筛选、加载、刷新、批量选择）：`web/src/composables/useList.ts`。
 
 ### 6.1 选择必须按稳定键，不能按对象引用
 
-批量操作 + 轮询放在一起时，有一个很容易写错的地方：列表每次刷新拿到的是**全新的
-对象**，所以"把上一轮的选中项在新数据里过滤一遍"这种写法（`new Set(rows).has(row)`）
-永远过滤到空 —— 于是每轮轮询都把教师刚勾好的十个选手清掉，批量删除根本没法用。
-
-规矩是：
-
-- 选择状态存的是**资源的稳定键**（`id`，或 `player_no` 这类天然主键），
-  要用的时候再去当前页里捞回整行
-- 表格组件必须带 `row-key` 且开启跨数据保留选择的能力
-- **有选中项或批量对话框打开时，后台轮询不得刷新列表**。静默地丢掉选择，
-  在破坏性批量流程里就是"删错东西"的前一步
+- 选择状态存资源稳定键（`id` 或 `player_no` 等），使用时从当前页取回整行。
+- 表格组件带 `row-key` 并开启 `reserve-selection`。
+- 有选中项或批量对话框打开时，后台轮询不刷新列表。
 
 ---
 
@@ -273,17 +240,15 @@ server/syncoj_server/schemas.py        ← 类型的唯一来源
         │  python server/tools/dump_openapi.py
         ▼
 web/openapi.json
-        │  npx openapi-typescript
+        │  cd web && npm run gen:types（openapi-typescript）
         ▼
 web/src/api/schema.d.ts
 ```
 
-改了接口就必须重跑这两步并把结果提交，否则前端拿到的是旧类型。
+- 改接口后重跑两步，生成物一并提交。
 
-守这条链路的测试有两层，分工不同：
-
-| 测试 | 守什么 |
+| 测试 | 检查内容 |
 |---|---|
-| `server/tests/test_api_conventions.py` | 路由**形状**：GET 不返回裸数组、信封四个字段齐全、每个信封都收 `limit`/`offset`、8 个单对象删除与 7 个清空必须带 `confirm`、路径前缀与命名。它还有一组 `test_selfcheck_*`，拿合成出来的坏 spec 证明每个检测器**真的会红** |
-| `server/tests/test_frontend_contract.py` | 前端声明与服务端实际**双向**对齐：`endpoints.ts` 里的路径服务端都认，服务端有的路径前端都声明了。它还盯着 `npm run check:routes` 还在、且仍挂在 `build` 的第一步 |
-| `web/scripts/check-routes.mjs` | 反向的那一半：声明的接口方法**必须有界面入口**（这正是"很多功能没有入口"的防复发机制） |
+| `server/tests/test_api_conventions.py` | 路由形状：GET 不返回裸数组、信封四字段齐全、信封接口收 `limit`/`offset`、8 个单对象删除与 7 个清空带必填 `confirm`、路径前缀与命名；`test_selfcheck_*` 用合成坏 spec 自证检测器会报错 |
+| `server/tests/test_frontend_contract.py` | `endpoints.ts` 与服务端路径双向对齐；`npm run check:routes` 存在且是 `build` 第一步 |
+| `web/scripts/check-routes.mjs` | 声明的接口方法都有界面入口 |

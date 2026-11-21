@@ -1,78 +1,93 @@
 # SyncOJ Agent ⇄ Server 协议
 
-> 本文件是协议的**权威描述**。改协议必须同时更新：
-> - `server/syncoj_server/schemas.py`（pydantic 模型，OpenAPI 的来源）
-> - `server/syncoj_server/errors.py`（错误码清单）
-> - `agent/syncoj_agent/client.py` 与 `main.py`（报文体构造与状态机）
-> - `server/tests/test_agent_contract.py`（契约测试会自动发现不一致）
-> - `docs/reference/api-conventions.md`（管理端 API 的同类约定）
+改协议时同步修改：
+
+- `server/syncoj_server/schemas.py`（pydantic 模型，OpenAPI 来源）
+- `server/syncoj_server/errors.py`（错误码清单）
+- `server/syncoj_server/protocol.py` 与 `agent/syncoj_agent/client.py` 的协议版本号
+- `agent/syncoj_agent/client.py`、`main.py`（报文构造与状态机）
+- `server/tests/test_agent_contract.py`（契约测试）
+- `docs/reference/api-conventions.md`（管理端同类约定）
 
 ## 0. 总则
 
 | 项 | 约定 |
 |---|---|
-| 传输 | HTTP/1.1，生产环境走 HTTPS |
-| 编码 | 请求/响应体统一 UTF-8 JSON；文件内容走 multipart 或原始字节流 |
-| 认证 | `Authorization: Bearer <token>`（`/enroll` 除外） |
-| 时间 | 全部 Unix 秒（UTC） |
-| 路径 | **只使用 POSIX 相对路径**，不接受反斜杠、绝对路径、`..` |
-| 命名 | JSON 字段用 `snake_case` |
-| 轮询 | 服务端用 `next_tick_seconds` 决定节奏，Agent **不得自行决定** |
+| 传输 | HTTP/1.1；生产环境 HTTPS |
+| 编码 | 请求 / 响应体 UTF-8 JSON；文件内容走 multipart 或原始字节流 |
+| 认证 | `Authorization: Bearer <token>`；`/enroll`、`/whoami`、`/install*` 不鉴权 |
+| 时间 | Unix 秒（UTC）；诊断回执的 `received_at` 为 ISO-8601 |
+| 路径 | POSIX 相对路径；拒绝反斜杠、绝对路径、`..` |
+| 命名 | JSON 字段 `snake_case` |
+| 未知字段 | 请求体多出字段 → `422 validation_error`（`extra="forbid"`） |
+| 轮询 | 节奏由服务端 `next_tick_seconds` 决定 |
+| 协议版本 | `protocol_version`，当前 = 最低要求 = `2`；只在破坏性变更时加一 |
+
+端点一览（前缀 `/api/v1/agent`）：
+
+| 方法 / 路径 | 鉴权 | 章节 |
+|---|---|---|
+| `POST /enroll` | 统一密钥（报文内） | 2 |
+| `POST /tick` | 任意有效凭据 | 3 |
+| `POST /files` | 能干活的凭据 | 4 |
+| `GET /assets/{asset_id}` | 能干活的凭据 | 5 |
+| `POST /events` | 任意有效凭据 | 6 |
+| `POST /diagnostics` | 任意有效凭据 | 6.1 |
+| `GET /releases/{release_id}` | 任意有效凭据 | 升级包下载；只给已铺开且未撤回的版本 |
+| `GET /me` | 能干活的凭据 | 自检：身份、场次、在线状态、`config` |
+| `GET /whoami?nonce=` | 无 | 9.1 |
+| `GET /install.json`、`/install/bundle`、`/install/installer`、`/install/bootstrap.sh` | 无 | 装机入口 |
+
+"任意有效凭据" = 未配对 / 无场次的机器也可调用；"能干活的凭据" = 已解析出场次与选手，否则 `403`。
 
 ### 0.1 错误响应
 
-**所有**错误响应都是同一个形状：
+所有错误响应同一形状：
 
 ```json
-{ "detail": "这句是给人看的中文", "code": "pairing_required", "details": { } }
+{ "detail": "给人看的中文", "code": "pairing_required", "details": { } }
 ```
 
-| 字段 | 说明 |
+| 字段 | 类型 | 必填 | 含义 |
+|---|---|---|---|
+| `detail` | string | 是 | 可直接显示的中文句子 |
+| `code` | string | 是 | 稳定短标识符；分支判断只用它，不比较 `detail` |
+| `details` | object | 否 | 结构化补充信息 |
+
+Agent 的分支（先看状态码，再看 `code`）：
+
+| 条件 | Agent 动作 |
 |---|---|
-| `detail` | **永远是字符串**，可以直接显示给教师/选手 |
-| `code` | 稳定的短标识符。要分支判断就用它，**不要拿 `detail` 做字符串比较** |
-| `details` | 结构化补充信息，可缺省 |
+| `429` | 按 `Retry-After` 退避，上限 300 秒 |
+| `code` ∈ `bootstrap_key_invalid` / `bootstrap_key_revoked` / `bootstrap_key_expired` | 记 `bootstrap_key_rejected` 事件，按最长间隔（300 秒）重试 |
+| `401`（`unauthorized` / `token_expired` / `machine_revoked`） | 清本地凭据，重新 `/enroll` |
+| `403`（`pairing_required` / `no_active_contest` / `ambiguous_contest` / `contest_missing` / `contest_player_missing`） | 不重新注册；更新状态，等下一轮 tick |
+| `409` | 静默丢弃 |
+| `413` | 跳过该文件 |
+| `426` / `agent_outdated` | 记日志，按协议错误退避；不重新注册 |
+| `5xx` | 指数退避（5 秒起，上限 300 秒） |
+| 其他 | 记日志，退避后下一轮 |
 
-Agent 只应对下面这几个 `code` 做分支，其余一律"记日志 + 等下一轮"：
-
-| `code` | Agent 的动作 |
-|---|---|
-| `unauthorized` / `token_expired` | 凭据坏了 → 清掉本地 token，重新走 `/enroll` |
-| `machine_revoked` | 这台机器已被作废 → 停止重试，等人处理 |
-| `pairing_required` | 还没配对 → **不要重新注册**，显示配对码，等下一轮 tick |
-| `no_active_contest` / `ambiguous_contest` / `contest_missing` / `contest_player_missing` | 配对好了但还干不了活 → 写「等待场次.txt」，等下一轮 tick |
-| `bootstrap_key_invalid` / `bootstrap_key_revoked` / `bootstrap_key_expired` | 镜像里的密钥不对 → 停止重试，写明确日志等人来修 |
-| `rate_limited` | 按 `Retry-After` 退避 |
-| `internal_error` | 指数退避 |
-
-其他 `code` 一律"记日志 + 等下一轮"。
-
-> **`pair_code_invalid` 不在这张表里，因为 Agent 收不到它。** 配对码是教师在管理
-> 界面里输的，所以"码不对/过期"是发给**浏览器**的响应。机器那侧只管把码显示在
-> 桌面上、等对方输对 —— 它甚至不知道有人正在试。
-
-> **分界线是状态码**：**401 才清凭据重新注册，403 一律只更新状态**。`code` 只用于把
-> "卡在哪一档"写进日志和事件；服务端将来新增 `code` 时，按状态码判的客户端不受影响。
+- 只有 `401` 清凭据重新注册；`403` 只更新状态。
+- `pair_code_invalid` 只发给管理端浏览器，Agent 收不到。
 
 ### 0.2 状态码语义（Agent 视角）
 
-| 状态码 | 含义 | Agent 应如何处理 |
-|---|---|---|
-| 400 | 请求不合法（路径、哈希格式） | 记日志，不重试；等下一轮 |
-| **401** | **凭据本身无效** | 清空本地凭据，重新 `/enroll` |
-| **403** | **凭据有效，但还没配对/无权访问** | **不要重新注册**。显示配对码，等下一轮 |
-| 404 | 资源不存在 | 记日志，不重试 |
-| 409 | 上传被拒：`stale_upload`（不是最近一次扫描到的那一版）、`upload_not_requested`（这个路径当前不在待上传列表里）、`contest_not_started` / `contest_ended`（时间窗之外） | **静默丢弃**，下一轮 tick 会说清现在要什么 |
-| 411 | 上传 / tick 没带 `Content-Length` | 不该发生（Agent 总带长度） |
-| 410 | 服务端资源内容缺失 | 上报审计事件 |
-| 413 | 文件超过策略上限；或请求体超过 `max_upload_request_bytes` / `max_tick_request_bytes`（按 `Content-Length` 在读请求体之前就挡） | 跳过该文件，不重试 |
-| **426** | `agent_outdated`：`enroll` / `tick` 的 `protocol_version` 低于服务端最低要求（缺省按 0 算）。旧 Agent 的报文即使字段对不上（本该 422）也先判成 426 | 记日志、按协议错误退避；**自己升级不了**（升级清单就在被拒的 tick 响应里），只能重装 |
-| 429 | 触发限速，带 `Retry-After` | 按 `Retry-After` 退避 |
-| 5xx | 服务端故障 | 指数退避重试 |
-
-> 401 与 403 的分工：把"还没配对"报成 401，客户端会以为凭据坏了去反复重新注册，
-> 把真正的原因盖掉；而每次重新注册都会换一个新配对码，教师刚在屏幕上读到的那个
-> 当场失效。
+| 状态码 | `code` | 含义 | Agent 处理 |
+|---|---|---|---|
+| 400 | `bad_request` | 路径 / 哈希格式不合法，或上传内容与声明的 `sha256` 不符 | 记日志，不重试；等下一轮 |
+| 401 | `unauthorized` / `machine_revoked` | 凭据无效 / 机器已作废 | 清空本地凭据，重新 `/enroll` |
+| 403 | 见 0.1 | 凭据有效，但未配对 / 无场次 / 资源未下发给本选手 | 不重新注册；等下一轮 |
+| 404 | `not_found` 等 | 资源不存在 | 记日志，不重试 |
+| 409 | `stale_upload` / `upload_not_requested` / `contest_not_started` / `contest_ended` / `machine_mismatch` | 上传被拒，或 `machine_id` 与凭据不符 | 静默丢弃；下一轮 tick 给出当前需要 |
+| 410 | `gone` | 服务端资源内容缺失 | 上报审计事件 |
+| 411 | `bad_request` | `/files` 或 `/tick` 未带 `Content-Length` | — |
+| 413 | `payload_too_large` | 文件超过策略上限；或请求体超过 `max_upload_request_bytes`（4 MiB）/ `max_tick_request_bytes`（8 MiB），按 `Content-Length` 在读体之前判定 | 跳过该文件，不重试 |
+| 416 | — | Range 不合法，带 `Content-Range: bytes */<size>` | 记日志，等下一轮 |
+| 422 | `validation_error` | 报文缺字段 / 超长 / 多字段 | 记日志 |
+| 426 | `agent_outdated` | `/enroll` / `/tick` 的 `protocol_version` 低于最低要求（缺省按 0）；优先于 422 判定；`details.protocol_version` = 上报值 | 只能重装 |
+| 429 | `rate_limited` | 限速，带 `Retry-After` | 按 `Retry-After` 退避 |
+| 5xx | `internal_error` / `unavailable` | 服务端故障 | 指数退避 |
 
 ---
 
@@ -80,59 +95,45 @@ Agent 只应对下面这几个 `code` 做分支，其余一律"记日志 + 等�
 
 ```
 装机（root 一次性）          机器首次开机              教师
-bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码输入──▶ 绑到名单里的**人**
+bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码输入──▶ 绑到名单里的人
 ```
 
-**配对是永久的，而且绑的是"人"，不是"某场比赛的选手"。**
-
-- 绑定的对象是 `roster_entry`（名单条目 = 一个人），不是 `player`（某场次的参赛者）
-- 同一个学生换一场比赛**不用重新配对**，只要新场次应用了那份名单
-- 配对码**只在绑定的那一刻用**。配对之后认机器一律靠 `machine_uuid`
+- 配对永久有效，绑定对象是 `roster_entry`（名单条目 = 人），不是 `player`（某场次的参赛者）。
+- 同一学生换场次不重新配对；新场次应用该名单即可。
+- 配对码只在绑定时使用；之后按 `machine_uuid` 认机器。
 
 ### 三个状态
 
-`claimed` 与 `bound` 是两个正交的布尔量，组合出三种状态；三种状态在客户端要做的
-事情不同：
-
-| `claimed` | `bound` | 含义 | Agent 该做什么 |
+| `claimed` | `bound` | 含义 | Agent 动作 |
 |---|---|---|---|
-| `false` | `false` | 还没配对到人 | 把 `pair_code` 写到桌面 `配对码.txt`，**不扫描**，安静等 tick |
-| `true` | `false` | 配对好了，但还没有含你的场次 | 写 `等待场次.txt`（内容 = `reason`），**不扫描**，等 tick |
-| `true` | `true` | 正常 | 扫代码、收下发 |
-
-第二档是"机器绑的是人"带来的必然结果：某个场次有没有这个人，取决于那份名单
-有没有被应用到场次里。所以**配对成功不等于马上能干活** —— 这个中间状态必须
-说得出来，否则客户端只能猜（猜错的后果是它去扫一个展开不出准考证号的目录）。
+| `false` | `false` | 未配对 | 把 `pair_code` 写到桌面配对码文件；不扫描；等 tick |
+| `true` | `false` | 已配对，无含本人的场次 | 写 `等待场次.txt`（内容 = `reason`）；不扫描；等 tick |
+| `true` | `true` | 正常 | 扫描代码、接收下发 |
 
 ### 机器身份的三个要素
 
 | 字段 | 来源 | 作用 |
 |---|---|---|
-| `machine_uuid` | Agent 首次运行生成并持久化 | **首选身份**。换凭据、重新注册都按它匹配 |
-| `machine_fingerprint` | SMBIOS UUID | 第二道依据。**整机快照还原后不变**，UUID 会一起消失 |
-| `machine_id` | `/etc/machine-id` | **仅供人工辨认**（列表里显示），不参与身份判定 |
+| `machine_uuid` | Agent 首次运行生成并持久化 | 首选身份；换凭据、重新注册按它匹配 |
+| `machine_fingerprint` | SMBIOS UUID | 第二依据；整机快照还原后不变 |
+| `machine_id` | `/etc/machine-id` | 仅供人工辨认，不参与身份判定 |
 
-> `machine_fingerprint` **读不到就省略，不要拿主机名或 machine-id 顶替** ——
-> 那样会在克隆镜像时整批相同，把"认回原机器"变成"认错机器"。
->
-> 克隆镜像时 `/etc/machine-id` 也常常整批相同，这正是它不当身份用的原因。
+- `machine_fingerprint` 读不到时省略；不用主机名或 machine-id 顶替。
 
-### 认机器的顺序（服务端逻辑）
+### 认机器的顺序（服务端）
 
-1. `machine_uuid` 能对上 → 就是它。配对之后的常态，一次索引命中
-2. UUID 新（快照还原把它抹了）但指纹对上一台**离线**的机器 → 认回它，记下新 UUID
-3. 都对不上 → 新机器，发一个六位配对码等教师绑人
+1. `machine_uuid` 命中 → 该机器。
+2. UUID 未命中，指纹命中一台离线机器 → 认回该机器，记录新 UUID。
+3. 指纹命中在线机器（事件 `enroll_conflict`）或多台机器（事件 `enroll_ambiguous`）→ 不自动认回，按新机器处理。
+4. 均未命中 → 新机器，发六位配对码。
 
-第 2 步的"离线"条件是**安全要求**：克隆镜像时母机多半还开着，一台新机器却报出
-同样的指纹。如果让它把身份拿走了，那个学生的成绩就会被另一台机器的代码污染，
-而且完全静默。所以原机器在线 / 指纹撞多台时都不自动认回，改走人工配对并留告警。
+"在线"阈值 = 运行参数 `offline_after_seconds`（默认 90）。
 
 ---
 
 ## 2. `POST /api/v1/agent/enroll`
 
-换长期凭据。**无需认证**（凭据本身就是认证），但**有限速**（按 IP 与全局两层）。
-这是**唯一**的注册路径 —— 每选手注册码已经被"机器永久绑定名单条目"取代。
+用统一密钥换长期凭据。不鉴权；限速：单 IP 10 次/秒、全局 50 次/秒。
 
 ### 请求
 
@@ -149,16 +150,35 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
 }
 ```
 
-`protocol_version` 是协议版本（`enroll` 与 `tick` 都带）：只在**破坏性**协议变更时加一，
-服务端 `syncoj_server/protocol.py` 与 Agent `client.PROTOCOL_VERSION` 各一份、契约测试对账。
-2 = 2026-11 那一代（`scanned_for`、下发按目标回执、`scan_complete` 必填）。
-
-`bootstrap_key` 必填。它从 **root 只读**的单独文件读（默认
-`/etc/syncoj/bootstrap.key`），**不要**写进选手账号可读的 `agent.ini`。
+| 字段 | 类型 | 必填 | 限制 / 含义 |
+|---|---|---|---|
+| `protocol_version` | int | 否 | 0–10000，缺省 0 |
+| `bootstrap_key` | string | 是 | 1–256 字符；从 root 只读文件读取（默认 `/etc/syncoj/bootstrap.key`） |
+| `machine_id` | string | 是 | 1–128 字符 |
+| `machine_uuid` | string | 否 | ≤64 |
+| `machine_fingerprint` | string | 否 | ≤128 |
+| `hostname` | string | 否 | ≤128 |
+| `agent_version` | string | 否 | ≤32 |
+| `os_info` | string | 否 | ≤200 |
 
 ### 响应 `200`：三态
 
-**未配对** —— 把码显示给人看：
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `token` | string | 长期凭据（32 字节随机数，约 43 字符） |
+| `agent_id` | int | 机器 id |
+| `claimed` | bool | 已绑定名单条目 |
+| `bound` | bool | 已解析出场次与选手 |
+| `pair_code` | string \| null | 未配对时的六位配对码 |
+| `reason` | string \| null | 未就绪原因 |
+| `player_no` | string | 默认 `""` |
+| `player_name` | string \| null | |
+| `contest_id` | int \| null | |
+| `contest_slug` | string | 默认 `""` |
+| `contest_name` | string | 默认 `""` |
+| `config` | object | 见第 7 节 |
+
+未配对：
 
 ```json
 {
@@ -172,22 +192,22 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
   "contest_id": null,
   "contest_slug": "",
   "contest_name": "",
-  "config": { "…见 §7…" }
+  "config": { "…": "见第 7 节" }
 }
 ```
 
-**已配对，但还没有含你的场次**：
+已配对，无场次：
 
 ```json
 {
   "token": "…", "agent_id": 7, "claimed": true, "bound": false,
   "pair_code": null,
   "reason": "还没有包含你的场次",
-  "config": { "…见 §7…" }
+  "config": { "…": "见第 7 节" }
 }
 ```
 
-**正常**：
+正常：
 
 ```json
 {
@@ -195,39 +215,34 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
   "pair_code": null,
   "player_no": "S001", "player_name": "张三",
   "contest_id": 1, "contest_slug": "mock-1", "contest_name": "校内模拟赛",
-  "config": { "…见 §7…" }
+  "config": { "…": "见第 7 节" }
 }
 ```
 
-> ⚠️ `claimed=false` **不是失败**。把它当成"注册失败"去反复重试，服务端每次都
-> 会换一个新配对码 —— 教师刚读到的那个立刻失效。这个 `token` 是**有效的**，
-> 只是还没有归属。客户端应当写下配对码，然后安静地按 tick 等着。
+### 规则
 
-### 语义
-
-- 密钥可重复使用、可吊销、可带过期时间。**已注册的机器不受吊销影响** ——
-  它们手里是各自的 token，不是这把密钥
-- 重新注册（UUID 认回或指纹认回）→ **换发新 token，旧 token 立即失效**。
-  这就是整机快照还原之后的自愈路径
-- 未配对的机器重新注册时**换一个新配对码**（教师手上那个可能早就过期了）
-- 配对码：**六位数字**，服务端只存哈希，有效期 30 分钟，**一次性**，
-  绑定成功即刻作废
+- `claimed=false` 时 `token` 有效；Agent 写配对码后按 tick 等待，不重新注册。
+- 统一密钥可重复使用、可吊销、可设过期时间；吊销不影响已注册机器。
+- 重新注册（UUID 或指纹认回）→ 换发新 token，旧 token 立即失效。
+- 未配对机器每次注册换新配对码。
+- 配对码：六位数字，与所有有效码不重复；服务端只存哈希；有效期 30 分钟；一次性，绑定后作废。
 
 ### 错误
 
 | 状态码 | `code` | 含义 |
 |---|---|---|
-| `404` | `bootstrap_key_invalid` | 统一密钥不存在（与"存在但被吊销"分开，现场排查时这个区别有用） |
-| `403` | `bootstrap_key_revoked` | 统一密钥已被吊销 |
+| `404` | `bootstrap_key_invalid` | 统一密钥不存在 |
+| `403` | `bootstrap_key_revoked` | 统一密钥已吊销 |
 | `403` | `bootstrap_key_expired` | 统一密钥已过期 |
-| `422` | `validation_error` | 报文体缺字段/字段过长 |
-| `429` | `rate_limited` | 触发限速，带 `Retry-After` |
+| `422` | `validation_error` | 报文缺字段 / 字段过长 |
+| `426` | `agent_outdated` | 协议版本过低 |
+| `429` | `rate_limited` | 限速，带 `Retry-After` |
 
 ---
 
 ## 3. `POST /api/v1/agent/tick`
 
-系统的核心接口。**幂等** —— 重复调用、补发、乱序都不会破坏状态。
+核心接口；幂等（重复、补发、乱序不破坏状态）。请求体上限 8 MiB。
 
 ### 请求
 
@@ -246,24 +261,46 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
   "deploy_progress": [ { "target_id": 42, "bytes_done": 3145728 } ],
   "deploy_done": [ { "target_id": 7, "sha256": "cd34…" } ],
   "deploy_failed": [ { "target_id": 9, "reason": "写盘失败: [Errno 28] No space left on device" } ],
+  "release_public_key": true,
   "scanned_for": { "player_no": "S001", "contest_slug": "mock-1" },
-  "stats": { "disk_free": 10737418240, "last_error": null, "queue": 0 }
+  "stats": { "disk_free": 10737418240, "last_error": null, "queue": 0, "scan_missing": [] }
 }
 ```
 
-| 字段 | 说明 |
-|---|---|
-| `scan` | **全量**文件索引，不含内容。路径 = `<扫描根目录名>/<相对路径>`，**NFC 归一化**（服务端按 NFC 存、按 NFC 回 `need_upload`；Agent 上传时按本地真实文件名打开）。文件名不是合法 UTF-8 的文件不进 `scan`，只在 `stats.last_error` 里说一声 |
-| `scan_complete` | **必填**。本次扫描是否完整覆盖了所有根目录。**为 `false` 时服务端跳过删除判定**。服务端因 `scan` 超过上限而截断时，按 `false` 处理（截掉的文件服务端没看见，不是被删了）。Agent 的 `max_files` 是**整台机器**的总数，不是每个根各一份 |
-| `deploy_progress` | 上一轮派下来的作业在本机分片里已有多少字节（**按下发目标** `target_id`）。只用于管理端的进度条 |
-| `deploy_done` | 已落地的下发目标，**连同落地内容的 sha256**。服务端只认与资产**当前**内容一致的回执：教师在线改了正文之后，迟到的旧版回执不会把新内容标成已完成。**显式上报**而不由服务端从"没有进度了"推断 —— "分片不见了"既可能是下完了，也可能是被清理了 |
-| `deploy_failed` | 本轮没下成的目标与原因（≤300 字）。连续失败 5 次服务端判 `failed`、不再派发，原因显示在管理端；内容变更、手工重试，或 `deploy_progress` 显示分片比上次长（断网续传有进展）都清零 |
-| *(时间窗)* | 场次设了开考 / 结束时间时，窗口 `[starts_at, ends_at)` 之外的 tick **不对账**：台账不动、`need_upload` 为空、按空闲节奏回 `next_tick_seconds`。机器照常在线、照常拿下发文件 |
-| `scanned_for` | 这一轮的扫描根是按**哪个身份**展开的（`{player_no}` / `{contest_slug}`）。与服务端此刻解析出的身份不同 = 机器刚被改派或换了场次，这份扫描是上一个人的目录：服务端**整份不对账**（不进台账、`need_upload` 为空，记一条 `scan_identity_mismatch`），响应照常带新身份；Agent 发现身份变了就重算扫描根、清掉哈希缓存，本轮不再上传下载。缺省按"一致"处理 |
-| `stats.queue` | 待上报审计事件数 |
+| 字段 | 类型 | 必填 | 限制 / 含义 |
+|---|---|---|---|
+| `protocol_version` | int | 否 | 0–10000，缺省 0 |
+| `agent_version` | string | 否 | ≤32 |
+| `machine_id` | string | 是 | 1–128；与凭据不符 → `409 machine_mismatch` |
+| `hostname` | string | 否 | ≤128；未配对 / 无场次时每次 tick 更新服务端记录的主机名 |
+| `ts` | int | 是 | ≥0 |
+| `scan_root` | string | 否 | ≤512 |
+| `scan` | array | 否 | 全量文件索引，不含内容；≤50000 条。元素：`path`（≤1024）、`sha256`（64 位十六进制）、`size`（≥0）、`mtime`（≥0） |
+| `scan_complete` | bool | 是 | 本轮是否完整覆盖全部扫描根；`false` → 服务端跳过删除判定 |
+| `deploy_progress` | array | 否 | ≤1000；`{target_id, bytes_done≥0}`：本机分片已有字节数，只用于进度条 |
+| `deploy_done` | array | 否 | ≤1000；`{target_id, sha256(64)}`：已落地目标及落地内容的 sha256 |
+| `deploy_failed` | array | 否 | ≤1000；`{target_id, reason(≤300)}`：本轮未下成的目标与原因 |
+| `release_public_key` | bool | 否 | 本机有无发布公钥（升级信任锚）；缺省 `false` |
+| `scanned_for` | object | 否 | 本轮扫描根按哪个身份展开：`player_no`（≤64）、`contest_slug`（≤128）；缺省按"一致" |
+| `stats.disk_free` | int | 否 | 字节 |
+| `stats.last_error` | string | 否 | ≤1024 |
+| `stats.queue` | int | 否 | 待上报审计事件数，默认 0 |
+| `stats.scan_missing` | array | 否 | 本机不存在的扫描根（绝对路径，最多 5 条） |
 
-> ⚠️ `scan` 必须是完整扫描。若 Agent 因权限错误等原因漏扫了一批文件，
-> **必须**置 `scan_complete=false`，否则服务端会把漏扫误判成"选手删除了文件"。
+#### `scan` 规则
+
+- 路径 = `<扫描根目录名>/<相对路径>`（受 `scan.prefix` 影响），NFC 归一化；服务端按 NFC 存、按 NFC 回 `need_upload`；Agent 上传时按本地真实文件名打开。
+- 文件名非合法 UTF-8 的文件不进 `scan`，只写入 `stats.last_error`。
+- 漏扫（权限错误等）必须置 `scan_complete=false`。
+- `max_files`（默认 5000）是整台机器的总数，不是每个根各一份。
+- 服务端截断超过 `max_files_per_scan`（默认 5000）的 `scan` 并按 `scan_complete=false` 处理，记事件 `scan_too_large`。
+
+#### 对账规则
+
+- `scanned_for` 与服务端当前身份不同 → 整份不对账：台账不动、`need_upload` 为空、记事件 `scan_identity_mismatch`；响应带新身份。Agent 发现身份变化后重算扫描根、清哈希缓存，本轮不上传不下载。
+- 场次设了时间窗时，`[starts_at, ends_at)` 之外的 tick 不对账：台账不动、`need_upload` 为空、按空闲节奏回 `next_tick_seconds`；下发与在线状态照常。
+- 服务端只认与资产当前内容一致的 `deploy_done`。
+- 连续 5 次 `deploy_failed` → 目标判 `failed`、不再派发，原因显示在管理端；内容变更、手工重试、`deploy_progress` 比上次长时计数清零。
 
 ### 响应 `200`
 
@@ -284,8 +321,9 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
     }
   ],
   "upgrade": null,
+  "uninstall_token": null,
   "diagnostics_request": false,
-  "config": { "…见 §7…" },
+  "config": { "…": "见第 7 节" },
   "claimed": true,
   "bound": true,
   "pair_code": null,
@@ -295,86 +333,66 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
 }
 ```
 
-**下发作业按下发目标（`target_id`）派发**，回执也按它报（同一资产可以发到同一个人
-的两个目录，按资产计的话一条回执会把两个都标完成）。作业**不带续传偏移**：续传位置
-只看 Agent 本地分片（`deploy_root/.syncoj-parts/<sha256>.part`，按内容命名，内容一换
-自然从头来）。服务端在收到 `deploy_done` 之前**每一轮都派发**，哪怕机器报的进度已经
-满长 —— 落盘前崩溃过一次的机器只有再收到作业才会完成最后一步。已取消的目标不再派发，
-下载接口也不再给。
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `server_time` | int | 服务端 Unix 秒 |
+| `next_tick_seconds` | int | 下次 tick 间隔 |
+| `need_upload` | string[] | 待上传路径，最多 500 条 |
+| `deploy_jobs` | array | 下发作业，字段见下表 |
+| `upgrade` | object \| null | 已铺开且未撤回的版本；服务端无签名私钥时为 `null` |
+| `uninstall_token` | string \| null | 一次性卸载授权令牌；仅当教师请求过卸载且本机报过 `release_public_key=true` |
+| `diagnostics_request` | bool | 教师请求过诊断包 |
+| `config` | object | 见第 7 节 |
+| `claimed` / `bound` / `pair_code` / `reason` | | 三态，见第 1 节 |
+| `player_no` / `contest_slug` | string \| null | 当前身份 |
 
-**`diagnostics_request` 是一次性字段**：管理端点过「要一份」之后，这个字段在
-**下一次**心跳里为 `true`，服务端在返回它的同时就把标记清掉 —— 机器没收到就让教师
-再点一次，服务端不重发。它与 `uninstall_token` 的"多轮原样重发"刻意不同：卸载授权
-要保证机器真的拿到那枚 root 凭据，而少收一份诊断包的代价只是"这次少看到一份现场"。
-正常 tick 与未配对机器的 tick（见下文）两条路径都会处理它。
+`deploy_jobs[]`：
 
-未配对 / 无场次的机器**也走这个接口**，响应形态相同但三态不同（见 §1），
-并且此时：
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `target_id` | int | 下发目标 id；进度与回执按它报 |
+| `asset_id` | int | 资产 id |
+| `url` | string | 下载地址 |
+| `sha256` | string | 内容哈希 |
+| `size` | int | 字节数 |
+| `dest` | string | 相对 `deploy_root` 的落地路径 |
+| `mode` | string | 默认 `overwrite` |
 
-- 请求里的 `scan` **一律被丢弃** —— 那台机器没有准考证号，相对路径没法归属到
-  任何人，收下来只会污染台账。客户端也因此应当在未配对上时干脆不扫描
-- 客户端此时应当报**空 `scan` 且 `scan_complete=false`**，而不是 `true`：空
-  `scan` + `true` 与"选手把所有文件都删了"在报文里无法区分，服务端只能靠"记得丢弃"
-  避免误判，而这一行在重构中最容易漏。报 `false` 让歧义在协议层不存在，代价是零。
-- `need_upload` 与 `deploy_jobs` 一律为空
-- `upgrade` **照常给**：装好后迟迟没配对的机器同样要能换上修好的版本。`upgrade`
-  只有 `version` / `url` / `sha256` / `signature` / `size` / `notes`；安装策略（密钥、
-  配置、升级模式）以**包内** `install_policy.json` 为准，不在清单里
-- `claimed=false` 时响应里**带上 `pair_code`**（每次 tick 都会确认它还有效；
-  过期就发一个新的，理由见 §1 —— 心跳是未配对机器唯一稳定的上行通道）
+`upgrade`：`version`、`url`（`/api/v1/agent/releases/{id}`）、`sha256`、`signature`、`size`（默认 0）、`notes`。安装策略以包内 `install_policy.json` 为准，不在清单里。
 
-> **每次 tick 都带同一个码，要求服务端在内存里保留明文。** 库里只存哈希，哈希推不回
-> 明文，所以明文要留到过期或配对为止（`services/paircodes.py`，随进程消失）。
->
-> 备选方案（Agent 记住上次收到的码、只在有变化时下发）会让"桌面上那个码是不是还有
-> 效"变成客户端状态问题：Agent 的状态目录被抹掉（快照还原的常态）之后它就说不出码
-> 是什么了。现在的规则是"每次 tick 都给你一个当前有效的码"，客户端只负责显示，不
-> 负责保管有效性。
->
-> 代价是明文在服务端内存里最多活 30 分钟 —— 与它同时活在选手桌面文件里是同一量级。
-> 它绝不落库、绝不落服务端磁盘；进程重启后缓存没了，下一次 tick 直接发一个新码，
-> 桌面上的文件随之更新，不需要人工介入。
+### 规则
 
-配对完成之后，服务端会在下一次 tick 里带上 `claimed=true` 与身份。
-客户端接住它就能转入正常扫描，**不需要**为此再 enroll 一次 —— 那是多一次可能
-失败的网络往返，还会多刷一条注册审计。
+- `next_tick_seconds`：本轮有 `need_upload`、`deploy_jobs` 或发现删除 → `tick_active_seconds`（默认 2，范围 1–60）；否则 `tick_idle_seconds`（默认 30，范围 5–3600）。两者与 `offline_after_seconds`（默认 90，范围 10–86400）在管理端「运行参数」修改，下一轮生效。
+- `need_upload` 由服务端决定，Agent 只执行。
+- 下发作业按 `target_id` 派发；作业不带续传偏移，续传位置只看本地分片 `deploy_root/.syncoj-parts/<sha256>.part`。
+- 收到 `deploy_done` 之前每轮都派发，即使进度已满长；已取消的目标不派发、不可下载。
+- `diagnostics_request=true` 只出现一次，服务端返回时即清标记，不重发。
+- `uninstall_token` 在多轮心跳里原样重发；教师再次请求换新令牌。
+- `dest` 中的 `{player_no}` 已由服务端展开。通用资料：`"题面.zip"`；按题附件：`"<准考证号>/<题目名>/<文件名>"`。
+- 下发资产一律按文件落地，不解压；密码以普通资产（如 `password.txt`）下发。
 
-> 未配对的机器调**除 tick 以外**的接口（上传、下载、事件）一律 `403`，而不是 401。
-> 401 会让客户端以为凭据坏了去反复重新注册，把真正的原因（还没配对）盖掉。
-> 403 的 `code` 会告诉你卡在哪一档（`pairing_required` / `no_active_contest` /
-> `ambiguous_contest` / `contest_missing` / `contest_player_missing`），
-> `detail` 是一句能直接显示的中文。
+### 未配对 / 无场次的机器
 
-**`next_tick_seconds` 由服务端决定**：有活干（`need_upload`/`deploy_jobs`/发现删除）
-时收紧到 `tick_active_seconds`（默认 2），否则放宽到 `tick_idle_seconds`（默认 30）。
-**这三个值（空闲心跳 / 有活心跳 / 离线判定）在管理端的「运行参数」里可改，不用重启** ——
-考试现场想收紧感知延迟，或者大规模机房想放宽负载，改一下即可。
+响应形状相同，此时：
 
-**`need_upload` 是服务端的判断，不是 Agent 的。** Agent 只执行，不自行决定传什么 ——
-"谁传过什么"必须只有一个权威来源。
-
-**`dest` 是相对于 Agent 的 `deploy_root` 的相对路径**（默认 `deploy_root` 就是桌面）。
-服务端下发前已经把 `{player_no}` 展开成该选手的准考证号 —— 客户端不知道也不可能
-知道"这次下发是给谁的"。所以：
-
-- 通用资料（题面、样例、须知）的 `dest` 就是文件名本身，例如 `"题面.zip"`、`"样例.zip"`
-- 按题分发的附件是 `"<准考证号>/<题目名>/<文件名>"`
-
-**下发资产一律是文件，不解压。** 题面与样例本身就是 zip，服务端只负责搬运字节，
-选手/评测机自己解压。密码不进系统：需要密码时，教师把它当普通资产一起下发
-（一个 `password.txt`），它会像别的文件一样落到桌面上。
+- 请求里的 `scan` 一律丢弃；Agent 发空 `scan` 且 `scan_complete=false`。
+- `need_upload`、`deploy_jobs` 为空；`next_tick_seconds` = `tick_idle_seconds`。
+- `upgrade`、`uninstall_token`、`diagnostics_request` 照常给。
+- `claimed=false` 时每次都带 `pair_code`：有效期内为同一个码；过期、缓存丢失或被解绑后发新码。明文只存于服务端内存（`services/paircodes.py`），不落库、不落盘。
+- 配对完成后下一次 tick 带 `claimed=true` 与身份；Agent 直接转入正常扫描，不再 enroll。
+- 调用 `/files`、`/assets` 返回 `403`，`code` 为 `pairing_required` / `no_active_contest` / `ambiguous_contest` / `contest_missing` / `contest_player_missing` 之一，`details` = `{agent_id, paired}`。
 
 ---
 
 ## 4. `POST /api/v1/agent/files`
 
-上传单个文件内容。`multipart/form-data`。
+上传单个文件内容。`multipart/form-data`。请求体上限 4 MiB（`max_upload_request_bytes`）；文件内容上限 `max_file_size`（默认 2 MiB）。
 
-| 字段 | 位置 | 说明 |
-|---|---|---|
-| `path` | form | POSIX 相对路径，须与 tick 中上报的一致，并且**此刻在台账的待上传列表里**（否则 409 `upload_not_requested`，内容一个字节都不落盘）。已存好的同一份内容重传是幂等成功，不加 `revision` |
-| `sha256` | form | **文件内容的** sha256（不是 tick 里那个的简单复制，见下） |
-| `file` | file | 文件内容 |
+| 字段 | 位置 | 必填 | 含义 |
+|---|---|---|---|
+| `path` | form | 是 | POSIX 相对路径，与 tick 上报一致，且此刻在待上传列表中 |
+| `sha256` | form | 是 | 文件内容的 sha256（上传前重新计算） |
+| `file` | file | 是 | 文件内容 |
 
 ### 响应 `200`
 
@@ -382,56 +400,51 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
 { "path": "code/main.cpp", "sha256": "ab12…", "revision": 1, "stored": true }
 ```
 
-### 旧版本保护（重要）
+### 旧版本保护
 
-服务端会比对 `sha256` 与台账中该文件**最近一次扫描到的**版本（`scanned_sha256`）：
+台账分别记"最近一次扫描到的"（`scanned_sha256`，tick 更新）与"已存下的"（`sha256`，上传成功更新）；两者不等时路径持续出现在 `need_upload`。
 
-- **一致** → 先落到 `source/`，再记成已存下，`revision += 1`
-- **不一致** → `409` + `code=stale_upload`，`details.reason = "stale"`，
-  `details.expected` = 最近一次扫描到的 sha256
+| 情况 | 结果 |
+|---|---|
+| 路径不在台账 | `409 upload_not_requested`，`details.reason="not_requested"`，不落盘 |
+| 场次时间窗之外 | `409 contest_not_started` / `contest_ended`，`details` = `{reason, starts_at, ends_at}`，不落盘 |
+| 与已存下的同一份内容 | `200`，幂等，`revision` 不变 |
+| `sha256` ≠ 最近一次扫描到的版本 | `409 stale_upload`，`details` = `{reason: "stale", expected: <最近一次扫描到的 sha256>}` |
+| 内容与声明的 `sha256` 不符 | `400` |
+| 一致 | 先落到 `source/`，再更新台账，`revision += 1` |
+| 落盘失败 | `500`，台账不动，下一轮仍要求上传 |
 
-台账分开记"最近一次扫描到的"与"已存下的"两个指纹：tick 只改前者，上传成功才改
-后者；两者不等就一直出现在 `need_upload` 里。所以**某一轮没传上的新版本，下一轮
-照样会被要求**（曾经只有一个指纹，tick 先改写它，那一轮没传上就再也不要了）。
-落盘失败（磁盘满、`source/` 里同名路径是个目录）时台账不动、返回 500，下一轮照样再要。
-
-这是断网补传 / 乱序重传场景下的正确性保证：**迟到的旧内容绝不能覆盖新版本**。
-Agent 收到 409 应当静默丢弃，下一轮 tick 自然会拿到真正需要的版本。
-
-> Agent 实现细节：上传前应当**重新计算**磁盘上文件的 sha256，而不是复用 tick
-> 时报的那个。若文件在 tick 与 upload 之间又变了，重算会让服务端返回 409
-> （干净地走"迟到版本"路径），而复用旧哈希会导致 400 "哈希不符"（脏的错误）。
->
-> Agent 也不应自行判断"这个文件变了，那我直接传新的" —— 服务端台账还是旧版本，
-> 直传新内容同样会得到 409。让它走 409 才是对的。
+- Agent 收到 `409` 静默丢弃。
+- Agent 只上传 `need_upload` 里的路径。
 
 ---
 
 ## 5. `GET /api/v1/agent/assets/{asset_id}`
 
-下载下发文件。**支持 HTTP Range**，用于断点续传。
+下载下发文件，支持 HTTP Range。
 
-| 请求头 | 说明 |
+| 请求头 | 含义 |
 |---|---|
-| `Range: bytes=<start>-` | 从指定偏移续传 |
+| `Range: bytes=<start>-` | 从指定偏移续传（也接受 `bytes=<start>-<end>`、`bytes=-<suffix>`） |
 
-| 响应 | 说明 |
+| 响应 | 含义 |
 |---|---|
-| `200` | 完整内容（未请求 Range，或服务端/代理不支持 Range） |
+| `200` | 完整内容（未带 Range，或代理剥离了 Range） |
 | `206` | 部分内容，带 `Content-Range` |
+| `403` | 资源未下发给本选手（或目标 / 任务已取消） |
+| `404` | 资源不存在或不属于本场次 |
+| `410` | 资源内容缺失 |
 | `416` | 范围不合法 |
+| `500` | 内容大小与台账不符 |
 
-**Agent 必须处理"请求了 Range 却收到 200"的情况** —— 代理剥离 `Range` 头很常见。
-此时必须丢弃本地分片从头下载，不能把完整内容追加到已有分片后面。
-
-**授权**：凭据只能下载**下发给本选手**的资源。仅 token 有效是不够的 ——
-否则任一选手可以拖走全场测试点。
+- 请求了 Range 却收到 `200` → 丢弃本地分片，从头写入。
+- 只能下载下发给本选手的资源。
 
 ---
 
 ## 6. `POST /api/v1/agent/events`
 
-批量上报审计事件。刻意用列表：断网期间事件会堆积，逐条上报会在重连瞬间产生请求风暴。
+批量上报审计事件。鉴权与 tick 相同；未配对时只记 `agent_id`，场次与选手留空。单次最多处理前 200 条。
 
 ```json
 [
@@ -440,62 +453,69 @@ Agent 收到 409 应当静默丢弃，下一轮 tick 自然会拿到真正需要
 ]
 ```
 
-> **未配对的机器也能发事件**（2026-11 起）：鉴权与 `/tick` 相同（任意有效凭据），未配对时
-> 只记 `agent_id`、场次与选手留空。未配对的机器同样会升级、会被远程卸载，"交给 root 管理
-> 单元失败"这类事件恰恰出在它们身上；以前这里是 `403`，事件永远积压。
+| 字段 | 类型 | 必填 | 限制 |
+|---|---|---|---|
+| `level` | string | 否 | ≤16，默认 `info` |
+| `category` | string | 是 | ≤32 |
+| `message` | string | 是 | ≤2000 |
+| `meta` | object | 否 | 序列化后截断到 8000 字符 |
 
-常见的 `category`：
+响应：`{"ok": true, "detail": "已记录 N 条"}`。
 
-| category | 触发条件 |
-|---|---|
-| `scan_error` | 扫描过程中出现错误 |
-| `scan_incomplete` | 扫描不完整，已跳过删除判定 |
-| `oversize_skipped` | 有文件超过大小上限被跳过 |
-| `deploy_failed` | 下发失败 |
-| `upload_rejected` | 服务端拒绝（通常因超限） |
-| `pairing_wait` | 已配对但没有可用场次（**客户端产生**，带上 `reason`） |
-| `file_deleted`（服务端产生） | 完整扫描中发现文件消失 |
-| `bulk_rewrite`（服务端产生） | 单轮内大量文件内容变化 |
-| `offline`（服务端产生） | 超时未 tick |
-| `enroll_conflict`（服务端产生） | 指纹撞上在线的机器，拒绝自动认回 |
-| `enroll_ambiguous`（服务端产生） | 多台机器共用同一指纹，无法自动认回 |
-| `bind`（服务端产生） | 机器被配对到某个名单条目 |
+常见 `category`：
+
+| category | 产生方 | 触发条件 |
+|---|---|---|
+| `scan_error` | Agent | 扫描出错 |
+| `oversize_skipped` | Agent | 文件超过大小上限被跳过 |
+| `deploy_failed` | Agent | 下发失败 |
+| `upload_rejected` | Agent | 上传被服务端拒绝 |
+| `pairing_wait` | Agent | 已配对但无可用场次，带 `reason` |
+| `bootstrap_key_rejected` | Agent | 统一密钥被拒 |
+| `upgrade_failed` / `upgrade_activate_failed` / `upgrade_rollback_failed` | Agent | 升级失败 / 激活失败 / 回滚失败 |
+| `uninstall_handoff` / `uninstall_failed` | Agent | 卸载交接 / 卸载失败 |
+| `scan_incomplete` | 服务端 | 扫描不完整，已跳过删除判定 |
+| `scan_rejected` | 服务端 | 扫描结果中有条目被拒 |
+| `scan_too_large` | 服务端 | `scan` 超过 `max_files_per_scan` 被截断 |
+| `scan_identity_mismatch` | 服务端 | `scanned_for` 与当前身份不符 |
+| `file_deleted` | 服务端 | 完整扫描中发现文件消失 |
+| `bulk_rewrite` | 服务端 | 单轮 ≥20 个文件内容变化 |
+| `offline` | 服务端 | 超时未 tick |
+| `enroll` | 服务端 | 注册 / 重新注册 |
+| `enroll_conflict` | 服务端 | 指纹撞上在线机器，拒绝自动认回 |
+| `enroll_ambiguous` | 服务端 | 多台机器共用同一指纹 |
+| `bind` | 服务端 | 机器被配对到名单条目 |
+
+- `scan_incomplete`、`scan_rejected` 只在状态变化时记录。
 
 ---
 
 ## 6.1 `POST /api/v1/agent/diagnostics`
 
-把一份 **gzip 压缩**的诊断包回传给服务端（Agent 定期 / 出错后 / 被点名时）。
+回传 gzip 压缩的诊断包（Agent 每 600 秒、连续 2 轮失败后、或收到 `diagnostics_request` 时）。
 
 ### 请求
 
 | 项 | 值 |
 |---|---|
-| 方法 / 路径 | `POST /api/v1/agent/diagnostics` |
-| 认证 | 与 tick 同一套 Bearer 凭据。**未配对的机器也收** —— 卡在配对阶段的机器，现场恰恰最有用 |
+| 认证 | 与 tick 相同（未配对机器可调用） |
 | `Content-Type` | `application/gzip` |
-| body | **原始 gzip 字节**（不是 multipart，也不是 JSON）。解压后是 `diagnostics.build_bundle(...)` 那份报文 |
+| body | 原始 gzip 字节；解压后为 `diagnostics.build_bundle(...)` 生成的 JSON 对象 |
 
 ### 上限
 
-| 项 | 上限 | 超了 |
+| 项 | 上限 | 超出 |
 |---|---|---|
-| 压缩后 | 256 KB | `413` + `code=payload_too_large` |
-| 解压后 | 1 MB | `413` + `code=payload_too_large` |
+| 压缩后 | 256 KB | `413 payload_too_large` |
+| 解压后 | 1 MB | `413 payload_too_large` |
 
-**两道上限都要有**：压缩比可以很大，只看压缩后大小等于没防 zip bomb。服务端用带上限的
-解压（`zlib.decompressobj(16 + zlib.MAX_WBITS)` 配 `max_length`），**不会**先把整个明文
-展开再判长度。
-
-解压出来必须是**合法 JSON、而且是对象**；**只校验"是对象"，不逐字段校验** —— Agent
-将来加字段不该被服务端拒绝。坏 gzip / 非 UTF-8 / 非 JSON / 不是对象一律
-`400` + `code=bad_request`。
+- 解压用带上限的流式解压（`zlib.decompressobj(16 + zlib.MAX_WBITS)` + `max_length`）。
+- 解压结果必须是 JSON 对象；不逐字段校验。坏 gzip / 非 UTF-8 / 非 JSON / 非对象 → `400 bad_request`。
 
 ### 限速
 
-**按机器 60 秒一份**。窗口内再来一次是 `429` + `Retry-After`（秒）。对 Agent 来说
-429 就是"这次没传成、不重试"，下一轮自然再来 —— 所以这里**不是** 400。
-换一台机器不受影响：窗口按 `agent_id` 而不是按 IP（考场机器共用出口 IP）。
+- 按 `agent_id` 每 60 秒一份；超出 → `429` + `Retry-After`（秒）。
+- Agent 对 `429` 不重试，下一周期再传。
 
 ### 响应 `200`
 
@@ -503,18 +523,20 @@ Agent 收到 409 应当静默丢弃，下一轮 tick 自然会拿到真正需要
 { "received_at": "2026-10-07T10:00:00Z", "bytes": 4096 }
 ```
 
-`bytes` 是**解压后 JSON 文本**的字节数，不是压缩后的大小。
+| 字段 | 含义 |
+|---|---|
+| `received_at` | 服务端接收时刻（ISO-8601，UTC） |
+| `bytes` | 解压后 JSON 文本字节数 |
 
 ### 存储
 
-服务端**每台机器只留最新一份**（同一个 `agent_id` 覆盖写入），存解压后的 JSON 文本。
-"解压炸弹"在上传那一刻就已经挡住，所以管理端读的时候不必再解压一次。
+- 每台机器只留最新一份（按 `agent_id` 覆盖），存解压后的 JSON 文本。
 
 ---
 
 ## 7. `config` 对象
 
-服务端权威下发，两边有各自的默认值（由契约测试保证一致）。
+服务端下发；Agent 内置等价默认值（契约测试对账）。
 
 ```json
 {
@@ -530,76 +552,79 @@ Agent 收到 409 应当静默丢弃，下一轮 tick 自然会拿到真正需要
 }
 ```
 
-Agent 合并时**逐键校验**：某一键不合法只回退该键，不整体退回默认值 ——
-否则服务端一个新字段的把关疏漏会让整个策略退化。
+| 字段 | 默认值 |
+|---|---|
+| `extensions` | `.c .cc .cpp .cxx .h .hpp .pas .pp .java .py .pyw .kt .cs .go .rs .js .ts` |
+| `exclude_dirs` | `.git .svn .hg .idea .vscode __pycache__ node_modules build dist cmake-build-debug cmake-build-release .cache target` |
+| `exclude_suffixes` | `.swp .swx .tmp .temp .bak .orig .rej .pyc .pyo ~` |
+| `max_file_size` | 服务端 `max_file_size`（默认 2097152） |
+| `scan_interval` | = `tick_idle_seconds` |
+| `max_files` | 服务端 `max_files_per_scan`（默认 5000） |
+| `policy_version` | `1` |
+| `tick_idle_seconds` / `tick_active_seconds` | 运行参数（默认 30 / 2） |
+
+- Agent 逐键校验合并：某键不合法只回退该键。
 
 ---
 
 ## 8. Agent 本地状态
 
-### 凭据文件
+### 文件
 
-`agent.ini`（默认 `/etc/syncoj/agent.ini`，0600，属主 = 运行 Agent 的账号）：
-
-| 键 | 说明 |
+| 文件 | 内容 |
 |---|---|
-| `server_url` | 服务端地址 |
-| `bootstrap_key_file` | 统一密钥路径，**root 只读**，默认 `/etc/syncoj/bootstrap.key` |
-| `state_dir` | 本地状态目录，默认 `/var/lib/syncoj`。token、machine_uuid、下载分片都在这里 |
-| `deploy_root` | 下发落盘根目录，默认 `{desktop}` |
-| `scan_roots` | 扫描根目录列表 |
-| `pairing_show_on_desktop` | 是否把配对码写到桌面，默认 `true` |
-| `pairing_file_name` | 配对码文件名，默认 `配对码.txt` |
+| `/etc/syncoj/agent.ini` | 配置，`0600`，属主 = 运行账号；逐键说明见 `docs/reference/config-keys.md` |
+| `/etc/syncoj/bootstrap.key` | 统一注册密钥，root 只读 |
+| `/etc/syncoj/machine_uuid` | 权威机器 UUID；读不到时退回 `<state_dir>/machine_uuid` |
+| `<state_dir>/credential.json` | token 与身份 |
+| `<state_dir>/hash_cache.json` | 哈希缓存 |
+| `<state_dir>/agent.log` | 日志（`log.file` 留空时） |
+| `<deploy_root>/.syncoj-parts/<sha256>.part` | 未完成的下载分片 |
 
-桌面上可能出现的两个提示文件（配对成功后都要删掉，留着会让下一场的人以为那是
-新的码）：
+桌面提示文件（写在 `deploy_root` 下，状态变为可干活后删除）：
 
-| 文件 | 什么时候出现 | 内容 |
+| 文件 | 出现条件 | 内容 |
 |---|---|---|
-| 配对码文件（`pairing_file_name`） | `claimed=false` | 六位配对码 |
-| `等待场次.txt`（**常量**，不可配） | `claimed=true, bound=false` | 服务端给的 `reason` 原话 |
+| 配对码文件（`pairing.file_name`，默认 `配对码.txt`） | `claimed=false` | 六位配对码 |
+| `等待场次.txt`（常量，不可配） | `claimed=true, bound=false` | 服务端 `reason` 原文 |
 
-第二个刻意不做成配置键：它是"机器已配对但还不能干活"的说明，名字必须能被教师
-一眼看懂是同一类东西，而没有第二个使用场景需要定制它。内容必须是**服务端给的
-原话**，不能由客户端兜底 —— 客户端编不出一句准确的"为什么还没有你的场次"。
-
-**不再有 `enroll_code`。** 它属于被取代的每选手注册码链路；`config.py` 里
-残留的 `enroll_code` 字段、`SYNCOJ_ENROLL_CODE` 环境变量映射、以及
-`config.example.ini` 里的注释**都要删掉**，否则运维会照着配置一个不存在的功能。
+- `pairing.show_on_desktop=false` 时两个文件都不写。
 
 ### 状态机
 
 ```
 启动
- ├─ state_dir 里没有 token ──────────────▶ enroll
+ ├─ 无 token ──────────────────▶ enroll
  └─ 有 token ──▶ tick
-                 ├─ 200 claimed=false        ──▶ 写配对码.txt，next_tick 秒后再 tick
+                 ├─ 200 claimed=false            ──▶ 写配对码文件，next_tick 秒后再 tick
                  ├─ 200 claimed=true bound=false ──▶ 写等待场次.txt，再 tick
                  ├─ 200 claimed=true bound=true  ──▶ 正常循环（扫描 + 上传 + 下发）
                  ├─ 401 ──▶ 清 token，回到 enroll
-                 └─ 403 pairing_required / no_active_contest
-                       ──▶ 只更新状态，按原节奏继续 tick
-                           （**不要 enroll**；提示文件和配对码由下一次 200 带回来）
+                 └─ 403 ──▶ 只更新状态，按原节奏继续 tick（不 enroll）
 ```
 
-配对码文件在**配对成功后必须删掉** —— 留在桌面上会让下一场的人以为那是新的码。
+### 命令行参数
 
-### `--provision` 与 `--check`
-
-- `--provision`：一次性装机动作（写 systemd unit、建状态目录、chown 凭据文件），
-  **不注册**
-- `--check`：只做本地自检（配置能不能解析、密钥文件读不读得到、桌面目录在不在），
-  **不联网**
+| 参数 | 行为 |
+|---|---|
+| `--check` | 只校验配置；不联网、不运行 |
+| `--once` | 只跑一轮后退出 |
+| `--dump-config` | 打印解析后的配置（JSON）后退出 |
+| `--provision` | 只注册，拿到凭据即退出（装机时 root 一次性单元调用） |
+| `--chown-to <用户>` | 配合 `--provision`：把凭据 / 身份文件交给该用户 |
+| `--pair-code` | 打印本机配对码（未配对时） |
+| `--config` / `-c` | 配置文件路径 |
+| `--verbose` / `-v` | 调试日志输出到 stderr |
+| `--version` | 打印版本 |
 
 ---
 
 ## 9. 局域网发现（UDP 广播）
 
-装 50 台机器时，"服务端地址"是唯一还得人手输的一项。主路径是**包内嵌地址**
-（见 §10），这一节是兜底：包没带地址、或者服务端换了 IP 时，机器喊一声。
+用于包内未带服务端地址或服务端换了 IP 的情况。
 
 ```
-机器 ──UDP 广播──▶ 255.255.255.255:45871  （以及各接口的子网广播地址）
+机器 ──UDP 广播──▶ 255.255.255.255:45871（及各接口的子网广播地址）
                   {"syncoj":"syncoj","v":1,"nonce":"<32 位十六进制>",
                    "machine_id":"...","pad":"<填充，凑到 640 字节>"}
 
@@ -608,77 +633,72 @@ Agent 合并时**逐键校验**：某一键不合法只回退该键，不整体�
                    "url":"http://10.0.0.5:8000","key_id":"...","sig":"<base64url>"}
 ```
 
-**签名对象是一段规范化文本，不是 JSON** —— 两边各自 `json.dumps` 出来的字节可能
-不一样（键序、空格、转义），而签名是逐字节比的：
+签名对象（规范化文本，非 JSON）：
 
 ```
 syncoj-discovery-v1\n<nonce>\n<url>
 ```
 
-版本前缀的作用是**跨协议隔离**：将来若有另一处也用这把私钥签东西，两边的签名对象
-不会长得一样，一个签名就不能被搬到另一个场景里用。
+### 规则
 
-### 规矩
-
-| 规矩 | 为什么 |
+| 规则 | 依据 |
 |---|---|
-| 应答必须能**验签**（发布公钥，与自更新同一把） | 机器找到服务端后立刻要发**统一注册密钥**过去。不验签就等于把它交给局域网里任何一个应答者 —— 而那个密钥是这间机房所有机器共享的，拿它做 HMAC 也挡不住 |
-| 机器上**没有公钥就不发现** | 分不出"服务端"和"随便一个应答者"时不猜。与"没有密钥就不升级"同一个默认 |
-| 每次探测现生成 `nonce`，对不上就不认 | 防重放：录下一条真应答原样发回来没用 |
-| **应答不得大于探测** | 这是个无状态反射点，伪造来源地址就能借它放大流量。探测靠 `pad` 凑到 640 字节；比这短的探测服务端一律不理，地址太长时宁可**不应答** |
-| 按来源 IP 限速 | 挡"一个来源反复刷" |
-| 多个**都验得过**的地址 = 歧义，不许猜 | 两个考场共用一层楼时很常见；猜错的表现是"代码交上去了但成绩是空的"，且现场看不出来 |
+| 应答必须用发布公钥验签（与自更新同一把） | 防止把统一注册密钥交给伪造应答者 |
+| 机器上没有发布公钥 → 不发现 | 同上 |
+| 每次探测新生成 `nonce`，不匹配不认 | 防重放 |
+| 探测 < 640 字节不应答；应答不得大于探测，地址过长时不应答 | 防反射放大 |
+| 按来源 IP 限速（默认 5 次/秒） | 防刷 |
+| 多个验签通过的地址 → 视为歧义，不选择 | 防连错考场 |
 
-### 机器这边的使用时机
+- 服务端端口：`SYNCOJ_DISCOVERY_PORT`（默认 45871）；最小探测长度：`SYNCOJ_DISCOVERY_MIN_PROBE`（默认 640）。
 
-- **装机时**（`install.py`）：优先级 `--server` > 包内 `server.json` > 发现 > 默认值。
-  落到默认值时会打一条显眼的警告 —— 它是 `127.0.0.1`，意味着机器去连自己
-- **运行时**：连续若干轮连不上服务端之后才问一次（约 5+10+20 秒），因为常见原因是
-  服务端重启或网线抖动，那些情况下地址并没有变，而广播会打扰整个局域网。
-  问到的新地址**只在这个进程内生效**，不写回 `agent.ini`
+### 机器侧使用时机
+
+- 装机（`install.py`）：`--server` > 包内 `server.json` > 发现 > 默认值 `127.0.0.1`（打印警告）。
+- 运行时：连续 3 轮网络失败（约 5 + 10 + 20 秒）后发现一次；新地址只在本进程内生效，不写回 `agent.ini`。
 
 ## 9.1 服务端主动通告（UDP 广播 + 挑战应答）
 
-方向与上一节相反：**服务端喊、机器听**。服务端启动后前 10 分钟每 30 秒、之后每 5 分钟，
-以及管理端「召集机器」时，往各广播地址的 UDP 45872 发：
+服务端启动后前 10 分钟每 30 秒、之后每 5 分钟，以及管理端「召集机器」时，向各广播地址的 UDP 45872 发送（≤512 字节）：
 
 ```
 {"syncoj":"syncoj","v":1,"kind":"announce","url":"http://10.0.0.5:8000",
  "key_id":"<发布公钥指纹>","boot_id":"<本次启动的随机数>"}
 ```
 
-**通告不签名**，机器只把它当线索。核实走 HTTP，**不带凭据**：
+通告不签名。机器经 HTTP 核实（不带凭据）：
 
 ```
 GET <url>/api/v1/agent/whoami?nonce=<32 位十六进制，机器现生成>
-→ 200 {"url":"<服务端自己认定的对外地址>","nonce":"<原样>","key_id":"...","sig":"<base64url>"}
+→ 200 {"url":"<服务端认定的对外地址>","nonce":"<原样>","key_id":"...","sig":"<base64url>"}
 签名对象：syncoj-announce-v1\n<nonce>\n<url>
 ```
 
-| 规矩 | 为什么 |
-|---|---|
-| 通告不签名、切换前必须挑战应答 | 单方面发出的报文没有机器给的随机数，签了也挡不住重放（录下真通告，等那个 IP 换了主人再放） |
-| 机器切换到**签名里**的地址，不是通告里的 | 有人把挑战请求转给真服务端，拿到的签名也只会把机器指回真服务端 |
-| `key_id` 不是本机信任锚的通告直接丢 | 隔壁考场的服务端 |
-| 同一 `boot_id` 只处理一次、每分钟最多认真处理一次 | 监听端口对局域网开放，输入一律不可信 |
-| `whoami` 按来源 IP 限速；没私钥 `503 no_signing_key`、不知道地址 `503 no_public_url` | 不鉴权、每次一个 RSA 签名 |
-| 机器自己去问（上一节）保留 | ufw 默认挡入站 UDP、交换机可能隔离广播、装机时等不到通告 |
+| 规则 |
+|---|
+| 切换前必须完成挑战应答 |
+| 机器切换到签名里的 `url`，不是通告里的 |
+| `key_id` 不是本机信任锚 → 丢弃通告 |
+| 同一 `boot_id` 只处理一次；每分钟最多处理一次 |
+| `whoami` 按来源 IP 限速（默认 5 次/秒，超出 `429`）；无私钥 → `503 no_signing_key`；不知道对外地址 → `503 no_public_url` |
+| 第 9 节的机器主动发现保留 |
 
-新地址与上一节一样**只在进程内生效**，不写回 `agent.ini`。服务端用 `SYNCOJ_ANNOUNCE=0`
-关掉、`SYNCOJ_ANNOUNCE_PORT` 改端口（改了要整间机房一起改）。
+- 新地址只在本进程内生效，不写回 `agent.ini`。
+- `SYNCOJ_ANNOUNCE=0` 关闭通告；`SYNCOJ_ANNOUNCE_PORT` 改端口（全机房同步修改）。
+- 设计 → 见 `docs/design/09-server-announce.md`。
 
 ---
 
-## 10. 服务端内部约定（Agent 无需关心，但影响目录布局）
+## 10. 服务端内部约定（影响目录布局）
 
 ```
 <data_root>/
 ├── syncoj.db
-├── blobs/<sha[:2]>/<sha>                              # 内容寻址，天然去重
-├── source/<contest_slug>/<player_no>/<前缀>/<路径>     # 评测器直接读取
+├── blobs/<sha[:2]>/<sha>                              # 内容寻址
+├── source/<contest_slug>/<player_no>/<前缀>/<路径>     # 评测器读取
 ├── judge_result/<contest_slug>/<player_no>/<题目>/     # 成绩回写扫描源
 └── logs/
 ```
 
-**`source/` 的路径就是 Agent 上报的路径原样**，包含扫描根目录名前缀。
-评测器（LemonLime / Arbiter）按这个结构配置即可，无需任何转换。
+- `source/` 下的路径 = Agent 上报路径原样（含扫描根目录名前缀）。
+- 评测器（LemonLime / Arbiter）按此结构配置，无需转换。

@@ -26,7 +26,7 @@
 | 名单 | 全局可复用的 `Roster`，场次**复制**一份进来（不是引用） | 见 [04-server.md §4.7](04-server.md)（[`ADR-0003`](../decisions/ADR-0003-delete-semantics.md)） |
 | 管理端 API | 统一列表信封 `{items,total,limit,offset}` + 统一错误体 `{detail,code,details}` | 见 [05-api-and-frontend.md §5.2](05-api-and-frontend.md) / `../reference/api-conventions.md` |
 | 前端 | 共享数据层（`useList`/`useMutation`）+ 通用页面外壳，页面只描述长相不描述取数 | 见 [05-api-and-frontend.md §5.3](05-api-and-frontend.md)（[`ADR-0001`](../decisions/ADR-0001-tech-stack-and-dependencies.md)） |
-| 删除语义 | 结构性数据硬删 + **输入名称确认**；产物性数据（代码/资产）软删留墓碑 | 见 [05-api-and-frontend.md §5.4](05-api-and-frontend.md)（[`ADR-0003`](../decisions/ADR-0003-delete-semantics.md)） |
+| 删除语义 | 结构性数据硬删 + **输入名称确认**；产物性数据（代码/资产）也硬删、blob 按引用回收；只有扫描对账的"已消失"留墓碑 | 见 [05-api-and-frontend.md §5.4](05-api-and-frontend.md)（[`ADR-0003`](../decisions/ADR-0003-delete-semantics.md)） |
 | 库结构演进 | `PRAGMA user_version` + 有序迁移；重建表需要一套已验证的安全配方 | 见 [04-server.md §4.8](04-server.md)（[`ADR-0003`](../decisions/ADR-0003-delete-semantics.md)） |
 | 选手代码目录 | **默认 `~/Desktop/<准考证号>`**（`{desktop}` 按运行账号的家目录展开），下发根默认 `~/Desktop` | 产品决定；见 [04-server.md §4.5](04-server.md)（[`ADR-0010`](../decisions/ADR-0010-run-user-owns-path-templates.md)） |
 | Agent 运行账号 | **默认 = 跑安装的那个账号**（显式 `--user` 才创建专用账号）；状态目录属主跟着它 | 代码与下发文件都在那个账号的桌面下，跨用户授权在现场容易装成"服务起来了但什么都不传"（[`ADR-0010`](../decisions/ADR-0010-run-user-owns-path-templates.md)） |

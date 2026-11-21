@@ -59,7 +59,7 @@
 | [`decisions/README.md`](decisions/README.md) | ADR 清单与写法 |
 | [`decisions/ADR-0001-tech-stack-and-dependencies.md`](decisions/ADR-0001-tech-stack-and-dependencies.md) | 技术栈与依赖：为什么是 Python 3.8 + 零依赖、INI 而不是 TOML |
 | [`decisions/ADR-0002-communication-and-identity.md`](decisions/ADR-0002-communication-and-identity.md) | 通信与身份：为什么轮询、机器怎么被认出来、配对为什么绑"人" |
-| [`decisions/ADR-0003-delete-semantics.md`](decisions/ADR-0003-delete-semantics.md) | 删除语义：结构性数据硬删、产物性数据留墓碑 |
+| [`decisions/ADR-0003-delete-semantics.md`](decisions/ADR-0003-delete-semantics.md) | 删除语义：结构性数据硬删 + 输名称确认；代码 / 资产也硬删（2026-11 修订） |
 | [`decisions/ADR-0004-ui-copy-and-notice.md`](decisions/ADR-0004-ui-copy-and-notice.md) | 界面文案口径与考场公告为什么用 `NOTICE.md` |
 | [`decisions/ADR-0005-public-port.md`](decisions/ADR-0005-public-port.md) | 公开端口：默认 80、白名单还是黑名单、为什么回 404 |
 | [`decisions/ADR-0006-delete-nothing-of-the-verifier.md`](decisions/ADR-0006-delete-nothing-of-the-verifier.md) | 验收不许拿自己人替代：信任锚取包里那一份、交叉验证 |

@@ -368,11 +368,11 @@ class ConfirmIn(_Base):
 
 
 class FileClearIn(ConfirmIn):
-    """清代码台账。
+    """清代码台账（硬删，见 ``docs/reference/api-conventions.md`` §5.3）。
 
-    ``purge=False``（默认）只打墓碑 —— 行还在、``?include_deleted=true`` 仍能
-    查到，导出里也仍然带着（见 ``docs/reference/api-conventions.md`` §5.2）。
-    ``purge=True`` 才连行一起删，只在"这些记录本来就是误传"时才该用。
+    ``purge=False``（默认）只删扫描对账标成"已消失"的行（``deleted_at`` 非空）。
+    ``purge=True`` 连还在的行一起删 —— 机器还在报的文件下一轮会重新收上来，
+    所以只在"归档完毕准备清场"或"这些记录本来就是误传"时才该用。
     """
 
     purge: bool = False

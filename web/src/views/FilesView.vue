@@ -203,7 +203,7 @@ async function askRemove(row: SourceFileOut): Promise<void> {
   try {
     await ElMessageBox.confirm(
       `把 ${row.player_no} 的 ${row.rel_path} 从台账里删掉？\n\n` +
-        '这是一条墓碑：勾上「含已删除」仍看得到；文件还在机器上，下一轮扫描会被重新收上来。',
+        '台账记录直接删掉，不留墓碑；文件还在机器上，下一轮扫描会被重新收上来。',
       '删除台账记录',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
     )

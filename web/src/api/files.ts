@@ -1,7 +1,7 @@
 /** 代码台账、查看与导出。 */
 
 import { download, downloadWithServerName, fetchText, query, request } from './client'
-import { listPage, softRemoveItem } from './crud'
+import { listPage, removeArtifact } from './crud'
 import type { ListParams } from './crud'
 import { paths } from './endpoints'
 import type { SimpleAck, SourceFileOut } from './types'
@@ -47,7 +47,7 @@ export const fileApi = {
     download(paths.fileContent(fileId), fallbackName),
 
   /** 硬删这一行（无人引用的内容一并删掉）；`include_deleted=true` 也看不到了。 */
-  remove: (fileId: number) => softRemoveItem(paths.file(fileId)),
+  remove: (fileId: number) => removeArtifact(paths.file(fileId)),
 
   /**
    * 清空台账。`confirm` 是**场次标识**。

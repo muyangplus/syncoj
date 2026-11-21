@@ -105,11 +105,10 @@ export async function removeItem(path: string, confirmName?: string): Promise<Si
 }
 
 /**
- * 产物性数据（代码、资产）的删除：不带 `confirm` 的 `DELETE`。
- *
- * 名字是历史遗留 —— 服务端是**硬删**，没有墓碑（见 ADR-0003 的 2026-11 修订）。
+ * 产物性数据（代码、资产）的删除：不带 `confirm` 的 `DELETE`。服务端是**硬删**，
+ * 没有墓碑（见 ADR-0003 的 2026-11 修订）。曾经叫 `softRemoveItem`，名字与事实相反。
  */
-export async function softRemoveItem(path: string): Promise<SimpleAck> {
+export async function removeArtifact(path: string): Promise<SimpleAck> {
   return request<SimpleAck>(path, { method: 'DELETE' })
 }
 

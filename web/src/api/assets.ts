@@ -1,7 +1,7 @@
 /** 下发用的资产。 */
 
 import { request } from './client'
-import { listPage, softRemoveItem } from './crud'
+import { listPage, removeArtifact } from './crud'
 import type { ListParams } from './crud'
 import { paths } from './endpoints'
 import type {
@@ -93,7 +93,7 @@ export const assetApi = {
     }),
 
   /** 硬删（下发任务级联删掉）。已经落到选手机器上的文件不会撤回。 */
-  remove: (assetId: number) => softRemoveItem(paths.asset(assetId)),
+  remove: (assetId: number) => removeArtifact(paths.asset(assetId)),
 
   /**
    * 这个 zip 现在有没有密码。

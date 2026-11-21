@@ -188,7 +188,8 @@ def apply_deploy_reports(
     * 完成：只认 ``sha256`` 与资产**当前**内容一致的回执。教师在线改了正文之后，
       迟到的旧版回执不能把新内容标成已完成（曾经按 asset_id、不看内容就标）。
     * 失败：记原因、连续失败计数 +1，到 :data:`MAX_CONSECUTIVE_FAILURES` 判 FAILED。
-    * 进度：只更新 ``bytes_done``（管理端的进度条），不改状态。
+    * 进度：更新 ``bytes_done``（管理端的进度条）；分片比上次记的长 = 有进展，
+      连续失败计数清零（先于失败处理，所以"断在更远处"的那次失败只记 1）。
     """
     ids = {int(getattr(r, "target_id")) for r in list(progress) + list(done) + list(failed)}
     if not ids:
@@ -211,7 +212,13 @@ def apply_deploy_reports(
     for item in progress:
         hit = rows.get(int(item.target_id))
         if hit is not None:
-            hit[0].bytes_done = min(int(item.bytes_done), int(hit[1].size))
+            target = hit[0]
+            reported = min(int(item.bytes_done), int(hit[1].size))
+            if reported > int(target.bytes_done or 0):
+                # 分片在长：断网续传是常态，不是"连续失败"。不清零的话，弱网下
+                # 大文件每轮断一次、5 轮后被判 FAILED，再也不派发。
+                target.failure_count = 0
+            target.bytes_done = reported
 
     for item in done:
         hit = rows.get(int(item.target_id))

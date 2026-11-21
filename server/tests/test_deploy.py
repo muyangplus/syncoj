@@ -485,6 +485,24 @@ def test_repeated_failures_mark_the_target_failed(client: TestClient, contest: d
     assert body["deploy_jobs"], "重试之后计数清零，一次失败不该又判 FAILED"
 
 
+def test_interrupted_but_progressing_download_is_never_failed(
+        client: TestClient, contest: dict, admin_headers: dict, enrolled: dict) -> None:
+    """弱网：每轮都断，但每轮分片都更长 —— 这不是"连续失败"，不能判 FAILED。"""
+    from syncoj_server.services.deploy import MAX_CONSECUTIVE_FAILURES
+
+    asset = upload_asset(client, contest, admin_headers, "big.zip", b"q" * 4096).json()
+    make_deploy(client, contest, admin_headers, asset["id"])
+    job = tick(client, enrolled["token"], [], machine_id=enrolled["machine_id"])["deploy_jobs"][0]
+
+    for round_no in range(1, MAX_CONSECUTIVE_FAILURES * 2):
+        body = tick(
+            client, enrolled["token"], [], machine_id=enrolled["machine_id"],
+            deploy_progress=[{"target_id": job["target_id"], "bytes_done": 300 * round_no}],
+            deploy_failed=[{"target_id": job["target_id"], "reason": "连接中断"}],
+        )
+    assert body["deploy_jobs"], "一直在进展的下载不该被判失败"
+
+
 def test_progress_is_written_back_for_the_admin(client: TestClient, contest: dict,
                                                 admin_headers: dict, enrolled: dict) -> None:
     data = b"z" * 2048

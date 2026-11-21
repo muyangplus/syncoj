@@ -90,6 +90,7 @@ export type DeployTaskOut = S['DeployTaskOut']
 export type DeployTargetOut = S['DeployTargetOut']
 
 export type ScoreMatrixOut = S['ScoreMatrixOut']
+export type PlayerProgressOut = S['PlayerProgressOut']
 export type ScoreRowOut = S['ScoreRowOut']
 export type ScoreCellOut = S['ScoreCellOut']
 export type ProblemColumnOut = S['ProblemColumnOut']

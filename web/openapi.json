@@ -2562,6 +2562,34 @@
         "title": "Page[PlayerOut]",
         "type": "object"
       },
+      "Page_PlayerProgressOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PlayerProgressOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "default": 50,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "title": "Page[PlayerProgressOut]",
+        "type": "object"
+      },
       "Page_ProblemOut_": {
         "properties": {
           "items": {
@@ -3098,6 +3126,46 @@
           "player_no"
         ],
         "title": "PlayerProfileOut",
+        "type": "object"
+      },
+      "PlayerProgressOut": {
+        "additionalProperties": false,
+        "description": "一位选手的交题进度（概览页巡场用）。\n\n只数**清单里登记过的题目**，口径与成绩矩阵一致：有评测记录算\"已出成绩\"，\n没有记录但收到了这道题的代码算\"待评测\"，两样都没有算\"未交\"。\n概览页每 5 秒刷一次，只要这几个数，不该为此拉整张成绩矩阵。",
+        "properties": {
+          "missing": {
+            "default": 0,
+            "title": "Missing",
+            "type": "integer"
+          },
+          "pending": {
+            "default": 0,
+            "title": "Pending",
+            "type": "integer"
+          },
+          "player_id": {
+            "title": "Player Id",
+            "type": "integer"
+          },
+          "player_no": {
+            "title": "Player No",
+            "type": "string"
+          },
+          "submitted": {
+            "default": 0,
+            "title": "Submitted",
+            "type": "integer"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "player_id",
+          "player_no"
+        ],
+        "title": "PlayerProgressOut",
         "type": "object"
       },
       "PlayerUpsert": {
@@ -7432,6 +7500,76 @@
           }
         },
         "summary": "Score Matrix",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/contests/{contest_id}/scores/progress": {
+      "get": {
+        "description": "每位选手交了几道、待评测几道、没交几道（只数登记过的题目）。\n\n概览页要的只是这几个数。排序与分页和选手列表一致（按考号），\n所以概览页拿同一组 ``limit/offset`` 取到的正好是同一页人；\n代码文件与评测记录也只查这一页，不扫全场。",
+        "operationId": "score_progress_api_v1_admin_contests__contest_id__scores_progress_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "每页条数",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "每页条数",
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "起始位置",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "起始位置",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_PlayerProgressOut_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Score Progress",
         "tags": [
           "admin"
         ]

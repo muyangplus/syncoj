@@ -160,6 +160,8 @@ export const paths = {
 
   // ---- 成绩 ----
   contestScores: (contestId: number) => `${ADMIN}/contests/${contestId}/scores`,
+  /** 每位选手的交题进度（概览页用，分页与选手列表一致）。 */
+  contestScoreProgress: (contestId: number) => `${ADMIN}/contests/${contestId}/scores/progress`,
   contestJudgeRuns: (contestId: number) => `${ADMIN}/contests/${contestId}/judge/runs`,
   contestJudgeRescan: (contestId: number) => `${ADMIN}/contests/${contestId}/judge/rescan`,
   contestJudgeScore: (contestId: number) => `${ADMIN}/contests/${contestId}/judge/score`,

@@ -111,6 +111,7 @@ from ..schemas import (
     PlayerClearIn,
     PlayerImportOut,
     PlayerOut,
+    PlayerProgressOut,
     PlayerUpsert,
     ProblemColumnOut,
     ProblemImportOut,
@@ -4991,6 +4992,93 @@ def score_matrix(
         unparsed=unparsed,
         complete=unparsed == 0,
     )
+
+
+@router.get("/contests/{contest_id}/scores/progress", response_model=Page[PlayerProgressOut])
+def score_progress(
+    contest_id: int,
+    page: PageParams = Depends(),
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> Page[PlayerProgressOut]:
+    """每位选手交了几道、待评测几道、没交几道（只数登记过的题目）。
+
+    概览页要的只是这几个数。排序与分页和选手列表一致（按考号），
+    所以概览页拿同一组 ``limit/offset`` 取到的正好是同一页人；
+    代码文件与评测记录也只查这一页，不扫全场。
+    """
+    with ctx.db.session() as session:
+        if session.get(Contest, contest_id) is None:
+            raise HTTPException(status_code=404, detail="场次不存在")
+        total_players = _count(session, Player, Player.contest_id == contest_id)
+        players = list(
+            session.execute(
+                select(Player)
+                .where(Player.contest_id == contest_id)
+                .order_by(Player.player_no)
+                .limit(page.limit)
+                .offset(page.offset)
+            ).scalars()
+        )
+        declared = list(
+            session.execute(
+                select(Problem)
+                .where(Problem.contest_id == contest_id)
+                .order_by(Problem.order_index, Problem.ident)
+            ).scalars()
+        )
+        idents = [row.ident for row in declared]
+        page_ids = [player.id for player in players]
+
+        judged = set()
+        submitted_pairs = set()
+        if page_ids and idents:
+            judged = set(
+                session.execute(
+                    select(JudgeRun.player_id, JudgeRun.problem).where(
+                        JudgeRun.contest_id == contest_id,
+                        JudgeRun.player_id.in_(page_ids),
+                        JudgeRun.problem.in_(idents),
+                    )
+                ).all()
+            )
+            rules = [
+                matching.ProblemRule(
+                    ident=row.ident,
+                    title=row.title,
+                    patterns=problem_rules.patterns_for(row, ctx.settings),
+                )
+                for row in declared
+            ]
+            # 与成绩矩阵同一口径：只看活着的文件
+            for player_id, rel_path in session.execute(
+                select(SourceFile.player_id, SourceFile.rel_path).where(
+                    SourceFile.player_id.in_(page_ids), SourceFile.deleted_at.is_(None)
+                )
+            ):
+                ident = matching.match_problem(rel_path, rules)
+                if ident is not None:
+                    submitted_pairs.add((player_id, ident))
+
+        items = []
+        for player in players:
+            done = sum(1 for ident in idents if (player.id, ident) in judged)
+            waiting = sum(
+                1
+                for ident in idents
+                if (player.id, ident) not in judged and (player.id, ident) in submitted_pairs
+            )
+            items.append(
+                PlayerProgressOut(
+                    player_id=player.id,
+                    player_no=player.player_no,
+                    submitted=done,
+                    pending=waiting,
+                    missing=len(idents) - done - waiting,
+                    total=len(idents),
+                )
+            )
+        return page_of(items, total_players, page)
 
 
 @router.get("/contests/{contest_id}/judge/runs", response_model=Page[JudgeRunOut])

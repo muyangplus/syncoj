@@ -4,10 +4,21 @@ import { query, request } from './client'
 import { clearCollection, listPage } from './crud'
 import type { ListParams } from './crud'
 import { paths } from './endpoints'
-import type { JudgeRunOut, JudgeScanOut, ManualScoreIn, ScoreMatrixOut, SimpleAck } from './types'
+import type {
+  JudgeRunOut,
+  JudgeScanOut,
+  ManualScoreIn,
+  PlayerProgressOut,
+  ScoreMatrixOut,
+  SimpleAck,
+} from './types'
 
 export const scoreApi = {
   matrix: (contestId: number) => request<ScoreMatrixOut>(paths.contestScores(contestId)),
+
+  /** 交题进度：只有几个计数，概览页轮询用它，不拉整张矩阵。 */
+  progress: (contestId: number, params: ListParams = {}, signal?: AbortSignal) =>
+    listPage<PlayerProgressOut>(paths.contestScoreProgress(contestId), params, signal),
 
   runs: (contestId: number, params: ListParams = {}, signal?: AbortSignal) =>
     listPage<JudgeRunOut>(paths.contestJudgeRuns(contestId), params, signal),

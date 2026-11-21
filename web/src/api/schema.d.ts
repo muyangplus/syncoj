@@ -959,6 +959,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/contests/{contest_id}/scores/progress": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Score Progress
+         * @description 每位选手交了几道、待评测几道、没交几道（只数登记过的题目）。
+         *
+         *     概览页要的只是这几个数。排序与分页和选手列表一致（按考号），
+         *     所以概览页拿同一组 ``limit/offset`` 取到的正好是同一页人；
+         *     代码文件与评测记录也只查这一页，不扫全场。
+         */
+        get: operations["score_progress_api_v1_admin_contests__contest_id__scores_progress_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/deploys/{task_id}": {
         parameters: {
             query?: never;
@@ -3393,6 +3417,26 @@ export interface components {
              */
             total: number;
         };
+        /** Page[PlayerProgressOut] */
+        Page_PlayerProgressOut_: {
+            /** Items */
+            items?: components["schemas"]["PlayerProgressOut"][];
+            /**
+             * Limit
+             * @default 50
+             */
+            limit: number;
+            /**
+             * Offset
+             * @default 0
+             */
+            offset: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        };
         /** Page[ProblemOut] */
         Page_ProblemOut_: {
             /** Items */
@@ -3669,6 +3713,40 @@ export interface components {
             player_no: string;
             /** Seat */
             seat?: string | null;
+        };
+        /**
+         * PlayerProgressOut
+         * @description 一位选手的交题进度（概览页巡场用）。
+         *
+         *     只数**清单里登记过的题目**，口径与成绩矩阵一致：有评测记录算"已出成绩"，
+         *     没有记录但收到了这道题的代码算"待评测"，两样都没有算"未交"。
+         *     概览页每 5 秒刷一次，只要这几个数，不该为此拉整张成绩矩阵。
+         */
+        PlayerProgressOut: {
+            /**
+             * Missing
+             * @default 0
+             */
+            missing: number;
+            /**
+             * Pending
+             * @default 0
+             */
+            pending: number;
+            /** Player Id */
+            player_id: number;
+            /** Player No */
+            player_no: string;
+            /**
+             * Submitted
+             * @default 0
+             */
+            submitted: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
         };
         /** PlayerUpsert */
         PlayerUpsert: {
@@ -5912,6 +5990,42 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ScoreMatrixOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    score_progress_api_v1_admin_contests__contest_id__scores_progress_get: {
+        parameters: {
+            query?: {
+                /** @description 每页条数 */
+                limit?: number;
+                /** @description 起始位置 */
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                contest_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_PlayerProgressOut_"];
                 };
             };
             /** @description Validation Error */

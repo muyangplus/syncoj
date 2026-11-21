@@ -1105,6 +1105,26 @@ class ScoreMatrixOut(_Base):
     complete: bool = True
 
 
+class PlayerProgressOut(_Base):
+    """一位选手的交题进度（概览页巡场用）。
+
+    只数**清单里登记过的题目**，口径与成绩矩阵一致：有评测记录算"已出成绩"，
+    没有记录但收到了这道题的代码算"待评测"，两样都没有算"未交"。
+    概览页每 5 秒刷一次，只要这几个数，不该为此拉整张成绩矩阵。
+    """
+
+    player_id: int
+    player_no: str
+    #: 有评测记录（含未解析、手工录入）的题数
+    submitted: int = 0
+    #: 交了代码、还没有评测记录的题数
+    pending: int = 0
+    #: 既没有代码也没有评测记录的题数
+    missing: int = 0
+    #: 清单里登记的题目数
+    total: int = 0
+
+
 class ManualScoreIn(_Base):
     """教师手工录入 / 修正成绩。
 

@@ -570,6 +570,7 @@ def scan_contest_results(
     # ---- 写入阶段：条件语句，手工成绩写不进去 ----
     not_manual = JudgeRun.__table__.c.parse_status != "manual"
     for player_id, problem, values, run_id in pending:
+        written = 0
         if run_id is not None:
             written = session.execute(
                 update(JudgeRun)
@@ -577,7 +578,9 @@ def scan_contest_results(
                 .values(**values)
                 .execution_options(synchronize_session=False)
             ).rowcount
-        else:
+        if not written:
+            # 没有旧行、或旧行在解析期间被删了 / 改成了手工：走 upsert。行没了就
+            # 插回去；行是手工的，ON CONFLICT 的 WHERE 挡住，written 仍为 0。
             row = dict(values, contest_id=contest.id, player_id=player_id, problem=problem,
                        scanned_at=values["updated_at"])
             row.setdefault("parse_status", "unparsed")

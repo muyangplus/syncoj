@@ -68,6 +68,7 @@ from ..models import (
 )
 from ..paths import PathValidationError, safe_join, slugify, validate_relpath
 from ..schemas import (
+    ProblemTestdataOut,
     AdminHealthOut,
     AnnounceStatusOut,
     GLOBAL_CONFIRM,
@@ -2543,6 +2544,8 @@ _BLOB_REFERENCES = (
     (SourceFile, SourceFile.sha256),
     (Asset, Asset.sha256),
     (AgentRelease, AgentRelease.sha256),
+    #: 自带评测的数据包（§12）
+    (Problem, Problem.testdata_sha256),
 )
 
 
@@ -2998,7 +3001,9 @@ def delete_contest(
             ).distinct()
         ).scalars()) + list(session.execute(
             select(Asset.sha256).where(Asset.contest_id == contest_id)
-        ).scalars())
+        ).scalars()) + [sha for sha in session.execute(
+            select(Problem.testdata_sha256).where(Problem.contest_id == contest_id)
+        ).scalars() if sha]
         session.delete(contest)
         session.add(
             EventLog(
@@ -4878,7 +4883,9 @@ def delete_problem(
             return SimpleAck(ok=True, detail="没有该题目")
         require_confirm(row.ident, confirm, "题目标识")
         ident = row.ident
+        testdata = row.testdata_sha256
         session.delete(row)
+    _reclaim_blobs(ctx, [testdata])
     return SimpleAck(ok=True, detail="已删除题目 %s（已有成绩记录保留）" % ident)
 
 
@@ -4914,6 +4921,7 @@ def clear_problems(
 
         rows = list(session.execute(stmt).scalars())
         removed = [row.ident for row in rows]
+        testdata = [row.testdata_sha256 for row in rows]
         for row in rows:
             session.delete(row)
 
@@ -4928,6 +4936,7 @@ def clear_problems(
                 )
             )
 
+    _reclaim_blobs(ctx, testdata)
     detail = "已删除 %d 道题的登记" % len(removed)
     if removed:
         detail += "（已有成绩记录保留，会以「未登记」显示在矩阵里）"
@@ -4945,6 +4954,30 @@ def _problem_out(row: Problem, settings: Settings) -> ProblemOut:
         # 把实际生效的模式一并给前端 —— 否则界面得自己推默认值，
         # 而默认值是可配置的（settings.default_file_pattern），前端推不出来
         file_patterns=problem_rules.patterns_for(row, settings),
+        judge_mode=row.judge_mode or "external",
+        time_limit_ms=row.time_limit_ms,
+        memory_limit_mb=row.memory_limit_mb,
+        io_mode=row.io_mode or "stdio",
+        compile_flags=row.compile_flags,
+        testdata=_testdata_out(row),
+    )
+
+
+def _testdata_out(row: Problem) -> Optional[ProblemTestdataOut]:
+    if not row.testdata_sha256:
+        return None
+    try:
+        info = json.loads(row.testdata_info or "{}")
+    except ValueError:
+        info = {}
+    return ProblemTestdataOut(
+        name=row.testdata_name or "",
+        size=int(row.testdata_size or 0),
+        sha256=row.testdata_sha256,
+        cases=int(info.get("cases") or 0),
+        subtasks=int(info.get("subtasks") or 0),
+        has_checker=bool(info.get("has_checker")),
+        total_score=int(info.get("total_score") or 0),
     )
 
 

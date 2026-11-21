@@ -150,7 +150,12 @@ MIGRATION_ADDED_COLUMNS = {
     #: 考场公告改成"下发一份 NOTICE.md 文件"之后它没有读者了，所以本轮由迁移 005
     #: 真的把它删掉 —— 它现在在 ``MIGRATION_DROPPED_COLUMNS`` 里。
     "contest": {"default_roster_id"},
-    "problem": {"file_patterns"},
+    #: file_patterns；以及自带评测的配置与数据包指纹（迁移 018，§12）
+    "problem": {
+        "file_patterns",
+        "judge_mode", "time_limit_ms", "memory_limit_mb", "io_mode", "compile_flags",
+        "testdata_sha256", "testdata_name", "testdata_size", "testdata_info",
+    },
     "player": set(),
     #: ``agent_status`` 不在这里：它是迁移 017 删掉的整张表（见 test_017_…）。
     #: ``bootstrap_key_id``：发布记录记住"这个包附带的是哪把统一注册密钥"（迁移 006）。

@@ -1,8 +1,13 @@
-## 12. 系统自带沙箱评测（提案，未实现）
+## 12. 系统自带沙箱评测
 
-> **状态**：设计，2026-11，未实现。现状是 SyncOJ **不触发评测**（`reference/judge-result.md`）：
-> 教师在 LemonLime / Arbiter 里点评测，SyncOJ 只扫描结果目录。本节设计一条**可选的**自带
-> 评测路径，与现有对接**并存**，不替掉它。
+> **状态**：已实现（2026-11），用法见 `reference/judge-result.md` 第 6 节，取舍见 ADR-0016。
+> 与外部评测器对接**并存**，按题选择。
+>
+> 与下文设计的出入：沙箱后端实现了 `isolate` 与 `rlimit` 两个，`systemd-run` 没做（它统计
+> 单次运行的 CPU 时间与峰值内存要绕一圈，而有 root 的机器装 isolate 更直接）；LemonLime
+> 工程文件导入没做（数据包直接用它的数据目录打 zip 即可）；`rlimit` 后端经一层小 shim 取
+> 选手程序自己的 rusage（Linux 的 `ru_maxrss` 跨 exec 保留，直接从 worker fork 会把 worker
+> 的内存算到选手头上）。
 
 ### 12.1 目标与边界
 

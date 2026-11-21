@@ -22,6 +22,8 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __version__, errors
 from .api import admin as admin_api
+from .api import admin_judge as admin_judge_api
+from .api import judge as judge_api
 from .api import agent as agent_api
 from .api import meta as meta_api
 from .api import player as player_api
@@ -86,6 +88,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # 而它们都要按同一个钟点显示时间。
     app.include_router(meta_api.router)
     app.include_router(admin_api.router)
+    app.include_router(admin_judge_api.router)
+    app.include_router(judge_api.router)
 
     _install_public_port_gate(app)
     _install_agent_body_limits(app)
@@ -181,6 +185,8 @@ def _is_loopback_host(host: str) -> bool:
 #: 接口，放在考生随手就能打开的地址上没有意义，只是白送一张接口地图。
 _PUBLIC_PORT_HIDDEN = (
     "/api/v1/admin",
+    # 评测机只连管理端口（§12）；公开端口是考生网段随手能打开的地址
+    "/api/v1/judge",
     "/docs",
     "/redoc",
     "/openapi.json",

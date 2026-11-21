@@ -9,7 +9,7 @@ OpenAPI 生成；Agent 侧因为必须零依赖（不能 import pydantic），�
 
 from __future__ import annotations
 
-from typing import Any, Dict, Generic, List, Optional, TypeVar
+from typing import Any, Dict, Generic, List, Literal, Optional, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -784,6 +784,18 @@ class ProblemUpsert(_Base):
     file_patterns: List[str] = Field(default_factory=list)
 
 
+class ProblemTestdataOut(_Base):
+    """题目的数据包（§12）：上传时校验出的摘要。"""
+
+    name: str
+    size: int
+    sha256: str
+    cases: int
+    subtasks: int = 0
+    has_checker: bool = False
+    total_score: int = 0
+
+
 class ProblemOut(_Base):
     id: int
     contest_id: int
@@ -793,6 +805,109 @@ class ProblemOut(_Base):
     note: Optional[str] = None
     #: 实际生效的模式（服务端把默认值补上，前端不用自己推）
     file_patterns: List[str] = Field(default_factory=list)
+    #: external = 外部评测器写 judge_result/；builtin = 自带评测（§12）
+    judge_mode: str = "external"
+    #: 空 = 用默认值（1000 ms / 256 MB）
+    time_limit_ms: Optional[int] = None
+    memory_limit_mb: Optional[int] = None
+    io_mode: str = "stdio"
+    compile_flags: Optional[str] = None
+    testdata: Optional[ProblemTestdataOut] = None
+
+
+class ProblemJudgeIn(_Base):
+    """题目的自带评测配置（§12）。``compile_flags`` 只接受白名单里的几类参数（服务端校验）。"""
+
+    judge_mode: Literal["external", "builtin"] = "external"
+    time_limit_ms: Optional[int] = Field(default=None, ge=100, le=60000)
+    memory_limit_mb: Optional[int] = Field(default=None, ge=16, le=4096)
+    io_mode: Literal["stdio", "file"] = "stdio"
+    compile_flags: Optional[str] = Field(default=None, max_length=200)
+
+
+class BuiltinJudgeIn(_Base):
+    """排自带评测任务。都不填 = 全场所有用自带评测的题 × 所有选手。"""
+
+    problem: Optional[str] = Field(default=None, max_length=64)
+    player_id: Optional[int] = None
+    #: 场次还在进行时也评（评的是考到一半的代码）
+    force: bool = False
+
+
+class BuiltinJudgeQueuedOut(_Base):
+    queued: int
+    problems: List[str] = Field(default_factory=list)
+
+
+class BuiltinJudgeFailureOut(_Base):
+    player_no: str
+    problem: str
+    error: str
+
+
+class BuiltinJudgeProgressOut(_Base):
+    total: int = 0
+    queued: int = 0
+    running: int = 0
+    done: int = 0
+    failed: int = 0
+    failures: List[BuiltinJudgeFailureOut] = Field(default_factory=list)
+
+
+class JudgeWorkerIn(_Base):
+    name: str = Field(min_length=1, max_length=64)
+
+
+class JudgeWorkerOut(_Base):
+    id: int
+    name: str
+    created_at: str
+    last_seen_at: Optional[str] = None
+    last_seen_ip: Optional[str] = None
+
+
+class JudgeWorkerCreatedOut(JudgeWorkerOut):
+    #: 明文令牌，**只在这一刻返回一次**；库里只存哈希
+    token: str
+
+
+class JudgeProblemConfigOut(_Base):
+    ident: str
+    time_limit_ms: int
+    memory_limit_mb: int
+    io_mode: str
+    compile_flags: Optional[str] = None
+
+
+class JudgeBlobRefOut(_Base):
+    sha256: str
+    path: Optional[str] = None
+    name: Optional[str] = None
+
+
+class JudgeLeaseOut(_Base):
+    """评测机领到的任务。两份内容（代码、数据包）用各自的 sha256 去取。"""
+
+    id: int
+    contest_slug: str
+    player_no: str
+    problem: JudgeProblemConfigOut
+    source: JudgeBlobRefOut
+    testdata: JudgeBlobRefOut
+    attempt: int
+
+
+class JudgeResultIn(_Base):
+    """评测机交回的结果：``score`` / ``max_score`` / ``status`` 进成绩矩阵，其余原样进 ``raw_json``。"""
+
+    score: int = Field(ge=0, le=1000000)
+    max_score: int = Field(ge=0, le=1000000)
+    status: str = Field(min_length=1, max_length=16)
+    detail: Dict[str, Any] = Field(default_factory=dict)
+
+
+class JudgeFailIn(_Base):
+    message: str = Field(default="", max_length=2000)
 
 
 class ProblemImportOut(_Base):

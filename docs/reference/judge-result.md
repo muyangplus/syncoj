@@ -1,7 +1,11 @@
 # 评测器对接：成绩怎么进 SyncOJ
 
-> SyncOJ **不触发评测**。开考、点评测仍然由教师在自己的 LemonLime / Arbiter
-> 界面里操作。SyncOJ 只做一件事：把评测器写出来的成绩收拢成一张表。
+> 两条路，可以在同一场里按题混用：
+>
+> * **外部评测器**（默认）：教师在自己的 LemonLime / Arbiter 界面里点评测，SyncOJ 只把
+>   评测器写出来的成绩收拢成一张表（第 1–5 节）。
+> * **自带评测**（§12，第 6 节）：题目设成"自带评测"、传一个数据包，SyncOJ 的评测机编译
+>   运行比对，结果写进**同一个目录**、走**同一套**扫描。
 >
 > 不接管触发评测的理由：LemonLime 和 Arbiter 都是 Qt GUI 程序，无头调用方式不稳定、
 > 随版本变化，硬接会把 SyncOJ 的可靠性绑死在别人的界面实现上。
@@ -192,3 +196,72 @@ curl -H "Authorization: Bearer <管理员令牌>" \
   "complete": false
 }
 ```
+
+## 6. 自带评测（§12）
+
+### 题目怎么配
+
+题目清单里「评测设置」：评测方式选"自带评测"，填时限（默认 1000 ms）、内存（默认 256 MB）、
+输入输出方式（标准 IO，或 NOI 惯例的文件 IO：读 `<题目>.in`、写 `<题目>.out`）、可选的编译参数
+（只收 `-std=` / `-O` / `-D` / `-W` / `-f…` / `-g` / `-static` / `-m…`），再上传数据包。
+
+### 数据包
+
+一个 zip，结构与 LemonLime 的数据目录一致，**上传时就校验**：
+
+```
+1.in  1.ans          # 答案也可以叫 .out；可以放在一层子目录里
+2.in  2.ans
+config.json          # 可选
+checker.cpp          # 可选：special judge（testlib 风格），testlib.h 放同一目录
+```
+
+`config.json`（全部可选）：`{"cases": [{"name": "1", "score": 10}, …], "subtasks": [{"score": 40, "cases": ["1", "2"]}, …]}`。
+没写分值时总分 100 按测试点平均分；子任务里**全部** AC 才得这个子任务的分。
+
+### 评测机
+
+评测**不在服务端进程里跑**。成绩页「自带评测」→「添加评测机」签发一个令牌（只显示一次），
+然后在评测机上以**专用账号**运行：
+
+```bash
+syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
+```
+
+* `--backend isolate`（推荐）：需要先装好 [isolate](https://github.com/ioi/isolate)；同一台机器上
+  跑多个 worker 时用 `--box-id` 区分，有 cgroup 时加 `--cgroups` 让内存统计更准。
+* `--backend rlimit`：只用 `setrlimit`，**不隔离网络与文件系统**，只给开发自测；以 root 运行时
+  必须 `--run-as <普通账号>`。结果里 `isolated: false`。
+* 评测机令牌只能领任务、取**这个任务**的代码与数据包、交结果，碰不到别的选手的代码。
+
+### 怎么评、结果长什么样
+
+编译 `g++ -O2 -std=c++14 -lm`（C 用 `gcc -O2 -std=c99`），每个测试点前清空工作目录；
+默认逐行比较、忽略行末空白与文末空行；判 TLE 看 CPU 时间。写出的 `result.json`：
+
+```json
+{"score": 70, "max_score": 100, "status": "WA", "judge": "syncoj-builtin", "isolated": true,
+ "language": "cpp", "compile_message": "", "source_path": "ab/ab.cpp",
+ "cases": [{"name": "1", "status": "AC", "score": 10, "time_ms": 3, "memory_kb": 1540, "message": ""}, …],
+ "subtasks": [{"index": 1, "score": 0, "max_score": 40, "cases": ["2", "3"]}]}
+```
+
+状态：AC / WA / TLE / MLE / RE / OLE / CE；评测机自己的问题（沙箱起不来、checker 编不过）不写
+成绩，任务退回队列，三次都失败记失败并在进度里显示原因。
+
+* **选哪份代码**：只看还在机器上、内容已存下的文件，按题目的代码路径归题；多份候选时优先文件名
+  与题目同名的，还分不出来就记失败（不猜）。没交的选手不写结果，矩阵照旧显示"未交"。
+* **考试进行中**点评测会先确认：那时评的是考到一半的代码。
+* **重测**就是再点一次：旧任务被替换，结果覆盖旧的 `result.json`。手工录入的成绩照旧不被覆盖。
+
+### 评测机接口
+
+都带 `Authorization: Bearer <评测机令牌>`：
+
+| 接口 | 说明 |
+|---|---|
+| `POST /api/v1/judge/lease` | 领任务（租约 15 分钟，过期自动回到队列）；没有任务 `204` |
+| `GET /api/v1/judge/tasks/{id}/blobs/{sha256}` | 取这个任务的代码或数据包 |
+| `POST /api/v1/judge/tasks/{id}/result` | `{score, max_score, status, detail}`，写 `result.json` |
+| `POST /api/v1/judge/tasks/{id}/fail` | `{message}`，退回队列 |
+

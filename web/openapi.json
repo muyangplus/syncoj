@@ -807,6 +807,20 @@
         "title": "Body_upload_release_api_v1_admin_releases_post",
         "type": "object"
       },
+      "Body_upload_testdata_api_v1_admin_problems__problem_id__testdata_post": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_testdata_api_v1_admin_problems__problem_id__testdata_post",
+        "type": "object"
+      },
       "BootstrapKeyIssueIn": {
         "additionalProperties": false,
         "properties": {
@@ -1013,6 +1027,126 @@
           "created_at"
         ],
         "title": "BootstrapKeyOut",
+        "type": "object"
+      },
+      "BuiltinJudgeFailureOut": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "title": "Error",
+            "type": "string"
+          },
+          "player_no": {
+            "title": "Player No",
+            "type": "string"
+          },
+          "problem": {
+            "title": "Problem",
+            "type": "string"
+          }
+        },
+        "required": [
+          "player_no",
+          "problem",
+          "error"
+        ],
+        "title": "BuiltinJudgeFailureOut",
+        "type": "object"
+      },
+      "BuiltinJudgeIn": {
+        "additionalProperties": false,
+        "description": "排自带评测任务。都不填 = 全场所有用自带评测的题 × 所有选手。",
+        "properties": {
+          "force": {
+            "default": false,
+            "title": "Force",
+            "type": "boolean"
+          },
+          "player_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Player Id"
+          },
+          "problem": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Problem"
+          }
+        },
+        "title": "BuiltinJudgeIn",
+        "type": "object"
+      },
+      "BuiltinJudgeProgressOut": {
+        "additionalProperties": false,
+        "properties": {
+          "done": {
+            "default": 0,
+            "title": "Done",
+            "type": "integer"
+          },
+          "failed": {
+            "default": 0,
+            "title": "Failed",
+            "type": "integer"
+          },
+          "failures": {
+            "items": {
+              "$ref": "#/components/schemas/BuiltinJudgeFailureOut"
+            },
+            "title": "Failures",
+            "type": "array"
+          },
+          "queued": {
+            "default": 0,
+            "title": "Queued",
+            "type": "integer"
+          },
+          "running": {
+            "default": 0,
+            "title": "Running",
+            "type": "integer"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "title": "BuiltinJudgeProgressOut",
+        "type": "object"
+      },
+      "BuiltinJudgeQueuedOut": {
+        "additionalProperties": false,
+        "properties": {
+          "problems": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Problems",
+            "type": "array"
+          },
+          "queued": {
+            "title": "Queued",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "queued"
+        ],
+        "title": "BuiltinJudgeQueuedOut",
         "type": "object"
       },
       "CloneAlertOut": {
@@ -2051,6 +2185,173 @@
         "title": "InstallLedgerOut",
         "type": "object"
       },
+      "JudgeBlobRefOut": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sha256"
+        ],
+        "title": "JudgeBlobRefOut",
+        "type": "object"
+      },
+      "JudgeFailIn": {
+        "additionalProperties": false,
+        "properties": {
+          "message": {
+            "default": "",
+            "maxLength": 2000,
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "title": "JudgeFailIn",
+        "type": "object"
+      },
+      "JudgeLeaseOut": {
+        "additionalProperties": false,
+        "description": "评测机领到的任务。两份内容（代码、数据包）用各自的 sha256 去取。",
+        "properties": {
+          "attempt": {
+            "title": "Attempt",
+            "type": "integer"
+          },
+          "contest_slug": {
+            "title": "Contest Slug",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "player_no": {
+            "title": "Player No",
+            "type": "string"
+          },
+          "problem": {
+            "$ref": "#/components/schemas/JudgeProblemConfigOut"
+          },
+          "source": {
+            "$ref": "#/components/schemas/JudgeBlobRefOut"
+          },
+          "testdata": {
+            "$ref": "#/components/schemas/JudgeBlobRefOut"
+          }
+        },
+        "required": [
+          "id",
+          "contest_slug",
+          "player_no",
+          "problem",
+          "source",
+          "testdata",
+          "attempt"
+        ],
+        "title": "JudgeLeaseOut",
+        "type": "object"
+      },
+      "JudgeProblemConfigOut": {
+        "additionalProperties": false,
+        "properties": {
+          "compile_flags": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Compile Flags"
+          },
+          "ident": {
+            "title": "Ident",
+            "type": "string"
+          },
+          "io_mode": {
+            "title": "Io Mode",
+            "type": "string"
+          },
+          "memory_limit_mb": {
+            "title": "Memory Limit Mb",
+            "type": "integer"
+          },
+          "time_limit_ms": {
+            "title": "Time Limit Ms",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "ident",
+          "time_limit_ms",
+          "memory_limit_mb",
+          "io_mode"
+        ],
+        "title": "JudgeProblemConfigOut",
+        "type": "object"
+      },
+      "JudgeResultIn": {
+        "additionalProperties": false,
+        "description": "评测机交回的结果：``score`` / ``max_score`` / ``status`` 进成绩矩阵，其余原样进 ``raw_json``。",
+        "properties": {
+          "detail": {
+            "additionalProperties": true,
+            "title": "Detail",
+            "type": "object"
+          },
+          "max_score": {
+            "maximum": 1000000.0,
+            "minimum": 0.0,
+            "title": "Max Score",
+            "type": "integer"
+          },
+          "score": {
+            "maximum": 1000000.0,
+            "minimum": 0.0,
+            "title": "Score",
+            "type": "integer"
+          },
+          "status": {
+            "maxLength": 16,
+            "minLength": 1,
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "score",
+          "max_score",
+          "status"
+        ],
+        "title": "JudgeResultIn",
+        "type": "object"
+      },
       "JudgeRunClearIn": {
         "additionalProperties": false,
         "description": "清空成绩记录。\n\n``player_id`` 把范围缩小到一个人；``keep_manual`` 默认 True，\n因为手工录入的分数是全场最贵的数据，不该被\"重扫一遍\"顺手清掉。",
@@ -2215,6 +2516,119 @@
           }
         },
         "title": "JudgeScanOut",
+        "type": "object"
+      },
+      "JudgeWorkerCreatedOut": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "last_seen_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Seen At"
+          },
+          "last_seen_ip": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Seen Ip"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "token": {
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "created_at",
+          "token"
+        ],
+        "title": "JudgeWorkerCreatedOut",
+        "type": "object"
+      },
+      "JudgeWorkerIn": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "JudgeWorkerIn",
+        "type": "object"
+      },
+      "JudgeWorkerOut": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "last_seen_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Seen At"
+          },
+          "last_seen_ip": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Seen Ip"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "created_at"
+        ],
+        "title": "JudgeWorkerOut",
         "type": "object"
       },
       "LoginRequest": {
@@ -2562,6 +2976,34 @@
           }
         },
         "title": "Page[JudgeRunOut]",
+        "type": "object"
+      },
+      "Page_JudgeWorkerOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/JudgeWorkerOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "default": 50,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "title": "Page[JudgeWorkerOut]",
         "type": "object"
       },
       "Page_PendingMachineOut_": {
@@ -3340,6 +3782,70 @@
         "title": "ProblemImportOut",
         "type": "object"
       },
+      "ProblemJudgeIn": {
+        "additionalProperties": false,
+        "description": "题目的自带评测配置（§12）。``compile_flags`` 只接受白名单里的几类参数（服务端校验）。",
+        "properties": {
+          "compile_flags": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Compile Flags"
+          },
+          "io_mode": {
+            "default": "stdio",
+            "enum": [
+              "stdio",
+              "file"
+            ],
+            "title": "Io Mode",
+            "type": "string"
+          },
+          "judge_mode": {
+            "default": "external",
+            "enum": [
+              "external",
+              "builtin"
+            ],
+            "title": "Judge Mode",
+            "type": "string"
+          },
+          "memory_limit_mb": {
+            "anyOf": [
+              {
+                "maximum": 4096.0,
+                "minimum": 16.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Limit Mb"
+          },
+          "time_limit_ms": {
+            "anyOf": [
+              {
+                "maximum": 60000.0,
+                "minimum": 100.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time Limit Ms"
+          }
+        },
+        "title": "ProblemJudgeIn",
+        "type": "object"
+      },
       "ProblemMatchIn": {
         "additionalProperties": false,
         "description": "拿一条相对路径来试算归题结果。\n\n界面上的「这条路径会算成哪道题」走的是**服务端同一套匹配代码** ——\n前端再实现一遍 glob 迟早会和服务端说不到一块去，而教师没法判断\n是配置错了还是界面显示错了。",
@@ -3399,6 +3905,17 @@
       "ProblemOut": {
         "additionalProperties": false,
         "properties": {
+          "compile_flags": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Compile Flags"
+          },
           "contest_id": {
             "title": "Contest Id",
             "type": "integer"
@@ -3418,6 +3935,27 @@
             "title": "Ident",
             "type": "string"
           },
+          "io_mode": {
+            "default": "stdio",
+            "title": "Io Mode",
+            "type": "string"
+          },
+          "judge_mode": {
+            "default": "external",
+            "title": "Judge Mode",
+            "type": "string"
+          },
+          "memory_limit_mb": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Limit Mb"
+          },
           "note": {
             "anyOf": [
               {
@@ -3433,6 +3971,27 @@
             "default": 0,
             "title": "Order Index",
             "type": "integer"
+          },
+          "testdata": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProblemTestdataOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "time_limit_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time Limit Ms"
           },
           "title": {
             "anyOf": [
@@ -3452,6 +4011,51 @@
           "ident"
         ],
         "title": "ProblemOut",
+        "type": "object"
+      },
+      "ProblemTestdataOut": {
+        "additionalProperties": false,
+        "description": "题目的数据包（§12）：上传时校验出的摘要。",
+        "properties": {
+          "cases": {
+            "title": "Cases",
+            "type": "integer"
+          },
+          "has_checker": {
+            "default": false,
+            "title": "Has Checker",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          },
+          "subtasks": {
+            "default": 0,
+            "title": "Subtasks",
+            "type": "integer"
+          },
+          "total_score": {
+            "default": 0,
+            "title": "Total Score",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "size",
+          "sha256",
+          "cases"
+        ],
+        "title": "ProblemTestdataOut",
         "type": "object"
       },
       "ProblemUpsert": {
@@ -6768,6 +7372,100 @@
         ]
       }
     },
+    "/api/v1/admin/contests/{contest_id}/judge/builtin": {
+      "get": {
+        "description": "自带评测的进度：排队 / 在评 / 完成 / 失败，以及失败的原因。",
+        "operationId": "builtin_judge_progress_api_v1_admin_contests__contest_id__judge_builtin_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BuiltinJudgeProgressOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Builtin Judge Progress",
+        "tags": [
+          "admin"
+        ]
+      },
+      "post": {
+        "description": "排自带评测：指定的题（或全部用自带评测的题）× 指定的选手（或全部选手）。\n\n场次还在进行时拒绝（``contest_in_progress``）：那时评的是考到一半的代码；教师确认后带\n``force`` 再来。已有的任务（不管什么状态）会被替换 —— 重测就是重新排。",
+        "operationId": "queue_builtin_judge_api_v1_admin_contests__contest_id__judge_builtin_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BuiltinJudgeIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BuiltinJudgeQueuedOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Queue Builtin Judge",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/api/v1/admin/contests/{contest_id}/judge/rescan": {
       "post": {
         "description": "立即重扫成绩目录（忽略 mtime 缓存）。",
@@ -8123,6 +8821,162 @@
         ]
       }
     },
+    "/api/v1/admin/judge-workers": {
+      "get": {
+        "operationId": "list_judge_workers_api_v1_admin_judge_workers_get",
+        "parameters": [
+          {
+            "description": "每页条数",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "每页条数",
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "起始位置",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "起始位置",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_JudgeWorkerOut_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Judge Workers",
+        "tags": [
+          "admin"
+        ]
+      },
+      "post": {
+        "description": "签发一台评测机的令牌。明文只在这一次返回，库里只存哈希。",
+        "operationId": "create_judge_worker_api_v1_admin_judge_workers_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JudgeWorkerIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JudgeWorkerCreatedOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Judge Worker",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/judge-workers/{worker_id}": {
+      "delete": {
+        "description": "吊销一台评测机（删行）。它手上没交的任务租约到期后回到队列。",
+        "operationId": "delete_judge_worker_api_v1_admin_judge_workers__worker_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "原样输入评测机名称",
+            "in": "query",
+            "name": "confirm",
+            "required": true,
+            "schema": {
+              "description": "原样输入评测机名称",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Confirm",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Judge Worker",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/api/v1/admin/login": {
       "post": {
         "operationId": "login_api_v1_admin_login_post",
@@ -8771,6 +9625,152 @@
           }
         },
         "summary": "Update Problem",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/problems/{problem_id}/judge": {
+      "put": {
+        "description": "题目的评测方式：外部评测器 / 自带评测，以及时限、内存、IO 方式、编译参数。",
+        "operationId": "set_problem_judge_api_v1_admin_problems__problem_id__judge_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "problem_id",
+            "required": true,
+            "schema": {
+              "title": "Problem Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProblemJudgeIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Problem Judge",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/problems/{problem_id}/testdata": {
+      "delete": {
+        "operationId": "delete_testdata_api_v1_admin_problems__problem_id__testdata_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "problem_id",
+            "required": true,
+            "schema": {
+              "title": "Problem Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Testdata",
+        "tags": [
+          "admin"
+        ]
+      },
+      "post": {
+        "description": "上传数据包（zip）。**上传时就校验结构**：缺答案、路径不安全、配置写错当场报出来。",
+        "operationId": "upload_testdata_api_v1_admin_problems__problem_id__testdata_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "problem_id",
+            "required": true,
+            "schema": {
+              "title": "Problem Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_testdata_api_v1_admin_problems__problem_id__testdata_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Upload Testdata",
         "tags": [
           "admin"
         ]
@@ -10027,6 +11027,187 @@
         "summary": "Whoami",
         "tags": [
           "agent"
+        ]
+      }
+    },
+    "/api/v1/judge/lease": {
+      "post": {
+        "description": "领下一个任务；没有就 204。租约 15 分钟，过期没交结果的任务自动回到队列。",
+        "operationId": "lease_api_v1_judge_lease_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JudgeLeaseOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "204": {
+            "description": "没有待评的任务"
+          }
+        },
+        "summary": "Lease",
+        "tags": [
+          "judge"
+        ]
+      }
+    },
+    "/api/v1/judge/tasks/{task_id}/blobs/{sha256}": {
+      "get": {
+        "description": "取任务要用的内容：只认这个任务的代码与它那道题的数据包。",
+        "operationId": "task_blob_api_v1_judge_tasks__task_id__blobs__sha256__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "sha256",
+            "required": true,
+            "schema": {
+              "title": "Sha256",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Task Blob",
+        "tags": [
+          "judge"
+        ]
+      }
+    },
+    "/api/v1/judge/tasks/{task_id}/fail": {
+      "post": {
+        "description": "评测机自己出错（沙箱起不来、checker 编译不过……）：退回队列，三次都失败就记失败。",
+        "operationId": "report_failure_api_v1_judge_tasks__task_id__fail_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JudgeFailIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Report Failure",
+        "tags": [
+          "judge"
+        ]
+      }
+    },
+    "/api/v1/judge/tasks/{task_id}/result": {
+      "post": {
+        "description": "交结果：写进 ``judge_result/<场次>/<选手>/<题目>/result.json``，扫描器随后收进矩阵。\n\n任务已被重测替换掉（或者不是你领的）时 404：那份结果对应的代码可能已经变了，丢掉。",
+        "operationId": "submit_result_api_v1_judge_tasks__task_id__result_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JudgeResultIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit Result",
+        "tags": [
+          "judge"
         ]
       }
     },

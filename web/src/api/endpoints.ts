@@ -159,6 +159,12 @@ export const paths = {
   /** 清题目。体里带场次 `slug`，可选 `idents` 缩小范围。 */
   contestProblemsClear: (contestId: number) => `${ADMIN}/contests/${contestId}/problems/clear`,
   problem: (problemId: number) => `${ADMIN}/problems/${problemId}`,
+  // ---- 自带评测（§12）----
+  problemJudge: (problemId: number) => `${ADMIN}/problems/${problemId}/judge`,
+  problemTestdata: (problemId: number) => `${ADMIN}/problems/${problemId}/testdata`,
+  contestBuiltinJudge: (contestId: number) => `${ADMIN}/contests/${contestId}/judge/builtin`,
+  judgeWorkers: () => `${ADMIN}/judge-workers`,
+  judgeWorker: (workerId: number) => `${ADMIN}/judge-workers/${workerId}`,
 
   // ---- 成绩 ----
   contestScores: (contestId: number) => `${ADMIN}/contests/${contestId}/scores`,

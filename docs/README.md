@@ -32,7 +32,7 @@
 |---|---|
 | [`reference/protocol.md`](reference/protocol.md) | Agent ⇄ Server 协议：`enroll` / `tick` / `files` / `assets` / `events` 的字段与三态 |
 | [`reference/api-conventions.md`](reference/api-conventions.md) | 管理端 API 的形状约定：列表信封、错误体、命名、删除语义 |
-| [`reference/judge-result.md`](reference/judge-result.md) | 评测器对接：成绩怎么进 SyncOJ，以及三条保守解析规则 |
+| [`reference/judge-result.md`](reference/judge-result.md) | 评测器对接：成绩怎么进 SyncOJ、三条保守解析规则；自带评测的数据包、评测机与接口 |
 | [`reference/config-keys.md`](reference/config-keys.md) | `agent.ini` 逐键说明，与 `CONFIG_POLICY_KEYS` 逐键对账 |
 
 ### 设计（原 `DESIGN.md` 按主题拆开，**编号一律没动**）
@@ -49,7 +49,7 @@
 | [`design/07-ops-and-install.md`](design/07-ops-and-install.md) | 运维与装机：`.key/`、发布、安装策略三档、服务端发现、远程卸载（原 §7） |
 | [`design/08-milestones-and-open.md`](design/08-milestones-and-open.md) | 里程碑、待补信息、待办与被明确否决的想法（原 §8 / §9 / §10） |
 | [`design/09-server-announce.md`](design/09-server-announce.md) | 服务端主动通告地址、Agent 听到后挑战应答再切换（§11，已实现） |
-| [`design/10-builtin-judge.md`](design/10-builtin-judge.md) | 提案（未实现）：自带沙箱评测，结果写进 `judge_result/`、独立 worker、可插拔沙箱（§12） |
+| [`design/10-builtin-judge.md`](design/10-builtin-judge.md) | 自带沙箱评测：结果写进 `judge_result/`、独立评测机、可插拔沙箱（§12，已实现） |
 
 ### 决策记录（ADR）
 
@@ -74,6 +74,7 @@
 | [`decisions/ADR-0013-install-policy-defaults.md`](decisions/ADR-0013-install-policy-defaults.md) | 安装策略三条的默认值 |
 | [`decisions/ADR-0014-config-must-prove-it-is-read.md`](decisions/ADR-0014-config-must-prove-it-is-read.md) | 一个配置项必须有测试证明它真的被读到 |
 | [`decisions/ADR-0015-server-announce.md`](decisions/ADR-0015-server-announce.md) | 服务端主动通告只当线索，切换前挑战应答；机器自己探测保留 |
+| [`decisions/ADR-0016-builtin-judge.md`](decisions/ADR-0016-builtin-judge.md) | 自带评测写 `judge_result/`、独立评测机、沙箱借用 isolate |
 
 ## 文档之间的关系
 

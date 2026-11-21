@@ -95,6 +95,8 @@ def test_admin_api_is_hidden_on_public_port(workdir: Path) -> None:
         # 其它管理接口也一样，包括免登录的 /me
         assert client.get("/api/v1/admin/me").status_code == 404
         assert client.get("/api/v1/admin/contests").status_code == 404
+        # 评测机接口（§12）同样只在管理端口上
+        assert client.post("/api/v1/judge/lease").status_code == 404
 
 
 def test_api_map_is_hidden_on_public_port(workdir: Path) -> None:

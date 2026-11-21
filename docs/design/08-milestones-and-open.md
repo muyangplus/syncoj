@@ -205,14 +205,14 @@ root 拒绝再切、Agent 不再下载（否则"切过去→崩→回滚"循环�
   配置里空的 `pass` 告警分支删掉、安装器"三选一"改"四选一"、导出接口 `include_deleted`
   默认与界面一致为 True。）
 
-**新想法（已评估 / 已设计，未实现）**：
+**新想法（2026-11 已实现）**：
 
 * **服务端主动通告**：见 §11（`09-server-announce.md`），2026-11 已实现：服务端周期通告 +
   「召集机器」，Agent 听到后挑战应答验签再切换；Agent 自己探测保留为兜底（ADR-0015）。
   systemd 245 冒烟里关掉局域网发现、服务端换端口重启，机器靠通告转了过去。
-* **系统自带沙箱评测**：见 §12（`10-builtin-judge.md`）。结果写进现有 `judge_result/`，成绩
-  矩阵与手工录入规则不动；独立账号的 worker 经 HTTP 领任务，碰不到私钥与数据库；沙箱后端
-  可插拔（isolate 推荐 / systemd-run / 仅开发用的 rlimit）。
+* **系统自带沙箱评测**：见 §12（`10-builtin-judge.md`），2026-11 已实现：按题选择外部评测器 /
+  自带评测；数据包上传时校验；独立账号的评测机（`syncoj-judge`）经 HTTP 领任务，碰不到私钥与
+  数据库；沙箱 isolate（推荐）/ rlimit（仅开发）；结果写进 `judge_result/` 走现有扫描（ADR-0016）。
 
 **推迟（本轮不做）**：`api/admin.py` 与 `agent/main.py` 的整体拆分；zip 改密码改后台任务
 （纯 Python 约 1.9 MB/s、同步跑在请求线程）；TLS + pinning；全局 person 表；

@@ -403,6 +403,10 @@ class Agent:
     def __init__(self, config: AgentConfig) -> None:
         self.config = config
         self.config.state_dir.mkdir(parents=True, exist_ok=True)
+        #: 是否往选手桌面写 / 删提示文件。``--provision``（root 跑的注册单元）关掉它：
+        #: 桌面属选手，root 在那里按路径写文件，一个符号链接就能让 root 改写任意文件。
+        #: 提示文件交给以选手身份运行的 Agent 服务，它下一轮就会写上。
+        self.touch_desktop = True
 
         self.machine_id = resolve_machine_id(config.machine_id, config.state_dir)
         #: 本机身份：**优先读安装器写的权威那份**（<config-dir>/machine_uuid），
@@ -808,6 +812,8 @@ class Agent:
         **自愈性质没丢**：文件被人删掉 = 读不到 = 内容不一致 → 下一轮自然补写。
         这条日志的价值在"状态（或内容）变了"，不在"进程还活着"。
         """
+        if not self.touch_desktop:
+            return
         try:
             if _read_desktop_text(path) == text:
                 return
@@ -819,6 +825,8 @@ class Agent:
             log.warning("无法把%s写到 %s：%s（日志里还有一份）", label, path, exc)
 
     def _remove_desktop_file(self, path: Path, label: str) -> None:
+        if not self.touch_desktop:
+            return
         try:
             path.unlink()
             log.info("已删除%s %s", label, path)
@@ -1763,6 +1771,13 @@ class Agent:
         if isinstance(remote_config, dict):
             self.policy = merge_policy(remote_config)
 
+        # 管理端授权的卸载：**未配对的机器也要接** —— 装错了、不该装的那台恰恰多半
+        # 还没配对。以前只有正常路径读这个字段，未配对的机器收到令牌也一直不动
+        # （systemd 245 冒烟实测）。
+        token = tick.get("uninstall_token")
+        if isinstance(token, str) and token.strip():
+            self._handle_uninstall_token(token.strip())
+
         if tick.get("diagnostics_request"):
             # 管理端按了"抓一份现场"：**待配对的机器也要能补发** —— 它卡在配对
             # 阶段的现场恰恰最有用。这条路径不会走到正常 tick 里读这个字段的那
@@ -2215,7 +2230,11 @@ def _disk_free(path: Path) -> Optional[int]:
 # --------------------------------------------------------------------------- #
 
 
-def setup_logging(config: AgentConfig, verbose: bool = False) -> None:
+class _SkipFileLog(Exception):
+    """``setup_logging(to_file=False)`` 的内部跳转。"""
+
+
+def setup_logging(config: AgentConfig, verbose: bool = False, to_file: bool = True) -> None:
     """配置日志。
 
     默认写**文件**而不是 stdout：systemd 单元里 ``StandardOutput=null``，
@@ -2233,17 +2252,22 @@ def setup_logging(config: AgentConfig, verbose: bool = False) -> None:
 
     log_file = config.resolved_log_file
     try:
+        if not to_file:
+            raise _SkipFileLog()
         log_file.parent.mkdir(parents=True, exist_ok=True)
         handler = logging.handlers.RotatingFileHandler(
             str(log_file), maxBytes=4 * 1024 * 1024, backupCount=3, encoding="utf-8"
         )
         handler.setFormatter(fmt)
         root.addHandler(handler)
+    except _SkipFileLog:
+        pass
     except OSError as exc:
-        # 日志文件写不了不能导致 Agent 起不来
-        print("警告：无法写入日志文件 %s: %s" % (log_file, exc), file=sys.stderr)
+        # 日志文件写不了不能导致 Agent 起不来。flush：3.8 上不接终端的 stderr 是块缓冲，
+        # 不 flush 的话这一行要等进程退出才进 journal —— 等于没说
+        print("警告：无法写入日志文件 %s: %s" % (log_file, exc), file=sys.stderr, flush=True)
 
-    if config.log_to_stderr or verbose:
+    if config.log_to_stderr or verbose or not to_file:
         stream = logging.StreamHandler(sys.stderr)
         stream.setFormatter(fmt)
         root.addHandler(stream)
@@ -2373,7 +2397,10 @@ def _run_provision(args, config: AgentConfig, agent: "Agent") -> int:
 
 def _chown_state_files(config: AgentConfig, user: str) -> None:
     """把状态目录里 Agent 要读写的文件交给运行用户。"""
-    import shutil
+    try:
+        import pwd
+    except ImportError:  # pragma: no cover - Windows 上没有属主可改
+        return
 
     targets = [
         config.state_dir,
@@ -2382,12 +2409,28 @@ def _chown_state_files(config: AgentConfig, user: str) -> None:
         config.state_dir / "machine_id",
         config.hash_cache_path,
     ]
+    # 日志文件：注册单元以 root 跑、先建出了 agent.log（属主 root）。不交出去的话
+    # Agent 服务以选手身份起来后打不开它，整台机器**一行日志都没有**（systemd 245
+    # 容器冒烟里实测）。只管状态目录里的那份 —— 教师在 agent.ini 里另指的路径不碰。
+    log_file = config.resolved_log_file
+    if log_file.parent == config.state_dir:
+        targets.append(log_file)
+        targets.extend(
+            log_file.with_name("%s.%d" % (log_file.name, index)) for index in range(1, 4)
+        )
+    try:
+        uid = pwd.getpwnam(user).pw_uid
+    except KeyError as exc:
+        log.warning("无法把状态文件交给 %s：%s", user, exc)
+        return
     for target in targets:
-        if not target.exists():
-            continue
         try:
-            shutil.chown(str(target), user=user)
-        except (OSError, LookupError) as exc:
+            # 不顺着符号链接：状态目录属选手，这里以 root 运行，换成链接的
+            # credential.json 会让 root 把任意文件（/etc/shadow）交给选手
+            if target.is_symlink() or not target.exists():
+                continue
+            os.chown(str(target), uid, -1, follow_symlinks=False)
+        except OSError as exc:
             log.warning("无法把 %s 的属主改为 %s：%s", target, user, exc)
 
 
@@ -2408,7 +2451,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             _print_provision_hint()
         return 2
 
-    setup_logging(config, verbose=args.verbose)
+    # --provision 以 root 跑：日志只进 journal（stderr），不碰状态目录里的 agent.log ——
+    # 那个目录属选手，root 按路径打开它会顺着选手放的符号链接追加写任意文件；
+    # 而且 root 先建出 agent.log 之后，以选手身份运行的服务就打不开它了。
+    setup_logging(config, verbose=args.verbose, to_file=not args.provision)
 
     try:
         config.validate(for_provision=args.provision)
@@ -2472,6 +2518,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     if args.provision:
+        agent.touch_desktop = False
         return _run_provision(args, config, agent)
 
     if args.once:

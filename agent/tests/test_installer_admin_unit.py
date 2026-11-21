@@ -264,3 +264,30 @@ def test_装机时给的公钥路径带进管理单元(installer_module, tmp_pat
     instance = installer_module.Installer(args, installer_module.Reporter(dry_run=True, quiet=True))
     layout_args = instance._layout_args()
     assert layout_args[layout_args.index("--public-key") + 1] == "/etc/custom/pub.json"
+
+
+@posix_only
+@requires_openssl
+def test_交接目录被换成符号链接时重装不把链接目标交出去(
+    installer_module, layout: Layout, tmp_path
+) -> None:
+    """装机 / 升级以 root 建交接目录：选手把它换成指向 /etc 的链接，root 不能顺着它 chmod / chown。"""
+    victim = tmp_path / "etc-like"
+    victim.mkdir()
+    os.chmod(str(victim), 0o755)
+    layout.handoff.rmdir()
+    layout.handoff.symlink_to(victim, target_is_directory=True)
+
+    bundle = make_bundle(tmp_path / "v1b.tar.gz", version="1.0.0")
+    args = [a for a in layout.args() if a != "--skip-service"]
+    import unittest.mock as mock
+
+    with mock.patch.object(installer_module, "_is_posix_platform", return_value=True):
+        installer_module.Installer(
+            installer_module.build_parser().parse_args(["--bundle", str(bundle)] + args),
+            installer_module.Reporter(dry_run=False, quiet=True),
+        ).install_admin_unit()
+
+    assert (victim.stat().st_mode & 0o777) == 0o755, "链接目标的权限被改了"
+    assert not layout.handoff.is_symlink() and layout.handoff.is_dir()
+    assert (layout.handoff.stat().st_mode & 0o777) == 0o700

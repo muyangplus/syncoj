@@ -1318,12 +1318,19 @@ def download_release(
 def report_events(
     payload: List[AgentEvent],
     ctx: AppContext = Depends(get_ctx),
-    identity: AgentIdentity = Depends(require_agent),
+    identity: Principal = Depends(require_principal),
 ) -> SimpleAck:
     """Agent 主动上报的审计事件（权限异常、磁盘满、批量重写等）。
 
     刻意用列表批量提交：断网期间事件会堆积，逐条上报会在重连瞬间产生请求风暴。
+
+    **未配对的机器也收**（只记 agent_id，场次 / 选手留空）：它们同样会升级、会被远程
+    卸载，"交给 root 管理单元失败"这类事件恰恰出在还没配对的那批机器上。以前这里要求
+    选手身份，未配对的机器每轮心跳都吃一个 403、事件永远积压（systemd 245 冒烟实测）。
     """
+    contest_id = player_id = None
+    if not isinstance(identity, MachineIdentity):
+        contest_id, player_id = identity.contest_id, identity.player_id
     if not payload:
         return SimpleAck(ok=True, detail="无事件")
     if len(payload) > 200:
@@ -1335,8 +1342,8 @@ def report_events(
                 EventLog(
                     level=item.level,
                     category=item.category[:32],
-                    contest_id=identity.contest_id,
-                    player_id=identity.player_id,
+                    contest_id=contest_id,
+                    player_id=player_id,
                     agent_id=identity.agent_id,
                     message=item.message[:2000],
                     meta_json=(

@@ -191,6 +191,11 @@ def _installer_never_touches_the_host(installer_module, monkeypatch, request) ->
             installer_module, "SUDOERS_PATH", root / "etc" / "sudoers.d" / "syncoj-uninstall"
         )
         monkeypatch.setattr(installer_module, "DEFAULT_ADMIN_DIR", root / "usr" / "lib" / "syncoj")
+    # 开发机上跑过 `syncoj-server init` 就会有 <仓库>/.key/bootstrap.key，安装器从源码
+    # 跑时会自动用它 —— 测试结果不能取决于开发者有没有初始化过服务端
+    monkeypatch.setattr(
+        installer_module, "DEFAULT_BOOTSTRAP_KEY_FILE", root / "no-repo-key" / "bootstrap.key"
+    )
     real_which = installer_module._which
     monkeypatch.setattr(
         installer_module, "_which",

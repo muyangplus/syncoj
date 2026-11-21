@@ -2151,6 +2151,29 @@ class Installer:
             args += ["--service-name", self.service_name]
         return args
 
+    def _prepare_handoff_dir(self, handoff: Path) -> None:
+        """建好交接目录：0700、属运行账号。**全程不顺着符号链接。**
+
+        它在状态目录里，而状态目录属运行账号：选手可以把 ``handoff`` 换成指向 ``/etc``
+        的符号链接。按路径 chmod / chown（以前用的 ``shutil.chown``）会顺着链接把
+        ``/etc`` 交给选手 —— 而这一步在每次升级切换时都以 root 执行。
+        """
+        if handoff.is_symlink() or (handoff.exists() and not handoff.is_dir()):
+            handoff.unlink()
+        handoff.mkdir(parents=True, exist_ok=True)
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(str(handoff), flags)
+        try:
+            os.fchmod(fd, 0o700)
+            try:
+                import pwd
+
+                os.fchown(fd, pwd.getpwnam(self.run_user).pw_uid, -1)
+            except (OSError, KeyError, ImportError) as exc:
+                self.report.warn("无法把 %s 交给 %s：%s" % (handoff, self.run_user, exc))
+        finally:
+            os.close(fd)
+
     def install_admin_unit(self) -> None:
         """装 root 管理单元：把安装器自己拷到 ``admin_dir``，写 service + path 两个单元。
 
@@ -2183,15 +2206,13 @@ class Installer:
                 _write_text_file(script, me.read_text(encoding="utf-8"), 0o644)
             unit_dir = self.unit_path.parent
             unit_dir.mkdir(parents=True, exist_ok=True)
-            _write_text_file(unit_dir / ADMIN_UNIT_FILENAME, service, 0o644)
-            _write_text_file(unit_dir / ADMIN_PATH_UNIT_FILENAME, path_unit, 0o644)
+            # 内容没变就不写：管理单元在执行升级时会走到这里，改写正在运行的单元文件
+            # 会让 systemd 报 "Current command vanished from the unit file"
+            for name, text in ((ADMIN_UNIT_FILENAME, service), (ADMIN_PATH_UNIT_FILENAME, path_unit)):
+                if _read_text_or_none(unit_dir / name) != text:
+                    _write_text_file(unit_dir / name, text, 0o644)
             # 交接目录归运行账号（Agent 往里写请求），0700
-            handoff.mkdir(parents=True, exist_ok=True)
-            os.chmod(str(handoff), 0o700)
-            try:
-                shutil.chown(str(handoff), user=self.run_user)
-            except (OSError, LookupError) as exc:
-                self.report.warn("无法把 %s 交给 %s：%s" % (handoff, self.run_user, exc))
+            self._prepare_handoff_dir(handoff)
         except OSError as exc:
             raise InstallError("写入 root 管理单元失败：%s" % exc)
         self.report.action(
@@ -3702,6 +3723,13 @@ def _best_effort_unlink(path: Path) -> None:
         pass
 
 
+def _read_text_or_none(path: Path) -> Optional[str]:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
 def _write_text_file(path: Path, content: str, mode: int) -> None:
     """按固定权限写一个文本文件。
 
@@ -4803,6 +4831,18 @@ def resolve_bootstrap_key(options: argparse.Namespace, report: Reporter) -> Opti
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    # 钉死 umask：安装器以 root 跑，建出来的 /opt/syncoj、/etc/syncoj、/usr/lib/syncoj
+    # 只在少数地方显式 chmod，其余靠 umask。调用方的 umask 可能是 0（docker exec、
+    # 某些镜像构建器、cloud-init）—— 在 systemd 245 容器冒烟里实测装出来的是 0777，
+    # 选手能替换 root 管理单元信任的公钥与代码，等于提权。进程内调用（测试）结束后还原。
+    previous = os.umask(0o022)
+    try:
+        return _main(argv)
+    finally:
+        os.umask(previous)
+
+
+def _main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
 
     if args.version:

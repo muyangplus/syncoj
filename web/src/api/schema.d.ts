@@ -1848,6 +1848,10 @@ export interface paths {
          * @description Agent 主动上报的审计事件（权限异常、磁盘满、批量重写等）。
          *
          *     刻意用列表批量提交：断网期间事件会堆积，逐条上报会在重连瞬间产生请求风暴。
+         *
+         *     **未配对的机器也收**（只记 agent_id，场次 / 选手留空）：它们同样会升级、会被远程
+         *     卸载，"交给 root 管理单元失败"这类事件恰恰出在还没配对的那批机器上。以前这里要求
+         *     选手身份，未配对的机器每轮心跳都吃一个 403、事件永远积压（systemd 245 冒烟实测）。
          */
         post: operations["report_events_api_v1_agent_events_post"];
         delete?: never;

@@ -974,3 +974,36 @@ def test_credential_from_another_server_is_not_reused(
     assert credential is not None
     assert credential.server_url == agent_config.base_url
     assert len(server.enroll_calls) == 1
+
+
+def test_unclaimed_machine_hands_over_an_uninstall_token(agent_config: AgentConfig) -> None:
+    """未配对的机器收到卸载授权也要转交给 root 管理单元。
+
+    装错了、不该装的那台多半还没配对；以前只有正常路径读 ``uninstall_token``，
+    未配对的机器收到令牌一直不动（systemd 245 冒烟实测）。
+    """
+    import json
+
+    server = FakeServer()
+    provision(agent_config, server)
+    agent = service(agent_config, server)
+    server.tick_response["uninstall_token"] = "tok.en"
+
+    run_rounds(agent, 1)
+
+    request = agent_config.state_dir / "handoff" / "request.json"
+    assert json.loads(request.read_text(encoding="utf-8")) == {
+        "kind": "uninstall", "token": "tok.en",
+    }
+
+
+def test_provision_does_not_touch_the_desktop(agent_config: AgentConfig) -> None:
+    """root 跑的注册不往选手桌面写：那里属选手，一个符号链接就能让 root 改写任意文件。"""
+    server = FakeServer()
+    agent = make_agent(agent_config)
+    attach(agent, server)
+    agent.touch_desktop = False
+
+    agent.ensure_credential(allow_enroll=True)
+
+    assert not pair_code_file(agent_config).exists()

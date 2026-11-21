@@ -442,6 +442,13 @@ def _write_release_marker(staging: Path, fingerprint: str) -> None:
         handle.write(fingerprint + "\n")
 
 
+def release_signing_message(version: str, sha256: str, size: int) -> bytes:
+    """发布签名覆盖的文本（与服务端、Agent 各自独立实现，见服务端 test_signing）。"""
+    if not version or int(size) <= 0:
+        raise ValueError("版本号或大小缺失")
+    return ("syncoj-release-v1\n%s\n%s\n%d\n" % (version, sha256.lower(), int(size))).encode("ascii")
+
+
 def _decode_signature(text: str) -> Optional[bytes]:
     """base64url 解码，容忍缺填充。解不出来就是 None（调用方按验签失败处理）。"""
     import base64
@@ -1357,7 +1364,13 @@ class Installer:
             self.report.warn("发布公钥读不出来（%s），跳过验签" % key_path)
             return
         raw = _decode_signature(signature)
-        if raw is None or not verify_pkcs1v15_sha256(key, sha256_hex.encode("ascii"), raw):
+        try:
+            message = release_signing_message(
+                str(ledger.get("version") or ""), sha256_hex, int(ledger.get("size") or 0)
+            )
+        except (TypeError, ValueError):
+            message = None
+        if raw is None or message is None or not verify_pkcs1v15_sha256(key, message, raw):
             raise InstallError(
                 "**签名校验不通过** —— 这个包不是这台服务端的发布私钥签的。\n"
                 "安装被中止。请核对：服务端是不是换过密钥、这个地址是不是你以为的那台。"

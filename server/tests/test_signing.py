@@ -385,3 +385,38 @@ def test_release_version_shape_matches_agent(version: str) -> None:
     assert server_ok == agent_ok, "版本号 %r：服务端 %s、Agent %s" % (
         version, server_ok, agent_ok,
     )
+
+
+# --------------------------------------------------------------------------- #
+# 发布签名对象：服务端 ≡ Agent ≡ 安装器（三份独立实现，逐字节一致）
+# --------------------------------------------------------------------------- #
+
+
+def test_release_signing_message_matches_agent_and_installer() -> None:
+    import importlib.util
+    from pathlib import Path
+
+    from syncoj_agent.upgrade import release_signing_message as agent_message
+    from syncoj_server.services.signing import release_signing_message
+
+    installer_path = Path(__file__).resolve().parents[2] / "agent" / "packaging" / "install.py"
+    spec = importlib.util.spec_from_file_location("syncoj_install_for_parity", str(installer_path))
+    installer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(installer)  # type: ignore[union-attr]
+
+    digest = "ab" * 32
+    for version, size in [("0.1.0", 1), ("1.2.3-rc1", 123456), ("2.0.0+build.7", 99)]:
+        expected = release_signing_message(version, digest, size)
+        assert expected.startswith(b"syncoj-release-v1\n%s\n" % version.encode("ascii"))
+        assert agent_message(version, digest, size) == expected
+        assert installer.release_signing_message(version, digest, size) == expected
+        # 大写摘要按小写签
+        assert release_signing_message(version, digest.upper(), size) == expected
+
+
+def test_release_signing_message_rejects_bad_inputs() -> None:
+    from syncoj_server.services.signing import release_signing_message
+
+    for args in [("1/../x", "ab" * 32, 1), ("1.0", "zz" * 32, 1), ("1.0", "ab" * 32, 0)]:
+        with pytest.raises(ValueError):
+            release_signing_message(*args)

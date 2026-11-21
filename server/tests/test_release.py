@@ -482,3 +482,24 @@ def test_agent_rejects_release_signed_by_another_key(release_env, workdir: Path)
 
     with pytest.raises(UpgradeError, match="签名"):
         verify_bundle(wrong_public, local, ReleaseManifest.from_dict(upgrade))
+
+
+def test_old_format_signatures_are_resigned_on_startup(release_env, workdir: Path) -> None:
+    """库里旧格式（只签 sha256）的发布记录，下一次启动时按新格式重签。"""
+    from syncoj_server.models import AgentRelease
+    from syncoj_server.services.signing import b64url_encode, release_signing_message
+
+    response = upload(release_env.client, release_env.headers, "9.9.9", make_agent_bundle())
+    assert response.status_code in (200, 201), response.text
+    with release_env.app.state.ctx.db.session() as session:
+        row = session.query(AgentRelease).filter_by(version="9.9.9").one()
+        expected = b64url_encode(
+            release_env.key.sign(release_signing_message(row.version, row.sha256, int(row.size)))
+        )
+        assert row.signature == expected
+        row.signature = b64url_encode(release_env.key.sign(row.sha256.encode("ascii")))
+
+    restarted = create_app(release_env.settings)
+    with restarted.state.ctx.db.session() as session:
+        assert session.query(AgentRelease).filter_by(version="9.9.9").one().signature == expected
+    restarted.state.ctx.db.dispose()

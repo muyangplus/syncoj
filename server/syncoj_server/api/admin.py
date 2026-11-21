@@ -163,7 +163,7 @@ from ..services import (
     zipcrypto,
 )
 from ..services.deploy import validate_dest_template
-from ..services.signing import validate_release_version
+from ..services.signing import release_signing_message, validate_release_version
 from ..storage import BlobTooLarge, HashMismatch
 from .deps import PageParams, get_ctx
 
@@ -5277,10 +5277,10 @@ def _store_release(
     except BlobTooLarge as exc:
         raise HTTPException(status_code=413, detail=str(exc))
 
-    # 签名对象是 sha256 的十六进制字符串，而不是包本身的字节 ——
-    # 见 agent/syncoj_agent/upgrade.py 的说明。两边必须选同一种，否则所有
-    # 真实升级都会失败，且只在生产环境暴露。
-    signature = _b64(ctx.signing_key.sign(sha256.encode("ascii")))
+    # 签名对象是"格式标签 + 版本号 + sha256 + 大小"这段文本，而不是包本身的字节 ——
+    # 见 services/signing.release_signing_message 与 agent/syncoj_agent/upgrade.py
+    # 的说明。三处（这里、Agent、安装器）必须逐字节一致，否则所有真实升级都会失败。
+    signature = _b64(ctx.signing_key.sign(release_signing_message(version, sha256, size)))
 
     with ctx.db.session() as session:
         existing = session.execute(

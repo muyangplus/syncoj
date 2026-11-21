@@ -42,6 +42,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     settings = settings or default_settings()
     ctx = AppContext.create(settings)
     ctx.db.create_all()
+    _resign_releases(ctx)
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -238,6 +239,34 @@ def _install_public_port_gate(app: FastAPI) -> None:
             # 后者等于告诉你"管理接口在别处，去另一个端口试试"。
             return errors.error_response(404, "not_found", "Not Found")
         return await call_next(request)
+
+
+def _resign_releases(ctx: AppContext) -> None:
+    """按当前签名格式重签库里已有的发布记录（启动时跑一次，幂等）。
+
+    发布签名的对象从"只签 sha256"换成了 ``release_signing_message``（含版本号与
+    大小）。库里旧格式签名的记录在新 Agent 上一律验不过 —— 教师看到的是"铺开了
+    却没有一台升级"。PKCS#1 v1.5 签名是确定性的，所以每次启动都算一遍、只有不同
+    才写回，不需要额外的"已迁移"标记。没配签名私钥就什么都不做（也签不了）。
+    """
+    if ctx.signing_key is None:
+        return
+    from sqlalchemy import select
+
+    from .models import AgentRelease
+    from .services.signing import b64url_encode, release_signing_message
+
+    with ctx.db.session() as session:
+        for row in session.execute(select(AgentRelease)).scalars():
+            try:
+                message = release_signing_message(row.version, row.sha256, int(row.size))
+            except ValueError as exc:
+                log.warning("发布记录 %s 无法按新格式重签（%s），保持原样", row.version, exc)
+                continue
+            signature = b64url_encode(ctx.signing_key.sign(message))
+            if signature != row.signature:
+                row.signature = signature
+                log.info("发布记录 %s 已按新签名格式重签", row.version)
 
 
 def _install_agent_body_limits(app: FastAPI) -> None:

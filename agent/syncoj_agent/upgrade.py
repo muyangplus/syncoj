@@ -133,6 +133,19 @@ def validate_release_version(text: Any) -> str:
     return text
 
 
+RELEASE_SIGNATURE_TAG = "syncoj-release-v1"
+
+
+def release_signing_message(version: str, sha256: str, size: int) -> bytes:
+    """发布签名覆盖的那段文本：``syncoj-release-v1\n<版本>\n<sha256>\n<字节数>\n``。
+
+    曾经只签 sha256：版本号不在签名里，篡改的 tick 响应能把合法的旧包标成
+    "新版本"（降级）。服务端 ``services/signing`` 与安装器各有一份独立实现，
+    由服务端 ``test_signing`` 的对账用例守住一致。
+    """
+    return ("%s\n%s\n%s\n%d\n" % (RELEASE_SIGNATURE_TAG, version, sha256.lower(), int(size))).encode("ascii")
+
+
 def parse_version(text: str) -> Tuple[int, ...]:
     """把 ``"1.2.3"`` 解析成 ``(1, 2, 3)``。
 
@@ -238,11 +251,11 @@ def _sha256_file(path: Path) -> str:
 def verify_bundle(public_key: RSAPublicKey, bundle_path: Path, manifest: ReleaseManifest) -> None:
     """校验摘要与签名。不通过就抛 :class:`UpgradeError`。
 
-    **签名对象是 sha256 的十六进制字符串，而不是文件的原始字节。**
-    这样验证分两步且都不需要把包读进内存：
+    **签名对象是 :func:`release_signing_message`（标签 + 版本 + sha256 + 大小），
+    而不是文件的原始字节。** 这样验证分两步且都不需要把包读进内存：
 
     1. 流式计算 sha256 并与清单比对（256MB 的包也只占 1MB 缓冲区）
-    2. 对那 64 个 ASCII 字符验签
+    2. 对那一小段文本验签（版本号也在里面：换版本号就验不过）
 
     安全性与"对整个文件签名"等价：攻击者要伪造仍是找 sha256 碰撞，而
     PKCS#1 内部本来也是"先哈希再签名"。换来的是内存占用与文件大小解耦 ——
@@ -277,8 +290,12 @@ def verify_bundle(public_key: RSAPublicKey, bundle_path: Path, manifest: Release
     if not manifest.signature:
         raise UpgradeError("发布清单没有签名")
 
+    if size <= 0 or not manifest.size:
+        raise UpgradeError("发布清单没有声明大小（签名覆盖大小，缺了验不了）")
     if not verify_pkcs1v15_sha256(
-        public_key, manifest.sha256.encode("ascii"), manifest.signature_bytes()
+        public_key,
+        release_signing_message(manifest.version, manifest.sha256, manifest.size),
+        manifest.signature_bytes(),
     ):
         raise UpgradeError("发布包签名验证失败")
 

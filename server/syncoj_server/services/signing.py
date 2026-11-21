@@ -37,6 +37,7 @@ __all__ = [
     "generate_keypair",
     "openssl_available",
     "parse_version",
+    "release_signing_message",
     "validate_release_version",
     "write_public_key_json",
     "b64url_encode",
@@ -64,6 +65,27 @@ def validate_release_version(text: str) -> Tuple[int, ...]:
             "版本号形状不合法：%r（只允许数字段加可选的 -rc1 / +build.7 这类后缀）" % text[:80]
         )
     return parse_version(text)
+
+
+#: 发布签名对象的格式标签。曾经签的只是包的 sha256：版本号不在签名覆盖范围内，
+#: 篡改过的 tick 响应可以拿一个合法的旧包冒充"新版本"（降级），或者给同一个包
+#: 换个版本号让机器反复升级。现在版本号与大小一起进签名。
+RELEASE_SIGNATURE_TAG = "syncoj-release-v1"
+
+
+def release_signing_message(version: str, sha256: str, size: int) -> bytes:
+    """发布包签名的对象：``syncoj-release-v1\n<版本>\n<sha256>\n<字节数>\n``。
+
+    Agent（``syncoj_agent.upgrade``）与安装器（``packaging/install.py``）各有一份
+    **独立实现**，由 ``test_signing`` 的对账用例守住逐字节一致。
+    """
+    validate_release_version(version)
+    digest = str(sha256).lower()
+    if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+        raise ValueError("sha256 格式不合法")
+    if int(size) <= 0:
+        raise ValueError("size 必须为正")
+    return ("%s\n%s\n%s\n%d\n" % (RELEASE_SIGNATURE_TAG, version, digest, int(size))).encode("ascii")
 
 
 def parse_version(text: str) -> Tuple[int, ...]:

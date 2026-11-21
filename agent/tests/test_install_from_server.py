@@ -112,7 +112,8 @@ def make_ledger(bundle: bytes, version: str = "0.1.1", key=None, **overrides) ->
         "installer": "/api/v1/agent/install/installer",
     }
     if key is not None:
-        signature = key.sign(ledger["sha256"].encode("ascii"))
+        message = "syncoj-release-v1\n%s\n%s\n%d\n" % (version, ledger["sha256"], len(bundle))
+        signature = key.sign(message.encode("ascii"))
         ledger["signature"] = base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")
         ledger["key_id"] = key.key_id
     ledger.update(overrides)

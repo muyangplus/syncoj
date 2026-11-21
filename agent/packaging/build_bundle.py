@@ -289,10 +289,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.verify_signature:
         # 延迟导入：只有需要签名时才依赖服务端模块
         sys.path.insert(0, str(REPO_ROOT / "server"))
-        from syncoj_server.services.signing import load_signing_key
+        from syncoj_server.services.signing import load_signing_key, release_signing_message
 
         key = load_signing_key(Path(args.verify_signature))
-        signature = key.sign(digest.encode("ascii"))
+        signature = key.sign(release_signing_message(version, digest, size))
         import base64
 
         encoded = base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")

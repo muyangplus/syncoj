@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -945,8 +946,12 @@ def install_installer(ctx: AppContext = Depends(get_ctx)) -> Response:
     )
 
 
+#: 能安全嵌进 shell 双引号字符串的 Host 头（主机名 / IPv4 / [IPv6] + 可选端口）
+_SAFE_HOST_RE = re.compile(r"^[A-Za-z0-9.\-]+(?::[0-9]{1,5})?$|^\[[0-9A-Fa-f:.]+\](?::[0-9]{1,5})?$")
+
+
 @router.get("/install/bootstrap.sh")
-def install_bootstrap(ctx: AppContext = Depends(get_ctx)) -> Response:
+def install_bootstrap(request: Request, ctx: AppContext = Depends(get_ctx)) -> Response:
     """自举脚本（``bootstrap.sh``）。**不鉴权。**
 
     给的是"**一条** curl 就能起头"的那条命令 —— 空机器上只有 shell，而教师不该
@@ -957,9 +962,27 @@ def install_bootstrap(ctx: AppContext = Depends(get_ctx)) -> Response:
     """
     try:
         path = packaging.bootstrap_path()
+        installer = packaging.installer_path()
     except packaging.BuildError as exc:
         raise ApiError(404, "installer_unavailable", "%s发不出去：%s" % ("自举脚本", exc.detail))
-    return FileResponse(str(path), media_type="text/x-sh", filename="bootstrap.sh")
+    # 嵌进两样东西：**自己的地址**（就是 curl 用来下这个脚本的那个，脚本不必再
+    # 从机器上的 agent.ini 里猜）与**安装器的 sha256**（下载后对一遍再执行）。
+    # Host 头是请求方给的：只收形状安全的，否则不嵌（脚本退回要求 --server）——
+    # 它要被嵌进一段以 root 执行的 shell。
+    host = (request.headers.get("host") or "").strip()
+    server = "http://%s" % host if host and _SAFE_HOST_RE.match(host) else ""
+    script = path.read_text(encoding="utf-8")
+    script = script.replace('EMBEDDED_SERVER="__SYNCOJ_SERVER__"', 'EMBEDDED_SERVER="%s"' % server, 1)
+    script = script.replace(
+        'INSTALLER_SHA256="__SYNCOJ_INSTALLER_SHA256__"',
+        'INSTALLER_SHA256="%s"' % hashlib.sha256(installer.read_bytes()).hexdigest(),
+        1,
+    )
+    return Response(
+        content=script.encode("utf-8"),
+        media_type="text/x-sh",
+        headers={"Content-Disposition": 'attachment; filename="bootstrap.sh"'},
+    )
 
 def _precheck_upload(ctx: AppContext, identity: AgentIdentity, rel_path: str, claimed: str) -> None:
     with ctx.db.session() as session:

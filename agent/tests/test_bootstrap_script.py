@@ -7,7 +7,9 @@
    家目录下的桌面）整个覆盖掉 —— 现场扫不到东西，更糟的是那条写死的路径会被塞进
    systemd 单元的沙箱白名单，服务直接 ``226/NAMESPACE`` 起不来。
 2. **卸载那条命令不带 ``--server``**（装机页生成的就是它），但 install.py 还是
-   得先下下来；要卸载的机器上必然有 ``agent.ini``，就从里面读地址。
+   得先下下来；地址用服务端发脚本时嵌进来的那个（曾经从机器上的 ``agent.ini``
+   读 —— 以 root 信一个配置文件里的 URL 再下载执行，改得了那个文件就能让 root
+   跑任意代码）。
 
 测试方式：把 ``curl`` / ``python3`` 换成两个假的脚本，跑真的 ``sh bootstrap.sh``，
 断言**拼出来的 install.py 命令行**与**实际请求的下载地址** —— 不联网、不碰 root。
@@ -60,11 +62,26 @@ exit 0
 """
 
 
+def embedded_copy(tmp_path: Path, server: str = "", installer_sha256: str = "") -> Path:
+    """仿服务端发脚本时的替换：把两个占位符换成真值，写一份副本。"""
+    text = BOOTSTRAP.read_text(encoding="utf-8")
+    text = text.replace('EMBEDDED_SERVER="__SYNCOJ_SERVER__"', 'EMBEDDED_SERVER="%s"' % server)
+    text = text.replace(
+        'INSTALLER_SHA256="__SYNCOJ_INSTALLER_SHA256__"',
+        'INSTALLER_SHA256="%s"' % installer_sha256,
+    )
+    target = tmp_path / "served-bootstrap.sh"
+    with target.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text)
+    return target
+
+
 def run_bootstrap(
     tmp_path: Path,
     args,
     config_dir: Path = None,
     expect_ok: bool = True,
+    script: Path = None,
 ) -> SimpleNamespace:
     """在只有假 curl / 假 python3 的 PATH 下跑一次 bootstrap.sh。"""
     bin_dir = tmp_path / "bin"
@@ -90,7 +107,7 @@ def run_bootstrap(
         env["SYNCOJ_CONFIG_DIR"] = str(config_dir)
 
     result = subprocess.run(
-        [SH, str(BOOTSTRAP)] + list(args),
+        [SH, str(script or BOOTSTRAP)] + list(args),
         capture_output=True,
         cwd=str(REPO_ROOT),
         env=env,
@@ -189,19 +206,56 @@ def test_卸载只透传卸载开关(tmp_path: Path) -> None:
 
 
 @requires_sh
-def test_卸载没给_server_就从机器上的_agent_ini_读地址(tmp_path: Path) -> None:
+def test_卸载没给_server_就用服务端嵌进来的地址(tmp_path: Path) -> None:
     """装机页生成的那条卸载命令就是不带 --server 的。"""
+    script = embedded_copy(tmp_path, server="http://served.invalid:8000")
+
+    result = run_bootstrap(tmp_path, ["--uninstall", "--yes"], script=script)
+
+    assert result.url == "http://served.invalid:8000/api/v1/agent/install/installer"
+    assert result.argv[1:] == ["--uninstall", "--yes"]
+
+
+@requires_sh
+def test_不再从机器上的_agent_ini_读地址(tmp_path: Path) -> None:
+    """agent.ini 里的地址不可信：以 root 下载并执行它指向的东西 = 任意代码执行。"""
     config_dir = tmp_path / "etc-syncoj"
     config_dir.mkdir()
     with (config_dir / "agent.ini").open("w", encoding="utf-8", newline="\n") as handle:
-        handle.write("[server]\nurl = http://from-config.invalid\n")
+        handle.write("[server]\nurl = http://evil.invalid\n")
 
     result = run_bootstrap(
-        tmp_path, ["--uninstall", "--yes"], config_dir=config_dir
+        tmp_path, ["--uninstall", "--yes"], config_dir=config_dir, expect_ok=False
     )
 
-    assert result.url == "http://from-config.invalid/api/v1/agent/install/installer"
-    assert result.argv[1:] == ["--uninstall", "--yes"]
+    assert result.returncode == 2
+    assert result.url is None, "不该去 agent.ini 里那个地址下载任何东西"
+
+
+@requires_sh
+def test_安装器指纹对不上就不执行(tmp_path: Path) -> None:
+    script = embedded_copy(tmp_path, server="http://served.invalid", installer_sha256="0" * 64)
+
+    result = run_bootstrap(tmp_path, [], script=script, expect_ok=False)
+
+    assert result.returncode == 3
+    assert "指纹不符" in result.stderr
+    assert result.argv is None, "指纹对不上不该执行安装器"
+
+
+@requires_sh
+def test_安装器指纹对得上照常执行(tmp_path: Path) -> None:
+    import hashlib
+
+    # 假 curl 写下的占位安装器内容是固定的
+    expected = hashlib.sha256(b"# placeholder installer\n").hexdigest()
+    script = embedded_copy(tmp_path, server="http://served.invalid", installer_sha256=expected)
+
+    result = run_bootstrap(tmp_path, ["--dry-run"], script=script)
+
+    assert "--from-server" in result.argv
+    assert result.argv[result.argv.index("--server") + 1] == "http://served.invalid"
+    assert "--dry-run" in result.argv, "装机这一支也要透传 --dry-run（曾经被吞掉）"
 
 
 @requires_sh

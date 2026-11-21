@@ -234,7 +234,28 @@ def test_自举脚本就是仓库里那个文件(env) -> None:
     response = env.client.get("/api/v1/agent/install/bootstrap.sh")
 
     assert response.status_code == 200
-    assert response.content == packaging.bootstrap_path().read_bytes()
+    body = response.content.decode("utf-8")
+    # 两个占位符被换成了真值，其余与仓库里那个文件逐字相同
+    import hashlib
+
+    expected = packaging.bootstrap_path().read_text(encoding="utf-8")
+    expected = expected.replace(
+        'EMBEDDED_SERVER="__SYNCOJ_SERVER__"', 'EMBEDDED_SERVER="http://testserver"'
+    ).replace(
+        'INSTALLER_SHA256="__SYNCOJ_INSTALLER_SHA256__"',
+        'INSTALLER_SHA256="%s"' % hashlib.sha256(packaging.installer_path().read_bytes()).hexdigest(),
+    )
+    assert body == expected
+
+
+def test_自举脚本不嵌形状可疑的_Host(env) -> None:
+    """Host 头是请求方给的，而它要被嵌进一段以 root 执行的 shell。"""
+    response = env.client.get(
+        "/api/v1/agent/install/bootstrap.sh", headers={"Host": 'x";rm -rf /;"'}
+    )
+    assert response.status_code == 200
+    assert 'EMBEDDED_SERVER=""' in response.text
+    assert 'x";' not in response.text
 
 
 def test_自举脚本指着真的端点(env) -> None:

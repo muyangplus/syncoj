@@ -192,14 +192,17 @@ def _reject_outside_window(ctx: AppContext, identity: AgentIdentity, now) -> Non
         raise violation
 
 
-def _agent_config(ctx: AppContext) -> Dict[str, Any]:
+def _agent_config(
+    ctx: AppContext, settings: Optional[runtime_settings.RuntimeSettings] = None
+) -> Dict[str, Any]:
     """下发给 Agent 的运行时策略。服务端是权威，客户端不得自行决定。
 
     ``scan_interval`` 与 ``tick_idle_seconds`` 同值：扫描发生在心跳里，两者在
     Agent 那边本来就是一回事（用户明确要求保持绑定）。心跳节奏是**运行参数**，
     改完下一轮心跳就生效，所以这里每次都现读。
     """
-    settings = _runtime_settings(ctx)
+    if settings is None:
+        settings = _runtime_settings(ctx)
     cfg = build_policy(
         max_file_size=ctx.settings.max_file_size,
         scan_interval=settings.tick_idle_seconds,
@@ -400,6 +403,10 @@ def tick(
     )
 
     with ctx.db.session() as session:
+        # 运行参数**这一轮只读一次**、就在这个会话里：节奏（next_tick_seconds）与
+        # 下发给 Agent 的策略（config）用同一份。曾经两处各开一个会话各读一次，
+        # 教师恰好在中间改了参数时，同一个响应里两个数对不上。
+        live = runtime_settings.load(session)
         # 时间窗之外不对账：不改写台账、不要求上传、走空闲节奏。曾经这里照常对账，
         # 只在上传端点 409 —— 于是开考前每台机器每 2 秒把全部文件整包传一遍再被
         # 拒（multipart 在进入处理函数前已经整包收下），结束之后的修改还会改写
@@ -500,9 +507,8 @@ def tick(
         scan_skipped=collect.skipped_unmatched,
     )
 
-    # 自适应周期：有活干就收紧，没活干就放宽。两个值都是**运行参数**，现读 ——
-    # 教师改完下一轮就按新节奏走，不用重启服务端
-    live = _runtime_settings(ctx)
+    # 自适应周期：有活干就收紧，没活干就放宽。两个值都是**运行参数**（上面会话里
+    # 现读的那一份）—— 教师改完下一轮就按新节奏走，不用重启服务端
     active = bool(collect.need_upload or jobs or collect.deleted)
     next_tick = live.tick_active_seconds if active else live.tick_idle_seconds
 
@@ -514,7 +520,7 @@ def tick(
         upgrade=upgrade,
         uninstall_token=uninstall_token,
         diagnostics_request=diagnostics_request,
-        config=_agent_config(ctx),
+        config=_agent_config(ctx, live),
         claimed=True,
         # 走到这一支就说明场次与选手都解析出来了 —— 这正是三态里的"能干活"那一档。
         # 漏掉它会让 Agent 自己都以为"还没轮到"，于是永远不去扫代码。
@@ -569,6 +575,7 @@ def _tick_pending(
     diagnostics_request = False
     upgrade: Optional[UpgradeInfo] = None
     with ctx.db.session() as session:
+        live = runtime_settings.load(session)  # 这一轮只读一次（同正常路径）
         # 还没配对的机器也要能升级：装机后迟迟没配对的那批，正是最需要"先换上
         # 修好的版本再说"的（曾经只有配好的机器拿得到升级）
         upgrade = _pending_upgrade(session, ctx)
@@ -636,7 +643,7 @@ def _tick_pending(
     return TickResponse(
         server_time=unix_seconds(now),
         # 它本来就没事可做，用空闲周期（运行参数，现读）
-        next_tick_seconds=_runtime_settings(ctx).tick_idle_seconds,
+        next_tick_seconds=live.tick_idle_seconds,
         claimed=identity.paired,
         pair_code=pair_code,
         bound=False,
@@ -644,7 +651,7 @@ def _tick_pending(
         upgrade=upgrade,
         uninstall_token=uninstall_token,
         diagnostics_request=diagnostics_request,
-        config=_agent_config(ctx),
+        config=_agent_config(ctx, live),
     )
 
 

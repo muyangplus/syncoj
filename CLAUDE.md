@@ -52,7 +52,7 @@ python server/tools/dump_openapi.py && (cd web && npm run gen:types)   # 改了�
   上传内容按内容寻址存 `blobs/`，再落到 `source/`。库结构演进用 `PRAGMA user_version` + `migrations.py` 有序迁移。
 - **两个端口**：管理端端口提供全部 API 与 `/docs`；公开端口（默认 80）只暴露装机页与选手页，管理端在那里不存在。
 - **管理端 API 形状统一**：列表信封 `{items,total,limit,offset}`、错误体 `{detail,code,details}`；
-  结构性数据硬删 + 输入名称确认，产物性数据（代码/资产）软删留墓碑。见 `docs/reference/api-conventions.md`。
+  结构性数据硬删 + 输入名称确认；代码/资产按决策 2 也是硬删（ADR-0003 等文档尚待按 `docs/design/08-milestones-and-open.md` §10.5 修订，以代码为准）。见 `docs/reference/api-conventions.md`。
 - **前端**：`src/api/` 声明资源，`schema.d.ts` 由 `web/openapi.json` 生成（`openapi.json` 由 `server/tools/dump_openapi.py` 导出并入库）；
   页面通过 `composables/useList` / `useMutation` 取数，只描述长相。`scripts/check-routes.mjs` 校验声明的接口都有界面入口。
 - **Agent**：扫描 → 上传 → tick → 下载（Range 续传）→ RSA 签名自更新（自实现 `rsa.py`，PKCS#1 v1.5 + SHA-256）。

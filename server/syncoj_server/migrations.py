@@ -28,7 +28,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Callable, List, Sequence, Tuple
+import sqlite3
+import time
+from pathlib import Path
+from typing import Callable, List, Optional, Sequence, Tuple
 
 from sqlalchemy import Engine, inspect, text
 
@@ -628,6 +631,36 @@ def _set_version(engine: Engine, version: int) -> None:
         conn.execute(text("PRAGMA user_version=%d" % int(version)))
 
 
+def _backup_before_migrate(engine: Engine, version: int) -> Optional[Path]:
+    """用 SQLite 在线备份把整库拷到 ``<库名>.bak-v<旧版本>-<时间>``，返回备份路径。
+
+    只对文件库做（内存库没有可备份的东西）。备份失败**不阻止**迁移：拒绝启动的
+    代价（考场上服务端起不来）比"这一次没有备份"更大 —— 但要大声说出来。
+    """
+    database = engine.url.database
+    if not database or database == ":memory:":
+        return None
+    source = Path(database)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    target = source.with_name("%s.bak-v%03d-%s" % (source.name, int(version), stamp))
+    try:
+        raw = engine.raw_connection()
+        try:
+            destination = sqlite3.connect(str(target))
+            try:
+                driver = getattr(raw, "driver_connection", None) or raw.connection  # type: ignore[attr-defined]
+                driver.backup(destination)
+            finally:
+                destination.close()
+        finally:
+            raw.close()
+    except Exception as exc:  # pragma: no cover - 备份失败只告警
+        log.error("迁移前备份数据库失败（%s），继续迁移：%s", target, exc)
+        return None
+    log.warning("数据库结构要从 %03d 升到 %03d，已先备份到 %s", version, LATEST_VERSION, target)
+    return target
+
+
 def migrate(engine: Engine, create_missing_tables: bool = True) -> List[str]:
     """把库升到最新结构，返回实际执行过的步骤说明。
 
@@ -641,6 +674,12 @@ def migrate(engine: Engine, create_missing_tables: bool = True) -> List[str]:
     而 ``create_all`` 只建缺失的表、不碰已有的表，所以对老库是安全的。
     反过来的话，迁移步骤会撞上"表还不存在"。
     """
+    before = current_version(engine)
+    if before < LATEST_VERSION and _tables(engine):
+        # 已有数据、而且要动结构：先备份。迁移步骤写错（或者中途断电）时，
+        # 这是现场唯一能回到"昨天能用的那个库"的东西。新库（没有表）不备份。
+        _backup_before_migrate(engine, before)
+
     if create_missing_tables:
         from .models import Base
 

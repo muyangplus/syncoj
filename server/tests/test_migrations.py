@@ -636,3 +636,27 @@ def test_fresh_and_upgraded_databases_have_the_same_shape(
 
     fresh.dispose()
     upgraded.dispose()
+
+
+def test_upgrading_an_existing_database_backs_it_up_first(legacy_db: Path) -> None:
+    """要动结构的老库先整库备份（迁移写错或断电时唯一能回去的东西）。"""
+    engine = make_engine(legacy_db)
+    before = rows(engine, "SELECT count(*) FROM sqlite_master")[0][0]
+
+    migrations.migrate(engine)
+
+    backups = sorted(legacy_db.parent.glob(legacy_db.name + ".bak-v000-*"))
+    assert len(backups) == 1, backups
+    copy = make_engine(backups[0])
+    assert rows(copy, "PRAGMA user_version")[0][0] == 0
+    assert rows(copy, "SELECT count(*) FROM sqlite_master")[0][0] == before
+
+    # 已经是最新的库再启动：不再备份
+    migrations.migrate(engine)
+    assert len(sorted(legacy_db.parent.glob(legacy_db.name + ".bak-*"))) == 1
+
+
+def test_fresh_database_is_not_backed_up(workdir: Path) -> None:
+    path = workdir / "fresh.db"
+    migrations.migrate(make_engine(path))
+    assert not list(workdir.glob("fresh.db.bak-*"))

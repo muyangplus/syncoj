@@ -586,6 +586,29 @@ def _migration_015_deploy_task_cancelled_at(engine: Engine) -> None:
     _rebuild_table(engine, "deploy_task")
 
 
+#: 迁移 016 要补的索引。名字与模型上 ``index=True`` 生成的一致（``ix_<表>_<列>``），
+#: 全新库由 ``create_all`` 建出同名索引，这里的 ``IF NOT EXISTS`` 就是空操作。
+_EVENT_LOG_INDEXES: Sequence[Tuple[str, str]] = (
+    ("ix_event_log_level", "level"),
+    ("ix_event_log_category", "category"),
+)
+
+
+def _migration_016_event_log_indexes(engine: Engine) -> None:
+    """审计事件按级别、类别建索引。
+
+    审计页按这两列筛、清理按级别删，而这张表是全库长得最快的一张（每台机器
+    每轮心跳都可能写）。只加索引、不动数据，可以在任何时候重跑。
+    """
+    if "event_log" not in _tables(engine):
+        return
+    with engine.begin() as conn:
+        for name, column in _EVENT_LOG_INDEXES:
+            conn.execute(
+                text("CREATE INDEX IF NOT EXISTS %s ON event_log (%s)" % (name, column))
+            )
+
+
 MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
     (1, "统一密钥注册 + 名单库所需的结构", _migration_001_enrollment),
     (2, "机器永久绑定名单条目；去掉注册码链路", _migration_002_roster_binding),
@@ -645,6 +668,11 @@ MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
         15,
         "下发任务状态改为读时聚合：记取消时刻、删掉存储的状态列",
         _migration_015_deploy_task_cancelled_at,
+    ),
+    (
+        16,
+        "审计事件按级别、类别建索引",
+        _migration_016_event_log_indexes,
     ),
 ]
 

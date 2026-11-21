@@ -724,3 +724,23 @@ def test_migration_015_moves_cancelled_status_to_cancelled_at(workdir: Path) -> 
     assert "status" not in columns and "cancelled_at" in columns
     assert tasks[0][1] is not None and tasks[1][1] is None
     assert [tuple(row) for row in targets] == [(1, "cancelled"), (2, "done")]
+
+
+def test_migration_016_adds_event_log_indexes(workdir: Path) -> None:
+    """老库补上级别 / 类别索引，名字与全新库（模型 ``index=True``）一致。"""
+    fresh = make_engine(workdir / "fresh.db")
+    migrations.migrate(fresh)
+    expected = {ix["name"] for ix in inspect(fresh).get_indexes("event_log")}
+    fresh.dispose()
+    assert {"ix_event_log_level", "ix_event_log_category"} <= expected
+
+    engine = make_engine(workdir / "v15.db")
+    migrations.migrate(engine)
+    with engine.begin() as conn:
+        conn.execute(text("DROP INDEX ix_event_log_level"))
+        conn.execute(text("DROP INDEX ix_event_log_category"))
+        conn.execute(text("PRAGMA user_version = 15"))
+    migrations.migrate(engine)
+    upgraded = {ix["name"] for ix in inspect(engine).get_indexes("event_log")}
+    engine.dispose()
+    assert upgraded == expected

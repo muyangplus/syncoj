@@ -678,8 +678,9 @@ class EventLog(Base):
 
     id = Column(Integer, primary_key=True)
     ts = Column(DateTime, default=utcnow, nullable=False)
-    level = Column(String(16), nullable=False, default="info")
-    category = Column(String(32), nullable=False)
+    #: 级别与类别都建索引：审计页按它们筛、清理按级别删（迁移 016）
+    level = Column(String(16), nullable=False, default="info", index=True)
+    category = Column(String(32), nullable=False, index=True)
     contest_id = Column(Integer, nullable=True)
     player_id = Column(Integer, nullable=True)
     agent_id = Column(Integer, nullable=True)

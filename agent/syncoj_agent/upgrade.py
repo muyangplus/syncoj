@@ -62,6 +62,8 @@ __all__ = [
     "clear_state",
     "note_boot",
     "mark_healthy",
+    "note_rolled_back",
+    "rolled_back_versions",
     "BUNDLE_SHA_MARKER_FILENAME",
     "MAX_BOOT_ATTEMPTS",
     "MAX_BUNDLE_BYTES",
@@ -796,6 +798,31 @@ def note_boot(install_root: Path, running_version: str) -> Optional[str]:
 
     save_state(install_root, state)
     return None
+
+
+#: 被启动守卫回滚过的版本（与 install.py 的 ``ROLLED_BACK_FILE`` 同名同格式）。
+ROLLED_BACK_FILE = "rolled-back.json"
+MAX_ROLLED_BACK = 20
+
+
+def rolled_back_versions(install_root: Path) -> List[str]:
+    """启动守卫切回去过的版本：别再下载、别再请求切换（会再崩、再回滚，循环往复）。"""
+    try:
+        with open(Path(install_root) / ROLLED_BACK_FILE, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return []
+    versions = data.get("versions") if isinstance(data, dict) else None
+    return [str(v) for v in versions] if isinstance(versions, list) else []
+
+
+def note_rolled_back(install_root: Path, version: str) -> None:
+    versions = [v for v in rolled_back_versions(install_root) if v != version] + [version]
+    path = Path(install_root) / ROLLED_BACK_FILE
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump({"versions": versions[-MAX_ROLLED_BACK:]}, handle)
+    os.replace(str(tmp), str(path))
 
 
 def mark_healthy(install_root: Path) -> None:

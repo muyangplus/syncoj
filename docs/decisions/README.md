@@ -36,6 +36,8 @@
 | [ADR-0012](ADR-0012-remote-uninstall-authorization.md) | 远程卸载的授权模型 |
 | [ADR-0013](ADR-0013-install-policy-defaults.md) | 安装策略三条的默认值 |
 | [ADR-0014](ADR-0014-config-must-prove-it-is-read.md) | 一个配置项必须有测试证明它真的被读到 |
+| [ADR-0015](ADR-0015-server-announce.md) | 服务端主动通告只当线索，切换前挑战应答；机器自己探测保留 |
+| [ADR-0016](ADR-0016-builtin-judge.md) | 自带评测写 `judge_result/`、独立评测机、沙箱借用 isolate |
 
 ## 新增一篇 ADR 的门槛
 

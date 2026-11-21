@@ -33,6 +33,8 @@ python server/tools/parallel_tests.py --root server --pattern "tests/test_docs.p
 cd server && python -m pytest tests/test_api_flow.py -k 名字      # 单个文件 / 单个用例
 python agent/tools/check_py38.py agent/                          # py38 兼容门禁
 python server/tools/dump_openapi.py && (cd web && npm run gen:types)   # 改了服务端 schema 之后
+python scripts/smoke_systemd245.py                               # systemd 245 容器冒烟（要 docker；CI 也跑）
+python scripts/release.py versions                               # 四处版本号一致；发版 = 改版本号后推 v<版本号> 标签
 ```
 
 服务端测试串行很慢（每个用例都造真 app + 真库），优先用 `parallel_tests.py` 或只跑相关文件。
@@ -49,6 +51,8 @@ python server/tools/dump_openapi.py && (cd web && npm run gen:types)   # 改了�
 - **服务端分层**：`api/`（`admin.py` 管理端、`agent.py` 机器端、`player.py` 免登录选手页、`meta.py`）→ `services/`（业务逻辑）
   → `models.py` / `db.py`。`main.py:create_app()` 是工厂（不在模块级建 app，避免 import 时建目录）。
   在线状态放内存 `registry.py`，`tasks/flush.py` 批量落库，`tasks/judge.py` 扫描结果目录回写成绩。
+  自带评测（§12）：`judging/` 是只用标准库的评测机（`syncoj-judge`，沙箱 isolate / rlimit），经 `api/judge.py`
+  领任务，结果写进 `judge_result/` 走同一套扫描；服务端主动通告（§11）在 `services/announce.py`。
   上传内容按内容寻址存 `blobs/`，再落到 `source/`。库结构演进用 `PRAGMA user_version` + `migrations.py` 有序迁移。
 - **两个端口**：管理端端口提供全部 API 与 `/docs`；公开端口（默认 80）只暴露装机页与选手页，管理端在那里不存在。
 - **管理端 API 形状统一**：列表信封 `{items,total,limit,offset}`、错误体 `{detail,code,details}`；

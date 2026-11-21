@@ -540,3 +540,22 @@ def test_events_endpoint_records_agent_reports(client: TestClient, enrolled: dic
     )
     assert response.status_code == 200
     assert response.json()["ok"] is True
+
+
+def test_unclaimed_machine_can_report_events(
+    client: TestClient, admin_headers: dict, bootstrap_key: str
+) -> None:
+    """未配对的机器也会升级、被远程卸载，它的失败事件要能落库（只记 agent_id）。"""
+    machine = enroll_machine(client, bootstrap_key)
+    response = client.post(
+        "/api/v1/agent/events",
+        json=[{"level": "error", "category": "uninstall_failed", "message": "写不进交接目录"}],
+        headers=agent_headers(machine["token"]),
+    )
+    assert response.status_code == 200, response.text
+
+    listed = client.get(
+        "/api/v1/admin/events?category=uninstall_failed", headers=admin_headers
+    ).json()["items"]
+    assert [item["message"] for item in listed] == ["写不进交接目录"]
+    assert listed[0]["player_no"] is None

@@ -660,6 +660,10 @@ export interface paths {
          * Export Source Files
          * @description 把回收的代码打包成一个 zip。
          *
+         *     **默认带上扫描对账标了"已消失"的代码**（与界面一致）：考场现实是"选手确实交过，
+         *     只是后来被清了"，复核成绩时这份历史比干净的数据重要。列表接口默认不带，是因为
+         *     列表看的是"现在机器上有什么"；导出是归档，口径不同。
+         *
          *     包里有两个东西：
          *
          *     * ``代码/`` —— 按 ``<准考证号>/<相对路径>`` 放，结构与 ``source/`` 一致，
@@ -672,6 +676,33 @@ export interface paths {
         get: operations["export_source_files_api_v1_admin_contests__contest_id__files_export_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/contests/{contest_id}/judge/builtin": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Builtin Judge Progress
+         * @description 自带评测的进度：排队 / 在评 / 完成 / 失败，以及失败的原因。
+         */
+        get: operations["builtin_judge_progress_api_v1_admin_contests__contest_id__judge_builtin_get"];
+        put?: never;
+        /**
+         * Queue Builtin Judge
+         * @description 排自带评测：指定的题（或全部用自带评测的题）× 指定的选手（或全部选手）。
+         *
+         *     场次还在进行时拒绝（``contest_in_progress``）：那时评的是考到一半的代码；教师确认后带
+         *     ``force`` 再来。已有的任务（不管什么状态）会被替换 —— 重测就是重新排。
+         */
+        post: operations["queue_builtin_judge_api_v1_admin_contests__contest_id__judge_builtin_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1187,6 +1218,47 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/judge-workers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Judge Workers */
+        get: operations["list_judge_workers_api_v1_admin_judge_workers_get"];
+        put?: never;
+        /**
+         * Create Judge Worker
+         * @description 签发一台评测机的令牌。明文只在这一次返回，库里只存哈希。
+         */
+        post: operations["create_judge_worker_api_v1_admin_judge_workers_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/judge-workers/{worker_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Judge Worker
+         * @description 吊销一台评测机（删行）。它手上没交的任务租约到期后回到队列。
+         */
+        delete: operations["delete_judge_worker_api_v1_admin_judge_workers__worker_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/login": {
         parameters: {
             query?: never;
@@ -1215,6 +1287,33 @@ export interface paths {
         put?: never;
         /** Logout */
         post: operations["logout_api_v1_admin_logout_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/machines/announce": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Announce Status
+         * @description 服务端主动通告（§11）的现状：最近一次喊的是哪个地址、喊不出去的原因。
+         */
+        get: operations["announce_status_api_v1_admin_machines_announce_get"];
+        put?: never;
+        /**
+         * Announce Now
+         * @description 「召集机器」：立即在局域网里喊一次。
+         *
+         *     机器听到后到通告里的地址上做挑战应答、验过签才切换（见 ``/agent/whoami``）。
+         *     后台任务每秒看一次这个请求，所以返回的状态可能还是上一次的；界面过一两秒再读。
+         */
+        post: operations["announce_now_api_v1_admin_machines_announce_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1447,6 +1546,47 @@ export interface paths {
         head?: never;
         /** Update Problem */
         patch: operations["update_problem_api_v1_admin_problems__problem_id__patch"];
+        trace?: never;
+    };
+    "/api/v1/admin/problems/{problem_id}/judge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set Problem Judge
+         * @description 题目的评测方式：外部评测器 / 自带评测，以及时限、内存、IO 方式、编译参数。
+         */
+        put: operations["set_problem_judge_api_v1_admin_problems__problem_id__judge_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/problems/{problem_id}/testdata": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Upload Testdata
+         * @description 上传数据包（zip）。**上传时就校验结构**：缺答案、路径不安全、配置写错当场报出来。
+         */
+        post: operations["upload_testdata_api_v1_admin_problems__problem_id__testdata_post"];
+        /** Delete Testdata */
+        delete: operations["delete_testdata_api_v1_admin_problems__problem_id__testdata_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/v1/admin/releases": {
@@ -1848,6 +1988,10 @@ export interface paths {
          * @description Agent 主动上报的审计事件（权限异常、磁盘满、批量重写等）。
          *
          *     刻意用列表批量提交：断网期间事件会堆积，逐条上报会在重连瞬间产生请求风暴。
+         *
+         *     **未配对的机器也收**（只记 agent_id，场次 / 选手留空）：它们同样会升级、会被远程
+         *     卸载，"交给 root 管理单元失败"这类事件恰恰出在还没配对的那批机器上。以前这里要求
+         *     选手身份，未配对的机器每轮心跳都吃一个 403、事件永远积压（systemd 245 冒烟实测）。
          */
         post: operations["report_events_api_v1_agent_events_post"];
         delete?: never;
@@ -2037,6 +2181,115 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/agent/whoami": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Whoami
+         * @description 挑战应答（§11）：证明"此刻在这个地址上的，握着发布私钥"。
+         *
+         *     机器听到服务端的通告之后先来这里问一句（**不带凭据**），验过签才把服务端地址
+         *     切过去。通告本身不签名、挡不住重放；这一步让切换的前提变成"这里真的是那台服务端"。
+         *
+         *     签的是服务端**自己认定的**对外地址（§7.3 的三条来源），机器切换到签名里的地址 ——
+         *     有人把请求转给真服务端，拿到的签名也只会把机器指回真服务端。不鉴权、每次一个 RSA
+         *     签名，所以按来源 IP 限速。
+         */
+        get: operations["whoami_api_v1_agent_whoami_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/judge/lease": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Lease
+         * @description 领下一个任务；没有就 204。租约 15 分钟，过期没交结果的任务自动回到队列。
+         */
+        post: operations["lease_api_v1_judge_lease_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/judge/tasks/{task_id}/blobs/{sha256}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Task Blob
+         * @description 取任务要用的内容：只认这个任务的代码与它那道题的数据包。
+         */
+        get: operations["task_blob_api_v1_judge_tasks__task_id__blobs__sha256__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/judge/tasks/{task_id}/fail": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Report Failure
+         * @description 评测机自己出错（沙箱起不来、checker 编译不过……）：退回队列，三次都失败就记失败。
+         */
+        post: operations["report_failure_api_v1_judge_tasks__task_id__fail_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/judge/tasks/{task_id}/result": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Submit Result
+         * @description 交结果：写进 ``judge_result/<场次>/<选手>/<题目>/result.json``，扫描器随后收进矩阵。
+         *
+         *     任务已被重测替换掉（或者不是你领的）时 404：那份结果对应的代码可能已经变了，丢掉。
+         */
+        post: operations["submit_result_api_v1_judge_tasks__task_id__result_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/meta": {
         parameters: {
             query?: never;
@@ -2197,6 +2450,24 @@ export interface components {
              * @default 0
              */
             tick_count: number;
+        };
+        /**
+         * AnnounceStatusOut
+         * @description 服务端主动通告的现状（管理端「召集机器」用）。
+         */
+        AnnounceStatusOut: {
+            /** Boot Id */
+            boot_id: string;
+            /** Enabled */
+            enabled: boolean;
+            /** Last Error */
+            last_error?: string | null;
+            /** Last Sent At */
+            last_sent_at?: string | null;
+            /** Last Url */
+            last_url?: string | null;
+            /** Port */
+            port: number;
         };
         /**
          * ApplyRosterIn
@@ -2523,6 +2794,11 @@ export interface components {
              */
             version: string;
         };
+        /** Body_upload_testdata_api_v1_admin_problems__problem_id__testdata_post */
+        Body_upload_testdata_api_v1_admin_problems__problem_id__testdata_post: {
+            /** File */
+            file: string;
+        };
         /** BootstrapKeyIssueIn */
         BootstrapKeyIssueIn: {
             /** Expires Days */
@@ -2580,6 +2856,67 @@ export interface components {
              * @default 0
              */
             use_count: number;
+        };
+        /** BuiltinJudgeFailureOut */
+        BuiltinJudgeFailureOut: {
+            /** Error */
+            error: string;
+            /** Player No */
+            player_no: string;
+            /** Problem */
+            problem: string;
+        };
+        /**
+         * BuiltinJudgeIn
+         * @description 排自带评测任务。都不填 = 全场所有用自带评测的题 × 所有选手。
+         */
+        BuiltinJudgeIn: {
+            /**
+             * Force
+             * @default false
+             */
+            force: boolean;
+            /** Player Id */
+            player_id?: number | null;
+            /** Problem */
+            problem?: string | null;
+        };
+        /** BuiltinJudgeProgressOut */
+        BuiltinJudgeProgressOut: {
+            /**
+             * Done
+             * @default 0
+             */
+            done: number;
+            /**
+             * Failed
+             * @default 0
+             */
+            failed: number;
+            /** Failures */
+            failures?: components["schemas"]["BuiltinJudgeFailureOut"][];
+            /**
+             * Queued
+             * @default 0
+             */
+            queued: number;
+            /**
+             * Running
+             * @default 0
+             */
+            running: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        };
+        /** BuiltinJudgeQueuedOut */
+        BuiltinJudgeQueuedOut: {
+            /** Problems */
+            problems?: string[];
+            /** Queued */
+            queued: number;
         };
         /**
          * CloneAlertOut
@@ -3087,6 +3424,69 @@ export interface components {
             /** Version */
             version: string;
         };
+        /** JudgeBlobRefOut */
+        JudgeBlobRefOut: {
+            /** Name */
+            name?: string | null;
+            /** Path */
+            path?: string | null;
+            /** Sha256 */
+            sha256: string;
+        };
+        /** JudgeFailIn */
+        JudgeFailIn: {
+            /**
+             * Message
+             * @default
+             */
+            message: string;
+        };
+        /**
+         * JudgeLeaseOut
+         * @description 评测机领到的任务。两份内容（代码、数据包）用各自的 sha256 去取。
+         */
+        JudgeLeaseOut: {
+            /** Attempt */
+            attempt: number;
+            /** Contest Slug */
+            contest_slug: string;
+            /** Id */
+            id: number;
+            /** Player No */
+            player_no: string;
+            problem: components["schemas"]["JudgeProblemConfigOut"];
+            source: components["schemas"]["JudgeBlobRefOut"];
+            testdata: components["schemas"]["JudgeBlobRefOut"];
+        };
+        /** JudgeProblemConfigOut */
+        JudgeProblemConfigOut: {
+            /** Compile Flags */
+            compile_flags?: string | null;
+            /** Ident */
+            ident: string;
+            /** Io Mode */
+            io_mode: string;
+            /** Memory Limit Mb */
+            memory_limit_mb: number;
+            /** Time Limit Ms */
+            time_limit_ms: number;
+        };
+        /**
+         * JudgeResultIn
+         * @description 评测机交回的结果：``score`` / ``max_score`` / ``status`` 进成绩矩阵，其余原样进 ``raw_json``。
+         */
+        JudgeResultIn: {
+            /** Detail */
+            detail?: {
+                [key: string]: unknown;
+            };
+            /** Max Score */
+            max_score: number;
+            /** Score */
+            score: number;
+            /** Status */
+            status: string;
+        };
         /**
          * JudgeRunClearIn
          * @description 清空成绩记录。
@@ -3159,6 +3559,39 @@ export interface components {
              * @default 0
              */
             unparsed: number;
+        };
+        /** JudgeWorkerCreatedOut */
+        JudgeWorkerCreatedOut: {
+            /** Created At */
+            created_at: string;
+            /** Id */
+            id: number;
+            /** Last Seen At */
+            last_seen_at?: string | null;
+            /** Last Seen Ip */
+            last_seen_ip?: string | null;
+            /** Name */
+            name: string;
+            /** Token */
+            token: string;
+        };
+        /** JudgeWorkerIn */
+        JudgeWorkerIn: {
+            /** Name */
+            name: string;
+        };
+        /** JudgeWorkerOut */
+        JudgeWorkerOut: {
+            /** Created At */
+            created_at: string;
+            /** Id */
+            id: number;
+            /** Last Seen At */
+            last_seen_at?: string | null;
+            /** Last Seen Ip */
+            last_seen_ip?: string | null;
+            /** Name */
+            name: string;
         };
         /** LoginRequest */
         LoginRequest: {
@@ -3362,6 +3795,26 @@ export interface components {
         Page_JudgeRunOut_: {
             /** Items */
             items?: components["schemas"]["JudgeRunOut"][];
+            /**
+             * Limit
+             * @default 50
+             */
+            limit: number;
+            /**
+             * Offset
+             * @default 0
+             */
+            offset: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        };
+        /** Page[JudgeWorkerOut] */
+        Page_JudgeWorkerOut_: {
+            /** Items */
+            items?: components["schemas"]["JudgeWorkerOut"][];
             /**
              * Limit
              * @default 50
@@ -3796,6 +4249,30 @@ export interface components {
             updated: number;
         };
         /**
+         * ProblemJudgeIn
+         * @description 题目的自带评测配置（§12）。``compile_flags`` 只接受白名单里的几类参数（服务端校验）。
+         */
+        ProblemJudgeIn: {
+            /** Compile Flags */
+            compile_flags?: string | null;
+            /**
+             * Io Mode
+             * @default stdio
+             * @enum {string}
+             */
+            io_mode: "stdio" | "file";
+            /**
+             * Judge Mode
+             * @default external
+             * @enum {string}
+             */
+            judge_mode: "external" | "builtin";
+            /** Memory Limit Mb */
+            memory_limit_mb?: number | null;
+            /** Time Limit Ms */
+            time_limit_ms?: number | null;
+        };
+        /**
          * ProblemMatchIn
          * @description 拿一条相对路径来试算归题结果。
          *
@@ -3820,6 +4297,8 @@ export interface components {
         };
         /** ProblemOut */
         ProblemOut: {
+            /** Compile Flags */
+            compile_flags?: string | null;
             /** Contest Id */
             contest_id: number;
             /** File Patterns */
@@ -3828,6 +4307,18 @@ export interface components {
             id: number;
             /** Ident */
             ident: string;
+            /**
+             * Io Mode
+             * @default stdio
+             */
+            io_mode: string;
+            /**
+             * Judge Mode
+             * @default external
+             */
+            judge_mode: string;
+            /** Memory Limit Mb */
+            memory_limit_mb?: number | null;
             /** Note */
             note?: string | null;
             /**
@@ -3835,8 +4326,40 @@ export interface components {
              * @default 0
              */
             order_index: number;
+            testdata?: components["schemas"]["ProblemTestdataOut"] | null;
+            /** Time Limit Ms */
+            time_limit_ms?: number | null;
             /** Title */
             title?: string | null;
+        };
+        /**
+         * ProblemTestdataOut
+         * @description 题目的数据包（§12）：上传时校验出的摘要。
+         */
+        ProblemTestdataOut: {
+            /** Cases */
+            cases: number;
+            /**
+             * Has Checker
+             * @default false
+             */
+            has_checker: boolean;
+            /** Name */
+            name: string;
+            /** Sha256 */
+            sha256: string;
+            /** Size */
+            size: number;
+            /**
+             * Subtasks
+             * @default 0
+             */
+            subtasks: number;
+            /**
+             * Total Score
+             * @default 0
+             */
+            total_score: number;
         };
         /**
          * ProblemUpsert
@@ -4446,6 +4969,28 @@ export interface components {
             msg: string;
             /** Error Type */
             type: string;
+        };
+        /**
+         * WhoAmIOut
+         * @description 挑战应答（§11）：用发布私钥签 ``syncoj-announce-v1
+         *     <nonce>
+         *     <url>``。
+         *
+         *         ``url`` 是**服务端自己认定的**对外地址（§7.3 的三条来源），不是请求里的 Host：
+         *         机器切换到的是签名里的这个地址。
+         */
+        WhoAmIOut: {
+            /**
+             * Key Id
+             * @default
+             */
+            key_id: string;
+            /** Nonce */
+            nonce: string;
+            /** Sig */
+            sig: string;
+            /** Url */
+            url: string;
         };
     };
     responses: never;
@@ -5515,6 +6060,72 @@ export interface operations {
             };
         };
     };
+    builtin_judge_progress_api_v1_admin_contests__contest_id__judge_builtin_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contest_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BuiltinJudgeProgressOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    queue_builtin_judge_api_v1_admin_contests__contest_id__judge_builtin_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contest_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BuiltinJudgeIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BuiltinJudgeQueuedOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     rescan_judge_results_api_v1_admin_contests__contest_id__judge_rescan_post: {
         parameters: {
             query?: never;
@@ -6319,6 +6930,107 @@ export interface operations {
             };
         };
     };
+    list_judge_workers_api_v1_admin_judge_workers_get: {
+        parameters: {
+            query?: {
+                /** @description 每页条数 */
+                limit?: number;
+                /** @description 起始位置 */
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_JudgeWorkerOut_"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_judge_worker_api_v1_admin_judge_workers_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JudgeWorkerIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JudgeWorkerCreatedOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_judge_worker_api_v1_admin_judge_workers__worker_id__delete: {
+        parameters: {
+            query: {
+                /** @description 原样输入评测机名称 */
+                confirm: string;
+            };
+            header?: never;
+            path: {
+                worker_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     login_api_v1_admin_login_post: {
         parameters: {
             query?: never;
@@ -6368,6 +7080,46 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+        };
+    };
+    announce_status_api_v1_admin_machines_announce_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AnnounceStatusOut"];
+                };
+            };
+        };
+    };
+    announce_now_api_v1_admin_machines_announce_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AnnounceStatusOut"];
                 };
             };
         };
@@ -6712,6 +7464,107 @@ export interface operations {
                 "application/json": components["schemas"]["ProblemUpsert"];
             };
         };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_problem_judge_api_v1_admin_problems__problem_id__judge_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                problem_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProblemJudgeIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    upload_testdata_api_v1_admin_problems__problem_id__testdata_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                problem_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_upload_testdata_api_v1_admin_problems__problem_id__testdata_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_testdata_api_v1_admin_problems__problem_id__testdata_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                problem_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {
@@ -7629,6 +8482,166 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TickResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    whoami_api_v1_agent_whoami_get: {
+        parameters: {
+            query: {
+                nonce: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WhoAmIOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    lease_api_v1_judge_lease_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JudgeLeaseOut"];
+                };
+            };
+            /** @description 没有待评的任务 */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    task_blob_api_v1_judge_tasks__task_id__blobs__sha256__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                task_id: number;
+                sha256: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    report_failure_api_v1_judge_tasks__task_id__fail_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                task_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JudgeFailIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    submit_result_api_v1_judge_tasks__task_id__result_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                task_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JudgeResultIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimpleAck"];
                 };
             };
             /** @description Validation Error */

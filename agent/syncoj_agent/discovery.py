@@ -135,7 +135,7 @@ def _decode_signature(text: str) -> Optional[bytes]:
         return None
 
 
-def broadcast_targets() -> List[str]:
+def broadcast_targets(route_path: str = "/proc/net/route") -> List[str]:
     """往哪些地址喊。
 
     永远包含受限广播 ``255.255.255.255``。此外**在 Linux 上**从 ``/proc/net/route``
@@ -147,7 +147,7 @@ def broadcast_targets() -> List[str]:
     """
     targets = ["255.255.255.255"]
     try:
-        with open("/proc/net/route", "r", encoding="ascii") as handle:
+        with open(route_path, "r", encoding="ascii") as handle:
             lines = handle.read().splitlines()[1:]
     except OSError:
         return targets
@@ -166,7 +166,8 @@ def broadcast_targets() -> List[str]:
             continue  # 默认路由：它的"广播地址"没有意义
         network = destination & mask
         broadcast = network | (~mask & 0xFFFFFFFF)
-        target = socket.inet_ntoa(broadcast.to_bytes(4, "big"))
+        # 小端解析出来的整数要按小端还原成字节；曾经写成 "big"，算出 255.2.0.192 这种地址
+        target = socket.inet_ntoa(broadcast.to_bytes(4, "little"))
         if target not in targets:
             targets.append(target)
     return targets

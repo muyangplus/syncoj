@@ -40,11 +40,14 @@ ENVELOPE_FIELDS = {"items", "total", "limit", "offset"}
 #:   player —— **免登录**的选手页（靠来源 IP 或「场次+考号」定位，见 DESIGN §5.6）
 #:   meta   —— **免登录**的全站运行时常量（显示时区…）。它要被登录页、选手页与
 #:             装机页一起读，挂在任何一个需要鉴权的命名空间下都用不了
+#:   judge  —— 评测机（§12，评测机令牌）。不挂在 admin 下：令牌只能领任务、取内容、交结果，
+#:             与管理员会话是两种凭据
 API_PREFIXES = (
     "/api/v1/admin",
     "/api/v1/agent",
     "/api/v1/player",
     "/api/v1/meta",
+    "/api/v1/judge",
 )
 
 #: 目前应该有多少个 GET 集合走信封。少一个就说明有人新加列表时忘了套 ——

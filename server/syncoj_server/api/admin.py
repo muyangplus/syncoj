@@ -68,7 +68,9 @@ from ..models import (
 )
 from ..paths import PathValidationError, safe_join, slugify, validate_relpath
 from ..schemas import (
+    ProblemTestdataOut,
     AdminHealthOut,
+    AnnounceStatusOut,
     GLOBAL_CONFIRM,
     AdminInfo,
     AgentRuntimeOut,
@@ -981,6 +983,45 @@ def apply_roster_to_contest(
 # 机器绑的是**名单里的某个人**，不是某场比赛的选手 —— 所以配对是永久的，
 # 同一个学生换一场比赛不用重新配。教师在这里做的事只有一件：
 # 把"机器上显示的那串 6 位数字"对应到名单里的一个人。
+
+
+def _announce_status(ctx: AppContext) -> AnnounceStatusOut:
+    announcer = ctx.announcer
+    sent = announcer.last_sent_at
+    return AnnounceStatusOut(
+        enabled=bool(ctx.settings.announce_enabled and ctx.signing_key is not None),
+        port=ctx.settings.announce_port,
+        boot_id=announcer.boot_id,
+        last_sent_at=(
+            datetime.fromtimestamp(sent, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if sent else None
+        ),
+        last_url=announcer.last_url,
+        last_error=announcer.last_error,
+    )
+
+
+@router.get("/machines/announce", response_model=AnnounceStatusOut)
+def announce_status(
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> AnnounceStatusOut:
+    """服务端主动通告（§11）的现状：最近一次喊的是哪个地址、喊不出去的原因。"""
+    return _announce_status(ctx)
+
+
+@router.post("/machines/announce", response_model=AnnounceStatusOut)
+def announce_now(
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> AnnounceStatusOut:
+    """「召集机器」：立即在局域网里喊一次。
+
+    机器听到后到通告里的地址上做挑战应答、验过签才切换（见 ``/agent/whoami``）。
+    后台任务每秒看一次这个请求，所以返回的状态可能还是上一次的；界面过一两秒再读。
+    """
+    ctx.announcer.request_now()
+    return _announce_status(ctx)
 
 
 @router.get("/machines/pending", response_model=Page[PendingMachineOut])
@@ -2503,6 +2544,8 @@ _BLOB_REFERENCES = (
     (SourceFile, SourceFile.sha256),
     (Asset, Asset.sha256),
     (AgentRelease, AgentRelease.sha256),
+    #: 自带评测的数据包（§12）
+    (Problem, Problem.testdata_sha256),
 )
 
 
@@ -2616,11 +2659,15 @@ def export_source_files(
     contest_id: int,
     player_id: Optional[int] = None,
     problem: Optional[str] = None,
-    include_deleted: bool = False,
+    include_deleted: bool = True,
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> StreamingResponse:
     """把回收的代码打包成一个 zip。
+
+    **默认带上扫描对账标了"已消失"的代码**（与界面一致）：考场现实是"选手确实交过，
+    只是后来被清了"，复核成绩时这份历史比干净的数据重要。列表接口默认不带，是因为
+    列表看的是"现在机器上有什么"；导出是归档，口径不同。
 
     包里有两个东西：
 
@@ -2954,7 +3001,9 @@ def delete_contest(
             ).distinct()
         ).scalars()) + list(session.execute(
             select(Asset.sha256).where(Asset.contest_id == contest_id)
-        ).scalars())
+        ).scalars()) + [sha for sha in session.execute(
+            select(Problem.testdata_sha256).where(Problem.contest_id == contest_id)
+        ).scalars() if sha]
         session.delete(contest)
         session.add(
             EventLog(
@@ -4834,7 +4883,9 @@ def delete_problem(
             return SimpleAck(ok=True, detail="没有该题目")
         require_confirm(row.ident, confirm, "题目标识")
         ident = row.ident
+        testdata = row.testdata_sha256
         session.delete(row)
+    _reclaim_blobs(ctx, [testdata])
     return SimpleAck(ok=True, detail="已删除题目 %s（已有成绩记录保留）" % ident)
 
 
@@ -4870,6 +4921,7 @@ def clear_problems(
 
         rows = list(session.execute(stmt).scalars())
         removed = [row.ident for row in rows]
+        testdata = [row.testdata_sha256 for row in rows]
         for row in rows:
             session.delete(row)
 
@@ -4884,6 +4936,7 @@ def clear_problems(
                 )
             )
 
+    _reclaim_blobs(ctx, testdata)
     detail = "已删除 %d 道题的登记" % len(removed)
     if removed:
         detail += "（已有成绩记录保留，会以「未登记」显示在矩阵里）"
@@ -4901,6 +4954,30 @@ def _problem_out(row: Problem, settings: Settings) -> ProblemOut:
         # 把实际生效的模式一并给前端 —— 否则界面得自己推默认值，
         # 而默认值是可配置的（settings.default_file_pattern），前端推不出来
         file_patterns=problem_rules.patterns_for(row, settings),
+        judge_mode=row.judge_mode or "external",
+        time_limit_ms=row.time_limit_ms,
+        memory_limit_mb=row.memory_limit_mb,
+        io_mode=row.io_mode or "stdio",
+        compile_flags=row.compile_flags,
+        testdata=_testdata_out(row),
+    )
+
+
+def _testdata_out(row: Problem) -> Optional[ProblemTestdataOut]:
+    if not row.testdata_sha256:
+        return None
+    try:
+        info = json.loads(row.testdata_info or "{}")
+    except ValueError:
+        info = {}
+    return ProblemTestdataOut(
+        name=row.testdata_name or "",
+        size=int(row.testdata_size or 0),
+        sha256=row.testdata_sha256,
+        cases=int(info.get("cases") or 0),
+        subtasks=int(info.get("subtasks") or 0),
+        has_checker=bool(info.get("has_checker")),
+        total_score=int(info.get("total_score") or 0),
     )
 
 

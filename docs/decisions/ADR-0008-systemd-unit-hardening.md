@@ -79,5 +79,6 @@
 
 root 管理单元（[ADR-0012](ADR-0012-remote-uninstall-authorization.md)「重写（2026-11）」）落地后，
 Agent 不再需要 sudo：单元写回 `NoNewPrivileges=yes`，`ReadWritePaths=` 只剩运行账号家目录、
-安装根、状态目录三条。`Restart=on-failure` 暂时保留（卸载时 root 单元会先停掉它，
-`always` 已无害，但改动留给实机冒烟一起验证）。
+安装根、状态目录三条。`Restart=on-failure` 也改成了 `always`：卸载时 root 单元先停掉它再删，
+Agent 不再以 exit 0 退出卸载，`on-failure` 的理由没了；启动守卫随之移到 root 一侧
+（`ExecStartPre=-+…install.py --boot-guard`）。systemd 245 容器冒烟（`scripts/smoke_systemd245.py`，CI 每次跑）已验证：`NoNewPrivileges=yes` 下服务正常运行，升级经 root 管理单元切换。

@@ -3,6 +3,7 @@ import { computed, nextTick, reactive, ref } from 'vue'
 
 import { scoreApi } from '@/api'
 import type { JudgeRunOut, JudgeScanOut, ScoreCellOut, ScoreRowOut } from '@/api/types'
+import BuiltinJudgeDialog from '@/components/BuiltinJudgeDialog.vue'
 import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
 import DataTable from '@/components/DataTable.vue'
 import FormDialog from '@/components/FormDialog.vue'
@@ -413,6 +414,9 @@ function runStatusLabel(parseStatus: string): string {
   }
   return map[parseStatus] ?? parseStatus
 }
+
+// 自带评测（§12）：排任务、看进度、管评测机
+const builtinOpen = ref(false)
 </script>
 
 <template>
@@ -427,6 +431,7 @@ function runStatusLabel(parseStatus: string): string {
       <el-button size="small" :loading="rescan.pending.value" @click="rescan.run(undefined)">
         立即重扫
       </el-button>
+      <el-button size="small" :disabled="!contest.currentId" @click="builtinOpen = true">自带评测</el-button>
       <el-button size="small" :disabled="!view?.rows.length" @click="exportCsv">导出 CSV</el-button>
       <el-button size="small" :loading="loading" @click="reloadMatrix">刷新</el-button>
     </template>
@@ -797,6 +802,7 @@ function runStatusLabel(parseStatus: string): string {
         </template>
       </el-alert>
     </ConfirmByNameDialog>
+    <BuiltinJudgeDialog v-model="builtinOpen" :contest-id="contest.currentId" @update:model-value="(v: boolean) => { if (!v) reloadMatrix() }" />
   </PageShell>
 </template>
 

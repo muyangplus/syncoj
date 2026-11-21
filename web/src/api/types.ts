@@ -37,6 +37,7 @@ export type ApplyRosterIn = S['ApplyRosterIn']
 export type ApplyRosterOut = S['ApplyRosterOut']
 
 export type PendingMachineOut = S['PendingMachineOut']
+export type AnnounceStatusOut = S['AnnounceStatusOut']
 /** 按机器配对。`pair_code` 可省，但给了就必须对得上。 */
 export type BindMachineIn = S['BindMachineIn']
 /** 按配对码配对。六位数字，只在绑定的那一刻有效。 */
@@ -121,3 +122,12 @@ export type DeployStatus = 'pending' | 'ready' | 'done' | 'failed' | 'cancelled'
 
 /** 场次状态。定义在后端 `models.ContestStatus`。 */
 export type ContestStatus = 'draft' | 'running' | 'frozen' | 'closed'
+
+// ---- 自带评测（§12）----
+export type ProblemJudgeIn = S['ProblemJudgeIn']
+export type ProblemTestdataOut = S['ProblemTestdataOut']
+export type BuiltinJudgeIn = S['BuiltinJudgeIn']
+export type BuiltinJudgeQueuedOut = S['BuiltinJudgeQueuedOut']
+export type BuiltinJudgeProgressOut = S['BuiltinJudgeProgressOut']
+export type JudgeWorkerOut = S['JudgeWorkerOut']
+export type JudgeWorkerCreatedOut = S['JudgeWorkerCreatedOut']

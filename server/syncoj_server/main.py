@@ -22,6 +22,8 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __version__, errors
 from .api import admin as admin_api
+from .api import admin_judge as admin_judge_api
+from .api import judge as judge_api
 from .api import agent as agent_api
 from .api import meta as meta_api
 from .api import player as player_api
@@ -29,6 +31,7 @@ from .config import Settings, default_settings
 from .context import AppContext
 from .paths import PathValidationError
 from .services import discovery
+from .services.announce import run_announcer
 from .services.discovery import run_discovery_responder
 from .tasks.flush import run_maintenance_loop
 from .tasks.judge import run_judge_scan_loop
@@ -51,6 +54,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             asyncio.ensure_future(run_maintenance_loop(ctx)),
             asyncio.ensure_future(run_judge_scan_loop(ctx)),
             asyncio.ensure_future(run_discovery_responder(ctx)),
+            asyncio.ensure_future(run_announcer(ctx)),
         ]
         try:
             yield
@@ -84,6 +88,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # 而它们都要按同一个钟点显示时间。
     app.include_router(meta_api.router)
     app.include_router(admin_api.router)
+    app.include_router(admin_judge_api.router)
+    app.include_router(judge_api.router)
 
     _install_public_port_gate(app)
     _install_agent_body_limits(app)
@@ -179,6 +185,8 @@ def _is_loopback_host(host: str) -> bool:
 #: 接口，放在考生随手就能打开的地址上没有意义，只是白送一张接口地图。
 _PUBLIC_PORT_HIDDEN = (
     "/api/v1/admin",
+    # 评测机只连管理端口（§12）；公开端口是考生网段随手能打开的地址
+    "/api/v1/judge",
     "/docs",
     "/redoc",
     "/openapi.json",

@@ -2131,6 +2131,16 @@ class Installer:
             text = text.replace(key, value)
         return text
 
+    def _boot_guard_command(self) -> Optional[str]:
+        """启动守卫的命令行（root 管理单元那份安装器 + ``--boot-guard``）；非 POSIX 不要。"""
+        if not _is_posix_platform():
+            return None
+        return "%s -E -s %s --boot-guard %s" % (
+            self.options.python or "/usr/bin/python3",
+            _posix(self.admin_dir / ADMIN_SCRIPT_NAME),
+            " ".join(self._layout_args()),
+        )
+
     def _layout_args(self) -> List[str]:
         """管理单元的命令行里要原样带上的布局参数（与这次安装一致）。"""
         args = [
@@ -2150,6 +2160,29 @@ class Installer:
         if self.service_name != SERVICE_NAME:
             args += ["--service-name", self.service_name]
         return args
+
+    def _prepare_handoff_dir(self, handoff: Path) -> None:
+        """建好交接目录：0700、属运行账号。**全程不顺着符号链接。**
+
+        它在状态目录里，而状态目录属运行账号：选手可以把 ``handoff`` 换成指向 ``/etc``
+        的符号链接。按路径 chmod / chown（以前用的 ``shutil.chown``）会顺着链接把
+        ``/etc`` 交给选手 —— 而这一步在每次升级切换时都以 root 执行。
+        """
+        if handoff.is_symlink() or (handoff.exists() and not handoff.is_dir()):
+            handoff.unlink()
+        handoff.mkdir(parents=True, exist_ok=True)
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(str(handoff), flags)
+        try:
+            os.fchmod(fd, 0o700)
+            try:
+                import pwd
+
+                os.fchown(fd, pwd.getpwnam(self.run_user).pw_uid, -1)
+            except (OSError, KeyError, ImportError) as exc:
+                self.report.warn("无法把 %s 交给 %s：%s" % (handoff, self.run_user, exc))
+        finally:
+            os.close(fd)
 
     def install_admin_unit(self) -> None:
         """装 root 管理单元：把安装器自己拷到 ``admin_dir``，写 service + path 两个单元。
@@ -2183,15 +2216,13 @@ class Installer:
                 _write_text_file(script, me.read_text(encoding="utf-8"), 0o644)
             unit_dir = self.unit_path.parent
             unit_dir.mkdir(parents=True, exist_ok=True)
-            _write_text_file(unit_dir / ADMIN_UNIT_FILENAME, service, 0o644)
-            _write_text_file(unit_dir / ADMIN_PATH_UNIT_FILENAME, path_unit, 0o644)
+            # 内容没变就不写：管理单元在执行升级时会走到这里，改写正在运行的单元文件
+            # 会让 systemd 报 "Current command vanished from the unit file"
+            for name, text in ((ADMIN_UNIT_FILENAME, service), (ADMIN_PATH_UNIT_FILENAME, path_unit)):
+                if _read_text_or_none(unit_dir / name) != text:
+                    _write_text_file(unit_dir / name, text, 0o644)
             # 交接目录归运行账号（Agent 往里写请求），0700
-            handoff.mkdir(parents=True, exist_ok=True)
-            os.chmod(str(handoff), 0o700)
-            try:
-                shutil.chown(str(handoff), user=self.run_user)
-            except (OSError, LookupError) as exc:
-                self.report.warn("无法把 %s 交给 %s：%s" % (handoff, self.run_user, exc))
+            self._prepare_handoff_dir(handoff)
         except OSError as exc:
             raise InstallError("写入 root 管理单元失败：%s" % exc)
         self.report.action(
@@ -2267,6 +2298,10 @@ class Installer:
                     )
                     _write_handoff_result(dir_fd, kind, code == EXIT_OK, message)
                     return code
+                if kind == "healthy":
+                    # 不写回执：每次升级后都会来一次，回执只会变成一条没人看的事件
+                    self._handoff_healthy(data)
+                    return EXIT_OK
                 if kind == "uninstall":
                     self._verify_uninstall_token(data)
                     _write_handoff_result(dir_fd, kind, True, "令牌已验过，开始卸载")
@@ -2306,6 +2341,9 @@ class Installer:
         installed = current_version(self.prefix)
         if installed and _version_key(version) < _version_key(installed):
             raise InstallError("请求的版本 %s 低于已安装的 %s，拒绝降级" % (version, installed))
+        if version in _rolled_back_versions(self.prefix):
+            # 启动守卫刚把它切回去过：再切过去只会再崩两次、再回滚一次，循环往复
+            raise InstallError("版本 %s 曾启动失败被自动回滚，不再切换（发一个新版本号）" % version)
 
         workdir = Path(tempfile.mkdtemp(prefix="syncoj-admin-"))
         try:
@@ -2315,13 +2353,68 @@ class Installer:
             if actual != sha:
                 raise InstallError("暂存的包与请求里的 sha256 不符，拒绝切换")
             self.report.action("暂存的包已复制并验过签名：%s（%s）" % (version, sha[:12]))
+            # 回滚点**在切换之前**记下：run() 末尾就会重启服务，那一次启动要被启动守卫数到。
+            # 切换失败时 current 没变，守卫看到状态里的版本对不上会自己清掉。
+            if installed and installed != version and not self.report.dry_run:
+                _save_upgrade_state(self.prefix, {
+                    "version": version, "previous": installed, "boots": 0,
+                    "applied_at": time.time(),
+                })
             self.options.bundle = str(target)
             self.options.sha256 = sha
             self.options.from_server = False
             self.options.public_key = key_path
+            self._handoff_in_progress = True
             return self.run()
         finally:
             shutil.rmtree(str(workdir), ignore_errors=True)
+
+    def _handoff_healthy(self, data: dict) -> None:
+        """Agent 报告新版本已平稳运行若干轮：清掉回滚状态。
+
+        请求是运行账号写的，可以伪造：伪造的后果只是"这一版坏了也不自动回滚"，
+        不能让 root 切到任何别的版本。版本必须同时对得上状态与当前激活的版本。
+        """
+        version = str(data.get("version") or "")
+        state = _load_upgrade_state(self.prefix)
+        if state is None:
+            return
+        if version == state.get("version") == current_version(self.prefix):
+            _clear_upgrade_state(self.prefix)
+            self.report.action("版本 %s 已平稳运行，清除回滚状态" % version)
+
+    def boot_guard(self) -> int:
+        """Agent 每次启动前（``ExecStartPre=+``，root）调一次：数启动次数，必要时回滚。
+
+        曾经由 Agent 自己在启动时做，但它以选手账号运行、写不进属 root 的
+        ``/opt/syncoj`` —— 真机上回滚从来没生效过。状态文件格式与 Agent 那份相同
+        （``upgrade.py`` 的 ``UpgradeState``），开发机上安装根可写时仍由 Agent 自己处理。
+        """
+        state = _load_upgrade_state(self.prefix)
+        if state is None:
+            return EXIT_OK
+        running = current_version(self.prefix)
+        if state.get("version") != running:
+            _clear_upgrade_state(self.prefix)
+            return EXIT_OK
+        try:
+            boots = int(state.get("boots") or 0) + 1
+        except (TypeError, ValueError):
+            boots = MAX_BOOT_ATTEMPTS + 1
+        previous = state.get("previous")
+        if boots <= MAX_BOOT_ATTEMPTS:
+            state["boots"] = boots
+            _save_upgrade_state(self.prefix, state)
+            return EXIT_OK
+        _clear_upgrade_state(self.prefix)
+        if not previous or not (self.prefix / RELEASES_DIR / str(previous)).is_dir():
+            print("版本 %s 反复启动失败，但没有可回滚的上一版本" % running, file=sys.stderr)
+            return EXIT_OK
+        self.activate(str(previous))
+        _note_rolled_back(self.prefix, str(running))
+        print("版本 %s 已连续启动 %d 次仍未平稳运行，已回滚到 %s" % (running, boots, previous),
+              file=sys.stderr)
+        return EXIT_OK
 
     def _verify_uninstall_token(self, data: dict) -> None:
         token = str(data.get("token") or "")
@@ -2458,6 +2551,7 @@ class Installer:
             unit_dir=self.unit_path.parent,
             helper_dir=self.helper_dir,
             sudoers_dir=self.sudoers_path.parent,
+            boot_guard=self._boot_guard_command(),
         )
 
         existing = None
@@ -2568,6 +2662,12 @@ class Installer:
         """
         run(["systemctl", "daemon-reload"], check=False)
         run(["systemctl", "enable", ENROLL_UNIT_FILENAME], check=False)
+        if getattr(self, "_handoff_in_progress", False):
+            # root 管理单元执行升级时：机器早就注册过了（请求就是它交来的），不必当场跑。
+            # 当场跑还会用**新版本**的代码 —— 新版本要是起不来，注册单元自带的重试
+            # 会把管理单元挂住两分钟（systemd 245 冒烟实测）。
+            self.report.action("已启用 %s（升级时不当场执行）" % ENROLL_UNIT_FILENAME)
+            return
         # 上次失败留下的 failed 状态并不挡 start，但清掉它日志更好读
         run(["systemctl", "reset-failed", ENROLL_UNIT_FILENAME], check=False)
         if run(["systemctl", "start", ENROLL_UNIT_FILENAME], check=False) == 0:
@@ -3702,6 +3802,82 @@ def _best_effort_unlink(path: Path) -> None:
         pass
 
 
+#: 升级回滚状态（安装根下，与 ``syncoj_agent/upgrade.py`` 的 ``STATE_FILE`` 同名同格式）
+UPGRADE_STATE_FILE = "upgrade-state.json"
+#: 同一版本连续启动多少次仍未报平稳就回滚（与 ``upgrade.MAX_BOOT_ATTEMPTS`` 同值，测试对账）
+MAX_BOOT_ATTEMPTS = 2
+
+
+def _load_upgrade_state(prefix: Path) -> Optional[dict]:
+    path = Path(prefix) / UPGRADE_STATE_FILE
+    if path.is_symlink():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) and data.get("version") else None
+
+
+def _save_upgrade_state(prefix: Path, state: dict) -> None:
+    path = Path(prefix) / UPGRADE_STATE_FILE
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.unlink()
+    except FileNotFoundError:
+        pass
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(state, handle, ensure_ascii=False, indent=2)
+    os.replace(str(tmp), str(path))
+
+
+#: 被启动守卫回滚过的版本（安装根下，root 写、所有人可读）。root 管理单元拒绝再切到
+#: 这些版本，Agent 读它跳过下载。与 ``syncoj_agent/upgrade.py`` 的同名常量一致。
+ROLLED_BACK_FILE = "rolled-back.json"
+MAX_ROLLED_BACK = 20
+
+
+def _rolled_back_versions(prefix: Path) -> List[str]:
+    path = Path(prefix) / ROLLED_BACK_FILE
+    if path.is_symlink():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    versions = data.get("versions") if isinstance(data, dict) else None
+    return [str(v) for v in versions] if isinstance(versions, list) else []
+
+
+def _note_rolled_back(prefix: Path, version: str) -> None:
+    versions = [v for v in _rolled_back_versions(prefix) if v != version] + [version]
+    path = Path(prefix) / ROLLED_BACK_FILE
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.unlink()
+    except FileNotFoundError:
+        pass
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump({"versions": versions[-MAX_ROLLED_BACK:]}, handle)
+    os.replace(str(tmp), str(path))
+
+
+def _clear_upgrade_state(prefix: Path) -> None:
+    try:
+        (Path(prefix) / UPGRADE_STATE_FILE).unlink()
+    except OSError:
+        pass
+
+
+def _read_text_or_none(path: Path) -> Optional[str]:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
 def _write_text_file(path: Path, content: str, mode: int) -> None:
     """按固定权限写一个文本文件。
 
@@ -4314,8 +4490,13 @@ def render_unit(
     helper_dir: Optional[Path] = None,
     home: Optional[str] = None,
     sudoers_dir: Optional[Path] = None,
+    boot_guard: Optional[str] = None,
 ) -> str:
     """生成 systemd 单元。
+
+    ``boot_guard`` 是启动守卫的完整命令行（``install.py --boot-guard …``）：给了就写成
+    ``ExecStartPre=-+…``——``+`` 让它以 root 跑（服务本身是 ``User=`` 选手账号），``-`` 让
+    它失败也不挡住启动。
 
     **权限模型**：Agent 以**选手登录用户的身份**运行（而不是专用 syncoj 账号），
     因为代码与下发文件都在选手自己的桌面下，跨用户授权在现场很容易装成
@@ -4373,6 +4554,7 @@ def render_unit(
         #
         # -E 忽略所有 PYTHON* 环境变量，-s 忽略 user site-packages：
         # 选手怎么 pip install 都污染不到 Agent
+        ] + (["ExecStartPre=-+%s" % boot_guard] if boot_guard else []) + [
         "ExecStart=%s -E -s %s/%s/%s --config %s"
         % (
             python,
@@ -4387,15 +4569,16 @@ def render_unit(
         "StandardError=journal",
         "",
         "# ---- 自愈 ----",
-        # **on-failure 而不是 always**：自卸载成功时 Agent 以 exit 0 正常退出，
-        # always 会立刻把它重新拉起来 —— 而那时 /opt/syncoj、/etc/syncoj 都已经
-        # 被删掉，拉起来只会刷一堆"找不到文件"，现场看起来像"卸载失败"。
-        # 崩溃（非 0 退出）仍然要自愈，所以是 on-failure 不是 no；"反复起不来"
-        # 的上限交给 [Unit] 段里的 StartLimitIntervalSec/Burst。
+        # **always**（2026-11 起；曾经是 on-failure）：on-failure 的理由是"自卸载成功时
+        # Agent 以 exit 0 退出，always 会把它拉起来、刷一堆找不到文件"。卸载改由 root 管理
+        # 单元执行之后，它先 stop 再删，Agent 自己不再以 0 退出卸载 —— 那条理由没了。
+        # 剩下的只有 always 的好处：任何意外的 0 退出也会被拉起来（考试中途 Agent 安静地
+        # 不见了，是最难发现的那种故障）。"反复起不来"的上限仍是 [Unit] 段的
+        # StartLimitIntervalSec/Burst，新版本起不来时由 ExecStartPre 的启动守卫回滚。
         #
         # 注意：`syncoj-agent-enroll.service`（provision 那个 oneshot）不带
         # Restart，规则与这里无关，别一起改。
-        "Restart=on-failure",
+        "Restart=always",
         "RestartSec=5",
         # 版本切换（自更新激活 / 启动守卫回滚）以专用退出码退出，要求 systemd
         # 拉起新版本：**不能是 0**（on-failure 不会重启正常退出 —— 曾经铺开一个
@@ -4609,7 +4792,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="store_true", help="打印安装器版本后退出")
 
-    source = parser.add_argument_group("安装包来源（三选一）")
+    source = parser.add_argument_group("安装包来源（四选一）")
     source.add_argument("--bundle", help="本地 tar.gz 安装包（离线安装）")
     source.add_argument("--download-url", help="下载安装包的 URL（在线自举）")
     source.add_argument(
@@ -4709,6 +4892,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="（由 root 管理单元调用）处理 Agent 放在交接目录里的升级 / 卸载请求",
     )
     layout.add_argument(
+        "--boot-guard", action="store_true",
+        help="（由 Agent 单元的 ExecStartPre=+ 调用）启动计数，新版本反复起不来就切回上一版",
+    )
+    layout.add_argument(
         "--helper-dir", default=None,
         help="远程卸载辅助脚本目录（默认 %s；测试与定制用）" % HELPER_DIR,
     )
@@ -4803,6 +4990,18 @@ def resolve_bootstrap_key(options: argparse.Namespace, report: Reporter) -> Opti
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    # 钉死 umask：安装器以 root 跑，建出来的 /opt/syncoj、/etc/syncoj、/usr/lib/syncoj
+    # 只在少数地方显式 chmod，其余靠 umask。调用方的 umask 可能是 0（docker exec、
+    # 某些镜像构建器、cloud-init）—— 在 systemd 245 容器冒烟里实测装出来的是 0777，
+    # 选手能替换 root 管理单元信任的公钥与代码，等于提权。进程内调用（测试）结束后还原。
+    previous = os.umask(0o022)
+    try:
+        return _main(argv)
+    finally:
+        os.umask(previous)
+
+
+def _main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
 
     if args.version:
@@ -4810,6 +5009,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         return EXIT_OK
 
     report = Reporter(dry_run=args.dry_run, quiet=args.quiet)
+
+    if args.boot_guard:
+        # 由 Agent 单元的 ExecStartPre=+ 以 root 调用：**永远**返回 0，绝不挡住服务启动
+        try:
+            return Installer(args, report).boot_guard()
+        except Exception as exc:  # noqa: BLE001 - 守卫自己出错也不能让服务起不来
+            print("启动守卫出错（忽略，照常启动）：%s" % exc, file=sys.stderr)
+            return EXIT_OK
 
     if args.admin_handoff:
         # 不读命令行 / 默认位置的注册密钥：升级沿用机器上已有的那把

@@ -30,7 +30,7 @@ from typing import Dict, List, Optional, Tuple
 
 from . import __version__
 from . import diagnostics
-from . import discovery
+from . import announce, discovery
 from .client import (
     PROTOCOL_VERSION,
     AgentClient,
@@ -81,8 +81,11 @@ from .upgrade import (
     UpgradeState,
     activate_release,
     current_release,
+    load_state,
     mark_healthy,
     note_boot,
+    note_rolled_back,
+    rolled_back_versions,
     parse_version,
     read_release_fingerprint,
     rollback_release,
@@ -403,6 +406,10 @@ class Agent:
     def __init__(self, config: AgentConfig) -> None:
         self.config = config
         self.config.state_dir.mkdir(parents=True, exist_ok=True)
+        #: 是否往选手桌面写 / 删提示文件。``--provision``（root 跑的注册单元）关掉它：
+        #: 桌面属选手，root 在那里按路径写文件，一个符号链接就能让 root 改写任意文件。
+        #: 提示文件交给以选手身份运行的 Agent 服务，它下一轮就会写上。
+        self.touch_desktop = True
 
         self.machine_id = resolve_machine_id(config.machine_id, config.state_dir)
         #: 本机身份：**优先读安装器写的权威那份**（<config-dir>/machine_uuid），
@@ -444,6 +451,10 @@ class Agent:
         self._handled_release: Optional[Tuple[str, str]] = None
         #: 连续成功周期计数，用于确认新版本可用后清掉回滚状态
         self._healthy_cycles = 0
+        self._reported_healthy = False
+        #: 服务端主动通告（§11）：监听线程放候选、主循环核实
+        self._announce_slot: Optional[announce.CandidateSlot] = None
+        self._announce_listener: Optional[announce.AnnounceListener] = None
         self._public_key = self._load_release_public_key()
         #: 连续多少轮连不上服务端。攒够了才去局域网里问一次地址 ——
         #: 服务端重启一下、网线抖一下都会连不上，而那些情况下地址并没有变，
@@ -808,6 +819,8 @@ class Agent:
         **自愈性质没丢**：文件被人删掉 = 读不到 = 内容不一致 → 下一轮自然补写。
         这条日志的价值在"状态（或内容）变了"，不在"进程还活着"。
         """
+        if not self.touch_desktop:
+            return
         try:
             if _read_desktop_text(path) == text:
                 return
@@ -819,6 +832,8 @@ class Agent:
             log.warning("无法把%s写到 %s：%s（日志里还有一份）", label, path, exc)
 
     def _remove_desktop_file(self, path: Path, label: str) -> None:
+        if not self.touch_desktop:
+            return
         try:
             path.unlink()
             log.info("已删除%s %s", label, path)
@@ -1331,7 +1346,7 @@ class Agent:
             return False
 
         try:
-            self._write_handoff({"kind": "uninstall", "token": token})
+            self._write_handoff({"kind": "uninstall", "token": token}, replace=True)
         except OSError as exc:
             message = "按管理端授权卸载失败：写不进交接目录（%s）" % self._redact(str(exc), token)
             log.error(message)
@@ -1342,9 +1357,16 @@ class Agent:
         self._emit("warning", "uninstall_handoff", "已把卸载授权交给 root 管理单元")
         return False
 
-    def _write_handoff(self, request: dict) -> None:
-        """原子地写一份交接请求（临时名 + rename）。失败抛 OSError。"""
+    def _write_handoff(self, request: dict, replace: bool = False) -> bool:
+        """原子地写一份交接请求（临时名 + rename）。失败抛 OSError。
+
+        交接只有一个槽：里面还有没被 root 取走的请求时，默认**不覆盖**、返回 False，
+        调用方下一轮再试。只有卸载传 ``replace=True`` —— 它比升级 / 平稳报告都要紧。
+        曾经一律覆盖：升级请求把还没处理的卸载请求冲掉了（systemd 245 冒烟实测）。
+        """
         directory = Path(self.config.state_dir) / HANDOFF_DIRNAME
+        if not replace and (directory / HANDOFF_REQUEST).exists():
+            return False
         directory.mkdir(parents=True, exist_ok=True)
         try:
             os.chmod(str(directory), 0o700)
@@ -1357,6 +1379,7 @@ class Agent:
         finally:
             os.close(fd)
         os.replace(str(tmp), str(directory / HANDOFF_REQUEST))
+        return True
 
     def _collect_handoff_result(self) -> None:
         """root 管理单元留下的回执：读一次、上报、删掉。"""
@@ -1393,6 +1416,34 @@ class Agent:
             return text.replace(secret, "<token>")
         return text
 
+    def _note_healthy_cycle(self) -> None:
+        """又平稳跑完一轮。连续计数而不是"启动就算成功"：起得来但一 tick 就崩的版本同样要回滚。"""
+        self._healthy_cycles += 1
+        if self._healthy_cycles >= HEALTHY_CYCLES_BEFORE_TRUST and not self._reported_healthy:
+            self._report_healthy()
+
+    def _report_healthy(self) -> None:
+        """新版本已平稳运行：清掉回滚状态（自己能写安装根就自己清，否则交给 root）。
+
+        交接请求只有一个槽：里面还躺着别的请求（升级、卸载）时不覆盖，下一轮再试。
+        """
+        install_root = self.config.install_root
+        try:
+            if _writable(install_root):
+                mark_healthy(install_root)
+                self._reported_healthy = True
+                return
+            if load_state(install_root) is None:
+                self._reported_healthy = True  # 没有回滚状态（没刚升级过），不必报
+                return
+            if self._write_handoff({
+                "kind": "healthy",
+                "version": current_release(install_root) or __version__,
+            }):
+                self._reported_healthy = True
+        except OSError as exc:  # pragma: no cover
+            log.debug("报告平稳运行失败: %s", exc)
+
     def _guard_boot(self) -> bool:
         """启动守卫。返回 True 表示刚完成回滚，调用方应当退出让 systemd 重启。
 
@@ -1403,6 +1454,10 @@ class Agent:
             return False
 
         install_root = self.config.install_root
+        if not _writable(install_root):
+            # 真机上的常态：安装根属 root，启动计数与回滚由单元的 ExecStartPre=+
+            # （install.py --boot-guard，以 root）在本进程启动之前做完了
+            return False
         running = current_release(install_root) or __version__
         rollback_to = note_boot(install_root, running)
         if rollback_to is None:
@@ -1410,6 +1465,7 @@ class Agent:
 
         try:
             rollback_release(install_root, rollback_to)
+            note_rolled_back(install_root, running)
         except UpgradeError as exc:
             log.error("自动回滚失败: %s", exc)
             self._emit("error", "upgrade_rollback_failed", "自动回滚失败：%s" % exc)
@@ -1458,6 +1514,14 @@ class Agent:
             return
 
         install_root = self.config.install_root
+        if manifest.version in rolled_back_versions(install_root):
+            # 启动守卫切回去过的版本：再装只会再崩两次、再回滚一次，循环往复
+            self._emit_on_change(
+                "warning", "upgrade_skipped_rolled_back", manifest.version,
+                "版本 %s 曾启动失败被自动回滚，不再升级到它（请发一个新版本号）" % manifest.version,
+            )
+            self._handled_release = attempt_key
+            return
         running = current_release(install_root) or __version__
 
         # **版本号管降级、sha 管内容**（与安装器 install.py 同一套记录）：
@@ -1502,6 +1566,13 @@ class Agent:
                 manifest.sha256[:12],
             )
 
+        if mode == UpgradeMode.APPLY and not _writable(install_root) and (
+            Path(self.config.state_dir) / HANDOFF_DIRNAME / HANDOFF_REQUEST
+        ).exists():
+            # 交接槽里还有没处理的请求（交出去之前就看一眼）：下一轮再来，别每轮都重新下载一遍包
+            log.info("交接槽里还有没处理的请求，升级 %s 下一轮再说", manifest.version)
+            return
+
         bundle = self.config.state_dir / "upgrade" / ("%s.tar.gz" % manifest.version)
         try:
             size = self.client.download_to_file(manifest.url, bundle, MAX_BUNDLE_BYTES)
@@ -1510,21 +1581,24 @@ class Agent:
             if not _writable(install_root):
                 # 真机上的常态：/opt/syncoj 属 root，运行账号写不进去。验过签的包留在
                 # 状态目录里，切换交给 root 管理单元（它自己再验一遍）。
-                self._handled_release = attempt_key
                 if mode != UpgradeMode.APPLY:
+                    self._handled_release = attempt_key
                     self._emit(
                         "info", "upgrade_staged",
                         "版本 %s 已下载并通过签名校验，等待激活（当前 mode=%s）"
                         % (manifest.version, mode),
                     )
                     return
-                self._write_handoff({
+                if not self._write_handoff({
                     "kind": "upgrade",
                     "version": manifest.version,
                     "sha256": manifest.sha256,
                     "size": manifest.size,
                     "signature": manifest.signature,
-                })
+                }):
+                    log.info("交接槽里还有没处理的请求，升级 %s 下一轮再交", manifest.version)
+                    return
+                self._handled_release = attempt_key
                 self._emit(
                     "info", "upgrade_handoff",
                     "版本 %s 已下载并通过签名校验，交给 root 管理单元切换" % manifest.version,
@@ -1763,6 +1837,13 @@ class Agent:
         if isinstance(remote_config, dict):
             self.policy = merge_policy(remote_config)
 
+        # 管理端授权的卸载：**未配对的机器也要接** —— 装错了、不该装的那台恰恰多半
+        # 还没配对。以前只有正常路径读这个字段，未配对的机器收到令牌也一直不动
+        # （systemd 245 冒烟实测）。
+        token = tick.get("uninstall_token")
+        if isinstance(token, str) and token.strip():
+            self._handle_uninstall_token(token.strip())
+
         if tick.get("diagnostics_request"):
             # 管理端按了"抓一份现场"：**待配对的机器也要能补发** —— 它卡在配对
             # 阶段的现场恰恰最有用。这条路径不会走到正常 tick 里读这个字段的那
@@ -1935,14 +2016,6 @@ class Agent:
         self._flush_events()
         self.cache.save(self.config.hash_cache_path)
 
-        # 跑够几个周期说明新版本确实能用，清掉回滚状态。
-        # 连续计数而不是"启动就算成功"：起得来但一 tick 就崩的版本同样要回滚。
-        self._healthy_cycles += 1
-        if self._healthy_cycles == HEALTHY_CYCLES_BEFORE_TRUST:
-            try:
-                mark_healthy(self.config.install_root)
-            except OSError as exc:  # pragma: no cover
-                log.debug("清除回滚状态失败: %s", exc)
 
         next_tick = int(tick.get("next_tick_seconds") or self.config.scan_interval)
         return float(max(5, min(next_tick, 3600)))
@@ -2039,6 +2112,8 @@ class Agent:
         if not watchdog_supported():
             log.debug("这个平台没有 SIGALRM/setitimer，整轮看门狗不可用（不影响功能）")
 
+        self._start_announce_listener()
+
         exit_code = 0
         while not self._stop:
             if self._restart_requested:
@@ -2050,7 +2125,10 @@ class Agent:
             # 读上 34 分钟，就是没有被兜住。
             self._watchdog_active = arm_watchdog(self.watchdog_seconds)
             round_ok = False
+            #: 这一轮失败的原因在外面（连不上、被限速、凭据被拒）—— 不是这一版代码的错
+            external_failure = False
             try:
+                self._consider_announcement()
                 delay = self.cycle()
                 self._backoff = 0.0
                 round_ok = True
@@ -2064,11 +2142,13 @@ class Agent:
                 )
                 delay = max(5.0, min(float(self.config.scan_interval), 3600.0))
             except AuthError as exc:
+                external_failure = True
                 # 只有这一种错误该清掉凭据重新注册（401）。403 走的是
                 # UnboundError，它在上面的循环里就被消化掉了 —— 见 client.py 的注释。
                 self._forget_credential(str(exc))
                 delay = 30.0
             except BootstrapKeyError as exc:
+                external_failure = True
                 # 密钥不对是**部署问题**，重试解决不了。这里刻意不进指数退避循环
                 # 快速刷屏，而是用最长间隔慢慢重试 —— 万一运维正好在换密钥，
                 # 一个长周期后自己就好了，不需要重启 50 台机器。
@@ -2076,6 +2156,7 @@ class Agent:
                 self._emit("error", "bootstrap_key_rejected", str(exc))
                 delay = MAX_BACKOFF
             except RateLimited as exc:
+                external_failure = True
                 # 退避节奏由服务端决定：它才知道限速窗口有多长。
                 # 按自己的节奏硬撞只会把窗口一直顶开。
                 # 上界仍由本地的 MAX_BACKOFF 兜住 —— 服务端写错一个数量级
@@ -2088,6 +2169,7 @@ class Agent:
             except ConfigError:
                 raise
             except NetworkError as exc:
+                external_failure = True
                 self._backoff = min(MAX_BACKOFF, max(5.0, self._backoff * 2 or 5.0))
                 log.warning("网络不可用，%.0f 秒后重试：%s", self._backoff, exc)
                 delay = self._backoff
@@ -2115,6 +2197,13 @@ class Agent:
                 # 一份现场"的判据）。成功一轮就清零。
                 self._consecutive_failures = 0 if round_ok else self._consecutive_failures + 1
 
+            # 跑够几轮说明这一版确实能用，清掉回滚状态。"一轮"包括**因为外部原因失败**
+            # 的那些：只数成功的心跳的话，服务端没开的那两次开机就会让启动守卫把一个好好
+            # 的版本回滚掉、并记进 rolled-back.json 永不再装。未预期的异常不算 ——
+            # 起得来但一跑就崩的版本仍然要回滚。
+            if round_ok or external_failure:
+                self._note_healthy_cycle()
+
             # 连续失败攒到阈值 → 攒一份"出错包"（不是立刻发：60 秒最小间隔由
             # `_maybe_send_diagnostics` 守）。这里只记"该发"，发不发得出去不影响
             # 下面这一轮的等待。
@@ -2127,6 +2216,8 @@ class Agent:
 
             self._sleep(delay)
 
+        if self._announce_listener is not None:
+            self._announce_listener.stop()
         log.info("Agent 已停止")
         self.client.close()
         return exit_code
@@ -2163,27 +2254,58 @@ class Agent:
             log.warning("局域网发现的地址与配置一致（%s）：问题不在地址上", outcome.url)
             return
 
+        self._switch_server(outcome.url, "局域网发现")
+
+    def _switch_server(self, new_url: str, how: str) -> None:
+        """改用新的服务端地址（只在本进程内生效，不写回 ``agent.ini``）。"""
+        current = (self.config.server_url or "").rstrip("/")
         log.warning(
-            "服务端换地址了：%s → %s（本次运行内生效；agent.ini 里仍是旧值）",
+            "服务端换地址了：%s → %s（%s；本次运行内生效，agent.ini 里仍是旧值）",
             current or "（空）",
-            outcome.url,
+            new_url,
+            how,
         )
         self._emit(
             "warning",
             "server_address_changed",
-            "服务端地址变了，已自动改用 %s（原 %s）" % (outcome.url, current or "（空）"),
-            {"from": current, "to": outcome.url},
+            "服务端地址变了，已自动改用 %s（原 %s，经%s）" % (new_url, current or "（空）", how),
+            {"from": current, "to": new_url, "via": how},
         )
         try:
-            self.client.repoint(outcome.url)
+            self.client.repoint(new_url)
         except AgentError as exc:
             log.error("改用新地址失败，继续用原地址：%s", exc)
             return
-        self.config.server_url = outcome.url
+        self.config.server_url = new_url
         # 地址换了，之前那份凭据对应的服务端可能不是同一台 —— 不清凭据，
         # 但要让下一轮重新走一遍身份解析（服务端会自己判断这台机器是谁）。
         self._roots_ready = False
         self._backoff = 0.0
+
+    def _start_announce_listener(self) -> None:
+        """开始听服务端的主动通告（§11）。没有发布公钥就不听：验不了挑战应答。"""
+        if self._public_key is None:
+            return
+        self._announce_slot = announce.CandidateSlot(getattr(self._public_key, "key_id", "") or "")
+        self._announce_listener = announce.AnnounceListener(self._announce_slot)
+        self._announce_listener.start()
+
+    def _consider_announcement(self) -> None:
+        """听到过通告就核实一下：挑战应答验过签、且地址确实变了才切换。"""
+        if self._announce_slot is None or self._public_key is None:
+            return
+        candidate = self._announce_slot.take()
+        if not candidate:
+            return
+        current = (self.config.server_url or "").rstrip("/")
+        if candidate == current:
+            return
+        verified = announce.verify_announced(
+            candidate, self._public_key, ssl_context=getattr(self.client, "_ssl_context", None)
+        )
+        if verified is None or verified == current:
+            return
+        self._switch_server(verified, "服务端通告")
 
     def _sleep(self, seconds: float) -> None:
         """可被停止信号打断的休眠。
@@ -2215,7 +2337,11 @@ def _disk_free(path: Path) -> Optional[int]:
 # --------------------------------------------------------------------------- #
 
 
-def setup_logging(config: AgentConfig, verbose: bool = False) -> None:
+class _SkipFileLog(Exception):
+    """``setup_logging(to_file=False)`` 的内部跳转。"""
+
+
+def setup_logging(config: AgentConfig, verbose: bool = False, to_file: bool = True) -> None:
     """配置日志。
 
     默认写**文件**而不是 stdout：systemd 单元里 ``StandardOutput=null``，
@@ -2233,17 +2359,22 @@ def setup_logging(config: AgentConfig, verbose: bool = False) -> None:
 
     log_file = config.resolved_log_file
     try:
+        if not to_file:
+            raise _SkipFileLog()
         log_file.parent.mkdir(parents=True, exist_ok=True)
         handler = logging.handlers.RotatingFileHandler(
             str(log_file), maxBytes=4 * 1024 * 1024, backupCount=3, encoding="utf-8"
         )
         handler.setFormatter(fmt)
         root.addHandler(handler)
+    except _SkipFileLog:
+        pass
     except OSError as exc:
-        # 日志文件写不了不能导致 Agent 起不来
-        print("警告：无法写入日志文件 %s: %s" % (log_file, exc), file=sys.stderr)
+        # 日志文件写不了不能导致 Agent 起不来。flush：3.8 上不接终端的 stderr 是块缓冲，
+        # 不 flush 的话这一行要等进程退出才进 journal —— 等于没说
+        print("警告：无法写入日志文件 %s: %s" % (log_file, exc), file=sys.stderr, flush=True)
 
-    if config.log_to_stderr or verbose:
+    if config.log_to_stderr or verbose or not to_file:
         stream = logging.StreamHandler(sys.stderr)
         stream.setFormatter(fmt)
         root.addHandler(stream)
@@ -2373,7 +2504,10 @@ def _run_provision(args, config: AgentConfig, agent: "Agent") -> int:
 
 def _chown_state_files(config: AgentConfig, user: str) -> None:
     """把状态目录里 Agent 要读写的文件交给运行用户。"""
-    import shutil
+    try:
+        import pwd
+    except ImportError:  # pragma: no cover - Windows 上没有属主可改
+        return
 
     targets = [
         config.state_dir,
@@ -2382,12 +2516,28 @@ def _chown_state_files(config: AgentConfig, user: str) -> None:
         config.state_dir / "machine_id",
         config.hash_cache_path,
     ]
+    # 日志文件：注册单元以 root 跑、先建出了 agent.log（属主 root）。不交出去的话
+    # Agent 服务以选手身份起来后打不开它，整台机器**一行日志都没有**（systemd 245
+    # 容器冒烟里实测）。只管状态目录里的那份 —— 教师在 agent.ini 里另指的路径不碰。
+    log_file = config.resolved_log_file
+    if log_file.parent == config.state_dir:
+        targets.append(log_file)
+        targets.extend(
+            log_file.with_name("%s.%d" % (log_file.name, index)) for index in range(1, 4)
+        )
+    try:
+        uid = pwd.getpwnam(user).pw_uid
+    except KeyError as exc:
+        log.warning("无法把状态文件交给 %s：%s", user, exc)
+        return
     for target in targets:
-        if not target.exists():
-            continue
         try:
-            shutil.chown(str(target), user=user)
-        except (OSError, LookupError) as exc:
+            # 不顺着符号链接：状态目录属选手，这里以 root 运行，换成链接的
+            # credential.json 会让 root 把任意文件（/etc/shadow）交给选手
+            if target.is_symlink() or not target.exists():
+                continue
+            os.chown(str(target), uid, -1, follow_symlinks=False)
+        except OSError as exc:
             log.warning("无法把 %s 的属主改为 %s：%s", target, user, exc)
 
 
@@ -2408,7 +2558,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             _print_provision_hint()
         return 2
 
-    setup_logging(config, verbose=args.verbose)
+    # --provision 以 root 跑：日志只进 journal（stderr），不碰状态目录里的 agent.log ——
+    # 那个目录属选手，root 按路径打开它会顺着选手放的符号链接追加写任意文件；
+    # 而且 root 先建出 agent.log 之后，以选手身份运行的服务就打不开它了。
+    setup_logging(config, verbose=args.verbose, to_file=not args.provision)
 
     try:
         config.validate(for_provision=args.provision)
@@ -2472,6 +2625,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     if args.provision:
+        agent.touch_desktop = False
         return _run_provision(args, config, agent)
 
     if args.once:

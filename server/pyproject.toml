@@ -26,6 +26,7 @@ dev = [
 
 [project.scripts]
 syncoj-server = "syncoj_server.cli:main"
+syncoj-judge = "syncoj_server.judging.worker:main"
 
 [tool.setuptools.packages.find]
 include = ["syncoj_server*"]

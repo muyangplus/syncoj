@@ -619,6 +619,31 @@ def _migration_016_event_log_indexes(engine: Engine) -> None:
             )
 
 
+def _migration_018_problem_builtin_judge(engine: Engine) -> None:
+    """题目加自带评测（§12）的配置与数据包指纹。
+
+    新表 ``judge_task`` / ``judge_worker`` 交给 ``create_all``；这里只给已有的 ``problem`` 补列。
+    ``judge_mode`` / ``io_mode`` 回填默认值：老题目一律仍是外部评测器、标准 IO。
+    """
+    if "problem" not in _tables(engine):
+        return
+    for name, ddl in (
+        ("judge_mode", "VARCHAR(16)"),
+        ("time_limit_ms", "INTEGER"),
+        ("memory_limit_mb", "INTEGER"),
+        ("io_mode", "VARCHAR(16)"),
+        ("compile_flags", "VARCHAR(200)"),
+        ("testdata_sha256", "VARCHAR(64)"),
+        ("testdata_name", "VARCHAR(255)"),
+        ("testdata_size", "BIGINT"),
+        ("testdata_info", "TEXT"),
+    ):
+        _add_column(engine, "problem", name, ddl)
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE problem SET judge_mode = 'external' WHERE judge_mode IS NULL"))
+        conn.execute(text("UPDATE problem SET io_mode = 'stdio' WHERE io_mode IS NULL"))
+
+
 MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
     (1, "统一密钥注册 + 名单库所需的结构", _migration_001_enrollment),
     (2, "机器永久绑定名单条目；去掉注册码链路", _migration_002_roster_binding),
@@ -688,6 +713,11 @@ MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
         17,
         "删掉只写不读的在线状态快照表 agent_status",
         _migration_017_drop_agent_status,
+    ),
+    (
+        18,
+        "题目加自带评测的配置与数据包指纹",
+        _migration_018_problem_builtin_judge,
     ),
 ]
 

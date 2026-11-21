@@ -128,7 +128,7 @@ def test_单元模板认这个退出码(installer_module) -> None:
         python="/usr/bin/python3",
     )
     lines = text.splitlines()
-    assert "Restart=on-failure" in lines
+    assert "Restart=always" in lines
     assert "SuccessExitStatus=%d" % main_module.EXIT_RESTART in lines
     assert "RestartForceExitStatus=%d" % main_module.EXIT_RESTART in lines
 

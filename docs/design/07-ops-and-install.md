@@ -210,6 +210,9 @@ sha256 前 12 位、以及操作人。`EventLog` 没有管理员外键（它记�
 而广播会打扰整个局域网。问到的新地址**只在这个进程内生效**，不写回 `agent.ini` ——
 那是教师的文件，Agent 悄悄改它会让"配置文件里写的是什么"失去意义。
 
+**反方向：服务端主动通告**（§11，已实现）：服务端周期性地广播自己的地址，机器听到后做挑战
+应答、验过签才切换，换 IP 之后机器一两秒内转过来；上面这条"机器自己问"保留为兜底。
+
 **多个答案时不许猜。** 两个考场共用一层楼、或者有人插了一台假服务端时，可能有多个
 **都验得过**的地址。猜错的表现是"代码交上去了但成绩是空的"，且现场看不出来，
 所以如实报出来让人显式指定。
@@ -221,7 +224,7 @@ sha256 前 12 位、以及操作人。`EventLog` 没有管理员外键（它记�
 > no-follow 读取、自己验签后走 `--uninstall` 同一条路。下文"机器侧的执行链"与"为此必须
 > 放开的两处沙箱"是被替换掉的 v1，留作历史；现行做法见
 > [ADR-0012](../decisions/ADR-0012-remote-uninstall-authorization.md)「重写（2026-11）」。
-> 仍待 systemd 245 实机冒烟。
+> systemd 245 容器冒烟（`scripts/smoke_systemd245.py`，CI 每次跑）已验证：未配对机器的远程卸载经 root 管理单元卸干净。
 
 **起点是权限**：Agent 以选手账号运行（../design/00-decisions.md §0），而卸载要删的 `/opt/syncoj`、`/etc/syncoj`
 （里面有统一注册密钥）、systemd 单元全是 root 的。所以"按钮 → Agent 自己删"这条链
@@ -267,8 +270,9 @@ root 删除的凭据留在 `syncoj.db` 里，而备份、误传、随手拷走�
 4. 删除顺序：`systemctl disable`（**不用 `--now`**：脚本自己就跑在那个单元的 cgroup
    里）→ 删单元文件与 `*.wants/` 软链 → 删 prefix/config/state → 删 sudoers 与 helper
    → 逐项打印、**幂等**。**绝不动**选手桌面、家目录、运行账号、`/tmp`。
-5. 成功后 Agent **exit 0**，所以主单元必须是 `Restart=on-failure`（../design/03-agent.md §3.5）：`always`
-   会把它重新拉起来，而那时文件已经删了，现场看到的是"卸载失败"。
+5. 成功后 Agent **exit 0**，所以主单元当时必须是 `Restart=on-failure`（../design/03-agent.md §3.5）：`always`
+   会把它重新拉起来，而那时文件已经删了，现场看到的是"卸载失败"。（root 管理单元先 stop
+   再删之后不再如此，主单元已改 `Restart=always`。）
 
 **为此必须放开的两处沙箱**（`ProtectSystem=strict` 的只读挂载会被 sudo 出来的子进程
 继承，即使成了 root 也会 `EROFS`）：`ReadWritePaths` 增加 config 目录、单元目录、
@@ -285,3 +289,24 @@ root 删除的凭据留在 `syncoj.db` 里，而备份、误传、随手拷走�
 **审计里不写令牌。** 那枚令牌能在那台机器上换一次 root 删除，抄进事件表等于把一把
 一次性钥匙写进一份到处被导出、被翻看的日志里 —— 与"审计不写 zip 密码"（../design/05-api-and-frontend.md §5.5）
 是同一条纪律。
+
+### 7.5 发布（CD）：打标签即发版
+
+`.github/workflows/release.yml`：推 `v<版本号>` 标签触发。
+
+1. **版本号对账**（`scripts/release.py versions --tag`）：`server/pyproject.toml`、两个
+   `__init__.py`、`web/package.json` 四处必须一致，标签必须恰好是 `v<版本号>`；带
+   `a/b/rc/dev` 的发成预发布。日常 `check.py` 也跑"四处一致"这一步。
+2. **全量检查**：以 `workflow_call` 复用 `check.yml`（py38 / 最新 Python + 前端 / root /
+   systemd 245 冒烟），任何一路不过都不发。
+3. **构建**（`scripts/release.py build`）：`syncoj-<版本>.tar.gz`（`git archive` + 预构建的
+   `web/dist`，解开后 `pip install -e server`）、`syncoj-agent-<版本>.tar.gz`（Agent 离线包，
+   可复现）、独立的 `install.py` 与 `bootstrap.sh`、`SHA256SUMS`。产物 mtime 取提交时间，
+   同一提交打出来逐字节相同。
+4. **发布**：`gh release create`，说明里附部署命令，并接上自动生成的变更列表。
+
+**CI 不持有发布私钥，Release 里的 Agent 包不带公钥、不带服务端地址。** Agent 的信任锚是
+每台服务端自己的私钥（§7.1）：一把放在 CI 里、所有学校共用的私钥，泄露一次就能给所有
+机房推包。所以 Release 是**服务端**的分发渠道；机房里的 Agent 照旧从自己的服务端升级
+（「发布当前版本」，或把这个离线包上传后由服务端签名铺开）。
+

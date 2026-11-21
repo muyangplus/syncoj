@@ -49,6 +49,8 @@ __all__ = [
     "DeployTask",
     "DeployTarget",
     "JudgeRun",
+    "JudgeTask",
+    "JudgeWorker",
     "EventLog",
     "RuntimeSetting",
     "AgentRelease",
@@ -337,6 +339,22 @@ class Problem(Base, TimestampMixin):
     #: 支持 {ident} 与 {title} 占位符（每次匹配时展开，所以改名会自动跟着走）。
     file_patterns = Column(Text, nullable=True)
 
+    # ---- 自带评测（§12）----
+    #: external = 外部评测器（LemonLime / Arbiter 写 judge_result/）；builtin = 自带评测
+    judge_mode = Column(String(16), nullable=True, default="external")
+    time_limit_ms = Column(Integer, nullable=True)
+    memory_limit_mb = Column(Integer, nullable=True)
+    #: stdio | file（读 <ident>.in、写 <ident>.out，NOI 惯例）
+    io_mode = Column(String(16), nullable=True, default="stdio")
+    #: 追加到默认编译参数之后（如 -std=c++17）
+    compile_flags = Column(String(200), nullable=True)
+    #: 数据包（zip）的内容指纹，内容在 blobs/ 里
+    testdata_sha256 = Column(String(64), nullable=True)
+    testdata_name = Column(String(255), nullable=True)
+    testdata_size = Column(BigInteger, nullable=True)
+    #: 上传时校验出的摘要（测试点数、子任务数、有没有 checker、总分），JSON
+    testdata_info = Column(Text, nullable=True)
+
     __table_args__ = (
         UniqueConstraint("contest_id", "ident", name="uq_problem_contest_ident"),
         Index("ix_problem_contest", "contest_id"),
@@ -450,6 +468,51 @@ class Agent(Base, TimestampMixin):
         Index("ix_agent_machine", "machine_id"),
         Index("ix_agent_fingerprint", "machine_fingerprint"),
         Index("ix_agent_roster_entry", "roster_entry_id"),
+    )
+
+
+class JudgeWorker(Base):
+    """一台评测机（§12）。凭据只存哈希；吊销 = 删行（硬删，ADR-0003）。"""
+
+    __tablename__ = "judge_worker"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(64), nullable=False)
+    token_hash = Column(String(64), nullable=False, unique=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    last_seen_at = Column(DateTime, nullable=True)
+    last_seen_ip = Column(String(64), nullable=True)
+
+
+class JudgeTask(Base):
+    """一次自带评测（选手 × 题目）。同一对只留最新一条：重测 = 删掉旧的、排一条新的。
+
+    状态：``queued`` → ``running``（带租约，worker 崩了租约过期自动回到队列）→ ``done`` / ``failed``。
+    ``done`` 不等于有成绩：没交代码的选手直接 ``done``、不写 ``result.json``（矩阵照旧显示未交）。
+    """
+
+    __tablename__ = "judge_task"
+
+    id = Column(Integer, primary_key=True)
+    contest_id = Column(Integer, ForeignKey("contest.id", ondelete="CASCADE"), nullable=False)
+    player_id = Column(Integer, ForeignKey("player.id", ondelete="CASCADE"), nullable=False)
+    problem = Column(String(64), nullable=False)
+    status = Column(String(16), nullable=False, default="queued")
+    attempt = Column(Integer, nullable=False, default=0)
+    worker_id = Column(Integer, ForeignKey("judge_worker.id", ondelete="SET NULL"), nullable=True)
+    lease_until = Column(DateTime, nullable=True)
+    #: 领任务时选定的那份代码（台账里的相对路径与内容指纹）
+    source_path = Column(String(1024), nullable=True)
+    source_sha256 = Column(String(64), nullable=True)
+    #: 结果摘要（不是成绩本身 —— 成绩走 judge_result/ → 扫描器）
+    outcome = Column(String(16), nullable=True)
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    finished_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("contest_id", "player_id", "problem", name="uq_judge_task"),
+        Index("ix_judge_task_status", "status", "id"),
     )
 
 

@@ -974,3 +974,111 @@ def test_credential_from_another_server_is_not_reused(
     assert credential is not None
     assert credential.server_url == agent_config.base_url
     assert len(server.enroll_calls) == 1
+
+
+def test_unclaimed_machine_hands_over_an_uninstall_token(agent_config: AgentConfig) -> None:
+    """未配对的机器收到卸载授权也要转交给 root 管理单元。
+
+    装错了、不该装的那台多半还没配对；以前只有正常路径读 ``uninstall_token``，
+    未配对的机器收到令牌一直不动（systemd 245 冒烟实测）。
+    """
+    import json
+
+    server = FakeServer()
+    provision(agent_config, server)
+    agent = service(agent_config, server)
+    server.tick_response["uninstall_token"] = "tok.en"
+
+    run_rounds(agent, 1)
+
+    request = agent_config.state_dir / "handoff" / "request.json"
+    assert json.loads(request.read_text(encoding="utf-8")) == {
+        "kind": "uninstall", "token": "tok.en",
+    }
+
+
+def test_provision_does_not_touch_the_desktop(agent_config: AgentConfig) -> None:
+    """root 跑的注册不往选手桌面写：那里属选手，一个符号链接就能让 root 改写任意文件。"""
+    server = FakeServer()
+    agent = make_agent(agent_config)
+    attach(agent, server)
+    agent.touch_desktop = False
+
+    agent.ensure_credential(allow_enroll=True)
+
+    assert not pair_code_file(agent_config).exists()
+
+
+def test_install_root_not_writable_reports_health_through_the_handoff(
+    agent_config: AgentConfig, monkeypatch
+) -> None:
+    """真机上安装根属 root：回滚状态由 root 清，Agent 只递一份"平稳运行"的请求。"""
+    import json
+
+    from syncoj_agent import main as agent_main
+    from syncoj_agent.upgrade import UpgradeState, save_state
+
+    agent_config.install_root = agent_config.state_dir.parent / "opt"
+    agent_config.install_root.mkdir()
+    save_state(agent_config.install_root, UpgradeState(version="2.0.0", previous="1.0.0"))
+    agent = make_agent(agent_config)
+    monkeypatch.setattr(agent_main, "_writable", lambda root: False)
+    monkeypatch.setattr(agent_main, "current_release", lambda root: "2.0.0")
+
+    request = agent_config.state_dir / "handoff" / "request.json"
+    request.parent.mkdir(parents=True)
+    request.write_text("{\"kind\": \"upgrade\"}", encoding="utf-8")
+    agent._report_healthy()
+    assert json.loads(request.read_text(encoding="utf-8")) == {"kind": "upgrade"}, "不覆盖别的请求"
+
+    request.unlink()
+    agent._report_healthy()
+    assert json.loads(request.read_text(encoding="utf-8")) == {"kind": "healthy", "version": "2.0.0"}
+    assert (agent_config.install_root / "upgrade-state.json").exists(), "Agent 自己不动 root 的状态"
+
+
+def test_handoff_slot_is_not_overwritten_except_by_uninstall(agent_config: AgentConfig) -> None:
+    """交接只有一个槽：升级 / 平稳报告不冲掉还没处理的请求；卸载可以冲掉它们。"""
+    import json
+
+    agent = make_agent(agent_config)
+    request = agent_config.state_dir / "handoff" / "request.json"
+
+    assert agent._write_handoff({"kind": "upgrade"}) is True
+    assert agent._write_handoff({"kind": "healthy"}) is False
+    assert json.loads(request.read_text(encoding="utf-8")) == {"kind": "upgrade"}
+
+    assert agent._write_handoff({"kind": "uninstall", "token": "t"}, replace=True) is True
+    assert json.loads(request.read_text(encoding="utf-8"))["kind"] == "uninstall"
+
+
+def test_rounds_failing_on_the_network_still_count_as_healthy(agent_config: AgentConfig) -> None:
+    """服务端没开时的那几轮也算"这一版跑得起来"：只数成功心跳的话，两次没有服务端的
+    开机就会让启动守卫把好好的新版本回滚掉、并永久记进 rolled-back.json。"""
+    from syncoj_agent.client import NetworkError
+    from syncoj_agent.main import HEALTHY_CYCLES_BEFORE_TRUST
+
+    server = FakeServer()
+    provision(agent_config, server)
+    agent = service(agent_config, server)
+    server.tick_error = NetworkError("connection refused")
+    reported = []
+    agent._report_healthy = lambda: reported.append(True)  # type: ignore[assignment]
+    agent._try_rediscover = lambda: None  # type: ignore[assignment]
+
+    run_rounds(agent, HEALTHY_CYCLES_BEFORE_TRUST)
+
+    assert reported, "连不上服务端的轮次也要算平稳"
+
+
+def test_unexpected_crashes_do_not_count_as_healthy(agent_config: AgentConfig) -> None:
+    server = FakeServer()
+    provision(agent_config, server)
+    agent = service(agent_config, server)
+    server.tick_error = RuntimeError("新版本的 bug")
+    reported = []
+    agent._report_healthy = lambda: reported.append(True)  # type: ignore[assignment]
+
+    run_rounds(agent, 5)
+
+    assert not reported, "一跑就崩的版本不能被当成平稳"

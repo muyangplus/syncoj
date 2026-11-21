@@ -25,6 +25,8 @@
 | §6 安全 | [`docs/design/06-security.md`](docs/design/06-security.md) |
 | §7 运维与装机 | [`docs/design/07-ops-and-install.md`](docs/design/07-ops-and-install.md) |
 | §8 里程碑 / §9 待补信息 / §10 待办 | [`docs/design/08-milestones-and-open.md`](docs/design/08-milestones-and-open.md) |
+| §11 服务端主动通告 | [`docs/design/09-server-announce.md`](docs/design/09-server-announce.md) |
+| §12 自带沙箱评测 | [`docs/design/10-builtin-judge.md`](docs/design/10-builtin-judge.md) |
 
 ## 小节（代码与注释里真的有引用的那些）
 
@@ -42,7 +44,7 @@
 | §5.5 下发资产不解压 / §5.6 两个免登录页面 / §5.7 公开端口 | [`docs/design/05-api-and-frontend.md`](docs/design/05-api-and-frontend.md) |
 | §6.1 为什么签名不是 Ed25519 / §6.2 信任边界的现状 | [`docs/design/06-security.md`](docs/design/06-security.md) |
 | §7.1 密钥从哪来 / §7.2 发布当前版本 / §7.2.1 安装策略 | [`docs/design/07-ops-and-install.md`](docs/design/07-ops-and-install.md) |
-| §7.3 机器怎么知道服务端在哪 / §7.4 远程卸载 | [`docs/design/07-ops-and-install.md`](docs/design/07-ops-and-install.md) |
+| §7.3 机器怎么知道服务端在哪 / §7.4 远程卸载 / §7.5 发布（CD） | [`docs/design/07-ops-and-install.md`](docs/design/07-ops-and-install.md) |
 | §10.5 重构遗留 | [`docs/design/08-milestones-and-open.md`](docs/design/08-milestones-and-open.md) |
 
 **"为什么这么定"在 ADR 里**（[`docs/decisions/`](docs/decisions/)）：`design/` 记

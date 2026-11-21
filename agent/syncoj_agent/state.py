@@ -60,8 +60,18 @@ def atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
+    # 临时名**不顺着符号链接、必须是新建的**：状态目录属选手账号，而开机注册单元以
+    # root 在这里写凭据。用 open(tmp, "w") 的话，选手预先放一个
+    # ``credential.json.tmp -> /etc/passwd`` 就能让 root 把它截断重写。
+    # 先删掉残留（unlink 删的是链接本身），再 O_CREAT|O_EXCL|O_NOFOLLOW 新建。
     try:
-        with open(tmp, "w", encoding="utf-8") as handle:
+        os.unlink(str(tmp))
+    except FileNotFoundError:
+        pass
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(str(tmp), flags, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())

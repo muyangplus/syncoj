@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 from .config import Settings
 from .db import Database
@@ -62,6 +62,11 @@ class AppContext:
     #: 广播应答都用它。``None`` = 还没人从非回环地址访问过，此时什么都别做，
     #: 尤其不要退回 ``127.0.0.1``（那会让 50 台机器各自找自己）。
     public_url_hint: Optional[str] = None
+    #: 服务端主动通告的状态（``services.announce.Announcer``）。延迟 import：
+    #: announce → discovery → context 会成环。
+    announcer: Any = field(default_factory=lambda: _new_announcer())
+    #: 挑战应答端点按 IP 限速（不鉴权、每次一个 RSA 签名）
+    whoami_limiter: RateLimiter = field(default_factory=lambda: RateLimiter(limit=0))
 
     @classmethod
     def create(cls, settings: Settings) -> "AppContext":
@@ -77,6 +82,7 @@ class AppContext:
             player_lookup_limiter=RateLimiter(
                 limit=settings.player_lookup_per_ip_per_minute, window=60.0
             ),
+            whoami_limiter=RateLimiter(limit=settings.whoami_per_ip_per_second),
         )
         context.load_signing_key()
         return context
@@ -104,3 +110,9 @@ class AppContext:
             self.signing_key = None
             self.signing_key_error = str(exc)
             log.error("发布签名私钥载入失败，自更新功能不可用: %s", exc)
+
+
+def _new_announcer():
+    from .services.announce import Announcer
+
+    return Announcer()

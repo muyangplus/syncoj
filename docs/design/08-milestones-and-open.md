@@ -171,14 +171,26 @@
 blob 提交后回收（含删资产 / 选手 / 场次）、删除语义前端文案、注册表身份随解析更新与待配对
 心跳记在线、tick 运行参数每轮只读一次。
 
-**还没做**：
+**systemd 245 冒烟**（2026-11 完成）：`scripts/smoke_systemd245.py` 在 Ubuntu 20.04 容器
+（真 systemd 245 当 PID 1、Python 3.8.10）里以 umask 0 安装、经 root 管理单元升级、远程卸载
+未配对机器，CI 的 `systemd245` 一路每次跑。它当场抓出：安装器沿用调用方 umask（装出 0777）；
+root 注册单元在属选手的状态目录 / 桌面里按路径写文件、chown，顺着符号链接可改写任意文件；
+root 建的 `agent.log` 让选手服务没有日志；未配对机器不处理卸载令牌、事件上报恒 403；管理单元
+重写正在运行的自身单元文件。均已修复并有回归测试。**仍未覆盖**：真 NOI Linux 2.0 桌面环境
+（容器里没有图形会话与「桌面」目录的本地化名）。
 
-* **systemd 245 实机冒烟**（Ubuntu 20.04 / NOI Linux 2.0 虚拟机）：安装、升级（经 root 管理
-  单元）、回滚、卸载、加固项、家目录可写。托管 CI runner 的 systemd 版本不对，证明不了这些。
-  在它之前，root 管理单元与 `NoNewPrivileges` / 家目录这几处都只是按说明书推断正确。
-* **启动守卫与回滚移到 root 一侧**：Agent 侧的 `_guard_boot` 要写 `install_root`，真机上写
-  不进去；改由管理单元（`ExecStartPre=+` 或切换时记录）执行，计数文件不在 install_root 下。
-  核算 `StartLimitBurst` 与守卫重启次数；主单元改 `Restart=always`。
+**启动守卫与回滚移到 root 一侧**（2026-11 完成）：Agent 单元加 `ExecStartPre=-+…install.py
+--boot-guard`（`+` 以 root 跑，`-` 失败也不挡启动），计数文件仍是安装根下的
+`upgrade-state.json`（真机上属 root）；root 管理单元切换时记回滚点，Agent 平稳跑几轮（**含
+未配对时的心跳**）后经交接报 `healthy`，root 清状态；回滚过的版本记进 `rolled-back.json`，
+root 拒绝再切、Agent 不再下载（否则"切过去→崩→回滚"循环往复）。主单元改 `Restart=always`。
+冒烟加了"一启动就崩的版本被切回去"。顺带修了：交接槽被后来的升级请求冲掉卸载请求；root
+升级时当场跑注册单元（新版本坏时挂住两分钟）。
+
+**发布（CD）**（2026-11 完成）：推 `v<版本号>` 标签 → 全量检查（含 systemd 245 冒烟）→ 构建
+部署包 / Agent 离线包 / 安装器 / 校验和 → GitHub Release，见 07 的 §7.5。
+
+**还没做**：
 * **按 uuid 认回已配对机器**需原机离线或出示旧 token（与还原卡场景、注册重试窗口对齐）；
   可由 root 管理单元持有凭据。`agent.ini` 改 `root:root 0644`、删 `config_policy` 逐键合并器、
   注册单元不再以 root 执行发布目录里的代码。
@@ -189,17 +201,18 @@ blob 提交后回收（含删资产 / 选手 / 场次）、删除语义前端文
 * **结构**：`api/agent.py` 拆出 `services/tick.py`（返回 `TickOutcome`）与 `services/upload.py`；
   tar 安全解包、RSA 验签、`parse_version` 各留一份源码，安装器用构建生成的 vendored 拷贝 +
   逐字节一致测试（路径校验除外，按硬规则保持两份独立实现）。
-* 小项：`agent/syncoj_agent/config.py` 里 "http:// + verify_tls" 告警分支是空的 `pass`；
-  `install.py` 参数组说"三选一"实际四个来源；导出接口 `include_deleted` 默认 False 而界面默认
-  True；选手删掉的文件在 `source/` 里仍留着、照样被评测（要不要清待定）。
+* 小项：选手删掉的文件在 `source/` 里仍留着、照样被评测（要不要清待定）。（2026-11 已清：
+  配置里空的 `pass` 告警分支删掉、安装器"三选一"改"四选一"、导出接口 `include_deleted`
+  默认与界面一致为 True。）
 
-**新想法（仅记录，未评估）**：
+**新想法（2026-11 已实现）**：
 
-* **不指定服务端**：服务端上线时在局域网广播自己的存在，考试端 Agent 持续监听并响应
-  （监考端广播问一次、学生端答一次，Agent 不主动扫描）。是否可行待评估 —— 现有的是反方向
-  （Agent 主动发现、服务端用发布私钥签应答，见 07 §7.3），反过来要考虑广播被伪造（仍需验签）、
-  跨网段 / 交换机隔离、Agent 常驻监听端口与沙箱 `RestrictAddressFamilies` 的关系。
-* **系统自带沙箱评测**：不依赖 LemonLime / Arbiter，服务端自己编译运行评测。
+* **服务端主动通告**：见 §11（`09-server-announce.md`），2026-11 已实现：服务端周期通告 +
+  「召集机器」，Agent 听到后挑战应答验签再切换；Agent 自己探测保留为兜底（ADR-0015）。
+  systemd 245 冒烟里关掉局域网发现、服务端换端口重启，机器靠通告转了过去。
+* **系统自带沙箱评测**：见 §12（`10-builtin-judge.md`），2026-11 已实现：按题选择外部评测器 /
+  自带评测；数据包上传时校验；独立账号的评测机（`syncoj-judge`）经 HTTP 领任务，碰不到私钥与
+  数据库；沙箱 isolate（推荐）/ rlimit（仅开发）；结果写进 `judge_result/` 走现有扫描（ADR-0016）。
 
 **推迟（本轮不做）**：`api/admin.py` 与 `agent/main.py` 的整体拆分；zip 改密码改后台任务
 （纯 Python 约 1.9 MB/s、同步跑在请求线程）；TLS + pinning；全局 person 表；

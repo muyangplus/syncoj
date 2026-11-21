@@ -81,6 +81,8 @@ export const paths = {
   /** 清空待配对列表。范围是"全部"，所以体里带 `all`。 */
   machinesPendingClear: () => `${ADMIN}/machines/pending/clear`,
   machinesCloneAlerts: () => `${ADMIN}/machines/clone-alerts`,
+  /** 服务端主动通告：GET 读现状，POST 立即喊一次（「召集机器」）。 */
+  machinesAnnounce: () => `${ADMIN}/machines/announce`,
   machinesBindByCode: () => `${ADMIN}/machines/bind-by-code`,
   machineBind: (agentId: number) => `${ADMIN}/machines/${agentId}/bind`,
   agent: (agentId: number) => `${ADMIN}/agents/${agentId}`,
@@ -157,6 +159,12 @@ export const paths = {
   /** 清题目。体里带场次 `slug`，可选 `idents` 缩小范围。 */
   contestProblemsClear: (contestId: number) => `${ADMIN}/contests/${contestId}/problems/clear`,
   problem: (problemId: number) => `${ADMIN}/problems/${problemId}`,
+  // ---- 自带评测（§12）----
+  problemJudge: (problemId: number) => `${ADMIN}/problems/${problemId}/judge`,
+  problemTestdata: (problemId: number) => `${ADMIN}/problems/${problemId}/testdata`,
+  contestBuiltinJudge: (contestId: number) => `${ADMIN}/contests/${contestId}/judge/builtin`,
+  judgeWorkers: () => `${ADMIN}/judge-workers`,
+  judgeWorker: (workerId: number) => `${ADMIN}/judge-workers/${workerId}`,
 
   // ---- 成绩 ----
   contestScores: (contestId: number) => `${ADMIN}/contests/${contestId}/scores`,

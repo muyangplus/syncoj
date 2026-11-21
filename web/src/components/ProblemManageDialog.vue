@@ -7,6 +7,7 @@ import type { ProblemMatchOut, ProblemOut, ProblemUpsert } from '@/api/types'
 import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
 import DataTable from '@/components/DataTable.vue'
 import FormDialog from '@/components/FormDialog.vue'
+import ProblemJudgeDialog from '@/components/ProblemJudgeDialog.vue'
 import { useList } from '@/composables/useList'
 import { useMutation } from '@/composables/useMutation'
 import { parsePasteLines } from '@/utils/paste'
@@ -293,6 +294,15 @@ async function runProbe(): Promise<void> {
 }
 
 const problemCount = computed(() => problems.total.value)
+
+// 评测设置（§12）
+const judgeOpen = ref(false)
+const judgeTarget = ref<ProblemOut | null>(null)
+
+function openJudge(row: ProblemOut): void {
+  judgeTarget.value = row
+  judgeOpen.value = true
+}
 </script>
 
 <template>
@@ -362,9 +372,21 @@ const problemCount = computed(() => problems.total.value)
           </template>
         </el-table-column>
 
-        <el-table-column label="操作" width="120" fixed="right">
+        <el-table-column label="评测" width="170">
+          <template #default="{ row }">
+            <template v-if="row.judge_mode === 'builtin'">
+              自带 · {{ row.time_limit_ms ?? 1000 }}ms / {{ row.memory_limit_mb ?? 256 }}MB
+              <span v-if="row.testdata" class="muted"> · {{ row.testdata.cases }} 点</span>
+              <el-tag v-else size="small" type="danger" effect="plain">无数据</el-tag>
+            </template>
+            <span v-else class="muted">外部评测器</span>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="操作" width="170" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
+            <el-button link type="primary" size="small" @click="openJudge(row)">评测设置</el-button>
             <el-button link type="danger" size="small" @click="askRemove(row)">删除</el-button>
           </template>
         </el-table-column>
@@ -491,6 +513,7 @@ const problemCount = computed(() => problems.total.value)
       "
       @confirm="removeProblem.run(undefined)"
     />
+    <ProblemJudgeDialog v-model="judgeOpen" :problem="judgeTarget" @saved="problems.reload" />
   </el-dialog>
 </template>
 

@@ -92,10 +92,11 @@ StartLimitBurst=5              # 必须在 [Unit]：写在 [Service] 会被当�
 
 [Service]
 Type=simple
+ExecStartPre=-+/usr/bin/python3 -E -s /usr/lib/syncoj/install.py --boot-guard …   # root 跑启动守卫
 ExecStart=/usr/bin/python3 -E -s /opt/syncoj/current/run_agent.py --config /etc/syncoj/agent.ini
 StandardOutput=null            # 静默：不往终端/日志设备写任何东西
 StandardError=journal
-Restart=on-failure             # 自卸载成功时 Agent 以 exit 0 退出，always 会把它拉回来
+Restart=always                 # 卸载由 root 管理单元先 stop 再删，意外的 0 退出也要拉起来
 RestartSec=5
 SuccessExitStatus=75           # 切换版本（自更新激活 / 守卫回滚）的专用退出码：不算 failed
 RestartForceExitStatus=75      # ……但仍然要重启，拉起新版本
@@ -134,10 +135,13 @@ ReadWritePaths=-/var/lib/syncoj
 
 几条与常规写法不同的地方，各有原因：
 
-* **`Restart=on-failure` 而不是 `always`**：远程卸载成功时 Agent 以 exit 0 正常退出，
-  `always` 会立刻把它重新拉起来 —— 而那时 `/opt/syncoj`、`/etc/syncoj` 都已经删了，
-  拉起来只会刷一堆"找不到文件"，现场看起来像"卸载失败"。崩溃仍然自愈；
-  "反复起不来"的上限交给 `StartLimit*`（真机上见到过重启到 249 次）。
+* **`Restart=always`**（2026-11 起；曾经是 `on-failure`，因为当年远程卸载成功时 Agent 以
+  exit 0 退出，`always` 会把它拉回到已删掉的文件上）：卸载改由 root 管理单元先 stop 再删之后
+  那条理由没了，`always` 让意外的 0 退出也能被拉起来。"反复起不来"的上限交给
+  `StartLimit*`（真机上见到过重启到 249 次）。
+* **启动守卫在 `ExecStartPre=-+`**：每次启动前以 root 数一次（`+`），新版本连续两次没报平稳
+  就把 `current` 切回上一版并记进 `rolled-back.json`；守卫自己失败也不挡启动（`-`）。曾经由
+  Agent 自己做，但它写不进属 root 的 `/opt/syncoj`，真机上回滚从没生效过。
 * **切换版本用专用退出码 75，不是 0**：自更新激活新版本、启动守卫回滚之后，Agent
   要退出让 systemd 拉起新代码。`on-failure` 不重启 exit 0 —— 曾经就是 0，于是铺开
   一个版本整个机房停摆到重启机器。非 0 让旧单元也能拉起；新单元再用

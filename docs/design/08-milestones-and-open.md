@@ -158,7 +158,8 @@
 ### 10.5 重构遗留（2026-11 四路审计 + 方案盲审）
 
 阶段 0（检查链路全绿 + 自更新止血）与阶段 1（回收 / 下发 / 成绩 / 配对正确性）已完成。
-下面是方案里**还没做**的部分，按依赖顺序排。已拍板的决策：特权模型改 root 管理单元；
+阶段 5（文档对账）已完成，阶段 2 / 3 里的两处文档部分也已完成（见各条的"✅ 已完成"）。
+下面其余是方案里**还没做**的部分，按依赖顺序排。已拍板的决策：特权模型改 root 管理单元；
 删除语义**按现状硬删**、改文档承认；传输层文档如实写明文；一人一机按考号查重（不建
 person 表）；选手页手填保留但降级（这两条已落地）。
 
@@ -192,9 +193,12 @@ person 表）；选手页手填保留但降级（这两条已落地）。
   `/api/v1/agent/install/bundle` 下发，公开端口可达）。
 * **`bootstrap.sh`**：服务端下发时内嵌自身地址与安装包 sha256，`mktemp -d`，不读选手可写的
   `agent.ini`，选项统一透传（`--dry-run` 现在在安装分支被吞）。
-* **协议版本**：tick / enroll 带 `protocol_version`，旧 Agent 回 426 `agent_outdated`；写
-  「全部重装 / 重做镜像」手册（阶段 1 已有破坏性协议变更，镜像里预置的离线包也会失效）；
-  服务端迁移前自动备份库。
+* **协议版本**：tick / enroll 带 `protocol_version`，旧 Agent 回 426 `agent_outdated`；
+  服务端迁移前自动备份库。（✅ 已完成：「全部重装 / 重做镜像」手册，见
+  `docs/install-agent.md`「重装与卸载」。）
+* **单元里的家目录**：`ReadWritePaths=-%h` 在系统单元里是 `-/root`，运行账号的家目录（桌面）
+  没有放开，`ProtectSystem=strict` 下按说明书推断是只读的（ADR-0007「现状」）。改成安装时
+  解析出的绝对家目录（带 `-`），连同断言 `-%h` 的安装器测试；放进下面的实机冒烟里验证。
 * **systemd 245 实机冒烟**（Ubuntu 20.04 / NOI Linux 2.0 虚拟机）：安装、升级、回滚、卸载、
   加固项。托管 CI runner 的 systemd 版本不对，证明不了这些。
 
@@ -209,9 +213,12 @@ person 表）；选手页手填保留但降级（这两条已落地）。
   （`_deploy_task_out` 把 CANCELLED 计入 pending；取消接口看的是存储的状态）。
 * tar 安全解包、RSA 验签、`parse_version` 各留一份源码，安装器用构建生成的 vendored
   拷贝 + 逐字节一致测试（路径校验除外，按硬规则保持两份独立实现）。
-* **删除语义按决策 2 落地**：修订 ADR-0003、`api-conventions` §5.2、05 §5.4、CLAUDE.md，
-  承认代码 / 资产是硬删；`clear_source_files` 的 docstring 同步；blob 改为**提交后**按引用
-  计数回收，补上 `delete_asset` / `delete_player` / `delete_contest` 等漏回收的路径。
+* **删除语义按决策 2 落地**：blob 改为**提交后**按引用计数回收，补上 `delete_asset` /
+  `delete_player` / `delete_contest` 等漏回收的路径；`web/src/api/crud.ts` 的
+  `softRemoveItem` 改名，`FilesView.vue` 单删确认框里"这是一条墓碑：勾上「含已删除」仍看得到"
+  这句界面文案与事实相反，要改。（✅ 已完成文档部分：ADR-0003 修订、`api-conventions` §5.2 /
+  §5.3、05 §5.4、00 决策表、CLAUDE.md、`clear_source_files` / `FileClearIn` 的 docstring 与
+  前端注释。）
 * 注册表身份随解析结果更新、pending 心跳也刷新在线（场次结束后 50 条假"离线"告警）。
 
 **阶段 4：性能**
@@ -221,13 +228,17 @@ person 表）；选手页手填保留但降级（这两条已落地）。
 * 前端轮询统一 `usePolling`（`AppLayout` 的健康轮询从不清除）；概览页改用服务端聚合接口，
   成绩矩阵只在成绩页加载。
 
-**阶段 5：文档对账**
+**阶段 5：文档对账**（✅ 已完成，2026-11）
 
-* `06-security`：如实写"明文、仅限可信二层；自举链对中间人无保护；发布私钥常驻在线服务端
-  等于机群 root 钥匙"（决策 3）。
-* 04 §4.3 的"单写连接 + 队列线程"不存在；`install-agent.md` 的卸载 / 重装两节；ADR-0007 的
+* ~~`06-security`：如实写"明文、仅限可信二层；自举链对中间人无保护；发布私钥常驻在线服务端
+  等于机群 root 钥匙"（决策 3）。~~ → 06 §6.2。
+* ~~04 §4.3 的"单写连接 + 队列线程"不存在；`install-agent.md` 的卸载 / 重装两节；ADR-0007 的
   `%h` 语义（系统实例里是 `/root`，`-%h` 是无效项）、ADR-0008、ADR-0012；
-  `docs/install-agent.md` 里不存在的 `install.sh --mode`。
+  `docs/install-agent.md` 里不存在的 `install.sh --mode`。~~ → 04 §4.3 改写；
+  `install-agent.md`「重装与卸载」；ADR-0007 / 0008 / 0012 各加「现状（2026-11）」；
+  `install.sh --mode` 实际在 07 开头，已换成 `install.py` 的真实入口。
+  对账中发现、文档修不了的（`%h` 让家目录只读、远程卸载被隐式 `NoNewPrivileges` 挡住）
+  已并入阶段 2 的条目。
 
 **推迟（本轮不做）**：`api/admin.py` 与 `agent/main.py` 的整体拆分；zip 改密码改后台任务
 （纯 Python 约 1.9 MB/s、同步跑在请求线程）；TLS + pinning；全局 person 表；

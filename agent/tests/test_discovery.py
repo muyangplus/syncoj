@@ -418,3 +418,19 @@ def test_服务端能解析我们造的探测() -> None:
     assert parsed is not None
     assert parsed["nonce"] == "b" * 32
     assert parsed["machine_id"] == "m1"
+
+
+def test_子网广播地址按小端还原(tmp_path) -> None:
+    """``/proc/net/route`` 的地址列是小端十六进制。曾经按大端还原，192.0.2.0/24 算成了
+    255.2.0.192 —— 没有默认路由的考场里，定向广播一直发错地方。"""
+    route = tmp_path / "route"
+    route.write_text(
+        "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n"
+        "eth0\t00000000\t010200C0\t0003\t0\t0\t0\t00000000\t0\t0\t0\n"
+        "eth0\t000200C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n"
+        "eth1\t0000000A\t00000000\t0001\t0\t0\t0\t000000FF\t0\t0\t0\n",
+        encoding="ascii",
+    )
+    assert discovery.broadcast_targets(str(route)) == [
+        "255.255.255.255", "192.0.2.255", "10.255.255.255",
+    ]

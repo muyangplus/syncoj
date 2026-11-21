@@ -1007,3 +1007,46 @@ def test_provision_does_not_touch_the_desktop(agent_config: AgentConfig) -> None
     agent.ensure_credential(allow_enroll=True)
 
     assert not pair_code_file(agent_config).exists()
+
+
+def test_install_root_not_writable_reports_health_through_the_handoff(
+    agent_config: AgentConfig, monkeypatch
+) -> None:
+    """真机上安装根属 root：回滚状态由 root 清，Agent 只递一份"平稳运行"的请求。"""
+    import json
+
+    from syncoj_agent import main as agent_main
+    from syncoj_agent.upgrade import UpgradeState, save_state
+
+    agent_config.install_root = agent_config.state_dir.parent / "opt"
+    agent_config.install_root.mkdir()
+    save_state(agent_config.install_root, UpgradeState(version="2.0.0", previous="1.0.0"))
+    agent = make_agent(agent_config)
+    monkeypatch.setattr(agent_main, "_writable", lambda root: False)
+    monkeypatch.setattr(agent_main, "current_release", lambda root: "2.0.0")
+
+    request = agent_config.state_dir / "handoff" / "request.json"
+    request.parent.mkdir(parents=True)
+    request.write_text("{\"kind\": \"upgrade\"}", encoding="utf-8")
+    agent._report_healthy()
+    assert json.loads(request.read_text(encoding="utf-8")) == {"kind": "upgrade"}, "不覆盖别的请求"
+
+    request.unlink()
+    agent._report_healthy()
+    assert json.loads(request.read_text(encoding="utf-8")) == {"kind": "healthy", "version": "2.0.0"}
+    assert (agent_config.install_root / "upgrade-state.json").exists(), "Agent 自己不动 root 的状态"
+
+
+def test_handoff_slot_is_not_overwritten_except_by_uninstall(agent_config: AgentConfig) -> None:
+    """交接只有一个槽：升级 / 平稳报告不冲掉还没处理的请求；卸载可以冲掉它们。"""
+    import json
+
+    agent = make_agent(agent_config)
+    request = agent_config.state_dir / "handoff" / "request.json"
+
+    assert agent._write_handoff({"kind": "upgrade"}) is True
+    assert agent._write_handoff({"kind": "healthy"}) is False
+    assert json.loads(request.read_text(encoding="utf-8")) == {"kind": "upgrade"}
+
+    assert agent._write_handoff({"kind": "uninstall", "token": "t"}, replace=True) is True
+    assert json.loads(request.read_text(encoding="utf-8"))["kind"] == "uninstall"

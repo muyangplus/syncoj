@@ -221,14 +221,12 @@ def test_自卸载脚本用_glob_删掉两个单元的开机自启软链(install
     assert '"$UNIT_DIR"/*.wants/*' not in text
 
 
-def test_自愈策略是_on_failure_而不是_always(installer_module) -> None:
-    """自卸载成功时 Agent 以 **exit 0** 退出，``Restart=always`` 会立刻把它拉起来
-    —— 而那时 /opt/syncoj、/etc/syncoj 已经删了，只会刷"找不到文件"，看起来像
-    卸载失败。崩溃（非 0）仍要自愈，所以是 ``on-failure`` 不是 ``no``。"""
+def test_自愈策略是_always(installer_module) -> None:
+    """卸载改由 root 管理单元先 stop 再删之后，Agent 不再以 exit 0 退出卸载；
+    ``on-failure`` 的理由没了，剩下 ``always`` 的好处：意外的 0 退出也会被拉起来。"""
     text = unit_of(installer_module)
-    assert "Restart=on-failure" in text
-    assert "Restart=always" not in text
-    assert "Restart=no" not in text
+    assert "Restart=always" in text
+    assert "Restart=on-failure" not in text
 
 
 def test_provision_那个_oneshot_单元不带_Restart(installer_module) -> None:

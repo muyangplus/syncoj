@@ -267,8 +267,9 @@ root 删除的凭据留在 `syncoj.db` 里，而备份、误传、随手拷走�
 4. 删除顺序：`systemctl disable`（**不用 `--now`**：脚本自己就跑在那个单元的 cgroup
    里）→ 删单元文件与 `*.wants/` 软链 → 删 prefix/config/state → 删 sudoers 与 helper
    → 逐项打印、**幂等**。**绝不动**选手桌面、家目录、运行账号、`/tmp`。
-5. 成功后 Agent **exit 0**，所以主单元必须是 `Restart=on-failure`（../design/03-agent.md §3.5）：`always`
-   会把它重新拉起来，而那时文件已经删了，现场看到的是"卸载失败"。
+5. 成功后 Agent **exit 0**，所以主单元当时必须是 `Restart=on-failure`（../design/03-agent.md §3.5）：`always`
+   会把它重新拉起来，而那时文件已经删了，现场看到的是"卸载失败"。（root 管理单元先 stop
+   再删之后不再如此，主单元已改 `Restart=always`。）
 
 **为此必须放开的两处沙箱**（`ProtectSystem=strict` 的只读挂载会被 sudo 出来的子进程
 继承，即使成了 root 也会 `EROFS`）：`ReadWritePaths` 增加 config 目录、单元目录、

@@ -81,8 +81,11 @@ from .upgrade import (
     UpgradeState,
     activate_release,
     current_release,
+    load_state,
     mark_healthy,
     note_boot,
+    note_rolled_back,
+    rolled_back_versions,
     parse_version,
     read_release_fingerprint,
     rollback_release,
@@ -448,6 +451,7 @@ class Agent:
         self._handled_release: Optional[Tuple[str, str]] = None
         #: 连续成功周期计数，用于确认新版本可用后清掉回滚状态
         self._healthy_cycles = 0
+        self._reported_healthy = False
         self._public_key = self._load_release_public_key()
         #: 连续多少轮连不上服务端。攒够了才去局域网里问一次地址 ——
         #: 服务端重启一下、网线抖一下都会连不上，而那些情况下地址并没有变，
@@ -1339,7 +1343,7 @@ class Agent:
             return False
 
         try:
-            self._write_handoff({"kind": "uninstall", "token": token})
+            self._write_handoff({"kind": "uninstall", "token": token}, replace=True)
         except OSError as exc:
             message = "按管理端授权卸载失败：写不进交接目录（%s）" % self._redact(str(exc), token)
             log.error(message)
@@ -1350,9 +1354,16 @@ class Agent:
         self._emit("warning", "uninstall_handoff", "已把卸载授权交给 root 管理单元")
         return False
 
-    def _write_handoff(self, request: dict) -> None:
-        """原子地写一份交接请求（临时名 + rename）。失败抛 OSError。"""
+    def _write_handoff(self, request: dict, replace: bool = False) -> bool:
+        """原子地写一份交接请求（临时名 + rename）。失败抛 OSError。
+
+        交接只有一个槽：里面还有没被 root 取走的请求时，默认**不覆盖**、返回 False，
+        调用方下一轮再试。只有卸载传 ``replace=True`` —— 它比升级 / 平稳报告都要紧。
+        曾经一律覆盖：升级请求把还没处理的卸载请求冲掉了（systemd 245 冒烟实测）。
+        """
         directory = Path(self.config.state_dir) / HANDOFF_DIRNAME
+        if not replace and (directory / HANDOFF_REQUEST).exists():
+            return False
         directory.mkdir(parents=True, exist_ok=True)
         try:
             os.chmod(str(directory), 0o700)
@@ -1365,6 +1376,7 @@ class Agent:
         finally:
             os.close(fd)
         os.replace(str(tmp), str(directory / HANDOFF_REQUEST))
+        return True
 
     def _collect_handoff_result(self) -> None:
         """root 管理单元留下的回执：读一次、上报、删掉。"""
@@ -1401,6 +1413,34 @@ class Agent:
             return text.replace(secret, "<token>")
         return text
 
+    def _note_healthy_cycle(self) -> None:
+        """又平稳跑完一轮。连续计数而不是"启动就算成功"：起得来但一 tick 就崩的版本同样要回滚。"""
+        self._healthy_cycles += 1
+        if self._healthy_cycles >= HEALTHY_CYCLES_BEFORE_TRUST and not self._reported_healthy:
+            self._report_healthy()
+
+    def _report_healthy(self) -> None:
+        """新版本已平稳运行：清掉回滚状态（自己能写安装根就自己清，否则交给 root）。
+
+        交接请求只有一个槽：里面还躺着别的请求（升级、卸载）时不覆盖，下一轮再试。
+        """
+        install_root = self.config.install_root
+        try:
+            if _writable(install_root):
+                mark_healthy(install_root)
+                self._reported_healthy = True
+                return
+            if load_state(install_root) is None:
+                self._reported_healthy = True  # 没有回滚状态（没刚升级过），不必报
+                return
+            if self._write_handoff({
+                "kind": "healthy",
+                "version": current_release(install_root) or __version__,
+            }):
+                self._reported_healthy = True
+        except OSError as exc:  # pragma: no cover
+            log.debug("报告平稳运行失败: %s", exc)
+
     def _guard_boot(self) -> bool:
         """启动守卫。返回 True 表示刚完成回滚，调用方应当退出让 systemd 重启。
 
@@ -1411,6 +1451,10 @@ class Agent:
             return False
 
         install_root = self.config.install_root
+        if not _writable(install_root):
+            # 真机上的常态：安装根属 root，启动计数与回滚由单元的 ExecStartPre=+
+            # （install.py --boot-guard，以 root）在本进程启动之前做完了
+            return False
         running = current_release(install_root) or __version__
         rollback_to = note_boot(install_root, running)
         if rollback_to is None:
@@ -1418,6 +1462,7 @@ class Agent:
 
         try:
             rollback_release(install_root, rollback_to)
+            note_rolled_back(install_root, running)
         except UpgradeError as exc:
             log.error("自动回滚失败: %s", exc)
             self._emit("error", "upgrade_rollback_failed", "自动回滚失败：%s" % exc)
@@ -1466,6 +1511,14 @@ class Agent:
             return
 
         install_root = self.config.install_root
+        if manifest.version in rolled_back_versions(install_root):
+            # 启动守卫切回去过的版本：再装只会再崩两次、再回滚一次，循环往复
+            self._emit_on_change(
+                "warning", "upgrade_skipped_rolled_back", manifest.version,
+                "版本 %s 曾启动失败被自动回滚，不再升级到它（请发一个新版本号）" % manifest.version,
+            )
+            self._handled_release = attempt_key
+            return
         running = current_release(install_root) or __version__
 
         # **版本号管降级、sha 管内容**（与安装器 install.py 同一套记录）：
@@ -1518,21 +1571,24 @@ class Agent:
             if not _writable(install_root):
                 # 真机上的常态：/opt/syncoj 属 root，运行账号写不进去。验过签的包留在
                 # 状态目录里，切换交给 root 管理单元（它自己再验一遍）。
-                self._handled_release = attempt_key
                 if mode != UpgradeMode.APPLY:
+                    self._handled_release = attempt_key
                     self._emit(
                         "info", "upgrade_staged",
                         "版本 %s 已下载并通过签名校验，等待激活（当前 mode=%s）"
                         % (manifest.version, mode),
                     )
                     return
-                self._write_handoff({
+                if not self._write_handoff({
                     "kind": "upgrade",
                     "version": manifest.version,
                     "sha256": manifest.sha256,
                     "size": manifest.size,
                     "signature": manifest.signature,
-                })
+                }):
+                    log.info("交接槽里还有没处理的请求，升级 %s 下一轮再交", manifest.version)
+                    return
+                self._handled_release = attempt_key
                 self._emit(
                     "info", "upgrade_handoff",
                     "版本 %s 已下载并通过签名校验，交给 root 管理单元切换" % manifest.version,
@@ -1842,6 +1898,9 @@ class Agent:
         if credential.state != STATE_READY:
             state, wait = self._pending_tick()
             if state != STATE_READY:
+                # 心跳成功也算"这一版跑得起来"：未配对的机器同样会升级，只在正常路径里
+                # 数平稳轮数的话，它的回滚状态永远清不掉，重启两次就会被守卫无端回滚
+                self._note_healthy_cycle()
                 # 待配对/无场次的机器也要能把现场交出去：这条**提前返回**的路径
                 # 从前不会走到下面那次 `_maybe_send_diagnostics`，于是服务端点
                 # 的「要一份」在一台卡在配对阶段的机器上永远没反应，周期性的
@@ -1952,12 +2011,7 @@ class Agent:
 
         # 跑够几个周期说明新版本确实能用，清掉回滚状态。
         # 连续计数而不是"启动就算成功"：起得来但一 tick 就崩的版本同样要回滚。
-        self._healthy_cycles += 1
-        if self._healthy_cycles == HEALTHY_CYCLES_BEFORE_TRUST:
-            try:
-                mark_healthy(self.config.install_root)
-            except OSError as exc:  # pragma: no cover
-                log.debug("清除回滚状态失败: %s", exc)
+        self._note_healthy_cycle()
 
         next_tick = int(tick.get("next_tick_seconds") or self.config.scan_interval)
         return float(max(5, min(next_tick, 3600)))

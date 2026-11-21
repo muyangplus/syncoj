@@ -291,3 +291,123 @@ def test_交接目录被换成符号链接时重装不把链接目标交出去(
     assert (victim.stat().st_mode & 0o777) == 0o755, "链接目标的权限被改了"
     assert not layout.handoff.is_symlink() and layout.handoff.is_dir()
     assert (layout.handoff.stat().st_mode & 0o777) == 0o700
+
+
+# --------------------------------------------------------------------------- #
+# 启动守卫（root 一侧）
+# --------------------------------------------------------------------------- #
+
+
+def _install_two(installer_module, layout: Layout, tmp_path) -> None:
+    """装上 1.0.0 之后再装 2.0.0，并像 root 管理单元那样记下回滚点。"""
+    bundle = make_bundle(tmp_path / "v2.tar.gz", version="2.0.0")
+    assert installer_module.main(["--bundle", str(bundle)] + layout.args()) == 0
+    installer_module._save_upgrade_state(
+        layout.prefix, {"version": "2.0.0", "previous": "1.0.0", "boots": 0}
+    )
+
+
+def _guard(installer_module, layout: Layout) -> int:
+    return installer_module.main(["--boot-guard"] + layout.args())
+
+
+def test_启动守卫数够次数就切回上一版(installer_module, layout: Layout, tmp_path) -> None:
+    _install_two(installer_module, layout, tmp_path)
+    for _ in range(installer_module.MAX_BOOT_ATTEMPTS):
+        assert _guard(installer_module, layout) == 0
+        assert installer_module.current_version(layout.prefix) == "2.0.0"
+
+    assert _guard(installer_module, layout) == 0
+    assert installer_module.current_version(layout.prefix) == "1.0.0"
+    assert installer_module._load_upgrade_state(layout.prefix) is None
+
+
+def test_启动守卫_状态对不上当前版本就清掉(installer_module, layout: Layout) -> None:
+    installer_module._save_upgrade_state(
+        layout.prefix, {"version": "9.9.9", "previous": "1.0.0", "boots": 5}
+    )
+    assert _guard(installer_module, layout) == 0
+    assert installer_module.current_version(layout.prefix) == "1.0.0"
+    assert installer_module._load_upgrade_state(layout.prefix) is None
+
+
+def test_启动守卫自己出错也返回0(installer_module, layout: Layout, monkeypatch) -> None:
+    def boom(self):
+        raise RuntimeError("坏了")
+
+    monkeypatch.setattr(installer_module.Installer, "boot_guard", boom)
+    assert _guard(installer_module, layout) == 0, "ExecStartPre 失败会挡住服务启动"
+
+
+@posix_only
+def test_平稳运行的报告清掉回滚状态_版本对不上不清(installer_module, layout: Layout, tmp_path) -> None:
+    _install_two(installer_module, layout, tmp_path)
+    request = layout.handoff / "request.json"
+
+    request.write_text(json.dumps({"kind": "healthy", "version": "1.0.0"}), encoding="utf-8")
+    assert installer_module.main(["--admin-handoff"] + layout.args()) == 0
+    assert installer_module._load_upgrade_state(layout.prefix) is not None
+
+    request.write_text(json.dumps({"kind": "healthy", "version": "2.0.0"}), encoding="utf-8")
+    assert installer_module.main(["--admin-handoff"] + layout.args()) == 0
+    assert installer_module._load_upgrade_state(layout.prefix) is None
+    assert not (layout.handoff / "result.json").exists(), "平稳报告不写回执"
+
+
+@posix_only
+@requires_openssl
+def test_经管理单元升级时记下回滚点(installer_module, layout: Layout, key) -> None:
+    stage_upgrade(layout, key)
+    assert installer_module.main(["--admin-handoff"] + layout.args()) == 0
+    state = installer_module._load_upgrade_state(layout.prefix)
+    assert state["version"] == "2.0.0" and state["previous"] == "1.0.0"
+
+
+def test_单元以root跑启动守卫_失败不挡启动(installer_module, tmp_path) -> None:
+    args = installer_module.build_parser().parse_args([
+        "--prefix", str(tmp_path / "opt"), "--user", "noi",
+    ])
+    instance = installer_module.Installer(args, installer_module.Reporter(dry_run=True, quiet=True))
+    command = instance._boot_guard_command()
+    if command is None:
+        pytest.skip("非 POSIX")
+    text = installer_module.render_unit(
+        prefix=Path("/opt/syncoj"), config_path=Path("/etc/syncoj/agent.ini"),
+        state_dir=Path("/var/lib/syncoj"), deploy_root="{desktop}",
+        scan_roots="{desktop}/{player_no}", run_user="noi", python="/usr/bin/python3",
+        boot_guard=command,
+    )
+    line = [l for l in text.splitlines() if l.startswith("ExecStartPre=")]
+    assert len(line) == 1 and line[0].startswith("ExecStartPre=-+/usr/bin/python3 -E -s ")
+    assert "--boot-guard" in line[0]
+
+
+def test_启动次数上限与Agent一致(installer_module) -> None:
+    from syncoj_agent import upgrade
+
+    assert installer_module.MAX_BOOT_ATTEMPTS == upgrade.MAX_BOOT_ATTEMPTS
+    assert installer_module.UPGRADE_STATE_FILE == upgrade.STATE_FILE
+
+
+def test_回滚过的版本记下来_管理单元不再切过去(installer_module, layout: Layout, tmp_path) -> None:
+    _install_two(installer_module, layout, tmp_path)
+    for _ in range(installer_module.MAX_BOOT_ATTEMPTS + 1):
+        _guard(installer_module, layout)
+    assert installer_module.current_version(layout.prefix) == "1.0.0"
+    assert installer_module._rolled_back_versions(layout.prefix) == ["2.0.0"]
+
+    from syncoj_agent import upgrade
+
+    assert upgrade.rolled_back_versions(layout.prefix) == ["2.0.0"], "Agent 读得到同一份记录"
+    assert installer_module.ROLLED_BACK_FILE == upgrade.ROLLED_BACK_FILE
+
+
+@posix_only
+@requires_openssl
+def test_管理单元拒绝切到回滚过的版本(installer_module, layout: Layout, key) -> None:
+    installer_module._note_rolled_back(layout.prefix, "2.0.0")
+    stage_upgrade(layout, key, version="2.0.0")
+
+    assert installer_module.main(["--admin-handoff"] + layout.args()) == 1
+    assert installer_module.current_version(layout.prefix) == "1.0.0"
+    assert "回滚" in result_of(layout)["message"]

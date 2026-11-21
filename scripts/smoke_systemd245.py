@@ -11,8 +11,11 @@
    ``NoNewPrivileges=yes``；/opt/syncoj、/etc/syncoj、/usr/lib/syncoj 不对组 / 其他人可写；
 2. 日志属运行账号且在写；桌面上出现配对码；
 3. root 跑的注册单元不顺着选手放在状态目录里的符号链接写文件、改属主；
-4. 服务端铺开新版本 → Agent 验签后交给 root 管理单元 → 切换并以新版本重启；
-5. 服务端授权卸载（机器未配对）→ root 管理单元验令牌后卸干净，运行账号与家目录不动。
+4. 服务端铺开新版本 → Agent 验签后交给 root 管理单元 → 切换并以新版本重启；新版本平稳
+   跑几轮后经交接报告，root 清掉回滚状态；
+5. 再铺开一个**一启动就崩**的版本 → 单元的 ``ExecStartPre=-+`` 启动守卫（root）数够次数后
+   切回上一版，服务恢复；
+6. 服务端授权卸载（机器未配对）→ root 管理单元验令牌后卸干净，运行账号与家目录不动。
 
 本脚本只用标准库，跑在宿主上。
 """
@@ -155,7 +158,17 @@ def build_bundles(work: Path, server_url: str, key_dir: Path):
     upgrade = work / ("agent-%s.tar.gz" % next_version)
     run([sys.executable, str(REPO_ROOT / "agent/packaging/build_bundle.py"),
          "--agent-root", str(source), "--out", str(upgrade)] + common)
-    return base, upgrade, next_version
+
+    # 一启动就崩的版本：签名、校验都没问题，就是起不来 —— 启动守卫要把它切回去
+    broken_version = bump(next_version)
+    init.write_text(init.read_text(encoding="utf-8").replace(
+        '__version__ = "%s"' % next_version, '__version__ = "%s"' % broken_version), encoding="utf-8")
+    launcher = source / "run_agent.py"
+    launcher.write_text("import sys\nsys.exit('冒烟：故意起不来')\n", encoding="utf-8")
+    broken = work / ("agent-%s.tar.gz" % broken_version)
+    run([sys.executable, str(REPO_ROOT / "agent/packaging/build_bundle.py"),
+         "--agent-root", str(source), "--out", str(broken)] + common)
+    return base, upgrade, next_version, broken, broken_version
 
 
 def start_container(work: Path) -> None:
@@ -194,7 +207,7 @@ def smoke(work: Path) -> None:
         admin = Admin(server_url + "/api/v1/admin")
 
         log("打包当前版本与一个更高的版本")
-        base, upgrade, next_version = build_bundles(work, server_url, key_dir)
+        base, upgrade, next_version, broken, broken_version = build_bundles(work, server_url, key_dir)
 
         log("构建并启动 systemd 245 容器")
         run(["docker", "build", "-t", IMAGE, str(REPO_ROOT / "scripts" / "smoke")])
@@ -223,6 +236,37 @@ def smoke(work: Path) -> None:
         journal = sh("journalctl -u syncoj-agent-admin.service --no-pager")
         expect("已激活版本 %s" % next_version in journal, "切换是 root 管理单元做的（journal 里有记录）")
         expect(sh("systemctl is-active syncoj-agent").strip() == "active", "升级后服务在跑")
+        wait_for(
+            "平稳运行几轮后回滚状态被 root 清掉",
+            lambda: sh("test -e /opt/syncoj/upgrade-state.json && echo y || echo n").strip() == "n",
+            timeout=300,
+        )
+        expect(True, "新版本报告平稳运行，root 清掉了回滚状态")
+
+        log("铺开一个一启动就崩的版本 %s，等启动守卫切回 %s" % (broken_version, next_version))
+        admin.rollout(admin.upload_release(broken, broken_version))
+        wait_for(
+            "启动守卫回滚到 %s" % next_version,
+            lambda: "已回滚到 %s" % next_version in sh("journalctl -u syncoj-agent --no-pager", check=False),
+            timeout=240,
+        )
+        expect(sh("readlink /opt/syncoj/current").strip().endswith(next_version),
+               "current 指回 %s" % next_version)
+        wait_for("回滚后服务在跑",
+                 lambda: sh("systemctl is-active syncoj-agent || true", check=False).strip() == "active",
+                 timeout=60)
+        expect(True, "启动守卫（ExecStartPre=-+，root）在 systemd 245 上生效")
+        expect(broken_version in sh("cat /opt/syncoj/rolled-back.json"), "回滚过的版本记下来了")
+        wait_for(
+            "Agent 不再请求坏版本",
+            lambda: "曾启动失败被自动回滚" in sh("cat /var/lib/syncoj/agent.log", check=False)
+            or sh("grep -c '已下载发布包 %s' /var/lib/syncoj/agent.log || true" % broken_version,
+                  check=False).strip() == "1",
+            timeout=120,
+        )
+        time.sleep(20)
+        expect(sh("readlink /opt/syncoj/current").strip().endswith(next_version),
+               "回滚之后没有再切回坏版本（不循环）")
 
         log("授权卸载（机器未配对）")
         admin.uninstall(int(machine["id"]), machine["hostname"])

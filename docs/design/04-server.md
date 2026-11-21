@@ -20,7 +20,6 @@
 | `roster` / `roster_entry` | 全局可复用的名单（人）。机器永久绑的是 `roster_entry` |
 | `bootstrap_key` | 镜像内置的统一注册密钥（只存哈希、可吊销、带过期） |
 | `agent` | 每机 Token 哈希、`machine_uuid`、指纹、`roster_entry_id`、可选 `contest_id`、配对码哈希、吊销状态 |
-| `agent_status` | 在线状态快照，`last_tick_at`、指标 |
 | `agent_diagnostic` | 每台机器**最新一份**诊断包（解压后的 JSON 文本），新的一份覆盖旧的 |
 | `source_file` | 回收台账：`(contest, player, path, sha256, scanned_sha256, size, revision, first_seen, last_seen)` —— `sha256` 是已存下的那一版，`scanned_sha256` 是最近一次扫描到的；不等即待上传 |
 | `asset` | 内容寻址的下发文件 |
@@ -51,9 +50,8 @@
 
 - **内存优先**：`AgentRegistry`（`registry.py`）用 dict + `threading.Lock` 持有在线状态，
   管理端读在线状态走内存。没有 SSE，前端靠轮询
-- **批量落库**：`tasks/flush.py` 的维护循环每 `flush_interval_seconds`（默认 5s）把脏的
-  在线状态合并成**一个事务** upsert 进 `agent_status`（这张表只写不读，§10.5 阶段 3 要删）；
-  同一个循环顺带做离线判定与到点结束场次
+- **维护循环**：`tasks/flush.py` 每 `flush_interval_seconds`（默认 5s）做离线判定与到点结束
+  场次。在线状态**不落库**（曾经每轮 upsert 进 `agent_status`，那张表从来没人读，迁移 017 删了）
 - **其余写照常逐请求提交**：每次 tick 本身就开一个会话（`db.py` 的 `Database.session()`，
   退出时 commit）—— 对账文件台账、写审计事件、收下发回执、更新 `agent.last_seen_at`
   都在里面；上传、注册、管理操作也一样。会话来自 SQLAlchemy 默认连接池，

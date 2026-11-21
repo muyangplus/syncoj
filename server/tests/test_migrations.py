@@ -152,7 +152,7 @@ MIGRATION_ADDED_COLUMNS = {
     "contest": {"default_roster_id"},
     "problem": {"file_patterns"},
     "player": set(),
-    "agent_status": set(),
+    #: ``agent_status`` 不在这里：它是迁移 017 删掉的整张表（见 test_017_…）。
     #: ``bootstrap_key_id``：发布记录记住"这个包附带的是哪把统一注册密钥"（迁移 006）。
     #: 老结构里没有它 —— 那一轮的发布记录本来就不带密钥，升上来一律是 NULL。
     "agent_release": {
@@ -183,7 +183,6 @@ MIGRATION_DROPPED_COLUMNS = {
     "contest": {"player_notice"},
     "problem": set(),
     "player": set(),
-    "agent_status": set(),
     "agent_release": set(),
 }
 
@@ -504,7 +503,8 @@ def test_legacy_rebuild_keeps_child_table_rows(legacy_db: Path) -> None:
     在事务里关（无效），子表行归零。
     """
     engine = make_engine(legacy_db)
-    migrations.migrate(engine)
+    # 停在 016：agent_status（看守用的子表）在 017 被删掉了
+    migrations.migrate(engine, target=16)
 
     assert rows(engine, "SELECT COUNT(*) FROM agent")[0][0] == 1
     status = rows(engine, "SELECT agent_id, file_count, disk_free FROM agent_status")
@@ -522,7 +522,8 @@ def test_legacy_upgrade_keeps_every_row(legacy_db: Path) -> None:
     ``ON DELETE CASCADE`` 一起被删掉。这条断言就是为了在那一刻变红。
     """
     engine = make_engine(legacy_db)
-    migrations.migrate(engine)
+    # 停在 016：agent_status（看守用的子表）在 017 被删掉了
+    migrations.migrate(engine, target=16)
 
     assert rows(engine, "SELECT COUNT(*) FROM agent")[0][0] == 1
     assert rows(engine, "SELECT COUNT(*) FROM player")[0][0] == 1
@@ -744,3 +745,13 @@ def test_migration_016_adds_event_log_indexes(workdir: Path) -> None:
     upgraded = {ix["name"] for ix in inspect(engine).get_indexes("event_log")}
     engine.dispose()
     assert upgraded == expected
+
+
+def test_017_删掉只写不读的_agent_status(legacy_db: Path) -> None:
+    engine = make_engine(legacy_db)
+    migrations.migrate(engine)
+
+    tables = {row[0] for row in rows(engine, "SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "agent_status" not in tables
+    assert rows(engine, "SELECT COUNT(*) FROM agent")[0][0] == 1, "删子表不能牵连父表"
+    engine.dispose()

@@ -1,12 +1,11 @@
 """后台任务。
 
-只做三件事，都是"必须有，但不该挂在请求路径上"的：
+只做两件事，都是"必须有，但不该挂在请求路径上"的：
 
 1. **离线判定**。""不再 tick"" 这件事本身不产生任何事件，所以只能靠定时扫描。
-2. **批量落库**。把内存注册表里的脏数据合并成**一个事务**刷入 ``agent_status``。
-   这是让 SQLite 在 50 台机器持续心跳下不出现写锁争抢的关键 —— 写频率从
-   "每请求一次" 降到 "每 5 秒一次"。
-3. **到点自动结束场次**。配了 ``ends_at`` 的场次时间一到就置成"已结束"并留一条
+   （曾经还有第三件"把内存注册表批量刷进 ``agent_status``"——那张表从来没人读，
+   2026-11 连表一起删了，见迁移 017。）
+2. **到点自动结束场次**。配了 ``ends_at`` 的场次时间一到就置成"已结束"并留一条
    审计事件。**收不收代码不靠它**（那条判据在 ``api/agent.py`` 的上传门禁里，
    因为循环是周期跑的，"到点那一刻"不能靠等它）—— 它管的是**状态**：界面该显示
    "已结束"，机器也不该再被解析成一个还在跑的场次。
@@ -17,18 +16,17 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime
-from typing import Iterable, List, Optional
+from typing import List, Optional
 
 from sqlalchemy import select
 
 from ..context import AppContext
-from ..models import AgentStatus, Contest, ContestStatus, EventLog, local_clock, utcnow
+from ..models import Contest, ContestStatus, EventLog, local_clock, utcnow
 from ..registry import AgentRuntime
 from ..services import runtime_settings
 
 __all__ = [
     "run_maintenance_loop",
-    "flush_statuses",
     "flush_once",
     "close_finished_contests",
 ]
@@ -103,7 +101,7 @@ async def run_maintenance_loop(ctx: AppContext) -> None:
 
 
 def flush_once(ctx: AppContext) -> int:
-    """执行一轮：判定离线 -> 自动结束到点的场次 -> 落库。返回本轮落库条数。
+    """执行一轮：判定离线 -> 自动结束到点的场次。返回本轮刚转为离线的机器数。
 
     离线阈值**每轮现读**运行参数：它是可以在管理端改的，缓存一份就等于
     "改完得重启服务端"。
@@ -117,37 +115,7 @@ def flush_once(ctx: AppContext) -> int:
 
     close_finished_contests(ctx)
 
-    dirty = ctx.registry.take_dirty()
-    if dirty:
-        flush_statuses(ctx, dirty)
-    return len(dirty)
-
-
-def flush_statuses(ctx: AppContext, runtimes: Iterable[AgentRuntime]) -> None:
-    """把若干运行时状态 upsert 进 ``agent_status``，合并为一个事务。"""
-    now = utcnow()
-    with ctx.db.session() as session:
-        ids = [r.agent_id for r in runtimes]
-        existing = {
-            row.agent_id: row
-            for row in session.execute(
-                select(AgentStatus).where(AgentStatus.agent_id.in_(ids))
-            ).scalars()
-        }
-        for runtime in runtimes:
-            row = existing.get(runtime.agent_id)
-            if row is None:
-                row = AgentStatus(agent_id=runtime.agent_id)
-                session.add(row)
-            row.online = runtime.online
-            row.last_tick_at = runtime.last_tick_at
-            row.last_seen_ip = runtime.last_seen_ip
-            row.agent_version = runtime.agent_version
-            row.scan_root = runtime.scan_root
-            row.file_count = runtime.file_count
-            row.disk_free = runtime.disk_free
-            row.last_error = runtime.last_error
-            row.updated_at = now
+    return len(flipped)
 
 
 def _record_offline_event(

@@ -3,12 +3,12 @@
 为什么状态放内存而不是每次 tick 写库
 ------------------------------------
 50 台机器 × 每 20s 一次 tick = 2.5 次写/秒。听起来不多，但若每个 tick 都开事务，
-SQLite 的单写锁会在 Web 查询与 Agent 上报之间来回争抢，且每次都要
-``UPDATE agent_status SET ...`` 做一次 B 树定位。改成"内存持有 + 定时批量落库"
-之后，写频率降到 **每 5 秒一个事务**，彻底退出争抢区。
+SQLite 的单写锁会在 Web 查询与 Agent 上报之间来回争抢。在线状态是"此刻的
+事实"，放内存就够了。
 
-内存 dict 是**权威读源**，``agent_status`` 表只是它的持久化快照（用于服务端重启
-后 Web 不空白，以及历史回溯）。因此 Web 查询走内存，不查库。
+内存 dict 是**唯一读源**，Web 查询走内存，不查库。曾经还每 5 秒把它刷进
+``agent_status`` 表当"持久化快照"，但从来没有代码读那张表 —— 2026-11 连表一起
+删了（迁移 017）。服务端重启后在线列表由各机器的下一次 tick 重新填上。
 
 线程安全
 --------
@@ -62,8 +62,6 @@ class AgentRuntime:
     #: 只在内存里：服务端重启后同一状态会再记一次，可以接受。
     edge_state: Dict[str, str] = field(default_factory=dict)
 
-    #: 需要被批量落库
-    dirty: bool = True
     #: 供 Web 展示的累计 tick 次数
     tick_count: int = 0
 
@@ -190,7 +188,6 @@ class AgentRegistry:
             if scan_skipped is not None:
                 # 同上：它是"本轮"的数字，不是累计值
                 runtime.scan_skipped = int(scan_skipped)
-            runtime.dirty = True
             if was_offline:
                 log.info("agent %s (%s) 恢复在线", agent_id, runtime.player_no)
             return runtime
@@ -201,7 +198,6 @@ class AgentRegistry:
             if runtime is None or not runtime.online:
                 return None
             runtime.online = False
-            runtime.dirty = True
             log.info("agent %s (%s) 判定离线：%s", agent_id, runtime.player_no, reason)
             return runtime
 
@@ -254,17 +250,9 @@ class AgentRegistry:
                 last = runtime.last_tick_at
                 if last is None or last < deadline:
                     runtime.online = False
-                    runtime.dirty = True
                     flipped.append(runtime)
         for runtime in flipped:
             log.info("agent %s (%s) 判定离线（超过 %ds 无 tick）",
                      runtime.agent_id, runtime.player_no, threshold)
         return flipped
 
-    def take_dirty(self) -> List[AgentRuntime]:
-        """取走所有待落库的运行时对象并清除 dirty 标记。"""
-        with self._lock:
-            dirty = [a for a in self._agents.values() if a.dirty]
-            for runtime in dirty:
-                runtime.dirty = False
-            return dirty

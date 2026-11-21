@@ -43,7 +43,6 @@ __all__ = [
     "Roster",
     "BootstrapKey",
     "Agent",
-    "AgentStatus",
     "AgentDiagnostic",
     "SourceFile",
     "Asset",
@@ -452,28 +451,6 @@ class Agent(Base, TimestampMixin):
         Index("ix_agent_fingerprint", "machine_fingerprint"),
         Index("ix_agent_roster_entry", "roster_entry_id"),
     )
-
-
-class AgentStatus(Base):
-    """在线状态的**落库快照**。
-
-    这是个派生表：实时真身在 ``registry.AgentRegistry`` 的内存 dict 里，
-    由后台任务每 ``flush_interval_seconds`` 秒合并成一个事务刷进来。
-    存在的意义是服务端重启后 Web 不会看到空白，以及支持历史回溯。
-    """
-
-    __tablename__ = "agent_status"
-
-    agent_id = Column(Integer, ForeignKey("agent.id", ondelete="CASCADE"), primary_key=True)
-    online = Column(Boolean, nullable=False, default=False)
-    last_tick_at = Column(DateTime, nullable=True)
-    last_seen_ip = Column(String(64), nullable=True)
-    agent_version = Column(String(32), nullable=True)
-    scan_root = Column(String(512), nullable=True)
-    file_count = Column(Integer, nullable=False, default=0)
-    disk_free = Column(BigInteger, nullable=True)
-    last_error = Column(Text, nullable=True)
-    updated_at = Column(DateTime, default=utcnow, nullable=False)
 
 
 class AgentDiagnostic(Base):

@@ -594,6 +594,16 @@ _EVENT_LOG_INDEXES: Sequence[Tuple[str, str]] = (
 )
 
 
+def _migration_017_drop_agent_status(engine: Engine) -> None:
+    """删 ``agent_status``：后台任务每几秒把内存注册表刷进去，但从来没有任何代码读它。
+
+    注释里说它"让服务端重启后 Web 不会看到空白"，实际上重启后的在线列表来自
+    内存注册表（首个 tick 就填上），这张表只是白白占写入。外键关掉再删（见
+    :func:`_drop_table`）—— 它是 ``agent`` 的子表，不会牵连父表。
+    """
+    _drop_table(engine, "agent_status")
+
+
 def _migration_016_event_log_indexes(engine: Engine) -> None:
     """审计事件按级别、类别建索引。
 
@@ -674,6 +684,11 @@ MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
         "审计事件按级别、类别建索引",
         _migration_016_event_log_indexes,
     ),
+    (
+        17,
+        "删掉只写不读的在线状态快照表 agent_status",
+        _migration_017_drop_agent_status,
+    ),
 ]
 
 LATEST_VERSION = MIGRATIONS[-1][0] if MIGRATIONS else 0
@@ -726,7 +741,9 @@ def _backup_before_migrate(engine: Engine, version: int) -> Optional[Path]:
     return target
 
 
-def migrate(engine: Engine, create_missing_tables: bool = True) -> List[str]:
+def migrate(
+    engine: Engine, create_missing_tables: bool = True, target: Optional[int] = None
+) -> List[str]:
     """把库升到最新结构，返回实际执行过的步骤说明。
 
     幂等：已经在最新版本上时是空操作（只建缺失的新表）。
@@ -758,6 +775,10 @@ def migrate(engine: Engine, create_missing_tables: bool = True) -> List[str]:
     for number, description, step in MIGRATIONS:
         if number <= version:
             continue
+        if target is not None and number > target:
+            # 只给测试用：停在某个版本上，检查那一刻的库（比如"重建表没有顺着外键
+            # 吃掉子表"的那些看守用例，子表就是后来被删掉的 agent_status）
+            break
         log.info("应用迁移 %03d：%s", number, description)
         step(engine)
         _set_version(engine, number)

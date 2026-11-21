@@ -34,7 +34,7 @@ from fastapi import (
 # 它会试图把 ``ForwardRef('Response')`` 当成响应模型来建模，然后炸在
 # /openapi.json 上 —— 而 /docs 和前端类型生成都依赖那个端点。
 from fastapi.responses import FileResponse, Response, StreamingResponse
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..services.player_no import player_no_problem
@@ -870,12 +870,9 @@ def clear_roster_entries(
         bound = _bound_player_nos(session, roster_id)
         if bound:
             raise _roster_in_use_error(bound, "这份名单")
-        removed = 0
-        for entry in session.execute(
-            select(RosterEntry).where(RosterEntry.roster_id == roster_id)
-        ).scalars():
-            session.delete(entry)
-            removed += 1
+        # 一条 DELETE：条目没有挂 ORM 级联（机器那一侧的外键是库里的 SET NULL，
+        # 而且上面已经拒绝了有机器绑着的情况），不用逐行载入再删
+        removed = _bulk_delete(session, RosterEntry, RosterEntry.roster_id == roster_id)
         name = roster.name
     return SimpleAck(ok=True, detail="已清空名单「%s」的 %d 条记录" % (name, removed))
 
@@ -2557,21 +2554,19 @@ def clear_source_files(
             raise HTTPException(status_code=404, detail="场次不存在")
         require_confirm(contest.slug, payload.confirm, "场次标识")
 
-        stmt = (
-            select(SourceFile)
-            .join(Player, SourceFile.player_id == Player.id)
-            .where(Player.contest_id == contest_id)
-        )
+        conditions = [
+            SourceFile.player_id.in_(select(Player.id).where(Player.contest_id == contest_id))
+        ]
         if player_id is not None:
-            stmt = stmt.where(SourceFile.player_id == player_id)
+            conditions.append(SourceFile.player_id == player_id)
         if not purge:
-            stmt = stmt.where(SourceFile.deleted_at.isnot(None))
+            conditions.append(SourceFile.deleted_at.isnot(None))
 
-        rows = list(session.execute(stmt).scalars())
-        hashes = {row.sha256 for row in rows}
-        for row in rows:
-            session.delete(row)
-        session.flush()
+        # 一场比赛的台账能有上万行：只取要回收的内容指纹，删除走一条 DELETE
+        hashes = set(
+            session.execute(select(SourceFile.sha256).where(*conditions).distinct()).scalars()
+        )
+        removed = _bulk_delete(session, SourceFile, *conditions)
 
         freed = sum(1 for sha in hashes if _release_blob_if_unreferenced(session, ctx, sha))
 
@@ -2581,11 +2576,11 @@ def clear_source_files(
                 category="files_clear",
                 contest_id=contest_id,
                 message="清理代码台账：%d 条%s（释放 %d 份内容）"
-                % (len(rows), "（含未消失的）" if purge else "（只清已消失的）", freed),
+                % (removed, "（含未消失的）" if purge else "（只清已消失的）", freed),
             )
         )
 
-    detail = "已清理 %d 条台账记录，释放 %d 份内容" % (len(rows), freed)
+    detail = "已清理 %d 条台账记录，释放 %d 份内容" % (removed, freed)
     if purge:
         detail += "。机器还在报的文件会在下一轮重新出现"
     return SimpleAck(ok=True, detail=detail)
@@ -2842,19 +2837,18 @@ def clear_events(
         else:
             require_confirm(GLOBAL_CONFIRM, payload.confirm, "清空确认")
 
-        stmt = select(EventLog)
+        conditions = []
         if contest_id is not None:
-            stmt = stmt.where(EventLog.contest_id == contest_id)
+            conditions.append(EventLog.contest_id == contest_id)
         if level:
-            stmt = stmt.where(EventLog.level == level)
+            conditions.append(EventLog.level == level)
         if older_than_days is not None:
             cutoff = utcnow() - timedelta(days=max(0, older_than_days))
-            stmt = stmt.where(EventLog.ts < cutoff)
+            conditions.append(EventLog.ts < cutoff)
 
-        rows = list(session.execute(stmt).scalars())
-        for row in rows:
-            session.delete(row)
-        if rows:
+        # 审计日志动辄几十万行，逐行载入再删能把一次清理拖上几分钟
+        removed = _bulk_delete(session, EventLog, *conditions)
+        if removed:
             # 记一条"谁清的"—— 否则日志被清这件事本身没有痕迹
             session.add(
                 EventLog(
@@ -2862,7 +2856,7 @@ def clear_events(
                     category="events_clear",
                     message="清理审计日志 %d 条（场次=%s，级别=%s，早于 %s 天）"
                     % (
-                        len(rows),
+                        removed,
                         contest_id if contest_id is not None else "全部",
                         level or "全部",
                         older_than_days if older_than_days is not None else "不限",
@@ -2870,7 +2864,7 @@ def clear_events(
                 )
             )
 
-    return SimpleAck(ok=True, detail="已清理 %d 条审计日志" % len(rows))
+    return SimpleAck(ok=True, detail="已清理 %d 条审计日志" % removed)
 
 
 def _event_out(row: EventLog, player_no: Optional[str]) -> EventOut:
@@ -2958,6 +2952,19 @@ def _count(session, model, *conditions) -> int:
     return int(
         session.execute(select(func.count(model.id)).where(*conditions)).scalar_one() or 0
     )
+
+
+def _bulk_delete(session, model, *conditions) -> int:
+    """一条 ``DELETE ... WHERE``，返回删掉的行数。
+
+    只用在**没有 ORM 级联**的表上（事件、台账、成绩、名单条目）：它绕过
+    ``session.delete()``，ORM 层的 ``cascade=`` 不会触发；库里的外键级联照常生效。
+    调用方在同一事务里没有载入过这些行，所以不同步会话（``synchronize_session=False``）。
+    """
+    result = session.execute(
+        delete(model).where(*conditions).execution_options(synchronize_session=False)
+    )
+    return int(result.rowcount or 0)
 
 
 def _counts_by(session, key_col, id_col, keys: List[Any], *conditions) -> Dict[Any, int]:
@@ -5183,19 +5190,15 @@ def clear_judge_runs(
             raise HTTPException(status_code=404, detail="场次不存在")
         require_confirm(contest.slug, payload.confirm, "场次标识")
 
-        stmt = select(JudgeRun).where(JudgeRun.contest_id == contest_id)
+        conditions = [JudgeRun.contest_id == contest_id]
         if player_id is not None:
-            stmt = stmt.where(JudgeRun.player_id == player_id)
+            conditions.append(JudgeRun.player_id == player_id)
 
-        rows = list(session.execute(stmt).scalars())
-        removed = 0
         kept = 0
-        for run in rows:
-            if keep_manual and run.parse_status == "manual":
-                kept += 1
-                continue
-            session.delete(run)
-            removed += 1
+        if keep_manual:
+            kept = _count(session, JudgeRun, *conditions, JudgeRun.parse_status == "manual")
+            conditions.append(JudgeRun.parse_status != "manual")
+        removed = _bulk_delete(session, JudgeRun, *conditions)
 
         session.add(
             EventLog(

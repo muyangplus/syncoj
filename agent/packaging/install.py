@@ -4637,7 +4637,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="store_true", help="打印安装器版本后退出")
 
-    source = parser.add_argument_group("安装包来源（三选一）")
+    source = parser.add_argument_group("安装包来源（四选一）")
     source.add_argument("--bundle", help="本地 tar.gz 安装包（离线安装）")
     source.add_argument("--download-url", help="下载安装包的 URL（在线自举）")
     source.add_argument(

@@ -196,9 +196,9 @@ root 建的 `agent.log` 让选手服务没有日志；未配对机器不处理�
 * **结构**：`api/agent.py` 拆出 `services/tick.py`（返回 `TickOutcome`）与 `services/upload.py`；
   tar 安全解包、RSA 验签、`parse_version` 各留一份源码，安装器用构建生成的 vendored 拷贝 +
   逐字节一致测试（路径校验除外，按硬规则保持两份独立实现）。
-* 小项：`agent/syncoj_agent/config.py` 里 "http:// + verify_tls" 告警分支是空的 `pass`；
-  `install.py` 参数组说"三选一"实际四个来源；导出接口 `include_deleted` 默认 False 而界面默认
-  True；选手删掉的文件在 `source/` 里仍留着、照样被评测（要不要清待定）。
+* 小项：选手删掉的文件在 `source/` 里仍留着、照样被评测（要不要清待定）。（2026-11 已清：
+  配置里空的 `pass` 告警分支删掉、安装器"三选一"改"四选一"、导出接口 `include_deleted`
+  默认与界面一致为 True。）
 
 **新想法（已评估 / 已设计，未实现）**：
 

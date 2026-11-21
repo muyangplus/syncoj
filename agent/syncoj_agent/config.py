@@ -407,9 +407,9 @@ class AgentConfig:
         elif not self.server_url.startswith(("http://", "https://")):
             problems.append("server.url 必须以 http:// 或 https:// 开头")
 
-        if self.server_url.startswith("http://") and self.verify_tls:
-            # 不是错误，但必须让运维看见 —— 明文 HTTP 下 token 会被中间人拿走
-            pass
+        # http:// 配 verify_tls=true 不告警：内网明文 HTTP 是文档里认的默认部署（DESIGN.md
+        # §6.2，只限可信二层），每次启动都对默认值吵一句只会训练人无视日志。这里曾经是一个
+        # 写了注释、什么都不做的空分支。
 
         if self.verify_tls and self.ca_file is not None and not self.ca_file.is_file():
             problems.append("ca_file 不存在: %s" % self.ca_file)

@@ -236,19 +236,19 @@ def test_export_with_no_matches_is_a_clear_404(client: TestClient, admin_headers
     assert "没有符合条件" in response.json()["detail"]
 
 
-def test_export_includes_deleted_when_asked(client: TestClient, admin_headers: dict,
+def test_export_includes_deleted_by_default(client: TestClient, admin_headers: dict,
                                             contest: dict, enrolled: dict) -> None:
-    """归档时通常只想拿活着的；但"连已消失的一起，看看谁删过东西"也是合理需求。"""
+    """导出是归档：默认连"已消失"的一起（与界面一致），要干净的显式传 false。"""
     keep = b"keep"
     report_files(client, enrolled, {"p1/keep.cpp": keep, "p1/gone.cpp": b"bye"})
     # 第二次 tick 不带 gone.cpp = Agent 明确上报"它没了"
     report_files(client, enrolled, {"p1/keep.cpp": keep})
 
     with read_export(client, admin_headers, contest) as archive:
-        assert "代码/S001/p1/gone.cpp" not in archive.namelist()
-
-    with read_export(client, admin_headers, contest, "?include_deleted=true") as archive:
         assert "代码/S001/p1/gone.cpp" in archive.namelist()
+
+    with read_export(client, admin_headers, contest, "?include_deleted=false") as archive:
+        assert "代码/S001/p1/gone.cpp" not in archive.namelist()
 
 
 # --------------------------------------------------------------------------- #

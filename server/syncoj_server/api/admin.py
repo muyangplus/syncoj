@@ -2616,11 +2616,15 @@ def export_source_files(
     contest_id: int,
     player_id: Optional[int] = None,
     problem: Optional[str] = None,
-    include_deleted: bool = False,
+    include_deleted: bool = True,
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> StreamingResponse:
     """把回收的代码打包成一个 zip。
+
+    **默认带上扫描对账标了"已消失"的代码**（与界面一致）：考场现实是"选手确实交过，
+    只是后来被清了"，复核成绩时这份历史比干净的数据重要。列表接口默认不带，是因为
+    列表看的是"现在机器上有什么"；导出是归档，口径不同。
 
     包里有两个东西：
 

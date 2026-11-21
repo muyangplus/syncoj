@@ -4,6 +4,7 @@ import { RouterView, useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 
 import { authApi } from '@/api'
+import { usePolling } from '@/composables/usePolling'
 import { useAuthStore } from '@/stores/auth'
 import { useContestStore } from '@/stores/contest'
 
@@ -43,10 +44,12 @@ async function handleLogout(): Promise<void> {
   await router.replace({ name: 'login' })
 }
 
+// 健康状态每 10 秒刷一次：顶部那行"在线 3/50"是教师最常瞄的信息。
+// 走 usePolling：卸载时清掉定时器（退出登录再登录不会叠出第二个）、标签页隐藏时暂停。
+const health = usePolling(refreshHealth, { interval: 10000, immediate: false })
+
 onMounted(async () => {
-  await Promise.all([refreshHealth(), contests.load().catch(() => undefined)])
-  // 健康状态每 10 秒刷一次：顶部那行"在线 3/50"是教师最常瞄的信息
-  window.setInterval(() => void refreshHealth(), 10000)
+  await Promise.all([health.refresh(), contests.load().catch(() => undefined)])
 })
 </script>
 

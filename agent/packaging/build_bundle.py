@@ -244,6 +244,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--public-key", default=None,
                         help="打进包里的升级公钥。不指定时用仓库 .key/release-key.pub.json"
                              "（存在才用）；都没有就不打，机器上自更新保持关闭。")
+    parser.add_argument("--no-public-key", action="store_true",
+                        help="不打公钥，也不看仓库 .key/（CI 发布用：信任锚是每台服务端自己的私钥）")
     parser.add_argument("--server-url", default=None,
                         help="服务端地址，如 http://10.0.0.5:8000。会写进包内 %s，"
                              "装机时不必再手填 —— 装 50 台时这是唯一还要人输的一项。"
@@ -254,7 +256,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     agent_root = Path(args.agent_root)
     version = read_version(agent_root)
     out = Path(args.out) if args.out else REPO_ROOT / "dist" / ("syncoj-agent-%s.tar.gz" % version)
-    public_key = resolve_public_key(args.public_key)
+    if args.no_public_key and args.public_key:
+        raise SystemExit("--no-public-key 与 --public-key 不能同时给")
+    public_key = None if args.no_public_key else resolve_public_key(args.public_key)
     if args.server_url is not None and not args.server_url.strip():
         raise SystemExit("--server-url 不能是空字符串（不要它就别传这个参数）")
 

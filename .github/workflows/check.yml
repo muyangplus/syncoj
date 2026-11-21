@@ -19,7 +19,11 @@ name: check
 
 on:
   push:
+    # 只跑分支：打发布标签时由 release.yml 以 workflow_call 调本工作流，
+    # 标签推送再单独触发一遍会和那次调用抢同一个 concurrency 组
+    branches: ["**"]
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read

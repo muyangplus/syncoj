@@ -99,6 +99,11 @@ def step_ps1_bom(ctx: "Context") -> None:
         )
 
 
+def step_versions(ctx: "Context") -> None:
+    """四处版本号一致（发布时标签还要对上它，见 ``scripts/release.py``）。"""
+    run([ctx.python, "scripts/release.py", "versions"])
+
+
 def _parallel_tests(ctx: "Context", root: str) -> None:
     run([ctx.python, "server/tools/parallel_tests.py", "--root", root, "--jobs", ctx.jobs])
 
@@ -143,6 +148,7 @@ def step_web_build(ctx: "Context") -> None:
 STEPS: List[Tuple[str, str, Callable[["Context"], None], bool]] = [
     ("py38", "Python 3.8 兼容门禁", step_py38, False),
     ("ps1-bom", "PowerShell 脚本的编码", step_ps1_bom, False),
+    ("versions", "各处版本号一致", step_versions, False),
     ("agent-tests", "Agent 测试", step_agent_tests, False),
     ("server-tests", "服务端测试（含协议契约与端到端集成）", step_server_tests, False),
     ("openapi", "OpenAPI 与服务端 schema 是否同步", step_openapi, False),

@@ -33,6 +33,8 @@ python server/tools/parallel_tests.py --root server --pattern "tests/test_docs.p
 cd server && python -m pytest tests/test_api_flow.py -k 名字      # 单个文件 / 单个用例
 python agent/tools/check_py38.py agent/                          # py38 兼容门禁
 python server/tools/dump_openapi.py && (cd web && npm run gen:types)   # 改了服务端 schema 之后
+python scripts/smoke_systemd245.py                               # systemd 245 容器冒烟（要 docker；CI 也跑）
+python scripts/release.py versions                               # 四处版本号一致；发版 = 改版本号后推 v<版本号> 标签
 ```
 
 服务端测试串行很慢（每个用例都造真 app + 真库），优先用 `parallel_tests.py` 或只跑相关文件。

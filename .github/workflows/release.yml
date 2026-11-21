@@ -1,0 +1,115 @@
+# 发布（CD）：推一个 v<版本号> 标签 → 全量检查（含 systemd 245 冒烟）→ 构建产物 → GitHub Release。
+#
+#   1. 改四处版本号（server/pyproject.toml、server/syncoj_server/__init__.py、
+#      agent/syncoj_agent/__init__.py、web/package.json），提交并合进 main
+#   2. git tag v0.2.0 && git push origin v0.2.0
+#
+# 标签与代码里的版本号对不上、任何一路检查不过，都不会发布。版本号带 a/b/rc/dev 的
+# 发成预发布（pre-release）。产物与构建方式见 scripts/release.py 的文档字符串。
+#
+# 这里**没有**发布签名私钥：Agent 的信任锚是每台服务端自己的私钥，Release 里的 Agent
+# 离线包不带公钥。教室里的机器始终从自己的服务端升级（「发布当前版本」或上传这个包）。
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHONIOENCODING: utf-8
+  PYTHONUTF8: "1"
+
+jobs:
+  versions:
+    name: 标签与版本号对账
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - id: check
+        run: python scripts/release.py versions --tag "$GITHUB_REF_NAME" --github-output "$GITHUB_OUTPUT"
+
+  checks:
+    name: 全量检查
+    needs: versions
+    uses: ./.github/workflows/check.yml
+
+  build:
+    name: 构建产物
+    needs: [versions, checks]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: 前端构建
+        run: |
+          npm ci --prefix web
+          npm run build --prefix web
+      - name: 打包
+        run: python scripts/release.py build --out dist --tag "$GITHUB_REF_NAME"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ needs.versions.outputs.version }}
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: 发布 GitHub Release
+    needs: [versions, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-${{ needs.versions.outputs.version }}
+          path: dist
+      - name: 校验和
+        run: cd dist && sha256sum -c SHA256SUMS
+      - name: 创建 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.versions.outputs.version }}
+          PRERELEASE: ${{ needs.versions.outputs.prerelease }}
+        run: |
+          cat > notes.md <<NOTES
+          ## 部署
+
+          \`\`\`bash
+          tar xzf syncoj-${VERSION}.tar.gz && cd syncoj-${VERSION}
+          python3 -m venv .venv && .venv/bin/pip install -e server
+          .venv/bin/syncoj-server init && .venv/bin/syncoj-server serve --host 0.0.0.0
+          \`\`\`
+
+          必须是 \`pip install -e\`：服务端按目录布局找预构建的 \`web/dist\` 与打 Agent 包用的 \`agent/\` 源码。
+          Agent 走服务端界面「发布当前版本」最省事；\`syncoj-agent-${VERSION}.tar.gz\` 是不带公钥的离线包，
+          镜像预装时配 \`install.py --bundle … --public-key <服务端的 release-key.pub.json>\`。
+          下载后先 \`sha256sum -c SHA256SUMS\`。
+
+          NOTES
+          flags=()
+          if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --verify-tag --title "SyncOJ ${VERSION}" \
+            --notes-file notes.md --generate-notes "${flags[@]}"

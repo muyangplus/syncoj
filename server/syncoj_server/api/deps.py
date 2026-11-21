@@ -400,8 +400,8 @@ def _to_identity(resolved: Resolution) -> AgentIdentity:
 def require_principal(request: Request, ctx: AppContext = Depends(get_ctx)) -> Principal:
     """接受任意有效凭据：能干活就干活，不能干活就如实说明卡在哪。
 
-    只有 ``/tick`` 用它 —— 干不了活的机器唯一要做的事就是定期问一句
-    "轮到我了吗"。别的接口（上传、下载、事件）一律走 ``require_agent``：
+    ``/tick`` 与升级包下载用它 —— 干不了活的机器要做的事就是定期问一句
+    "轮到我了吗"，以及换上修好的版本。别的接口（上传、下载、事件）一律走 ``require_agent``：
     它们都需要选手身份，让干不了活的机器进来没有任何意义，
     只会多出一堆需要判空的分支。
     """

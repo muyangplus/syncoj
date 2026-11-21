@@ -2512,14 +2512,15 @@ def _unreferenced(session, hashes) -> List[str]:
     真正删文件在提交之后（:func:`_reclaim_blobs`）：曾经在事务里就 unlink，提交一旦
     失败，行回来了、内容却没了，表现是"某个早就归档的文件突然取不到内容"。
     """
-    left = []
-    for sha in sorted(set(h for h in hashes if h)):
-        if not any(
-            session.execute(select(func.count(model.id)).where(column == sha)).scalar_one()
-            for model, column in _BLOB_REFERENCES
-        ):
-            left.append(sha)
-    return left
+    candidates = sorted(set(h for h in hashes if h))
+    used = set()
+    # 成批查（每批 500，SQLite 参数上限之内）：曾经每个指纹三条 COUNT，一场上万份
+    # 内容的清理在写事务里跑几万条查询，期间所有机器的心跳都在等写锁
+    for start in range(0, len(candidates), 500):
+        chunk = candidates[start:start + 500]
+        for _model, column in _BLOB_REFERENCES:
+            used.update(session.execute(select(column).where(column.in_(chunk)).distinct()).scalars())
+    return [sha for sha in candidates if sha not in used]
 
 
 def _reclaim_blobs(ctx: AppContext, hashes) -> int:

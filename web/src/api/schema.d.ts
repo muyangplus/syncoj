@@ -2002,7 +2002,8 @@ export interface paths {
         };
         /**
          * Download Release
-         * @description 下载 Agent 升级包。
+         * @description 下载 Agent 升级包。**任意有效凭据都行**（未配对 / 无场次的机器也要能升级 ——
+         *     待配对的心跳会给它升级清单；曾经这里要求能干活的身份，清单给了却下不动）。
          *
          *     只提供**已铺开且未撤回**的版本 —— 上传但未 rollout 的包对 Agent 不可见，
          *     这样"上传"和"铺开"的风险边界在服务端也是硬的，而不是只靠 Agent 自觉。

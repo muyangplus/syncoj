@@ -228,3 +228,39 @@ def test_别的机器的卸载令牌不卸(installer_module, layout: Layout, key
     assert installer_module.current_version(layout.prefix) == "1.0.0"
     result = result_of(layout)
     assert result["ok"] is False and "令牌" in result["message"]
+
+
+@posix_only
+@requires_openssl
+def test_不许降级(installer_module, layout: Layout, key) -> None:
+    """请求文件是运行账号写的：真签名的旧版本也不能让 root 装回去。"""
+    stage_upgrade(layout, key, version="0.9.0")
+
+    assert installer_module.main(["--admin-handoff"] + layout.args()) == 1
+
+    assert installer_module.current_version(layout.prefix) == "1.0.0"
+    assert "降级" in result_of(layout)["message"]
+
+
+@posix_only
+def test_读不了的请求也被挪走_不会反复触发(installer_module, layout: Layout, tmp_path) -> None:
+    target = tmp_path / "secret"
+    target.write_text("x", encoding="utf-8")
+    (layout.handoff / "request.json").symlink_to(target)
+
+    assert installer_module.main(["--admin-handoff"] + layout.args()) == 1
+
+    assert not os.path.lexists(str(layout.handoff / "request.json"))
+    assert target.read_text(encoding="utf-8") == "x"
+
+
+def test_装机时给的公钥路径带进管理单元(installer_module, tmp_path) -> None:
+    import argparse
+
+    args = installer_module.build_parser().parse_args([
+        "--prefix", str(tmp_path / "opt"), "--public-key", "/etc/custom/pub.json",
+        "--user", "noi",
+    ])
+    instance = installer_module.Installer(args, installer_module.Reporter(dry_run=True, quiet=True))
+    layout_args = instance._layout_args()
+    assert layout_args[layout_args.index("--public-key") + 1] == "/etc/custom/pub.json"

@@ -106,10 +106,15 @@ _EDGE_CATEGORIES = {"scan_incomplete": None, "scan_rejected": "paths"}
 
 
 def _edge_triggered(runtime, events):
-    """按注册表里这台机器上一轮的状态过滤掉"状态没变"的那几类事件。"""
+    """按注册表里这台机器上一轮的状态过滤掉"状态没变"的那几类事件。
+
+    返回 ``(要写的事件, 新状态)``。**新状态由调用方在提交之后再写回**：先写的话，
+    这一轮的事务一旦失败，事件没落库、状态却已经记成"报过了"，重试时就被滤掉，
+    这条事件永远丢了。
+    """
     if runtime is None:
-        return events
-    state = runtime.edge_state
+        return events, None
+    state = dict(runtime.edge_state)
     present = set()
     kept = []
     for event in events:
@@ -130,7 +135,7 @@ def _edge_triggered(runtime, events):
         if category in _EDGE_CATEGORIES and category not in present:
             # 状态消失：清掉，下次再出现时重新记一条
             del state[category]
-    return kept
+    return kept, state
 
 
 def _require_protocol(reported: int) -> None:
@@ -441,12 +446,14 @@ def tick(
                 scan_complete=payload.scan_complete,
                 rules=rules,
             )
+        runtime = ctx.registry.get(identity.agent_id)
+        events, edge_state = _edge_triggered(runtime, collect.events)
         record_events(
             session,
             player_id=identity.player_id,
             contest_id=identity.contest_id,
             agent_id=identity.agent_id,
-            events=_edge_triggered(ctx.registry.get(identity.agent_id), collect.events),
+            events=events,
         )
 
         # 先收回执、再派作业：本轮刚报完成的不该再出现在作业里。
@@ -494,6 +501,9 @@ def tick(
             uninstall_token = _pending_uninstall_token(ctx, agent, now)
             # 一次性标记在这里取走：本轮响应会带 true，库里同步清空
             diagnostics_request = _take_diagnostics_request(agent)
+
+    if runtime is not None and edge_state is not None:
+        runtime.edge_state = edge_state  # 提交之后才写回（见 _edge_triggered）
 
     ctx.registry.note_tick(
         identity.agent_id,
@@ -628,17 +638,11 @@ def _tick_pending(
                     )
                     ctx.pair_codes.put(agent.id, pair_code, agent.pair_code_expires_at)
 
-    # 注册表里有它（以前能干活过）就照样记一次心跳：场次一结束，所有机器都走到
-    # 这条路，曾经这里不记，于是 offline_after 秒后整间机房 50 条"离线"告警 ——
-    # 而机器明明都在线。不在注册表里的（从没配好过）note_tick 自己会忽略。
-    ctx.registry.note_tick(
-        identity.agent_id,
-        ip=client_ip,
-        agent_version=payload.agent_version,
-        disk_free=payload.stats.disk_free,
-        last_error=payload.stats.last_error,
-        scan_missing=payload.stats.scan_missing,
-    )
+    # 这台机器现在解析不出"能干活的身份"（场次结束、选手被删、被解绑）：把它从在线
+    # 注册表里**拿掉**。曾经什么都不做，offline_after 秒后整间机房 50 条"离线"告警
+    # （机器明明都在线）；也不能照记心跳 —— 那会让它挂着旧的选手 / 场次一直显示在线。
+    # 重新能干活时，下一次带凭据的请求会按新身份把它放回来（deps.upsert_identity）。
+    ctx.registry.forget(identity.agent_id)
 
     return TickResponse(
         server_time=unix_seconds(now),
@@ -1277,9 +1281,10 @@ def download_release(
     release_id: int,
     request: Request,
     ctx: AppContext = Depends(get_ctx),
-    identity: AgentIdentity = Depends(require_agent),
+    identity: Principal = Depends(require_principal),
 ) -> Response:
-    """下载 Agent 升级包。
+    """下载 Agent 升级包。**任意有效凭据都行**（未配对 / 无场次的机器也要能升级 ——
+    待配对的心跳会给它升级清单；曾经这里要求能干活的身份，清单给了却下不动）。
 
     只提供**已铺开且未撤回**的版本 —— 上传但未 rollout 的包对 Agent 不可见，
     这样"上传"和"铺开"的风险边界在服务端也是硬的，而不是只靠 Agent 自觉。

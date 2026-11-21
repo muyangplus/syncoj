@@ -342,7 +342,7 @@ def _field_label(loc) -> str:
     return out
 
 
-async def _outdated_agent(request: Request) -> Optional[int]:
+def _outdated_agent(request: Request, exc: RequestValidationError) -> Optional[int]:
     """Agent 的 enroll / tick 校验失败时，先看是不是旧协议：是就返回它报的版本。
 
     旧 Agent 的报文里有新服务端不认的字段（``extra="forbid"``），根本走不到处理
@@ -350,10 +350,14 @@ async def _outdated_agent(request: Request) -> Optional[int]:
     """
     if request.url.path not in VERSIONED_AGENT_PATHS:
         return None
-    try:
-        body = json.loads((await request.body()).decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
-        return None
+    # 用异常里带的请求体，不再读一次请求：处理器拿到的可能是一个新的 Request，
+    # 在某些 Starlette 版本上再读会一直等下去
+    body = getattr(exc, "body", None)
+    if isinstance(body, (bytes, str)):
+        try:
+            body = json.loads(body)
+        except ValueError:
+            return None
     if not isinstance(body, dict):
         return None
     reported = body.get("protocol_version", 0)
@@ -461,7 +465,7 @@ def install_error_handlers(app: FastAPI) -> None:
     async def _validation_error(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
-        outdated = await _outdated_agent(request)
+        outdated = _outdated_agent(request, exc)
         if outdated is not None:
             return _body(426, "agent_outdated", outdated_detail(outdated), {"protocol_version": outdated})
         # 回显原始错误列表：前端表单要据此把红框标到具体某个输入框上，

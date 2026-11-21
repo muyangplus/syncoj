@@ -522,3 +522,19 @@ def test_unpaired_machine_also_gets_the_upgrade(release_env) -> None:
     assert body["upgrade"]["version"] == "1.0.0"
     for gone in ("bootstrap_key_policy", "config_policy", "upgrade_mode"):
         assert gone not in body["upgrade"]
+
+
+@requires_openssl
+def test_unpaired_machine_can_download_the_release(release_env) -> None:
+    """待配对的心跳给了升级清单，下载端点也得认这台机器（曾经 403）。"""
+    release = upload(release_env.client, release_env.headers, "1.0.0").json()
+    release_env.client.post(
+        "/api/v1/admin/releases/%d/rollout" % release["id"], headers=release_env.headers
+    )
+    raw_key = issue_bootstrap_key(release_env.client, release_env.headers)
+    lonely = enroll_machine(release_env.client, raw_key, machine_id="unpaired-dl")
+    url = do_tick(release_env.client, lonely["token"], [], machine_id="unpaired-dl")["upgrade"]["url"]
+
+    response = release_env.client.get(url, headers=agent_headers(lonely["token"]))
+
+    assert response.status_code == 200, response.text

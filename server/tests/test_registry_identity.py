@@ -20,11 +20,14 @@ def test_改派之后注册表里的场次与选手跟着变() -> None:
     assert registry.all(contest_id=10) == []
 
 
-def test_场次结束后的心跳仍然记为在线(client, enrolled, app) -> None:
+def test_场次结束后不再挂在注册表里_也不报离线(client, enrolled, app) -> None:
+    """场次结束后机器走待配对心跳：从在线注册表里拿掉 —— 既不挂着旧选手显示在线，
+    也不会在 offline_after 之后集体报一遍"离线"。"""
+    from syncoj_server.models import EventLog
+    from syncoj_server.tasks import flush
+
     do_tick(client, enrolled["token"], [], machine_id=enrolled["machine_id"])
-    runtime = app.state.ctx.registry.get(enrolled["agent_id"])
-    assert runtime is not None and runtime.online
-    before = runtime.tick_count
+    assert app.state.ctx.registry.get(enrolled["agent_id"]) is not None
 
     with app.state.ctx.db.session() as session:
         contest = session.execute(select(Contest)).scalars().first()
@@ -32,10 +35,15 @@ def test_场次结束后的心跳仍然记为在线(client, enrolled, app) -> No
 
     body = do_tick(client, enrolled["token"], [], machine_id=enrolled["machine_id"])
     assert body["bound"] is False, body
+    assert app.state.ctx.registry.get(enrolled["agent_id"]) is None
 
-    runtime = app.state.ctx.registry.get(enrolled["agent_id"])
-    assert runtime.tick_count == before + 1, "待配对 / 无场次的心跳没有记进注册表"
-    assert runtime.online
+    app.state.ctx.registry.sweep_offline(0)
+    flush.flush_once(app.state.ctx)
+    with app.state.ctx.db.session() as session:
+        offline = session.execute(
+            select(EventLog).where(EventLog.category == "offline")
+        ).scalars().all()
+    assert offline == []
 
 
 def test_扫描不完整只在状态变化时记一条(client, enrolled, app) -> None:

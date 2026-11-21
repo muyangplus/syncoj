@@ -2133,7 +2133,7 @@ class Installer:
 
     def _layout_args(self) -> List[str]:
         """管理单元的命令行里要原样带上的布局参数（与这次安装一致）。"""
-        return [
+        args = [
             "--prefix", _posix(self.prefix),
             "--config-dir", _posix(self.config_dir),
             "--state-dir", _posix(self.state_dir),
@@ -2143,6 +2143,13 @@ class Installer:
             "--python", self.options.python or "/usr/bin/python3",
             "--skip-user", "--skip-python-check",
         ]
+        # 装机时显式给的公钥路径只写进了 agent.ini、没拷进配置目录：管理单元得知道它，
+        # 否则验签时去找 <配置目录>/release-key.pub.json，找不到就永远升级 / 卸载不了
+        if self.options.public_key:
+            args += ["--public-key", _posix(Path(self.options.public_key))]
+        if self.service_name != SERVICE_NAME:
+            args += ["--service-name", self.service_name]
+        return args
 
     def install_admin_unit(self) -> None:
         """装 root 管理单元：把安装器自己拷到 ``admin_dir``，写 service + path 两个单元。
@@ -2225,7 +2232,17 @@ class Installer:
             self.report.skip("没有可处理的交接目录：%s" % exc)
             return EXIT_OK
         try:
-            raw = _read_untrusted(HANDOFF_REQUEST, dir_fd, MAX_HANDOFF_BYTES)
+            try:
+                raw = _read_untrusted(HANDOFF_REQUEST, dir_fd, MAX_HANDOFF_BYTES)
+            except InstallError as exc:
+                # 读不了的请求（符号链接、FIFO、超长……）也要挪走：留着它，PathExists=
+                # 会立刻再触发，撞满启动上限后 path 单元进 failed，之后什么都处理不了
+                try:
+                    os.unlink(HANDOFF_REQUEST, dir_fd=dir_fd)
+                except OSError:
+                    pass
+                _write_handoff_result(dir_fd, "?", False, str(exc))
+                raise
             if raw is None:
                 self.report.skip("没有待处理的请求")
                 return EXIT_OK
@@ -2284,6 +2301,11 @@ class Installer:
             raise InstallError("没有可用的发布公钥或签名，拒绝切换")
         if not verify_pkcs1v15_sha256(key, release_signing_message(version, sha, size), signature):
             raise InstallError("签名验不过（不是这台服务端的发布私钥签的），拒绝切换")
+        # 不许降级：请求文件是运行账号写的，它可以拿一份**真签名的旧版本**（明文 HTTP
+        # 上抓到的旧清单）来求 root 装回去。Agent 那边也不接受更低版本，这里同样不接受。
+        installed = current_version(self.prefix)
+        if installed and _version_key(version) < _version_key(installed):
+            raise InstallError("请求的版本 %s 低于已安装的 %s，拒绝降级" % (version, installed))
 
         workdir = Path(tempfile.mkdtemp(prefix="syncoj-admin-"))
         try:
@@ -3542,6 +3564,14 @@ def _posix(path: Path) -> str:
     现场暴露。
     """
     return path.as_posix()
+
+
+def _version_key(text: str) -> Tuple[int, ...]:
+    """只取开头的数字段比较（与 Agent 的 parse_version 同一口径）。"""
+    import re
+
+    match = re.match(r"^([0-9]+(?:\.[0-9]+)*)", text or "")
+    return tuple(int(part) for part in match.group(1).split(".")) if match else ()
 
 
 def _open_handoff_dir(state_dir: Path) -> int:

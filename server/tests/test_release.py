@@ -503,3 +503,22 @@ def test_old_format_signatures_are_resigned_on_startup(release_env, workdir: Pat
     with restarted.state.ctx.db.session() as session:
         assert session.query(AgentRelease).filter_by(version="9.9.9").one().signature == expected
     restarted.state.ctx.db.dispose()
+
+
+@requires_openssl
+def test_unpaired_machine_also_gets_the_upgrade(release_env) -> None:
+    """未配对的机器也拿得到升级（曾经只有配好的机器有）；清单不再带三条安装策略。"""
+    release = upload(release_env.client, release_env.headers, "1.0.0").json()
+    assert release_env.client.post(
+        "/api/v1/admin/releases/%d/rollout" % release["id"], headers=release_env.headers
+    ).status_code == 200
+
+    raw_key = issue_bootstrap_key(release_env.client, release_env.headers)
+    lonely = enroll_machine(release_env.client, raw_key, machine_id="unpaired-machine")
+    assert lonely["bound"] is False
+    body = do_tick(release_env.client, lonely["token"], [], machine_id="unpaired-machine")
+
+    assert body["claimed"] is False
+    assert body["upgrade"]["version"] == "1.0.0"
+    for gone in ("bootstrap_key_policy", "config_policy", "upgrade_mode"):
+        assert gone not in body["upgrade"]

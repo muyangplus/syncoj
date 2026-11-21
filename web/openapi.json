@@ -4656,18 +4656,6 @@
       "UpgradeInfo": {
         "additionalProperties": false,
         "properties": {
-          "bootstrap_key_policy": {
-            "default": "keep",
-            "title": "Bootstrap Key Policy",
-            "type": "string"
-          },
-          "config_policy": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "title": "Config Policy",
-            "type": "object"
-          },
           "notes": {
             "anyOf": [
               {
@@ -4691,11 +4679,6 @@
             "default": 0,
             "title": "Size",
             "type": "integer"
-          },
-          "upgrade_mode": {
-            "default": "apply",
-            "title": "Upgrade Mode",
-            "type": "string"
           },
           "url": {
             "title": "Url",

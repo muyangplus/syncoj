@@ -1697,6 +1697,13 @@ class Agent:
             log.info("服务端要求回传一份诊断包（manual）")
             self.request_diagnostics("manual")
 
+        upgrade = tick.get("upgrade")
+        if upgrade:
+            # 未配对的机器也升级：装好后迟迟没配对的那批正需要先换上修好的版本。
+            # 激活成功会置 _restart_requested，主循环下一圈以 EXIT_RESTART 退出。
+            with self._watchdog_paused():
+                self._handle_upgrade(upgrade)
+
         self._flush_events()
 
         credential = self._adopt_identity(tick)

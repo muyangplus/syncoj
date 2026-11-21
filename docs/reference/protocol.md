@@ -310,6 +310,9 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
   `scan` + `true` 与"选手把所有文件都删了"在报文里无法区分，服务端只能靠"记得丢弃"
   避免误判，而这一行在重构中最容易漏。报 `false` 让歧义在协议层不存在，代价是零。
 - `need_upload` 与 `deploy_jobs` 一律为空
+- `upgrade` **照常给**：装好后迟迟没配对的机器同样要能换上修好的版本。`upgrade`
+  只有 `version` / `url` / `sha256` / `signature` / `size` / `notes`；安装策略（密钥、
+  配置、升级模式）以**包内** `install_policy.json` 为准，不在清单里
 - `claimed=false` 时响应里**带上 `pair_code`**（每次 tick 都会确认它还有效；
   过期就发一个新的，理由见 §1 —— 心跳是未配对机器唯一稳定的上行通道）
 

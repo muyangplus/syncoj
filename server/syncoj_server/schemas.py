@@ -283,12 +283,10 @@ class UpgradeInfo(_Base):
     signature: str
     size: int = 0
     notes: Optional[str] = None
-    #: 随这个版本带下去的三条安装策略。与装机台账、包内 ``install_policy.json``
-    #: **是同一份真相**（都出自 ``services/install_policy.build_install_policy``）。
-    #: 机器升级时按它们切换配置与密钥 —— 升级与装机不该有两套规则。
-    bootstrap_key_policy: str = "keep"
-    config_policy: Dict[str, str] = Field(default_factory=dict)
-    upgrade_mode: str = "apply"
+    #: 曾经还带三条安装策略（bootstrap_key_policy / config_policy / upgrade_mode）。
+    #: Agent 从来不读它们 —— 升级时生效的是包内 ``install_policy.json``（与装机
+    #: 台账同出 ``services/install_policy.build_install_policy``）。删掉，免得有人
+    #: 以为改了这里就改了机器上的行为。
 
 
 class TickResponse(_Base):

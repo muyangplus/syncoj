@@ -4295,15 +4295,6 @@ export interface components {
         };
         /** UpgradeInfo */
         UpgradeInfo: {
-            /**
-             * Bootstrap Key Policy
-             * @default keep
-             */
-            bootstrap_key_policy: string;
-            /** Config Policy */
-            config_policy?: {
-                [key: string]: string;
-            };
             /** Notes */
             notes?: string | null;
             /** Sha256 */
@@ -4315,11 +4306,6 @@ export interface components {
              * @default 0
              */
             size: number;
-            /**
-             * Upgrade Mode
-             * @default apply
-             */
-            upgrade_mode: string;
             /** Url */
             url: string;
             /** Version */

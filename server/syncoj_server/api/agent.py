@@ -517,7 +517,11 @@ def _tick_pending(
     #: 一次性诊断请求标记：与正常 tick 那条路同一个语义（取走即清）。待配对的
     #: 机器同样可能被教师点「诊断」—— 它的现场恰恰最有用。
     diagnostics_request = False
+    upgrade: Optional[UpgradeInfo] = None
     with ctx.db.session() as session:
+        # 还没配对的机器也要能升级：装机后迟迟没配对的那批，正是最需要"先换上
+        # 修好的版本再说"的（曾经只有配好的机器拿得到升级）
+        upgrade = _pending_upgrade(session, ctx)
         agent = session.get(Agent, identity.agent_id)
         if agent is not None:
             agent.last_seen_at = now
@@ -575,6 +579,7 @@ def _tick_pending(
         pair_code=pair_code,
         bound=False,
         reason=identity.reason,
+        upgrade=upgrade,
         uninstall_token=uninstall_token,
         diagnostics_request=diagnostics_request,
         config=_agent_config(ctx),
@@ -761,9 +766,7 @@ def _pending_upgrade(session, ctx: AppContext) -> Optional[UpgradeInfo]:
     三个条件同时满足才下发：配置了签名私钥、有已铺开的版本、该版本未被撤回。
     缺任何一个都返回 None —— 宁可不下发，也不下发一个 Agent 必然拒收的包。
 
-    随包带下去的三条安装策略与装机台账、包内 ``install_policy.json`` 逐字相同
-    （同一个 helper）：机器升级时按同一套规则切换配置与密钥，不该因为"这次是升级
-    而不是装机"就换一套。
+    安装策略不在这里：升级时生效的是包内 ``install_policy.json``。
     """
     if ctx.signing_key is None:
         return None
@@ -785,14 +788,6 @@ def _pending_upgrade(session, ctx: AppContext) -> Optional[UpgradeInfo]:
         signature=row.signature,
         size=int(row.size),
         notes=row.notes,
-        **install_policy.build_install_policy(
-            bootstrap_key_policy=row.bootstrap_key_policy,
-            config_policy=install_policy.load_config_policy(row.config_policy_json),
-            upgrade_mode=row.upgrade_mode,
-            # 与台账那一处同一个理由：老记录没有策略列，但"夹带过密钥"这件事
-            # 记在 bootstrap_key_id 上，不能用常量默认值把它盖掉
-            has_bundled_key=row.bootstrap_key_id is not None,
-        )
     )
 
 

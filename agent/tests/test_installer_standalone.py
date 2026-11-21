@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import getpass
 import hashlib
 import http.server
 import io
@@ -64,18 +65,6 @@ from syncoj_server.services.signing import (  # noqa: E402
 
 HAS_OPENSSL = openssl_available() is not None
 requires_openssl = pytest.mark.skipif(not HAS_OPENSSL, reason="需要 openssl")
-
-#: 子进程里跑**真安装**（非 dry-run）的用例，在 POSIX 上一律跳过。
-#:
-#: ``install.py`` 的远程卸载辅助件路径是写死的常量（``/usr/local/lib/syncoj``、
-#: ``/etc/sudoers.d``），子进程里 conftest 的沙箱补丁够不着：以 root 跑会写宿主，
-#: 不以 root 跑则写不进去而**整次安装失败**（不是警告 —— CI 的非 root runner 上实测）。
-#: Windows 上安装器会跳过这一步，所以那边照常跑。等安装器的所有路径改由
-#: ``Layout(root)`` 派生（重构计划第 15 步）后收回。
-needs_layout = pytest.mark.skipif(
-    os.name == "posix",
-    reason="真安装会写死系统路径 /usr/local/lib/syncoj（待 Layout 派生全部路径后收回）",
-)
 
 #: 发现协议里那段被签名的文本前缀。**手写**，故意不 import 任何一端 ——
 #: 这里要能发现"某一边把前缀改了"，而不是跟着它一起改。
@@ -151,6 +140,12 @@ def layout_args(standalone: Standalone, prefix: Path = None):
         "--config-dir", str(standalone.tmp / "etc"),
         "--state-dir", str(standalone.tmp / "state"),
         "--unit-dir", str(standalone.tmp / "units"),
+        # 远程卸载辅助件也落在临时目录里：子进程够不着 conftest 的沙箱补丁，
+        # 不给这两个选项就会写宿主的 /usr/local/lib/syncoj 与 /etc/sudoers.d
+        "--helper-dir", str(standalone.tmp / "helper"),
+        "--sudoers-path", str(standalone.tmp / "sudoers.d" / "syncoj-uninstall"),
+        # 显式给运行账号：以 root 跑测试时安装器拒绝"默认成 root"
+        "--user", getpass.getuser(),
         "--skip-user", "--skip-service", "--skip-python-check",
     ]
 
@@ -195,10 +190,12 @@ def make_bundle(path: Path, version: str = "0.1.0") -> Path:
 
 
 def make_ledger(bundle: bytes, key, version: str = "0.1.0") -> dict:
-    """服务端那份装机台账（签名盖在 sha256 上）。"""
+    """服务端那份装机台账（签名盖在"标签 + 版本 + sha256 + 大小"那段文本上）。"""
     sha = hashlib.sha256(bundle).hexdigest()
+    # 手写签名对象，不 import 任何一端 —— 要能发现"某一边把格式改了"
+    message = "syncoj-release-v1\n%s\n%s\n%d\n" % (version, sha, len(bundle))
     signature = (
-        base64.urlsafe_b64encode(key.sign(sha.encode("ascii"))).decode("ascii").rstrip("=")
+        base64.urlsafe_b64encode(key.sign(message.encode("ascii"))).decode("ascii").rstrip("=")
     )
     return {
         "version": version,
@@ -346,7 +343,6 @@ class FakeDiscovery:
 # --------------------------------------------------------------------------- #
 
 
-@needs_layout
 @requires_openssl
 def test_脱离仓库也能验签成功(standalone: Standalone) -> None:
     """走到"_verify_signature_if_possible"那一步并**真的验过**。
@@ -378,7 +374,6 @@ def test_脱离仓库也能验签成功(standalone: Standalone) -> None:
         assert result.returncode == 0, text
 
 
-@needs_layout
 @requires_openssl
 def test_脱离仓库也真的验签_签名不对就拒绝(standalone: Standalone) -> None:
     """自包含实现不能是"永远返回 True"的空壳：别人签的必须被拒。"""

@@ -964,6 +964,11 @@ class Installer:
         self.run_user = options.user or default_run_user()
         self.service_name = options.service_name
         self.unit_path = Path(options.unit_dir) / UNIT_FILENAME
+        # 远程卸载辅助件的两个落点。默认是系统路径；给了 --helper-dir / --sudoers-path
+        # 就用给的（测试与定制用，与 --unit-dir 同一个思路）。不在这里把模块常量抄成
+        # 定值：缺省时每次现读，测试对模块常量的 monkeypatch 仍然有效。
+        self._helper_dir_option = getattr(options, "helper_dir", None)
+        self._sudoers_path_option = getattr(options, "sudoers_path", None)
         self.config_path = self.config_dir / CONFIG_FILENAME
 
         #: 机器上已有的统一密钥与包内附带的**不一致**时记下来（保留原有的、不覆盖，
@@ -2073,10 +2078,26 @@ class Installer:
         self.report.action("已写入机器身份 %s（0644 root:root）" % target)
         return value
 
+    @property
+    def helper_dir(self) -> Path:
+        return Path(self._helper_dir_option) if self._helper_dir_option else HELPER_DIR
+
+    @property
+    def self_uninstall_path(self) -> Path:
+        return self.helper_dir / SELF_UNINSTALL_PATH.name if self._helper_dir_option else SELF_UNINSTALL_PATH
+
+    @property
+    def verify_token_path(self) -> Path:
+        return self.helper_dir / VERIFY_TOKEN_PATH.name if self._helper_dir_option else VERIFY_TOKEN_PATH
+
+    @property
+    def sudoers_path(self) -> Path:
+        return Path(self._sudoers_path_option) if self._sudoers_path_option else SUDOERS_PATH
+
     def _render_self_uninstall(self) -> str:
         """把自卸载脚本里的 ``@@占位@@`` 换成这台机器的实际布局。"""
         replacements = {
-            "@@HELPER_DIR@@": _posix(HELPER_DIR),
+            "@@HELPER_DIR@@": _posix(self.helper_dir),
             "@@PUBLIC_KEY@@": self.options.public_key
             or _posix(self.config_dir / PUBLIC_KEY_FILENAME),
             "@@MACHINE_UUID_FILE@@": _posix(self.config_dir / MACHINE_UUID_FILENAME),
@@ -2086,7 +2107,7 @@ class Installer:
             "@@PREFIX@@": _posix(self.prefix),
             "@@CONFIG_DIR@@": _posix(self.config_dir),
             "@@STATE_DIR@@": _posix(self.state_dir),
-            "@@SUDOERS_PATH@@": _posix(SUDOERS_PATH),
+            "@@SUDOERS_PATH@@": _posix(self.sudoers_path),
         }
         text = _SELF_UNINSTALL_SCRIPT
         for key, value in replacements.items():
@@ -2115,25 +2136,25 @@ class Installer:
             return
         if self.report.dry_run:
             self.report.plan(
-                "安装 %s、%s 与 %s" % (SELF_UNINSTALL_PATH, VERIFY_TOKEN_PATH, SUDOERS_PATH)
+                "安装 %s、%s 与 %s" % (self.self_uninstall_path, self.verify_token_path, self.sudoers_path)
             )
             return
 
         try:
-            HELPER_DIR.mkdir(parents=True, exist_ok=True)
-            os.chmod(str(HELPER_DIR), 0o755)
-            _write_text_file(SELF_UNINSTALL_PATH, self._render_self_uninstall(), 0o755)
-            _write_text_file(VERIFY_TOKEN_PATH, _VERIFY_TOKEN_SCRIPT, 0o644)
+            self.helper_dir.mkdir(parents=True, exist_ok=True)
+            os.chmod(str(self.helper_dir), 0o755)
+            _write_text_file(self.self_uninstall_path, self._render_self_uninstall(), 0o755)
+            _write_text_file(self.verify_token_path, _VERIFY_TOKEN_SCRIPT, 0o644)
         except OSError as exc:
             raise InstallError("写入自卸载辅助脚本失败：%s" % exc)
 
         # sudoers 先落临时文件、过 visudo、再原子改名 —— 校验不通过就删掉临时文件
         # 并让安装失败：一份半截的 sudoers 会让 sudo 整体不可用。
         # 临时文件用 0600：0440 在 Windows 上会置只读位，挡住失败路径的 unlink。
-        tmp = SUDOERS_PATH.parent / (SUDOERS_PATH.name + ".tmp")
+        tmp = self.sudoers_path.parent / (self.sudoers_path.name + ".tmp")
         try:
             _write_text_file(
-                tmp, render_uninstall_sudoers(self.run_user), 0o600
+                tmp, render_uninstall_sudoers(self.run_user, self.self_uninstall_path), 0o600
             )
         except OSError as exc:
             raise InstallError("写入 sudoers 临时文件失败：%s" % exc)
@@ -2151,13 +2172,13 @@ class Installer:
             )
 
         try:
-            os.replace(str(tmp), str(SUDOERS_PATH))
-            os.chmod(str(SUDOERS_PATH), 0o440)
+            os.replace(str(tmp), str(self.sudoers_path))
+            os.chmod(str(self.sudoers_path), 0o440)
         except OSError as exc:
             raise InstallError("落盘 sudoers 文件失败：%s" % exc)
 
         self.report.action(
-            "已安装远程卸载辅助件（%s + sudoers NOPASSWD）" % SELF_UNINSTALL_PATH
+            "已安装远程卸载辅助件（%s + sudoers NOPASSWD）" % self.self_uninstall_path
         )
         self.report.note("卸载脚本的路径必须在 current 软链之外，sudo 才匹配得上")
 
@@ -2211,7 +2232,8 @@ class Installer:
             run_user=self.run_user,
             python=self.options.python or "/usr/bin/python3",
             unit_dir=self.unit_path.parent,
-            helper_dir=HELPER_DIR,
+            helper_dir=self.helper_dir,
+            sudoers_dir=self.sudoers_path.parent,
         )
 
         existing = None
@@ -2255,6 +2277,12 @@ class Installer:
         """
         self.enroll_unit_path = self.unit_path.parent / ENROLL_UNIT_FILENAME
         self.report.section("注册单元")
+
+        if self.options.skip_service:
+            # "不碰 systemd" 对两个单元一视同仁。曾经只管主单元：--skip-service
+            # 跑下来，注册单元照样写进单元目录、还会去 systemctl start。
+            self.report.skip("跳过注册单元（--skip-service）")
+            return
 
         if not has_bootstrap_key:
             # 没有密钥就没有注册可做。留一个永远失败的单元只会掩盖真正的问题。
@@ -3188,43 +3216,43 @@ class Installer:
         removed = False
         failed = False
 
-        if SUDOERS_PATH.is_file():
+        if self.sudoers_path.is_file():
             removed = True
             if self.report.dry_run:
-                self.report.plan("删除 %s" % SUDOERS_PATH)
+                self.report.plan("删除 %s" % self.sudoers_path)
             else:
                 try:
-                    SUDOERS_PATH.unlink()
-                    self.report.action("已删除 %s" % SUDOERS_PATH)
+                    self.sudoers_path.unlink()
+                    self.report.action("已删除 %s" % self.sudoers_path)
                 except OSError as exc:
-                    self.report.warn("删除 %s 失败：%s" % (SUDOERS_PATH, exc))
+                    self.report.warn("删除 %s 失败：%s" % (self.sudoers_path, exc))
                     failed = True
         else:
-            self.report.skip("sudoers 规则不存在，跳过：%s" % SUDOERS_PATH)
+            self.report.skip("sudoers 规则不存在，跳过：%s" % self.sudoers_path)
 
-        if HELPER_DIR.is_dir():
+        if self.helper_dir.is_dir():
             ours = [
                 path
-                for path in (SELF_UNINSTALL_PATH, VERIFY_TOKEN_PATH)
+                for path in (self.self_uninstall_path, self.verify_token_path)
                 if path.is_file()
             ]
             if not ours:
                 self.report.warn(
-                    "%s 看起来不是 SyncOJ 的辅助目录，为免误删已跳过" % HELPER_DIR
+                    "%s 看起来不是 SyncOJ 的辅助目录，为免误删已跳过" % self.helper_dir
                 )
             else:
                 removed = True
                 if self.report.dry_run:
-                    self.report.plan("删除 %s" % HELPER_DIR)
+                    self.report.plan("删除 %s" % self.helper_dir)
                 else:
                     try:
-                        shutil.rmtree(str(HELPER_DIR))
-                        self.report.action("已删除 %s" % HELPER_DIR)
+                        shutil.rmtree(str(self.helper_dir))
+                        self.report.action("已删除 %s" % self.helper_dir)
                     except OSError as exc:
-                        self.report.warn("删除 %s 失败：%s" % (HELPER_DIR, exc))
+                        self.report.warn("删除 %s 失败：%s" % (self.helper_dir, exc))
                         failed = True
         else:
-            self.report.skip("辅助目录不存在，跳过：%s" % HELPER_DIR)
+            self.report.skip("辅助目录不存在，跳过：%s" % self.helper_dir)
 
         return removed, failed
 
@@ -3464,6 +3492,7 @@ def _writable_paths(
     unit_dir: Path,
     helper_dir: Path,
     home: str,
+    sudoers_dir: Optional[Path] = None,
 ) -> List[str]:
     """``ReadWritePaths=`` 该开哪些目录 —— 只列**确实有理由写**的，且一律带 ``-``。
 
@@ -3519,7 +3548,7 @@ def _writable_paths(
         # ---- 只为远程卸载开的四条（见上面"为什么不算提权"）----
         "-%s" % _posix(config_dir),
         "-%s" % _posix(unit_dir),
-        "-%s" % _posix(SUDOERS_PATH.parent),
+        "-%s" % _posix(sudoers_dir or SUDOERS_PATH.parent),
         "-%s" % _posix(helper_dir),
     ]
     # 去重但保持顺序（--prefix 与 --state-dir 被指到同一个目录时会出现重复），
@@ -3815,13 +3844,13 @@ exit 0
 '''
 
 
-def render_uninstall_sudoers(run_user: str) -> str:
+def render_uninstall_sudoers(run_user: str, script: Optional[Path] = None) -> str:
     """sudoers 规则：**只**允许运行账号免密执行那一个固定路径的自卸载脚本。
 
     一行、没有通配符 —— 通配符会让"白名单"变成"任何东西"。写入前必须过
     :func:`visudo_lint`：半个 sudoers 文件会让 sudo 整体不可用。
     """
-    return "%s ALL=(root) NOPASSWD: %s\n" % (run_user, _posix(SELF_UNINSTALL_PATH))
+    return "%s ALL=(root) NOPASSWD: %s\n" % (run_user, _posix(script or SELF_UNINSTALL_PATH))
 
 
 def visudo_lint(path: Path) -> Optional[bool]:
@@ -3928,6 +3957,7 @@ def render_unit(
     unit_dir: Optional[Path] = None,
     helper_dir: Optional[Path] = None,
     home: Optional[str] = None,
+    sudoers_dir: Optional[Path] = None,
 ) -> str:
     """生成 systemd 单元。
 
@@ -3963,7 +3993,7 @@ def render_unit(
         helper_dir = HELPER_DIR
     writable = _writable_paths(
         prefix, state_dir, config_path.parent, Path(unit_dir), Path(helper_dir),
-        home or home_of(run_user),
+        home or home_of(run_user), sudoers_dir,
     )
 
     lines = [
@@ -4274,6 +4304,14 @@ def build_parser() -> argparse.ArgumentParser:
     layout.add_argument("--config-dir", default=str(DEFAULT_CONFIG_DIR))
     layout.add_argument("--state-dir", default=str(DEFAULT_STATE_DIR))
     layout.add_argument("--unit-dir", default="/etc/systemd/system")
+    layout.add_argument(
+        "--helper-dir", default=None,
+        help="远程卸载辅助脚本目录（默认 %s；测试与定制用）" % HELPER_DIR,
+    )
+    layout.add_argument(
+        "--sudoers-path", default=None,
+        help="远程卸载 sudoers 规则文件（默认 %s；测试与定制用）" % SUDOERS_PATH,
+    )
     layout.add_argument("--service-name", default=SERVICE_NAME)
     layout.add_argument(
         "--user",

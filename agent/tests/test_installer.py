@@ -722,9 +722,8 @@ def test_full_install_and_idempotency(installer, workdir: Path) -> None:
     # Windows 开发机上一直被跳过，所以没人发现。
     assert not (workdir / "units" / "syncoj-agent.service").exists()
     assert (config_dir / "bootstrap.key").is_file()
-    # 注册单元目前**不受** ``--skip-service`` 约束（已知不一致，见重构计划第 15 步：
-    # 届时 ``--skip-service`` 统一覆盖所有单元，这一条跟着改）。
-    assert (workdir / "units" / "syncoj-agent-enroll.service").is_file()
+    # ``--skip-service`` 对注册单元一样生效（曾经不管它：已知不一致，已统一）
+    assert not (workdir / "units" / "syncoj-agent-enroll.service").exists()
 
     # 第二次执行：结果必须一致
     assert run_installer(installer, base) == 0
@@ -756,7 +755,9 @@ def test_second_install_without_the_key_keeps_the_enroll_unit(
         "--config-dir", str(config_dir),
         "--state-dir", str(workdir / "state"),
         "--unit-dir", str(units),
-        "--skip-user", "--skip-service", "--skip-python-check", "--quiet",
+        # 不带 --skip-service：它现在对注册单元也生效，而这条测的正是注册单元。
+        # 测试沙箱里没有 systemctl，单元只落盘、不会被启用。
+        "--skip-user", "--skip-python-check", "--quiet",
     ]
 
     assert run_installer(installer, common + ["--bootstrap-key", "SECRET"]) == 0

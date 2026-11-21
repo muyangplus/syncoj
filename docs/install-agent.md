@@ -297,7 +297,10 @@ sudo systemctl disable --now syncoj-agent syncoj-agent-enroll
 sudo rm -f /etc/systemd/system/syncoj-agent.service \
            /etc/systemd/system/syncoj-agent-enroll.service
 sudo systemctl daemon-reload
-sudo rm -f /etc/sudoers.d/syncoj-uninstall      # 远程卸载的 sudoers 白名单
+sudo systemctl disable --now syncoj-agent-admin.path
+sudo rm -f /etc/systemd/system/syncoj-agent-admin.path /etc/systemd/system/syncoj-agent-admin.service
+sudo rm -rf /usr/lib/syncoj                     # root 管理单元的代码（安装器本身的一份拷贝）
+sudo rm -f /etc/sudoers.d/syncoj-uninstall      # 老版本留下的 sudoers 白名单（新版本不再装）
 sudo rm -rf /usr/local/lib/syncoj               # 远程卸载脚本
 sudo rm -rf /opt/syncoj /etc/syncoj             # 程序；配置、统一注册密钥、升级信任锚
 # 状态目录里是凭据与日志，确认不需要留档后再删

@@ -126,19 +126,23 @@ REDISCOVER_AFTER_FAILURES = 3
 #: 不用"启动成功"作为判据 —— 起得来但一 tick 就崩的版本同样必须回滚。
 HEALTHY_CYCLES_BEFORE_TRUST = 3
 
-#: 自卸载脚本的固定路径。**在 current 软链之外**：sudo 的 NOPASSWD 白名单按
-#: 字面路径匹配、不解析符号链接（见 install.py 的同名常量与注释）。
-SELF_UNINSTALL_PATH = "/usr/local/lib/syncoj/self_uninstall.sh"
+#: root 管理单元的交接目录（状态目录下）与请求 / 回执文件名，与 install.py 同名常量
+#: 一致。Agent 以选手账号、NoNewPrivileges 运行，写不进 /opt/syncoj、也不能提权：
+#: 切换已验签的升级、按授权卸载，都是把请求放到这里，由 root 管理单元
+#: （install.py --admin-handoff）自己再验一遍后执行。曾经是 `sudo -n
+#: self_uninstall.sh` —— systemd 245 上隐式的 NoNewPrivileges 让它必然失败。
+HANDOFF_DIRNAME = "handoff"
+HANDOFF_REQUEST = "request.json"
+HANDOFF_RESULT = "result.json"
+MAX_HANDOFF_RESULT_BYTES = 64 * 1024
 
 #: 一次性卸载令牌的长度上限（服务端签出来的只有几百字节）。
 MAX_UNINSTALL_TOKEN_BYTES = 8 * 1024
 
-#: 卸载执行失败后的重试间隔（秒）。**绝不每个 tick 都去撞 sudo**：失败可能是
-#: sudoers 没装好、令牌过期、脚本缺失，连着撞只会把日志刷爆、也烧 CPU。
-UNINSTALL_RETRY_SECONDS = 3600.0
-
-#: 等自卸载脚本跑完的上限（秒）。它要删目录、要调 systemctl，但不会太久。
-UNINSTALL_TIMEOUT_SECONDS = 120.0
+#: 转交卸载授权之后多久内不再重写请求（秒）。令牌在每轮心跳里原样再来，不必每轮
+#: 重写；但要**短于令牌有效期（15 分钟）**：曾经是 3600 秒，第一次没成，下一次
+#: 再试时令牌早就过期了。
+UNINSTALL_RETRY_SECONDS = 300.0
 
 #: 注册单元的单元名（root 身份跑一次注册的那个）。Agent **永远不自己注册** ——
 #: 它以选手身份运行，读不到 root 只读的统一密钥；撞上去只会 PermissionError →
@@ -236,27 +240,6 @@ def disarm_watchdog() -> None:
     signal.setitimer(signal.ITIMER_REAL, 0)
 
 
-def _run_uninstall_command(argv, stdin_bytes):
-    """真正执行 ``sudo -n <self_uninstall.sh>``：令牌**只走 stdin**。
-
-    返回 ``(returncode, stderr 摘要)``。做成模块级函数是为了让测试注入替身 ——
-    单元测试里不该真去碰 sudo 与 systemd。
-    """
-    try:
-        completed = subprocess.run(
-            argv,
-            input=stdin_bytes,
-            capture_output=True,
-            timeout=UNINSTALL_TIMEOUT_SECONDS,
-        )
-    except subprocess.TimeoutExpired:
-        return 124, "自卸载脚本超时（%d 秒）" % UNINSTALL_TIMEOUT_SECONDS
-    except OSError as exc:
-        return 127, "无法执行自卸载脚本: %s" % exc
-    stderr = (completed.stderr or b"").decode("utf-8", "replace").strip()
-    return completed.returncode, stderr
-
-
 def join_report_path(prefix: str, rel_path: str) -> str:
     """拼出上报给服务端的路径。
 
@@ -323,6 +306,14 @@ def _scan_missing_for_payload(raw) -> List[str]:
             "、".join(items),
         )
     return items[:SCAN_MISSING_MAX]
+
+
+def _writable(install_root: Path) -> bool:
+    """运行账号能不能自己往安装根里放新版本（开发机 / 测试里能，真机上不能）。"""
+    target = Path(install_root) / "releases"
+    if not target.exists():
+        target = Path(install_root)
+    return os.access(str(target), os.W_OK)
 
 
 def build_tick_payload(
@@ -477,7 +468,6 @@ class Agent:
         self._last_error: Optional[str] = None
         #: 执行卸载命令的 runner：``(argv, stdin_bytes) -> (returncode, stderr)``。
         #: 默认真的跑 `sudo -n`；测试里换成假的，不碰 sudo 与 systemd。
-        self._run_uninstall = _run_uninstall_command
         #: "还没注册凭据、在等注册单元"这条日志只说一次（别的每轮轮询不刷屏）
         self._registration_logged = False
         #: 上一轮"用不了的扫描根"（路径 -> 原因）。日志只在状态变化时说一次 ——
@@ -1318,11 +1308,12 @@ class Agent:
         return True
 
     def _handle_uninstall_token(self, token: str) -> bool:
-        """收到一次性卸载授权：交给自卸载脚本，成功就退出。返回是否已执行卸载。
+        """收到一次性卸载授权：交给 root 管理单元。返回是否已执行卸载（恒为 False ——
+        真正的卸载由 root 那边做，它会停掉本服务）。
 
-        **令牌只走 stdin**：不进 argv（ps 能看到）、不写文件、不进日志、不进
-        ``last_error``。失败要退避 —— 失败原因多半是 sudoers/令牌/脚本的问题，
-        每轮都撞一次 sudo 只会把日志刷爆。
+        令牌写进交接目录（0700、属运行账号）的请求文件，**不进 argv、不进日志、不进
+        ``last_error``**。它绑本机 machine_uuid、15 分钟过期、由发布私钥签名，root 那边
+        自己验过才卸。写进去之后退避一段：令牌在下一轮心跳里还会原样再来，不必每轮重写。
         """
         now = time.monotonic()
         if now < self._uninstall_blocked_until:
@@ -1331,38 +1322,69 @@ class Agent:
                 self._uninstall_blocked_until - now,
             )
             return False
+        self._uninstall_blocked_until = now + UNINSTALL_RETRY_SECONDS
 
-        payload = token.encode("utf-8")
-        if len(payload) > MAX_UNINSTALL_TOKEN_BYTES:
-            # 连长度都不对，不用去撞 sudo；但仍要退避，否则每轮都会走到这里
-            log.warning("卸载授权令牌过长（%d 字节），拒绝执行", len(payload))
-            self._uninstall_blocked_until = now + UNINSTALL_RETRY_SECONDS
+        if len(token.encode("utf-8")) > MAX_UNINSTALL_TOKEN_BYTES:
+            log.warning("卸载授权令牌过长，拒绝转交")
             self._last_error = "按管理端授权卸载失败：令牌过长"
             self._emit("error", "uninstall_failed", self._last_error)
             return False
 
-        argv = ["sudo", "-n", SELF_UNINSTALL_PATH]
         try:
-            returncode, stderr = self._run_uninstall(argv, payload)
-        except Exception as exc:  # pragma: no cover - 注入的 runner 不该抛
-            returncode, stderr = 127, "执行卸载脚本失败: %s" % exc
-
-        if returncode == 0:
-            # 单元是 Restart=on-failure，exit 0 不会被再拉起来。
-            log.warning("已按管理端授权卸载，本机 Agent 将退出")
-            self._last_error = None
-            self._stop = True
-            return True
-
-        summary = self._redact(" ".join((stderr or "").split()), token)[:200]
-        if not summary:
-            summary = "退出码 %d" % returncode
-        message = "按管理端授权卸载失败：%s" % summary
-        log.error("%s（%.0f 秒后再试）", message, UNINSTALL_RETRY_SECONDS)
-        self._uninstall_blocked_until = now + UNINSTALL_RETRY_SECONDS
-        self._last_error = message
-        self._emit("error", "uninstall_failed", message)
+            self._write_handoff({"kind": "uninstall", "token": token})
+        except OSError as exc:
+            message = "按管理端授权卸载失败：写不进交接目录（%s）" % self._redact(str(exc), token)
+            log.error(message)
+            self._last_error = message[:300]
+            self._emit("error", "uninstall_failed", self._last_error)
+            return False
+        log.warning("已把卸载授权交给 root 管理单元，等它验签后卸载")
+        self._emit("warning", "uninstall_handoff", "已把卸载授权交给 root 管理单元")
         return False
+
+    def _write_handoff(self, request: dict) -> None:
+        """原子地写一份交接请求（临时名 + rename）。失败抛 OSError。"""
+        directory = Path(self.config.state_dir) / HANDOFF_DIRNAME
+        directory.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(str(directory), 0o700)
+        except OSError:
+            pass
+        tmp = directory / (".request-%d.tmp" % os.getpid())
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, json.dumps(request, ensure_ascii=False).encode("utf-8"))
+        finally:
+            os.close(fd)
+        os.replace(str(tmp), str(directory / HANDOFF_REQUEST))
+
+    def _collect_handoff_result(self) -> None:
+        """root 管理单元留下的回执：读一次、上报、删掉。"""
+        path = Path(self.config.state_dir) / HANDOFF_DIRNAME / HANDOFF_RESULT
+        try:
+            if not path.is_file() or path.stat().st_size > MAX_HANDOFF_RESULT_BYTES:
+                return
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        finally:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        if not isinstance(data, dict):
+            return
+        kind = str(data.get("kind") or "?")
+        ok = bool(data.get("ok"))
+        message = str(data.get("message") or "")[:300]
+        if ok:
+            self._emit("info", "%s_applied" % kind if kind == "upgrade" else "%s_accepted" % kind,
+                       "root 管理单元：%s" % message)
+            return
+        self._last_error = "root 管理单元处理%s失败：%s" % ({"upgrade": "升级", "uninstall": "卸载"}.get(kind, kind), message)
+        self._emit("error" if kind == "uninstall" else "warning",
+                   "%s_failed" % ("uninstall" if kind == "uninstall" else "upgrade"),
+                   self._last_error)
 
     @staticmethod
     def _redact(text: str, secret: str) -> str:
@@ -1485,6 +1507,29 @@ class Agent:
             size = self.client.download_to_file(manifest.url, bundle, MAX_BUNDLE_BYTES)
             log.info("已下载发布包 %s（%d 字节），开始校验", manifest.version, size)
             verify_bundle(public_key, bundle, manifest)
+            if not _writable(install_root):
+                # 真机上的常态：/opt/syncoj 属 root，运行账号写不进去。验过签的包留在
+                # 状态目录里，切换交给 root 管理单元（它自己再验一遍）。
+                self._handled_release = attempt_key
+                if mode != UpgradeMode.APPLY:
+                    self._emit(
+                        "info", "upgrade_staged",
+                        "版本 %s 已下载并通过签名校验，等待激活（当前 mode=%s）"
+                        % (manifest.version, mode),
+                    )
+                    return
+                self._write_handoff({
+                    "kind": "upgrade",
+                    "version": manifest.version,
+                    "sha256": manifest.sha256,
+                    "size": manifest.size,
+                    "signature": manifest.signature,
+                })
+                self._emit(
+                    "info", "upgrade_handoff",
+                    "版本 %s 已下载并通过签名校验，交给 root 管理单元切换" % manifest.version,
+                )
+                return
             stage_release(install_root, manifest.version, bundle)
         except (UpgradeError, AgentError, OSError) as exc:
             # OSError 也在内：最常见的是运行账号写不进安装根（/opt/syncoj 属 root）。
@@ -1770,6 +1815,7 @@ class Agent:
 
     def cycle(self) -> float:
         """执行一轮，返回下次执行前的等待秒数。"""
+        self._collect_handoff_result()
         credential = self._ensure_credential()
         if credential is None:
             # 还没注册：**等 root 的注册单元**，不退出、不联网、不刷日志。

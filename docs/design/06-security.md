@@ -9,7 +9,7 @@
 | 路径 | 服务端**独立**做 `resolve()` + 白名单校验，绝不信任 Agent 上报的相对路径 |
 | 完整性 | 上传/下载双向 SHA256（防传坏，不防中间人）；升级包额外 RSA 签名（见本文 §6.1）。**自举链没有签名保护**（见本文 §6.2） |
 | 本地密钥 | 开发机放 `.key/`（两道 gitignore + 0600/0700），**有则自动加载、无则升级整体关闭**；生产用 `SYNCOJ_KEY_DIR` / `SYNCOJ_RELEASE_KEY` 指到服务端账号专属目录（见 ../design/07-ops-and-install.md §7.1） |
-| 隔离 | 服务端专用用户；`source/` 对评测器只读；Agent 以选手账号运行 + `ProtectSystem=strict` 等沙箱。单元里**没写** `NoNewPrivileges=`，但非 root 服务上的 `RestrictAddressFamilies=` / `RestrictNamespaces=` / `PrivateDevices=` 等会让 systemd 隐式打开它（见 [ADR-0008](../decisions/ADR-0008-systemd-unit-hardening.md) 的「现状」） |
+| 隔离 | 服务端专用用户；`source/` 对评测器只读；Agent 以选手账号运行 + `ProtectSystem=strict` 等沙箱。单元里 `NoNewPrivileges=yes`；需要 root 的升级切换与卸载由 root 管理单元验签后执行（ADR-0012「重写（2026-11）」）|
 | 审计 | 登录、注册、下发、回收、文件消失、批量重写、升级全进 `event_log` |
 
 ⚠️ **路径校验必须在服务端独立实现一遍** —— Agent 跑在选手机器上，随时可能被替换。

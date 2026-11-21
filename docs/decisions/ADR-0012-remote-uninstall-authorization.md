@@ -1,7 +1,7 @@
 # ADR-0012：远程卸载的授权模型
 
-**状态**：已锁定（v1）。授权模型（签名令牌）仍然成立；**机器侧的 sudo 执行链在 systemd 245
-上大概率不通**，见文末「现状（2026-11）」。计划在 root 管理单元落地时重写本篇。
+**状态**：已锁定（v1）；**机器侧执行链 2026-11 重写**为 root 管理单元，见文末「重写（2026-11）」。
+授权模型（签名令牌）不变。中间那段 sudo 执行链与「现状（2026-11）」是被替换掉的历史。
 
 ## 背景
 
@@ -100,3 +100,31 @@
 重写方向在 [`08-milestones-and-open.md`](../design/08-milestones-and-open.md) §10.5 阶段 2：
 root 管理单元（`syncoj-agent-admin`）用 timer 自己向服务端拉卸载指令，不再经过 sudo；
 届时删掉 sudoers 白名单、`/usr/local/lib/syncoj` 与为它放开的四条 `ReadWritePaths`。
+
+## 重写（2026-11）：root 管理单元
+
+机器侧不再经过 sudo。Agent（选手账号、`NoNewPrivileges=yes`）收到令牌后，把
+`{"kind": "uninstall", "token": …}` 写进 `<状态目录>/handoff/request.json`（目录 0700、属
+运行账号），`syncoj-agent-admin.path`（`PathExists=`）触发 root oneshot
+`syncoj-agent-admin.service`，执行 `/usr/lib/syncoj/install.py --admin-handoff`：
+
+1. 经 `O_NOFOLLOW` / `dir_fd` 打开交接目录与请求（运行账号能把 `handoff` 换成指向别处的
+   符号链接，root 不顺着它读写），限长、只认普通文件，读到就先删请求；
+2. 用与服务端签发对应的同一段验签代码（安装器里那份独立实现）验令牌：签名、`kind`/`v`、
+   绑本机 `machine_uuid`、15 分钟有效期；
+3. 验过就走与 `install.py --uninstall` **完全相同**的卸载路径（管理单元自己的 service
+   文件只删不 stop —— 它正在执行这次卸载）；结果写进 `handoff/result.json`（临时名
+   `O_EXCL|O_NOFOLLOW` + rename），Agent 下一轮读走上报。
+
+**与上文的取舍变化**：上文否掉"`PathExists=` 触发的 root 单元"，理由是令牌要**落一次盘**。
+现在接受它：令牌只在 0700、属运行账号的目录里待到 root 单元取走（秒级），而它本来就绑
+本机、15 分钟过期、只能在教师点过之后存在 —— 真正守住"选手不能自己卸掉监控"的一直是后
+一条（见上文），不是"不落盘"。换来的是：没有 sudoers 白名单、没有 `/usr/local/lib/syncoj`
+自卸载脚本、Agent 单元不再为它放开配置 / 单元 / sudoers / 辅助目录四条 `ReadWritePaths`，
+并恢复 `NoNewPrivileges=yes`。Agent 转交之后退避 300 秒（短于令牌有效期；曾经是 3600 秒）。
+
+同一个管理单元也负责**升级切换**：Agent 把验过签的包留在 `<状态目录>/upgrade/`，交接请求
+带版本、sha256、大小、签名；root 那边按声明大小 no-follow 拷进自己的临时目录、**自己**
+再验 sha256 与签名（签名覆盖版本号与大小），然后走装机同一条路（`--bundle`）并重启服务。
+
+**仍未在 systemd 245 实机上验证**（§10.5 阶段 2 的实机冒烟）。

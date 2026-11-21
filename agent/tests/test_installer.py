@@ -494,8 +494,9 @@ def test_render_unit_permissions_follow_contestant_user(installer) -> None:
     # 后四条是给"管理端授权的远程卸载"用的（沙箱里要能删单元文件与辅助脚本），
     # 它们本身是 root:0755，运行账号在 DAC 上写不进去 —— 详见 _writable_paths。
     assert (
-        "ReadWritePaths=-/home/student -/opt/syncoj -/var/lib/syncoj "
-        "-/etc/syncoj -/etc/systemd/system -/etc/sudoers.d -/usr/local/lib/syncoj"
+        # 曾经还有配置 / 单元 / sudoers / 辅助脚本四条（只为 Agent 自己 sudo 卸载）；
+        # 卸载改由 root 管理单元执行之后不再需要。
+        "ReadWritePaths=-/home/student -/opt/syncoj -/var/lib/syncoj\n"
     ) in text
     # 模板路径与可选配置不该被塞进来 —— 它们可能不存在，正是 226 的来源
     assert "{desktop}" not in text
@@ -530,7 +531,8 @@ def test_render_unit_uses_current_symlink(installer) -> None:
     # 沙箱还在（换一条代表性加固断言）：NoNewPrivileges 是**刻意去掉**的 ——
     # 它会挡死 setuid 的 sudo，让管理端授权的远程卸载没法工作，见 render_unit 注释。
     assert "ProtectSystem=strict" in text
-    assert "NoNewPrivileges" not in text
+    # Agent 不再提权（卸载 / 升级切换交给 root 管理单元），NoNewPrivileges 恢复
+    assert "NoNewPrivileges=yes" in text
 
 
 # --------------------------------------------------------------------------- #
@@ -632,9 +634,7 @@ def test_render_unit_without_extra_paths(installer) -> None:
     tokens = line.split("=", 1)[1].split()
     assert tokens[0] == "-/home/student", line
     assert "%h" not in text, "系统单元里 %h 是 /root，不是运行账号的家目录"
-    for token in ("-/o", "-/s", "-/etc/systemd/system", "-/etc/sudoers.d",
-                  "-/usr/local/lib/syncoj"):
-        assert token in tokens, "%s 不在白名单里：%s" % (token, line)
+    assert tokens == ["-/home/student", "-/o", "-/s"], line
     # `--config-dir /` 这类误配不许把整个文件系统放开
     assert "-/" not in tokens, line
 

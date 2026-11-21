@@ -102,36 +102,20 @@ def test_白名单只有带减号的_家目录与安装器自建目录(installer
     text = unit_of(installer_module)
     lines = [line for line in text.splitlines() if line.startswith("ReadWritePaths=")]
     assert lines == [
-        "ReadWritePaths=-/home/noi -/opt/syncoj -/var/lib/syncoj "
-        "-/etc/syncoj -/etc/systemd/system -/etc/sudoers.d -/usr/local/lib/syncoj"
+        "ReadWritePaths=-/home/noi -/opt/syncoj -/var/lib/syncoj"
     ], lines
     # 单元里不能出现字面量 `~`（systemd 不展开它）
     assert "~" not in text
 
 
 @pytest.mark.real_system_paths
-def test_远程卸载那四条都是带减号的可写目录(installer_module) -> None:
-    """**(a) 变体的核心**：sudo 出来的 root 子进程在**同一个 mount namespace** 里，
-    不放开这四条，删 ``/etc/syncoj`` / 单元文件 / ``sudoers`` / 辅助脚本全是 ``EROFS``。
-
-    每一条都必须带 `-`：这些目录在真机上不一定存在（比如没装远程辅助件的机器），
-    而 ``ReadWritePaths=`` 里一条不存在的路径就会 226，整个服务起不来。
-    """
+def test_不再放开只为_sudo_卸载开的四条系统目录(installer_module) -> None:
+    """卸载与升级切换改由 root 管理单元执行（render_admin_units），Agent 不碰
+    配置目录、单元目录、sudoers、辅助脚本目录 —— 少放开一条就少一个写系统目录的面。"""
     text = unit_of(installer_module)
     line = [x for x in text.splitlines() if x.startswith("ReadWritePaths=")][0]
-
-    for path in (
-        "/etc/syncoj",  # 配置目录：卸载要删 agent.ini / bootstrap.key / machine_uuid
-        "/etc/systemd/system",  # 单元目录：卸载要删两个 .service 与 *.wants 软链
-        "/etc/sudoers.d",  # sudoers 规则
-        "/usr/local/lib/syncoj",  # 自卸载脚本 + 验签脚本
-    ):
-        assert "-%s" % path in line, "%s 没有被放开写权限：%s" % (path, line)
-        assert " %s" % path not in line, "%-不带的 %s 会在目录不存在时 226" % (path, path)
-
-    # 去重逻辑保持：一个路径只能出现一次
-    tokens = line.split("=", 1)[1].split()
-    assert len(tokens) == len(set(tokens)), tokens
+    for path in ("/etc/syncoj", "/etc/systemd/system", "/etc/sudoers.d", "/usr/local/lib/syncoj"):
+        assert path not in line, line
 
 
 def test_不写死选手的代码目录与桌面目录(installer_module) -> None:
@@ -154,14 +138,13 @@ def test_单元里的运行账号就是解析出来的那个(installer_module) -
     assert "Group=" not in text
 
 
-def test_没有_NoNewPrivileges_但其它加固都还在(installer_module) -> None:
-    """``NoNewPrivileges=yes`` 会让 setuid 的 sudo 无法提权 —— 管理端授权的远程
-    卸载（``sudo -n self_uninstall.sh``）整条链就是死的。服务以普通账号运行，
-    那个账号本人在本机同样能跑任何 setuid 程序，所以这一条对"防选手"没有增量
-    价值。其余加固必须保留。"""
+def test_NoNewPrivileges_恢复且其它加固都还在(installer_module) -> None:
+    """曾经为了让 Agent 能 ``sudo -n self_uninstall.sh`` 而关掉 NoNewPrivileges ——
+    而 systemd 245 上别的加固项对非 root 的 ``User=`` 会隐式打开它，那条路本来就是死的。
+    卸载改由 root 管理单元执行之后，Agent 不再提权，这一条恢复。"""
     text = unit_of(installer_module)
 
-    assert "NoNewPrivileges" not in text
+    assert "NoNewPrivileges=yes" in text
     for hardening in (
         "ProtectSystem=strict",
         "PrivateTmp=yes",

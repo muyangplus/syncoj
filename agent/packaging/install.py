@@ -78,6 +78,22 @@ SERVICE_NAME = "syncoj-agent"
 
 CONFIG_FILENAME = "agent.ini"
 UNIT_FILENAME = SERVICE_NAME + ".service"
+#: root 管理单元：Agent（选手账号、无特权）把升级 / 卸载请求放进状态目录的
+#: 交接目录，path 单元触发这个 root oneshot 去处理（ADR-0012 的 2026-11 重写）。
+ADMIN_UNIT_FILENAME = SERVICE_NAME + "-admin.service"
+ADMIN_PATH_UNIT_FILENAME = SERVICE_NAME + "-admin.path"
+#: 管理单元执行的代码放这里：安装器把**自己**拷过去，升级**不替换**它
+#: （升级包里只有 Agent，没有安装器）。只用标准库。
+DEFAULT_ADMIN_DIR = Path("/usr/lib/syncoj")
+ADMIN_SCRIPT_NAME = "install.py"
+#: 状态目录下的交接目录与请求 / 回执文件名（Agent 那边有一份同名常量）
+HANDOFF_DIRNAME = "handoff"
+HANDOFF_REQUEST = "request.json"
+HANDOFF_RESULT = "result.json"
+#: 请求文件是选手账号能写的，按不可信输入读：限长
+MAX_HANDOFF_BYTES = 64 * 1024
+#: 发布版本号的形状（与服务端 / Agent 各自独立实现，见服务端 test_signing）
+_RELEASE_VERSION_SHAPE = r"^[0-9]+(?:\.[0-9]+)*(?:[-+][0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$"
 #: 统一注册密钥。**root 只读** —— 它能注册整间机房，不该躺在学生读得到的地方
 BOOTSTRAP_KEY_FILENAME = "bootstrap.key"
 #: 升级签名公钥。它不是秘密（只是信任锚），0644 即可。
@@ -968,6 +984,7 @@ class Installer:
         # 就用给的（测试与定制用，与 --unit-dir 同一个思路）。不在这里把模块常量抄成
         # 定值：缺省时每次现读，测试对模块常量的 monkeypatch 仍然有效。
         self._helper_dir_option = getattr(options, "helper_dir", None)
+        self.admin_dir = Path(getattr(options, "admin_dir", None) or DEFAULT_ADMIN_DIR)
         self._sudoers_path_option = getattr(options, "sudoers_path", None)
         self.config_path = self.config_dir / CONFIG_FILENAME
 
@@ -2114,6 +2131,191 @@ class Installer:
             text = text.replace(key, value)
         return text
 
+    def _layout_args(self) -> List[str]:
+        """管理单元的命令行里要原样带上的布局参数（与这次安装一致）。"""
+        return [
+            "--prefix", _posix(self.prefix),
+            "--config-dir", _posix(self.config_dir),
+            "--state-dir", _posix(self.state_dir),
+            "--unit-dir", _posix(self.unit_path.parent),
+            "--admin-dir", _posix(self.admin_dir),
+            "--user", self.run_user,
+            "--python", self.options.python or "/usr/bin/python3",
+            "--skip-user", "--skip-python-check",
+        ]
+
+    def install_admin_unit(self) -> None:
+        """装 root 管理单元：把安装器自己拷到 ``admin_dir``，写 service + path 两个单元。
+
+        见 :func:`render_admin_units`。``--skip-service`` 时整个跳过（"不碰 systemd"）。
+        """
+        self.report.section("root 管理单元")
+        if self.options.skip_service:
+            self.report.skip("跳过 root 管理单元（--skip-service）")
+            return
+        if not _is_posix_platform():
+            self.report.note("非 POSIX 平台，跳过 root 管理单元")
+            return
+        script = self.admin_dir / ADMIN_SCRIPT_NAME
+        python = self.options.python or "/usr/bin/python3"
+        service, path_unit = render_admin_units(
+            python, script, self.state_dir, self._layout_args()
+        )
+        handoff = self.state_dir / HANDOFF_DIRNAME
+        if self.report.dry_run:
+            self.report.plan(
+                "安装 %s、%s 与 %s" % (script, ADMIN_UNIT_FILENAME, ADMIN_PATH_UNIT_FILENAME)
+            )
+            return
+        try:
+            self.admin_dir.mkdir(parents=True, exist_ok=True)
+            os.chmod(str(self.admin_dir), 0o755)
+            me = Path(__file__).resolve()
+            # 管理单元自己在跑升级时，__file__ 就是 admin_dir 里那份：不拷到自己身上
+            if not (script.exists() and script.resolve() == me):
+                _write_text_file(script, me.read_text(encoding="utf-8"), 0o644)
+            unit_dir = self.unit_path.parent
+            unit_dir.mkdir(parents=True, exist_ok=True)
+            _write_text_file(unit_dir / ADMIN_UNIT_FILENAME, service, 0o644)
+            _write_text_file(unit_dir / ADMIN_PATH_UNIT_FILENAME, path_unit, 0o644)
+            # 交接目录归运行账号（Agent 往里写请求），0700
+            handoff.mkdir(parents=True, exist_ok=True)
+            os.chmod(str(handoff), 0o700)
+            try:
+                shutil.chown(str(handoff), user=self.run_user)
+            except (OSError, LookupError) as exc:
+                self.report.warn("无法把 %s 交给 %s：%s" % (handoff, self.run_user, exc))
+        except OSError as exc:
+            raise InstallError("写入 root 管理单元失败：%s" % exc)
+        self.report.action(
+            "已安装 root 管理单元（%s → %s）" % (ADMIN_PATH_UNIT_FILENAME, script)
+        )
+        if not _which("systemctl"):
+            self.report.warn("找不到 systemctl，请手工 enable --now %s" % ADMIN_PATH_UNIT_FILENAME)
+            return
+        run(["systemctl", "daemon-reload"], check=False)
+        result = run(["systemctl", "enable", "--now", ADMIN_PATH_UNIT_FILENAME], check=False)
+        if result == 0:
+            self.report.action("已启用 %s" % ADMIN_PATH_UNIT_FILENAME)
+        else:
+            self.report.warn(
+                "systemctl enable --now %s 失败（退出码 %s）" % (ADMIN_PATH_UNIT_FILENAME, result)
+            )
+
+    # ---------------------------------------------------------------- #
+    # root 管理单元：处理 Agent 交来的请求（--admin-handoff）
+    # ---------------------------------------------------------------- #
+
+    def admin_handoff(self) -> int:
+        """读一次交接请求、处理、写回执。**请求按不可信输入对待**（选手账号能写）。
+
+        * 只经 ``O_NOFOLLOW`` / ``dir_fd`` 打开交接目录里的东西：运行账号能把
+          ``handoff`` 换成指向别处的符号链接，root 不能顺着它读写；
+        * 读到就先删请求（坏请求不会让 path 单元反复触发）；
+        * 升级：把暂存的包按声明的大小拷进 root 自己的临时目录，**自己**再验
+          sha256 与签名（签名覆盖版本号与大小），再走装机同一条路；
+        * 卸载：用与服务端签发时对应的验签逻辑验令牌（绑本机 machine_uuid、
+          有效期），再走 ``--uninstall`` 同一条路。
+        """
+        if not _is_posix_platform() or not hasattr(os, "O_NOFOLLOW"):
+            raise InstallError("--admin-handoff 只在 Linux 上有意义")
+        try:
+            dir_fd = _open_handoff_dir(self.state_dir)
+        except OSError as exc:
+            self.report.skip("没有可处理的交接目录：%s" % exc)
+            return EXIT_OK
+        try:
+            raw = _read_untrusted(HANDOFF_REQUEST, dir_fd, MAX_HANDOFF_BYTES)
+            if raw is None:
+                self.report.skip("没有待处理的请求")
+                return EXIT_OK
+            try:
+                os.unlink(HANDOFF_REQUEST, dir_fd=dir_fd)
+            except OSError:
+                pass
+            kind = "?"
+            try:
+                try:
+                    data = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, ValueError) as exc:
+                    raise InstallError("请求不是合法 JSON：%s" % exc)
+                if not isinstance(data, dict):
+                    raise InstallError("请求不是一个对象")
+                kind = str(data.get("kind") or "?")[:32]
+                if kind == "upgrade":
+                    code = self._handoff_upgrade(data)
+                    message = (
+                        "已切换到 %s" % data.get("version")
+                        if code == EXIT_OK else "安装器退出码 %d" % code
+                    )
+                    _write_handoff_result(dir_fd, kind, code == EXIT_OK, message)
+                    return code
+                if kind == "uninstall":
+                    self._verify_uninstall_token(data)
+                    _write_handoff_result(dir_fd, kind, True, "令牌已验过，开始卸载")
+                    self.options.yes = True
+                    return self.uninstall()
+                raise InstallError("不认识的请求类型：%r" % kind)
+            except InstallError as exc:
+                _write_handoff_result(dir_fd, kind, False, str(exc))
+                raise
+        finally:
+            os.close(dir_fd)
+
+    def _handoff_upgrade(self, data: dict) -> int:
+        import re
+
+        version = str(data.get("version") or "")
+        if len(version) > 64 or not re.match(_RELEASE_VERSION_SHAPE, version):
+            raise InstallError("版本号形状不合法：%r" % version[:80])
+        sha = str(data.get("sha256") or "").lower()
+        if len(sha) != 64 or any(c not in "0123456789abcdef" for c in sha):
+            raise InstallError("sha256 格式不合法")
+        try:
+            size = int(data.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        if size <= 0 or size > 256 * 1024 * 1024:
+            raise InstallError("大小不合法：%r" % data.get("size"))
+        signature = _decode_signature(str(data.get("signature") or ""))
+        key_path = self.options.public_key or str(self.config_dir / PUBLIC_KEY_FILENAME)
+        key = load_public_key(key_path)
+        if key is None or signature is None:
+            raise InstallError("没有可用的发布公钥或签名，拒绝切换")
+        if not verify_pkcs1v15_sha256(key, release_signing_message(version, sha, size), signature):
+            raise InstallError("签名验不过（不是这台服务端的发布私钥签的），拒绝切换")
+
+        workdir = Path(tempfile.mkdtemp(prefix="syncoj-admin-"))
+        try:
+            os.chmod(str(workdir), 0o700)
+            target = workdir / "bundle.tar.gz"
+            actual = _copy_untrusted_bundle(self.state_dir, version, target, size)
+            if actual != sha:
+                raise InstallError("暂存的包与请求里的 sha256 不符，拒绝切换")
+            self.report.action("暂存的包已复制并验过签名：%s（%s）" % (version, sha[:12]))
+            self.options.bundle = str(target)
+            self.options.sha256 = sha
+            self.options.from_server = False
+            self.options.public_key = key_path
+            return self.run()
+        finally:
+            shutil.rmtree(str(workdir), ignore_errors=True)
+
+    def _verify_uninstall_token(self, data: dict) -> None:
+        token = str(data.get("token") or "")
+        if not token or len(token) > 8192:
+            raise InstallError("卸载令牌缺失或过长")
+        namespace = {"__name__": "syncoj_verify_uninstall_token"}
+        exec(compile(_VERIFY_TOKEN_SCRIPT, "verify_uninstall_token", "exec"), namespace)
+        try:
+            namespace["check"](
+                token,
+                self.options.public_key or str(self.config_dir / PUBLIC_KEY_FILENAME),
+                str(self.config_dir / MACHINE_UUID_FILENAME),
+            )
+        except namespace["VerificationError"] as exc:
+            raise InstallError("卸载令牌验不过：%s" % exc)
+
     def install_uninstall_helper(self) -> None:
         """装"管理端授权 → 机器本地以 root 卸载"所需的辅助件。
 
@@ -2935,7 +3137,10 @@ class Installer:
         self.write_config(version)
         self.install_unit(version)
         self.install_enroll_unit(has_bootstrap_key=has_bootstrap_key)
-        self.install_uninstall_helper()
+        self.install_admin_unit()
+        # 老安装留下的 sudoers 规则与自卸载脚本：root 管理单元接手之后它们只剩风险
+        if not self.report.dry_run and _is_posix_platform():
+            self._uninstall_remote_helper()
         self.start_service(restarted=True)
 
         self.report.section("完成")
@@ -3017,6 +3222,9 @@ class Installer:
         for did, bad in (
             self._uninstall_units(),
             self._uninstall_remote_helper(),
+            self._remove_tree(
+                self.admin_dir, "root 管理单元代码", (ADMIN_SCRIPT_NAME,)
+            ),
             self._remove_tree(
                 self.prefix, "安装根目录", UNINSTALL_PREFIX_MARKERS
             ),
@@ -3170,6 +3378,10 @@ class Installer:
         units = [
             self.unit_path,  # syncoj-agent.service
             self.unit_path.parent / ENROLL_UNIT_FILENAME,  # syncoj-agent-enroll.service
+            self.unit_path.parent / ADMIN_PATH_UNIT_FILENAME,  # 管理单元的触发器
+            # 管理单元本身放最后、**只删文件不 stop**：卸载往往正是它在执行，
+            # stop 自己会把这次卸载拦腰截断（oneshot 跑完自然结束）。
+            self.unit_path.parent / ADMIN_UNIT_FILENAME,
         ]
         removed = False
         failed = False
@@ -3182,7 +3394,9 @@ class Installer:
                 self.report.plan("systemctl disable --now %s" % unit.name)
                 self.report.plan("删除 %s" % unit)
                 continue
-            if _which("systemctl"):
+            if unit.name == ADMIN_UNIT_FILENAME:
+                pass  # 见上：不 stop 自己
+            elif _which("systemctl"):
                 result = run(["systemctl", "disable", "--now", unit.name], check=False)
                 if result == 0:
                     self.report.action("已停止并禁用 %s" % unit.name)
@@ -3328,6 +3542,119 @@ def _posix(path: Path) -> str:
     现场暴露。
     """
     return path.as_posix()
+
+
+def _open_handoff_dir(state_dir: Path) -> int:
+    """以 ``O_NOFOLLOW | O_DIRECTORY`` 打开 ``<状态目录>/handoff``，返回目录 fd。
+
+    状态目录本身在 root 拥有的父目录下（选手换不掉它），但它**里面**的条目归运行
+    账号：``handoff`` 可能被换成指向 ``/etc`` 的符号链接。之后的读、删、写回执
+    一律经这个 fd（``dir_fd=``），不再按路径名解析。
+    """
+    parent = os.open(str(state_dir), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        return os.open(
+            HANDOFF_DIRNAME, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent
+        )
+    finally:
+        os.close(parent)
+
+
+def _read_untrusted(name: str, dir_fd: int, limit: int) -> Optional[bytes]:
+    """经目录 fd、``O_NOFOLLOW`` 读一个普通文件，超过 ``limit`` 字节就拒绝。不存在返回 None。"""
+    import stat
+
+    try:
+        fd = os.open(
+            name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0), dir_fd=dir_fd
+        )
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise InstallError("打不开 %s（不是普通文件？）：%s" % (name, exc))
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise InstallError("%s 不是普通文件" % name)
+        if info.st_size > limit:
+            raise InstallError("%s 太大（%d 字节）" % (name, info.st_size))
+        data = os.read(fd, limit + 1)
+        if len(data) > limit:
+            raise InstallError("%s 太大" % name)
+        return data
+    finally:
+        os.close(fd)
+
+
+def _copy_untrusted_bundle(state_dir: Path, version: str, target: Path, size: int) -> str:
+    """把 ``<状态目录>/upgrade/<版本>.tar.gz`` 按声明大小拷到 ``target``，返回 sha256。
+
+    同 :func:`_open_handoff_dir` 的理由：``upgrade`` 与包文件都经 ``O_NOFOLLOW``。
+    """
+    import stat
+
+    parent = os.open(str(state_dir), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        upgrade_fd = os.open(
+            "upgrade", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent
+        )
+    except OSError as exc:
+        raise InstallError("找不到暂存目录：%s" % exc)
+    finally:
+        os.close(parent)
+    try:
+        try:
+            fd = os.open("%s.tar.gz" % version, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=upgrade_fd)
+        except OSError as exc:
+            raise InstallError("找不到暂存的包 %s：%s" % (version, exc))
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size != size:
+                raise InstallError(
+                    "暂存的包不是普通文件或大小不符（%d ≠ %d）" % (info.st_size, size)
+                )
+            digest = hashlib.sha256()
+            out = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                remaining = size
+                while remaining > 0:
+                    chunk = os.read(fd, min(1024 * 1024, remaining))
+                    if not chunk:
+                        raise InstallError("暂存的包读不全")
+                    digest.update(chunk)
+                    os.write(out, chunk)
+                    remaining -= len(chunk)
+            finally:
+                os.close(out)
+            return digest.hexdigest()
+        finally:
+            os.close(fd)
+    finally:
+        os.close(upgrade_fd)
+
+
+def _write_handoff_result(dir_fd: int, kind: str, ok: bool, message: str) -> None:
+    """写回执（Agent 下一轮读走、上报）。临时名 ``O_EXCL|O_NOFOLLOW`` 写、再 rename：
+    rename 替换的是目录项本身，不会顺着运行账号预先放好的符号链接写到别处。"""
+    payload = json.dumps(
+        {"kind": kind, "ok": bool(ok), "message": str(message)[:500], "at": int(time.time())},
+        ensure_ascii=False,
+    ).encode("utf-8")
+    tmp = ".result-%s.tmp" % secrets.token_hex(8)
+    try:
+        fd = os.open(
+            tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=dir_fd
+        )
+        try:
+            os.write(fd, payload)
+        finally:
+            os.close(fd)
+        os.replace(tmp, HANDOFF_RESULT, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except OSError:  # pragma: no cover - 回执写不进去不影响主流程
+        try:
+            os.unlink(tmp, dir_fd=dir_fd)
+        except OSError:
+            pass
 
 
 def _best_effort_unlink(path: Path) -> None:
@@ -3545,12 +3872,11 @@ def _writable_paths(
         "-%s" % home,
         "-%s" % _posix(prefix),
         "-%s" % _posix(state_dir),
-        # ---- 只为远程卸载开的四条（见上面"为什么不算提权"）----
-        "-%s" % _posix(config_dir),
-        "-%s" % _posix(unit_dir),
-        "-%s" % _posix(sudoers_dir or SUDOERS_PATH.parent),
-        "-%s" % _posix(helper_dir),
     ]
+    # 曾经还有配置目录 / 单元目录 / /etc/sudoers.d / 辅助脚本目录四条，只为
+    # "Agent 自己 sudo 跑卸载脚本"开的。卸载改由 root 管理单元执行之后（见
+    # render_admin_units），Agent 不再需要碰它们；参数保留只为签名稳定。
+    del config_dir, unit_dir, helper_dir, sudoers_dir
     # 去重但保持顺序（--prefix 与 --state-dir 被指到同一个目录时会出现重复），
     # 并且丢掉"根目录"这一条：把 `/` 放进 ReadWritePaths= 等于把整个文件系统
     # 放开。它只可能来自 `--config-dir /` 这类误配，宁可少一条。
@@ -4054,12 +4380,11 @@ def render_unit(
         # 刻意**不写 Group=**：systemd 会按 NSS 解析该账号的主组。写死
         # `Group=<账号名>` 会在"主组与账号不同名"的账号上撞 217/GROUP。
         #
-        # 刻意**不要 NoNewPrivileges=yes**：它会让 setuid 的 sudo 无法提权，
-        # `sudo -n /usr/local/lib/syncoj/self_uninstall.sh` 必然失败（报
-        # "effective uid is not 0"），管理端授权的远程卸载整条授权链就是死的。
-        # 服务以普通账号运行，**那个账号本人在本机同样能执行任何 setuid 程序**，
-        # 所以这一条对"防选手"没有增量价值。其余加固全部保留（ProtectSystem=strict、
-        # PrivateTmp、PrivateDevices、RestrictAddressFamilies、ProtectKernel* …）。
+        # NoNewPrivileges=yes 恢复（2026-11）：曾经为了让 Agent 能 `sudo` 跑自卸载
+        # 脚本而关掉它 —— 而 systemd 245 上别的加固项（Restrict*、PrivateDevices…）
+        # 对非 root 的 User= 会**隐式**打开它，那条 sudo 路本来就是死的。卸载与
+        # 升级切换都改由 root 管理单元执行（render_admin_units），Agent 不再提权。
+        "NoNewPrivileges=yes",
         "PrivateTmp=yes",
         "PrivateDevices=yes",
         # strict 把 /usr /etc /boot 等系统目录全部只读 —— 这才是它的价值
@@ -4091,6 +4416,47 @@ def render_unit(
         "",
     ]
     return "\n".join(line for line in lines if line is not None)
+
+
+def render_admin_units(
+    python: str,
+    admin_script: Path,
+    state_dir: Path,
+    layout_args: List[str],
+) -> Tuple[str, str]:
+    """root 管理单元：``(<service 文本>, <path 文本>)``。
+
+    Agent 以选手账号、``NoNewPrivileges=yes`` 运行，写不进 ``/opt/syncoj``，也不能
+    提权。需要 root 的两件事 —— **切换已验签的升级**、**按管理端授权卸载** ——
+    由它把请求写进 ``<状态目录>/handoff/request.json``，path 单元看到文件就触发这个
+    oneshot：``install.py --admin-handoff``（就是安装器本身，放在
+    ``/usr/lib/syncoj/``、升级不替换），按不可信输入读请求、自己再验一遍签名，
+    然后走与装机 / 卸载完全相同的代码路径。没有 sudoers、没有辅助脚本。
+    """
+    request = _posix(Path(state_dir) / HANDOFF_DIRNAME / HANDOFF_REQUEST)
+    service = "\n".join([
+        "[Unit]",
+        "Description=SyncOJ Agent 管理单元（以 root 处理 Agent 交来的升级 / 卸载请求）",
+        "",
+        "[Service]",
+        "Type=oneshot",
+        "ExecStart=%s -E -s %s --admin-handoff %s"
+        % (python, _posix(admin_script), " ".join(layout_args)),
+        "",
+    ])
+    path = "\n".join([
+        "[Unit]",
+        "Description=SyncOJ Agent 管理单元的触发器（看交接目录里有没有请求）",
+        "",
+        "[Path]",
+        "PathExists=%s" % request,
+        "Unit=%s" % ADMIN_UNIT_FILENAME,
+        "",
+        "[Install]",
+        "WantedBy=multi-user.target",
+        "",
+    ])
+    return service, path
 
 
 # --------------------------------------------------------------------------- #
@@ -4305,6 +4671,14 @@ def build_parser() -> argparse.ArgumentParser:
     layout.add_argument("--state-dir", default=str(DEFAULT_STATE_DIR))
     layout.add_argument("--unit-dir", default="/etc/systemd/system")
     layout.add_argument(
+        "--admin-dir", default=None,
+        help="root 管理单元的代码目录（默认 %s；测试与定制用）" % DEFAULT_ADMIN_DIR,
+    )
+    layout.add_argument(
+        "--admin-handoff", action="store_true",
+        help="（由 root 管理单元调用）处理 Agent 放在交接目录里的升级 / 卸载请求",
+    )
+    layout.add_argument(
         "--helper-dir", default=None,
         help="远程卸载辅助脚本目录（默认 %s；测试与定制用）" % HELPER_DIR,
     )
@@ -4406,6 +4780,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         return EXIT_OK
 
     report = Reporter(dry_run=args.dry_run, quiet=args.quiet)
+
+    if args.admin_handoff:
+        # 不读命令行 / 默认位置的注册密钥：升级沿用机器上已有的那把
+        args.bootstrap_key = None
+        installer = Installer(args, report)
+        try:
+            return installer.admin_handoff()
+        except InstallError as exc:
+            print("\n管理单元处理失败：%s" % exc, file=sys.stderr)
+            return EXIT_ERROR
 
     if args.uninstall:
         installer = Installer(args, report)

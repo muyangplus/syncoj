@@ -64,7 +64,7 @@
 | [`decisions/ADR-0005-public-port.md`](decisions/ADR-0005-public-port.md) | 公开端口：默认 80、白名单还是黑名单、为什么回 404 |
 | [`decisions/ADR-0006-delete-nothing-of-the-verifier.md`](decisions/ADR-0006-delete-nothing-of-the-verifier.md) | 验收不许拿自己人替代：信任锚取包里那一份、交叉验证 |
 | [`decisions/ADR-0007-unit-path-whitelist.md`](decisions/ADR-0007-unit-path-whitelist.md) | 单元里的 `ReadWritePaths` 每条都要带 `-` |
-| [`decisions/ADR-0008-systemd-unit-hardening.md`](decisions/ADR-0008-systemd-unit-hardening.md) | 单元加固的四处刻意例外（`Restart=`/`Group=`/`NoNewPrivileges=`） |
+| [`decisions/ADR-0008-systemd-unit-hardening.md`](decisions/ADR-0008-systemd-unit-hardening.md) | 单元加固的刻意例外（`Restart=`/`Group=`；`NoNewPrivileges=` 那条 2026-11 已撤销） |
 | [`decisions/ADR-0009-registration-is-a-root-unit.md`](decisions/ADR-0009-registration-is-a-root-unit.md) | 注册由 root 的一次性单元做，服务本体永不自己注册 |
 | [`decisions/ADR-0010-run-user-owns-path-templates.md`](decisions/ADR-0010-run-user-owns-path-templates.md) | `{home}`/`{desktop}` 恒按**运行账号**展开 |
 | [`decisions/ADR-0011-zipcrypto-not-aes.md`](decisions/ADR-0011-zipcrypto-not-aes.md) | zip 密码用 ZipCrypto 而不是 AES，口径只到"挡得住随手翻看" |

@@ -149,6 +149,8 @@ def test_写不进安装根时不抛出_也不再每轮重下(agent, workdir: Pa
         raise PermissionError(13, "Permission denied: /opt/syncoj/releases/.staging")
 
     monkeypatch.setattr(main_module, "stage_release", denied)
+    # 这条测的是"自己往安装根里放"那条（开发机）路径的失败：假装安装根可写
+    monkeypatch.setattr(main_module, "_writable", lambda root: True)
     info = manifest_for(bundle)
 
     for _ in range(3):
@@ -170,6 +172,7 @@ def test_换了内容的清单会再试一次(agent, workdir: Path, monkeypatch)
         main_module, "stage_release",
         lambda *args: (_ for _ in ()).throw(PermissionError(13, "denied")),
     )
+    monkeypatch.setattr(main_module, "_writable", lambda root: True)
 
     agent._handle_upgrade(manifest_for(bundle, "99.0.0"))
     agent._handle_upgrade(manifest_for(bundle, "99.0.1"))
@@ -230,3 +233,34 @@ def test_暂存时也拒绝_且什么都不落盘(workdir: Path) -> None:
 
     assert not root.exists(), "形状不对就不该建任何目录"
     assert not (workdir / "escaped").exists()
+
+
+def test_安装根写不进时把验过签的包交给_root_管理单元(agent, workdir: Path, monkeypatch) -> None:
+    """真机上的常态：/opt/syncoj 属 root。Agent 不再自己切换，而是写一份交接请求。"""
+    import json
+
+    agent.config.upgrade_mode = UpgradeMode.APPLY
+    bundle = make_bundle(workdir / "b.tar.gz")
+    downloads: dict = {}
+    monkeypatch.setattr(agent.client, "download_to_file", counting_download(bundle, downloads))
+    monkeypatch.setattr(main_module, "verify_bundle", lambda *args: None)
+    monkeypatch.setattr(main_module, "_writable", lambda root: False)
+    monkeypatch.setattr(
+        main_module, "stage_release",
+        lambda *args: (_ for _ in ()).throw(AssertionError("不该自己暂存")),
+    )
+    info = manifest_for(bundle)
+
+    for _ in range(3):
+        agent._handle_upgrade(info)
+
+    assert downloads["n"] == 1
+    request = json.loads(
+        (Path(agent.config.state_dir) / "handoff" / "request.json").read_text(encoding="utf-8")
+    )
+    assert request["kind"] == "upgrade"
+    assert request["version"] == info["version"]
+    assert request["sha256"] == info["sha256"]
+    assert request["signature"] == info.get("signature", "")
+    assert agent._restart_requested is False, "切换与重启由 root 那边做"
+    assert [e["category"] for e in agent._pending_events].count("upgrade_handoff") == 1

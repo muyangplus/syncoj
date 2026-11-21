@@ -113,8 +113,8 @@ RestrictAddressFamilies=AF_INET AF_INET6
 MemoryMax=200M
 CPUQuota=25%
 IOSchedulingClass=idle
-ReadWritePaths=-/home/noi -/opt/syncoj -/var/lib/syncoj \
-               -/etc/syncoj -/etc/systemd/system -/etc/sudoers.d -/usr/local/lib/syncoj
+NoNewPrivileges=yes
+ReadWritePaths=-/home/noi -/opt/syncoj -/var/lib/syncoj
 
 [Install]
 WantedBy=multi-user.target
@@ -145,13 +145,13 @@ ReadWritePaths=-/var/lib/syncoj
   代码里是 `main.EXIT_RESTART` 与 `install.py:AGENT_EXIT_RESTART`，测试对账。
 * **刻意不写 `Group=`**：systemd 按 NSS 解析该账号的主组。写死 `Group=<账号名>`
   会在"主组与账号名不同"的机器上撞 `217/GROUP`。
-* **刻意不要 `NoNewPrivileges=yes`**：它会让 setuid 的 sudo 无法提权，
-  `sudo -n <自卸载脚本>` 必然失败（`effective uid is not 0`），管理端授权的远程卸载
-  整条链就是死的。服务以普通账号运行，而**那个账号本人在这台机器上同样能执行任何
-  setuid 程序**，所以这一条对"防选手"没有增量价值。其余加固一条都没少。
-  **现状**：其余加固里的 `RestrictAddressFamilies=` 等在非 root 服务上会让 systemd 隐式
-  打开 `NoNewPrivileges`，这条例外的目的实际落空，见
-  [ADR-0008](../decisions/ADR-0008-systemd-unit-hardening.md) 的「现状（2026-11）」。
+* **`NoNewPrivileges=yes`**（2026-11 恢复）：曾经为了让 Agent 能 `sudo -n <自卸载脚本>`
+  而关掉它，而别的加固项在非 root 服务上本来就会隐式打开它。现在需要 root 的两件事 ——
+  切换已验签的升级、按授权卸载 —— 由 Agent 写进 `<状态目录>/handoff/request.json`，
+  **root 管理单元**（`syncoj-agent-admin.path` 触发 `syncoj-agent-admin.service`，执行
+  `/usr/lib/syncoj/install.py --admin-handoff`，升级不替换）no-follow 读取、自己再验签后
+  走装机 / 卸载同一条路。见 [ADR-0012](../decisions/ADR-0012-remote-uninstall-authorization.md)
+  「重写（2026-11）」与 [ADR-0008](../decisions/ADR-0008-systemd-unit-hardening.md)。
 * **`ReadWritePaths=` 里每一条都带 `-`**：路径不存在时 systemd 跳过它，而不是让单元
   在设沙箱时报 `226/NAMESPACE` 起不来。实例：单元里写了一条 `/home/student/code`，
   而那台机器没有这个目录。前三条是服务自己要写的地方（家目录、安装根、状态目录）——

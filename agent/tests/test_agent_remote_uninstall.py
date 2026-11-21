@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -250,75 +251,56 @@ def test_心跳上报有没有可用的发布公钥(tmp_path: Path) -> None:
     assert payload["release_public_key"] is False
 
 
-def test_令牌只出现在_stdin(tmp_path: Path) -> None:
-    """argv 里没有、stdin 里有 —— 这是"不进 ps"的全部依据。"""
+def handoff_request(agent: Agent) -> dict:
+    path = Path(agent.config.state_dir) / "handoff" / "request.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_令牌交给_root_管理单元_不进日志(tmp_path: Path, caplog) -> None:
+    """令牌写进交接目录的请求文件（0700 目录），由 root 管理单元验签后卸载；
+    不进 argv（不再有 sudo）、不进日志、不进 last_error。"""
     agent = make_agent(tmp_path)
-    seen = []
-
-    def runner(argv, stdin_bytes):
-        seen.append((list(argv), stdin_bytes))
-        return 0, ""
-
-    agent._run_uninstall = runner
-
-    assert agent._handle_uninstall_token(TOKEN) is True
-
-    assert len(seen) == 1
-    argv, stdin_bytes = seen[0]
-    assert TOKEN not in " ".join(argv), argv
-    assert stdin_bytes == TOKEN.encode("utf-8")
-    assert argv[:2] == ["sudo", "-n"]
-    assert argv[2].endswith("self_uninstall.sh")
-    # 成功 → 主循环退出（exit 0；单元是 Restart=on-failure，不会再拉起来）
-    assert agent._stop is True
-    assert agent._last_error is None
-
-
-def test_卸载成功时_agent_退出(tmp_path: Path) -> None:
-    agent = make_agent(tmp_path)
-    agent._run_uninstall = lambda argv, stdin_bytes: (0, "")
-
-    handled = agent._handle_uninstall_token(TOKEN)
-
-    assert handled is True
-    assert agent._stop is True
-
-
-def test_卸载失败写_last_error_并退避(tmp_path: Path) -> None:
-    agent = make_agent(tmp_path)
-    calls = []
-
-    def runner(argv, stdin_bytes):
-        calls.append(1)
-        return 1, "sudo: no tty present and no askpass program specified\n"
-
-    agent._run_uninstall = runner
-
-    assert agent._handle_uninstall_token(TOKEN) is False
-    assert agent._stop is False
-    assert agent._last_error is not None
-    assert "卸载失败" in agent._last_error
-    assert agent._uninstall_blocked_until > 0
-
-    # 退避窗口内不再去撞 sudo
-    assert agent._handle_uninstall_token(TOKEN) is False
-    assert len(calls) == 1
-
-
-def test_失败摘要里不含令牌(tmp_path: Path, caplog) -> None:
-    """底层命令万一回显了 stdin，摘要也必须把它抹掉 —— 它是一次 root 删除的凭据。"""
-    agent = make_agent(tmp_path)
-    agent._run_uninstall = lambda argv, stdin_bytes: (1, "echo: %s" % TOKEN)
 
     with caplog.at_level(logging.DEBUG):
         assert agent._handle_uninstall_token(TOKEN) is False
 
-    assert TOKEN not in (agent._last_error or ""), agent._last_error
+    assert handoff_request(agent) == {"kind": "uninstall", "token": TOKEN}
     assert TOKEN not in caplog.text, "令牌进了日志"
+    assert agent._last_error is None
+    assert agent._stop is False, "卸载由 root 那边做，它会停掉本服务"
+    directory = Path(agent.config.state_dir) / "handoff"
+    if os.name == "posix":
+        assert (directory.stat().st_mode & 0o777) == 0o700
 
 
-def test_cycle_收到令牌就执行并返回零(tmp_path: Path, monkeypatch) -> None:
-    """把"心跳带令牌 → 执行 → 停止主循环"这条线完整走一遍（不碰真 sudo/systemd）。"""
+def test_退避窗口内不重复写请求(tmp_path: Path) -> None:
+    agent = make_agent(tmp_path)
+    agent._handle_uninstall_token(TOKEN)
+    request = Path(agent.config.state_dir) / "handoff" / "request.json"
+    request.unlink()
+
+    agent._handle_uninstall_token(TOKEN)
+
+    assert not request.exists()
+
+
+def test_root_管理单元的失败回执写进_last_error(tmp_path: Path) -> None:
+    agent = make_agent(tmp_path)
+    directory = Path(agent.config.state_dir) / "handoff"
+    directory.mkdir(parents=True)
+    (directory / "result.json").write_text(
+        json.dumps({"kind": "uninstall", "ok": False, "message": "卸载令牌验不过：令牌已过期"}),
+        encoding="utf-8",
+    )
+
+    agent._collect_handoff_result()
+
+    assert "令牌已过期" in (agent._last_error or "")
+    assert not (directory / "result.json").exists(), "回执读一次就删"
+
+
+def test_cycle_收到令牌就转交(tmp_path: Path, monkeypatch) -> None:
+    """把"心跳带令牌 → 转交给 root 管理单元"这条线完整走一遍。"""
     agent = make_agent(tmp_path)
     credential = SimpleNamespace(
         state=STATE_READY, player_no="P001", contest_slug="C001"
@@ -340,18 +322,10 @@ def test_cycle_收到令牌就执行并返回零(tmp_path: Path, monkeypatch) ->
             "next_tick_seconds": 20,
         },
     )
-    seen = []
-    monkeypatch.setattr(
-        agent,
-        "_run_uninstall",
-        lambda argv, stdin_bytes: seen.append(stdin_bytes) or (0, ""),
-    )
 
-    delay = agent.cycle()
+    agent.cycle()
 
-    assert seen == [TOKEN.encode("utf-8")]
-    assert delay == 0.0
-    assert agent._stop is True
+    assert handoff_request(agent)["token"] == TOKEN
 
 
 # --------------------------------------------------------------------------- #

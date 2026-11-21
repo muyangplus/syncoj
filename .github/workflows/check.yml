@@ -93,3 +93,4 @@ jobs:
         run: |
           test ! -e /etc/sudoers.d/syncoj-uninstall
           test ! -e /usr/local/lib/syncoj
+          test ! -e /usr/lib/syncoj

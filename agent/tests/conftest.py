@@ -190,6 +190,7 @@ def _installer_never_touches_the_host(installer_module, monkeypatch, request) ->
         monkeypatch.setattr(
             installer_module, "SUDOERS_PATH", root / "etc" / "sudoers.d" / "syncoj-uninstall"
         )
+        monkeypatch.setattr(installer_module, "DEFAULT_ADMIN_DIR", root / "usr" / "lib" / "syncoj")
     real_which = installer_module._which
     monkeypatch.setattr(
         installer_module, "_which",

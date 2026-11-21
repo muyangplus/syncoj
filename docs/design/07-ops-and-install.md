@@ -216,10 +216,12 @@ sha256 前 12 位、以及操作人。`EventLog` 没有管理员外键（它记�
 
 ### 7.4 远程卸载：管理端点一下，机器自己清干净
 
-> **现状**：下面的 sudo 执行链在 systemd 245 上大概率不通 —— 单元里其他加固项会让 systemd
-> 隐式打开 `NoNewPrivileges`，sudo 提不了权。在实机验证或重写之前，可靠的卸载办法是
-> 站到机器前面跑装机页的 `--uninstall` 命令。详见
-> [ADR-0012](../decisions/ADR-0012-remote-uninstall-authorization.md) 的「现状（2026-11）」。
+> **2026-11 重写**：机器侧不再经过 sudo。Agent 把令牌写进 `<状态目录>/handoff/request.json`，
+> root 管理单元（`syncoj-agent-admin.path` → `.service` → `install.py --admin-handoff`）
+> no-follow 读取、自己验签后走 `--uninstall` 同一条路。下文"机器侧的执行链"与"为此必须
+> 放开的两处沙箱"是被替换掉的 v1，留作历史；现行做法见
+> [ADR-0012](../decisions/ADR-0012-remote-uninstall-authorization.md)「重写（2026-11）」。
+> 仍待 systemd 245 实机冒烟。
 
 **起点是权限**：Agent 以选手账号运行（../design/00-decisions.md §0），而卸载要删的 `/opt/syncoj`、`/etc/syncoj`
 （里面有统一注册密钥）、systemd 单元全是 root 的。所以"按钮 → Agent 自己删"这条链
@@ -252,7 +254,7 @@ root 删除的凭据留在 `syncoj.db` 里，而备份、误传、随手拷走�
 只会让前端多一个没有分支价值的分支。这条也是"心跳要上报 `release_public_key`"的全部
 理由。卸载与配对状态**无关**：要卸的可能是配错人的机器，也可能是台还没认领的测试机。
 
-**机器侧的执行链**：
+**机器侧的执行链（v1，已被 root 管理单元替换）**：
 
 1. `/etc/sudoers.d/syncoj-uninstall` 只允许一条命令、且**没有参数**
    （`<运行账号> ALL=(root) NOPASSWD: <固定路径>`）。写之前先 `visudo -c -f` 校验：

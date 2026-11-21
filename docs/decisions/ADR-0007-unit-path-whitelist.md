@@ -31,7 +31,8 @@
     状态目录（`/var/lib/syncoj`）；
     （**更正**：`-%h` 在系统单元里展开成 `-/root`，并没有放开运行账号的家目录。）
   * 后四条只服务于"以 root 执行远程卸载"
-    （`/etc/syncoj`、`/etc/systemd/system`、`/etc/sudoers.d`、`/usr/local/lib/syncoj`，
+    （2026-11 起不再放开：卸载改由 root 管理单元执行，见 ADR-0012「重写」。当时是
+    `/etc/syncoj`、`/etc/systemd/system`、`/etc/sudoers.d`、`/usr/local/lib/syncoj`，
     见 [ADR-0012](ADR-0012-remote-uninstall-authorization.md)）。
 
 ## 后果

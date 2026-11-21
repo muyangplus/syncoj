@@ -1,7 +1,7 @@
 # ADR-0008：systemd 单元加固的四处刻意例外
 
-**状态**：已锁定（v1，真机踩坑后补上）。"不要 `NoNewPrivileges=yes`"那一条的目的**实际没有
-达到**，见文末「现状（2026-11）」。
+**状态**：已锁定（v1，真机踩坑后补上）。"不要 `NoNewPrivileges=yes`"那一条**已撤销**（2026-11）：
+卸载与升级切换改由 root 管理单元执行，Agent 单元恢复 `NoNewPrivileges=yes`，见文末。
 
 ## 背景
 
@@ -74,3 +74,10 @@
 的待办）。出路不在单元加固上做减法（去掉那一串加固换一条 sudo 不值），而是 §10.5 阶段 2
 的 root 管理单元：卸载由 root 单元自己向服务端拉指令执行，Agent 本体随之恢复显式的
 `NoNewPrivileges=yes` 与 `Restart=always`，本文的第一、三两条例外届时一起撤掉。
+
+## 撤销"不要 NoNewPrivileges"（2026-11）
+
+root 管理单元（[ADR-0012](ADR-0012-remote-uninstall-authorization.md)「重写（2026-11）」）落地后，
+Agent 不再需要 sudo：单元写回 `NoNewPrivileges=yes`，`ReadWritePaths=` 只剩运行账号家目录、
+安装根、状态目录三条。`Restart=on-failure` 暂时保留（卸载时 root 单元会先停掉它，
+`always` 已无害，但改动留给实机冒烟一起验证）。

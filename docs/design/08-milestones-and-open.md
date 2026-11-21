@@ -186,13 +186,13 @@ person 表）；选手页手填保留但降级（这两条已落地）。
   （隐式 NoNewPrivileges 让 sudo 失败）。
 * **按 uuid 认回已配对机器**需原机离线或出示旧 token（与还原卡场景、注册重试窗口对齐）。
   `machine_uuid` 现为 0644、旧 token 在选手可写的 state 目录里，要等 root 管理单元持有凭据。
-* **发布签名覆盖版本号**：签名对象改为 `syncoj-release-v1\n<version>\n<sha256>\n<size>`；
-  同步服务端两个签名点、安装器两个验签点、库里已有发布记录重签；删升级清单里 Agent 不读的
-  三个策略字段；未配对机器也能拿到升级。版本号形状白名单已做（两端独立实现 + 对账测试）。
-* **`bootstrap.key` 不进任何可公开下载的包**（现在"附带密钥"的版本经免鉴权的
-  `/api/v1/agent/install/bundle` 下发，公开端口可达）。
-* **`bootstrap.sh`**：服务端下发时内嵌自身地址与安装包 sha256，`mktemp -d`，不读选手可写的
-  `agent.ini`，选项统一透传（`--dry-run` 现在在安装分支被吞）。
+* ~~**发布签名覆盖版本号**；删升级清单里 Agent 不读的三个策略字段；未配对机器也能拿到
+  升级。~~ ✅ 已完成：签名对象 `syncoj-release-v1\n<版本>\n<sha256>\n<字节数>\n`，三份独立
+  实现 + 对账测试，启动时重签库里旧记录。
+* ~~**`bootstrap.key` 不进任何可公开下载的包**~~ ✅ 已完成：装机入口对带密钥的版本回 409
+  `install_bundle_has_key`，这种包只经管理端下载。
+* ~~**`bootstrap.sh`** 加固~~ ✅ 已完成：服务端嵌入自身地址（形状安全的 Host）与**安装器**
+  sha256，`mktemp -d`，不读 `agent.ini`，`--dry-run` 透传。
 * **协议版本**：tick / enroll 带 `protocol_version`，旧 Agent 回 426 `agent_outdated`；
   服务端迁移前自动备份库。（✅ 已完成：「全部重装 / 重做镜像」手册，见
   `docs/install-agent.md`「重装与卸载」。）

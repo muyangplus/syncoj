@@ -65,14 +65,16 @@
 **2. 自举链对中间人没有任何保护。**
 
 * `curl http://…/bootstrap.sh | sudo sh` 以 root 执行一段明文下载的脚本；它再明文下载
-  `install.py`（`/api/v1/agent/install/installer`）并以 root 执行。**这两步都不验签**，
+  `install.py`（`/api/v1/agent/install/installer`）并以 root 执行。**这两步都不验签**：
+  脚本里嵌着安装器的 sha256，但它与脚本来自同一个明文来源，只挡传坏、挡不住中间人；
   `RELEASE_PUBLIC_KEY` / `--public-key` 只能验后面那个安装包，验不到安装器本身。
 * 没有预置发布公钥时，安装包只对照 sha256 —— 而台账与包来自同一个不鉴权的来源，
   挡得住传坏，挡不住中间人（[`../install-agent.md`](../install-agent.md) 里已写明）。
-* 勾了「附带统一注册密钥」的包经免鉴权的 `/api/v1/agent/install/bundle` 下发，公开端口
-  也可达：拿到包的人就拿到一张能注册进这台服务端的通行证。
-* 卸载用的是同一条 `bootstrap.sh`，服务端地址读自机器上的 `agent.ini` —— 而这份文件
-  属主是运行账号（选手），改掉地址就能让下一次 `sudo sh` 去别处取"安装器"。
+* 勾了「附带统一注册密钥」的包**不**经免鉴权的装机入口下发（409 `install_bundle_has_key`，
+  2026-11 起）；它只经管理端登录后下载、做成离线包 —— 离线包拷出去就收不回来。
+* 卸载用的是同一条 `bootstrap.sh`。曾经服务端地址读自机器上的 `agent.ini`（属主是运行
+  账号，改掉地址就能让下一次 `sudo sh` 去别处取"安装器"）；2026-11 起改为服务端发脚本时
+  嵌入自己的地址，不再读那份文件。
 
 **3. 发布签名私钥常驻在线服务端，等于整个机群的 root 钥匙。** `release-key.pem`
 （`.key/` 或 `SYNCOJ_RELEASE_KEY`）由 `serve` 进程常驻加载，用它签：

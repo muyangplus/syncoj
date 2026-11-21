@@ -1,218 +1,174 @@
 # SyncOJ 文档地图
 
-这份文档按**受众**分流：先找到你自己的那一行，再去读那一份。
-
-**读者要什么** → 看哪一份：
-
-| 我是谁 | 我想干什么 | 去哪 |
+| 读者 | 任务 | 文档 |
 |---|---|---|
-| 教师 | 开一场考试：建场次、导名单、配对机器、发文件、收成绩 | [`quickstart.md`](quickstart.md) |
-| 装机的人 | 把 Agent 装进一间机房的镜像 / 空机器上，并排障 | [`install-agent.md`](install-agent.md) |
-| 运维 | 部署服务端、发版、升级、卸载、查日志 | [`operate.md`](operate.md) |
-| 开发者 | 查协议字段、API 形状、配置项、成绩格式 | [`reference/`](reference/) |
-| 想改设计的人 | 看架构、看"为什么这么定"、看被否掉的方案 | [`design/`](design/) 与 [`decisions/`](decisions/) |
+| 教师 | 建场次、导名单、配对机器、发文件、收成绩 | [`quickstart.md`](quickstart.md) |
+| 装机人员 | 装 Agent、排障、卸载 | [`install-agent.md`](install-agent.md) |
+| 运维 | 部署服务端、发版、自带评测、排障 | [`operate.md`](operate.md) |
+| 开发者 | 协议字段、API 形状、配置项、成绩格式 | [`reference/`](reference/) |
+| 改设计 | 架构现状、已否决方案 | [`design/`](design/)、[`decisions/`](decisions/) |
 
 ## 全量文件清单
 
-本页自己也在清单里。`docs/**` 下每个文件都必须在清单中，清单里每个文件也都必须
-存在 —— 两边都由 `server/tests/test_docs.py` 检查。
+`docs/**` 下每个文件都须列在此处，且此处每个文件都须存在（`server/tests/test_docs.py` 检查）。
 
 ### 上手与运维
 
-| 文件 | 一句话 |
+| 文件 | 内容 |
 |---|---|
-| [`README.md`](README.md) | 本页：按「我是谁」分流的入口与全量文件清单 |
-| [`quickstart.md`](quickstart.md) | 教师上手：从 `syncoj-server init` 到机器配对成功，含两个端口的区别 |
-| [`install-agent.md`](install-agent.md) | 装机器：四种安装入口、注册密钥、注册单元、运行身份、目录约定、卸载与排障 |
-| [`operate.md`](operate.md) | 服务端运维：部署、`.key/`、发版与升级、公开端口与局域网发现 |
+| [`README.md`](README.md) | 文档地图与全量清单 |
+| [`quickstart.md`](quickstart.md) | 教师开考流程、配对、两个端口、目录约定 |
+| [`install-agent.md`](install-agent.md) | 安装入口与参数、注册单元、运行身份、目录与下发、卸载、排障 |
+| [`operate.md`](operate.md) | 服务端部署与环境变量、`.key/`、服务端发现与主动通告、Agent 发版、GitHub Release、systemd 245 冒烟、自带评测、心跳排障 |
 
-### 参考（对着代码核过的字段与约定）
+### 参考
 
-| 文件 | 一句话 |
+| 文件 | 内容 |
 |---|---|
-| [`reference/protocol.md`](reference/protocol.md) | Agent ⇄ Server 协议：`enroll` / `tick` / `files` / `assets` / `events` 的字段与三态 |
-| [`reference/api-conventions.md`](reference/api-conventions.md) | 管理端 API 的形状约定：列表信封、错误体、命名、删除语义 |
-| [`reference/judge-result.md`](reference/judge-result.md) | 评测器对接：成绩怎么进 SyncOJ、三条保守解析规则；自带评测的数据包、评测机与接口 |
-| [`reference/config-keys.md`](reference/config-keys.md) | `agent.ini` 逐键说明，与 `CONFIG_POLICY_KEYS` 逐键对账 |
+| [`reference/protocol.md`](reference/protocol.md) | Agent ⇄ Server 协议：`enroll` / `tick` / `files` / `assets` / `events` 字段与三态 |
+| [`reference/api-conventions.md`](reference/api-conventions.md) | 管理端 API 约定：列表信封、错误体、命名、删除语义 |
+| [`reference/judge-result.md`](reference/judge-result.md) | 成绩目录与格式、三条解析规则、自带评测数据包与评测机接口 |
+| [`reference/config-keys.md`](reference/config-keys.md) | `agent.ini` 逐键说明（与 `CONFIG_POLICY_KEYS` 对账） |
 
-### 设计（原 `DESIGN.md` 按主题拆开，**编号一律没动**）
+### 设计（原 `DESIGN.md` 拆分，编号不变）
 
-| 文件 | 一句话 |
+| 文件 | 内容 |
 |---|---|
-| [`design/00-decisions.md`](design/00-decisions.md) | 已锁定决策表（原 §0），每条指向对应的 ADR |
+| [`design/00-decisions.md`](design/00-decisions.md) | 已锁定决策表（原 §0） |
 | [`design/01-architecture.md`](design/01-architecture.md) | 架构总览（原 §1） |
-| [`design/02-tick-protocol.md`](design/02-tick-protocol.md) | 核心协议 `tick` 的设计取舍（原 §2） |
-| [`design/03-agent.md`](design/03-agent.md) | 客户端 Agent：零依赖、主循环、扫描、注册、systemd unit、py38 清单（原 §3） |
-| [`design/04-server.md`](design/04-server.md) | 服务端：目录、数据模型、写入策略、成绩回写、代码归题、注册配对、名单、迁移（原 §4） |
-| [`design/05-api-and-frontend.md`](design/05-api-and-frontend.md) | 接口约定与前端：契约测试、信封、前端架构、文案口径、删除语义、公开端口（原 §5） |
-| [`design/06-security.md`](design/06-security.md) | 安全面清单、签名算法选型、信任边界现状（明文 HTTP、自举链、发布私钥）（原 §6） |
-| [`design/07-ops-and-install.md`](design/07-ops-and-install.md) | 运维与装机：`.key/`、发布、安装策略三档、服务端发现、远程卸载（原 §7） |
-| [`design/08-milestones-and-open.md`](design/08-milestones-and-open.md) | 里程碑、待补信息、待办与被明确否决的想法（原 §8 / §9 / §10） |
-| [`design/09-server-announce.md`](design/09-server-announce.md) | 服务端主动通告地址、Agent 听到后挑战应答再切换（§11，已实现） |
-| [`design/10-builtin-judge.md`](design/10-builtin-judge.md) | 自带沙箱评测：结果写进 `judge_result/`、独立评测机、可插拔沙箱（§12，已实现） |
+| [`design/02-tick-protocol.md`](design/02-tick-protocol.md) | `tick` 协议取舍（原 §2） |
+| [`design/03-agent.md`](design/03-agent.md) | Agent：主循环、扫描、注册、systemd unit、py38 清单（原 §3） |
+| [`design/04-server.md`](design/04-server.md) | 服务端：数据模型、写入、成绩回写、代码归题、注册配对、名单、迁移（原 §4） |
+| [`design/05-api-and-frontend.md`](design/05-api-and-frontend.md) | 接口与前端：契约测试、信封、文案口径、删除语义、公开端口（原 §5） |
+| [`design/06-security.md`](design/06-security.md) | 安全面、签名算法、信任边界（原 §6） |
+| [`design/07-ops-and-install.md`](design/07-ops-and-install.md) | 运维与装机：`.key/`、发布、安装策略、服务端发现、远程卸载（原 §7） |
+| [`design/08-milestones-and-open.md`](design/08-milestones-and-open.md) | 里程碑、待补信息、待办、否决的想法（原 §8 / §9 / §10） |
+| [`design/09-server-announce.md`](design/09-server-announce.md) | 服务端主动通告与挑战应答（§11） |
+| [`design/10-builtin-judge.md`](design/10-builtin-judge.md) | 自带沙箱评测（§12） |
 
 ### 决策记录（ADR）
 
-每篇一个主题：**状态 / 背景 / 决定 / 后果 / 被否掉的替代方案与理由**。
-`design/` 记"现在是什么"，ADR 记"为什么是它、当初否掉了什么"。
+格式：状态 / 背景 / 决定 / 后果 / 被否决的替代方案。
 
-| 文件 | 一句话 |
+| 文件 | 内容 |
 |---|---|
 | [`decisions/README.md`](decisions/README.md) | ADR 清单与写法 |
-| [`decisions/ADR-0001-tech-stack-and-dependencies.md`](decisions/ADR-0001-tech-stack-and-dependencies.md) | 技术栈与依赖：为什么是 Python 3.8 + 零依赖、INI 而不是 TOML |
-| [`decisions/ADR-0002-communication-and-identity.md`](decisions/ADR-0002-communication-and-identity.md) | 通信与身份：为什么轮询、机器怎么被认出来、配对为什么绑"人" |
-| [`decisions/ADR-0003-delete-semantics.md`](decisions/ADR-0003-delete-semantics.md) | 删除语义：结构性数据硬删 + 输名称确认；代码 / 资产也硬删（2026-11 修订） |
-| [`decisions/ADR-0004-ui-copy-and-notice.md`](decisions/ADR-0004-ui-copy-and-notice.md) | 界面文案口径与考场公告为什么用 `NOTICE.md` |
-| [`decisions/ADR-0005-public-port.md`](decisions/ADR-0005-public-port.md) | 公开端口：默认 80、白名单还是黑名单、为什么回 404 |
-| [`decisions/ADR-0006-delete-nothing-of-the-verifier.md`](decisions/ADR-0006-delete-nothing-of-the-verifier.md) | 验收不许拿自己人替代：信任锚取包里那一份、交叉验证 |
-| [`decisions/ADR-0007-unit-path-whitelist.md`](decisions/ADR-0007-unit-path-whitelist.md) | 单元里的 `ReadWritePaths` 每条都要带 `-` |
-| [`decisions/ADR-0008-systemd-unit-hardening.md`](decisions/ADR-0008-systemd-unit-hardening.md) | 单元加固的刻意例外（`Restart=`/`Group=`；`NoNewPrivileges=` 那条 2026-11 已撤销） |
-| [`decisions/ADR-0009-registration-is-a-root-unit.md`](decisions/ADR-0009-registration-is-a-root-unit.md) | 注册由 root 的一次性单元做，服务本体永不自己注册 |
-| [`decisions/ADR-0010-run-user-owns-path-templates.md`](decisions/ADR-0010-run-user-owns-path-templates.md) | `{home}`/`{desktop}` 恒按**运行账号**展开 |
-| [`decisions/ADR-0011-zipcrypto-not-aes.md`](decisions/ADR-0011-zipcrypto-not-aes.md) | zip 密码用 ZipCrypto 而不是 AES，口径只到"挡得住随手翻看" |
-| [`decisions/ADR-0012-remote-uninstall-authorization.md`](decisions/ADR-0012-remote-uninstall-authorization.md) | 远程卸载的授权模型，以及为什么放开那四条沙箱路径 |
+| [`decisions/ADR-0001-tech-stack-and-dependencies.md`](decisions/ADR-0001-tech-stack-and-dependencies.md) | 技术栈：Python 3.8 零依赖、INI |
+| [`decisions/ADR-0002-communication-and-identity.md`](decisions/ADR-0002-communication-and-identity.md) | 通信与身份：轮询、机器识别、配对绑人 |
+| [`decisions/ADR-0003-delete-semantics.md`](decisions/ADR-0003-delete-semantics.md) | 删除语义：硬删 + 名称确认；代码 / 资产硬删 |
+| [`decisions/ADR-0004-ui-copy-and-notice.md`](decisions/ADR-0004-ui-copy-and-notice.md) | 界面文案口径、`NOTICE.md` 公告 |
+| [`decisions/ADR-0005-public-port.md`](decisions/ADR-0005-public-port.md) | 公开端口：默认 80、白名单、404 |
+| [`decisions/ADR-0006-delete-nothing-of-the-verifier.md`](decisions/ADR-0006-delete-nothing-of-the-verifier.md) | 验收信任锚取包内副本、交叉验证 |
+| [`decisions/ADR-0007-unit-path-whitelist.md`](decisions/ADR-0007-unit-path-whitelist.md) | `ReadWritePaths` 每条带 `-` |
+| [`decisions/ADR-0008-systemd-unit-hardening.md`](decisions/ADR-0008-systemd-unit-hardening.md) | 单元加固例外：`Restart=` / `Group=` |
+| [`decisions/ADR-0009-registration-is-a-root-unit.md`](decisions/ADR-0009-registration-is-a-root-unit.md) | 注册由 root 一次性单元执行 |
+| [`decisions/ADR-0010-run-user-owns-path-templates.md`](decisions/ADR-0010-run-user-owns-path-templates.md) | `{home}` / `{desktop}` 按运行账号展开 |
+| [`decisions/ADR-0011-zipcrypto-not-aes.md`](decisions/ADR-0011-zipcrypto-not-aes.md) | zip 密码用 ZipCrypto |
+| [`decisions/ADR-0012-remote-uninstall-authorization.md`](decisions/ADR-0012-remote-uninstall-authorization.md) | 远程卸载授权模型 |
 | [`decisions/ADR-0013-install-policy-defaults.md`](decisions/ADR-0013-install-policy-defaults.md) | 安装策略三条的默认值 |
-| [`decisions/ADR-0014-config-must-prove-it-is-read.md`](decisions/ADR-0014-config-must-prove-it-is-read.md) | 一个配置项必须有测试证明它真的被读到 |
-| [`decisions/ADR-0015-server-announce.md`](decisions/ADR-0015-server-announce.md) | 服务端主动通告只当线索，切换前挑战应答；机器自己探测保留 |
-| [`decisions/ADR-0016-builtin-judge.md`](decisions/ADR-0016-builtin-judge.md) | 自带评测写 `judge_result/`、独立评测机、沙箱借用 isolate |
+| [`decisions/ADR-0014-config-must-prove-it-is-read.md`](decisions/ADR-0014-config-must-prove-it-is-read.md) | 配置项须有测试证明被读取 |
+| [`decisions/ADR-0015-server-announce.md`](decisions/ADR-0015-server-announce.md) | 主动通告只作线索，切换前挑战应答 |
+| [`decisions/ADR-0016-builtin-judge.md`](decisions/ADR-0016-builtin-judge.md) | 自带评测：写 `judge_result/`、独立评测机、isolate 沙箱 |
 
 ## 文档之间的关系
 
 ```
-README.md                 是什么 + 三条命令 + 这一页的入口
-DESIGN.md                 § 编号 -> 新文件的映射表（老引用靠它落点）
-docs/README.md            这一页
-├── quickstart.md         教师视角的"怎么用"
-├── install-agent.md      装机视角的"怎么装、怎么修"
-├── operate.md            运维视角的"怎么部署与发版"
-├── reference/            字段与约定的权威描述（改代码要同步改这里）
-├── design/               系统"是什么样、为什么这样"
-└── decisions/            "当初否掉了什么" —— ADR
+README.md                 入口 + 三条命令
+DESIGN.md                 § 编号 -> docs/design/*.md 映射表
+docs/README.md            本页
+├── quickstart.md         教师
+├── install-agent.md      装机
+├── operate.md            运维
+├── reference/            字段与约定（改代码同步改）
+├── design/               现状设计
+└── decisions/            ADR
 ```
 
-字段与约定的权威描述在 `reference/` 下：`reference/protocol.md`、
-`reference/api-conventions.md`、`reference/config-keys.md`，改代码要同步改这三份。
-契约测试（`server/tests/test_agent_contract.py`）会自动发现不一致。
-
-## 要给这个仓库改代码的人
-
-`仓库结构` 与 `开发约定` 两节放在这里：它们不是操作说明、也不是设计依据，
-而是"在这个 checkout 里干活要知道的规矩"。
-
-### 仓库结构
+## 仓库结构
 
 ```
 SyncOJ/
-├── DESIGN.md                 完整技术方案
-├── docs/
-│   ├── protocol.md           Agent ⇄ Server 协议规范
-│   ├── api-conventions.md    管理端 API 形状约定（信封 / 错误体 / 删除语义）
-│   └── judge-result.md       评测器对接：成绩怎么进 SyncOJ
+├── DESIGN.md                 § 编号映射表
+├── docs/                     见上
 ├── server/                   服务端（FastAPI + SQLite WAL）
-│   ├── syncoj_server/
+│   ├── syncoj_server/        含 judging/（syncoj-judge 评测机）
+│   ├── tools/                dump_openapi.py、parallel_tests.py
 │   └── tests/
-├── agent/                    选手端 Agent（Python 3.8 零依赖）
+├── agent/                    Agent（Python 3.8 零依赖）
 │   ├── syncoj_agent/
-│   ├── packaging/            幂等安装器 / 打包器 / 在线自举
-│   ├── tools/                py38 兼容门禁、协议 fixture 生成
+│   ├── packaging/            install.py / build_bundle.py / bootstrap.sh
+│   ├── tools/                py38 门禁、协议 fixture 生成
 │   └── tests/
-├── scripts/                  一键跑全部检查（check.py 写步骤；check.sh / check.ps1 只是壳）
+├── scripts/                  check.py（检查步骤）、check.sh / check.ps1、release.py、smoke_systemd245.py
 └── web/                      管理界面（Vue3 + TS + Vite + Element Plus）
-    ├── src/api/              client + resource 声明 + 从 OpenAPI 生成的类型
-    ├── src/composables/      useList / useMutation —— 所有页面共用的数据层
-    ├── src/components/       通用页面外壳、表格、确认对话框
-    ├── src/views/            9 个页面
-    └── openapi.json          由 server/tools/dump_openapi.py 导出（纳入版本管理）
+    ├── src/api/              client、资源声明、生成的类型
+    ├── src/composables/      useList / useMutation
+    ├── src/components/       页面外壳、表格、确认对话框
+    ├── src/views/            页面
+    └── openapi.json          由 server/tools/dump_openapi.py 导出（入库）
 ```
 
-> 上面这棵树里的 `DESIGN.md`、`docs/protocol.md`、`docs/api-conventions.md`、
-> `docs/judge-result.md` 是**重建之前**的样子（树是逐字留档的，所以它没有跟着变）。
-> 现在的落点：`DESIGN.md` 只剩一张 § 映射表；那三份文档移到了 `docs/reference/`；
-> `docs/` 下另有 `quickstart.md` / `install-agent.md` / `operate.md` / `design/` /
-> `decisions/`，全在本文开头那份清单里。
+## 开发约定
 
-### 开发约定
+| 规则 | 守卫 |
+|---|---|
+| Agent 代码兼容 Python 3.8：`python agent/tools/check_py38.py agent/` | `check.py`、CI |
+| 协议改动同步 `server/syncoj_server/schemas.py`、`agent/syncoj_agent/` 报文构造、`docs/reference/protocol.md` | `server/tests/test_agent_contract.py` |
+| 路径校验服务端与 `agent/syncoj_agent/safepath.py` 各自独立实现 | `test_path_validation_parity` |
+| 前端类型不手写；改服务端模型后运行下方命令 | `check.py` 校验 `web/openapi.json` 同步 |
 
-- **Agent 侧代码必须是 Python 3.8 兼容**（目标机是 NOI Linux 2.0）。
-  提交前跑 `python agent/tools/check_py38.py agent/`，CI 也会跑。
-- **协议改动必须同步三处**：`server/syncoj_server/schemas.py`、
-  `agent/syncoj_agent/` 的报文体构造、`docs/reference/protocol.md`。
-  契约测试 `server/tests/test_agent_contract.py` 会自动发现不一致。
-- **服务端的路径安全校验必须独立实现**，绝不信任 Agent 上报的路径。
-  `agent/syncoj_agent/safepath.py` 是**另一份独立实现**（纵深防御），
-  两者的一致性由契约测试中的 `test_path_validation_parity` 守住。
-- **前端类型绝不手写**。改完服务端模型后依次跑：
-
-  ```bash
-  python server/tools/dump_openapi.py && (cd web && npm run gen:types)
-  ```
-
-  `scripts/check.py` 会校验 `web/openapi.json` 是否已同步，不同步直接失败。
+```bash
+python server/tools/dump_openapi.py && (cd web && npm run gen:types)
+```
 
 ## 跑全部检查
 
 ```bash
-./scripts/check.sh          # Linux / CI；Windows 的 Git bash 里也能直接跑
+./scripts/check.sh          # Linux / CI / Windows Git bash
 ```
 
 ```powershell
-.\scripts\check.ps1            # Windows PowerShell 5.1 与 pwsh 7 都能跑
+.\scripts\check.ps1         # Windows PowerShell 5.1 / pwsh 7
 ```
 
-步骤只写在 `scripts/check.py` 一处（只用标准库、能在 Python 3.8 上跑）。两个壳只做
-一件事：挑一个**真的能跑**的 Python 3.8+，把参数原样转过去。两者都先找仓库里的
-`.venv`（装着 `server[dev]`），再退回系统解释器；也可以用环境变量 `PYTHON` 指定。
+| 参数 / 变量 | 作用 |
+|---|---|
+| （默认） | 跑完全部步骤后汇总 |
+| `--fail-fast` | 第一处失败即停 |
+| `--list` | 列出步骤名 |
+| `--only <步骤>` | 只跑指定步骤 |
+| `--skip-web` | 跳过前端两步 |
+| `PYTHON` | 指定解释器；默认先找仓库 `.venv`，再找系统中可运行的 Python ≥ 3.8 |
 
-> 为什么收成一份：两个 shell 入口曾经各写一遍全部步骤、靠"一一对应"的约定同步，
-> 实际已经漂开 —— `check.ps1` 全局设了 `SYNCOJ_STATE_DIR` 而 `check.sh` 没设，于是
-> 有两条用例只在其中一个入口下能过；两边都建了一个从未用到的 `basetemp`；
-> 前端类型检查跑了两遍。
+步骤：`py38` → `ps1-bom` → `versions` → `agent-tests` → `server-tests` → `openapi` → `web-types`（重新生成后逐字节比对）→ `web-build`（入口对账 + `typecheck` + `build`）。步骤只写在 `scripts/check.py`。
 
-- **默认跑完全部步骤再汇总**，`--fail-fast` 才在第一处失败时停。旧脚本 `set -e`，
-  Agent 测试一红，后面的服务端测试与前端构建就都不跑了，"红了几处"永远只看得见第一处。
-- `--list` 列出步骤名，`--only <步骤>` 只跑某几步，`--skip-web` 跳过前端两步。
-- Windows 上 `python3` 常常指向应用商店的占位程序（`command -v` 找得到、执行直接
-  失败），所以 `check.sh` 的判据是"**真的能跑起来**且 ≥3.8"，不是"命令存在"。
-
-> **`.ps1` 必须带 UTF-8 BOM。** Windows PowerShell 5.1 在**没有 BOM** 时按当前
-> ANSI 代码页（简体中文 Windows 上是 GBK）解码脚本文件，于是仓库里这些中文注释
-> 会让它**整个脚本解析失败**，报的还是"字符串缺少终止符"这种指向完全无关位置的
-> 错。PS 7 认 BOM，所以带上两边都对。编辑类工具保存时**不会保留 BOM** ——
-> 改一行中文注释就可能把它弄丢，所以这件事由 `check.py` 的 `ps1-bom` 一步专门守着。
-
-检查内容：py38 兼容门禁 → `PowerShell` 脚本编码 → Agent 测试 → 服务端测试
-→ `openapi.json` 是否已同步 → `schema.d.ts` 是否与 `openapi.json` 一致
-（**重新生成一遍再逐字节比对**）→ 前端入口对账 + `typecheck` + `build`。
-
-> 生成物那条检查刻意**不用 `git diff`**：git diff 比的是工作树和 HEAD，而开发中
-> 工作树本来就有未提交的改动，于是它在最常见的场景下恒红。判据是"重新生成的结果
-> 和仓库里那份是否一致"。
+⚠️ `.ps1` 须保留 UTF-8 BOM 与 CRLF，丢失 BOM 会使 Windows PowerShell 5.1 解析失败（`ps1-bom` 步骤检查）。
 
 ## 状态
 
 | 里程碑 | 状态 |
 |---|---|
-| M1 骨架：enroll / tick / 在线状态 / 管理后台 | ✅ 完成 |
-| M2 回收：扫描 / 上传 / 内容寻址存储 / `source/` 落盘 / 删除审计 | ✅ 完成 |
-| M3 下发：资产管理 / 任务编排（全员·按人·按分组）/ Range 断点续传 / 进度聚合 | ✅ 完成 |
-| M4 成绩：结果扫描回写 / 成绩矩阵 / 手工补录 / 原始记录 | ✅ 完成 |
-| M5 运维：RSA 签名自更新 / 安全解包 / 自动回滚 / 幂等安装器 / 可复现打包 | ✅ 完成 |
-| 管理界面：9 个页面 + 初始化闭环（建场次 / 导名单 / 维护题目 / 机器配对） | ✅ 完成 |
-| 代码归题：题目 glob 模式 / 文件台账归类 / 路径试算 / 三层可配置 | ✅ 完成 |
-| 交付视图：区分「未交」「已待评测」「已出成绩」，列表页给交题进度 | ✅ 完成 |
-| 名单库：全局可复用名单，场次引用默认名单并一键应用 | ✅ 完成 |
-| 永久配对：镜像一份统一密钥 + 六位配对码绑定名单条目 + 指纹自愈 + 克隆告警 | ✅ 完成 |
-| API 形状统一：列表信封 / 统一错误体 / 输入名称确认的删除 | ✅ 完成 |
-| 局域网发现：UDP 探测 + 签名应答，机器侧零配置找服务端 | ✅ 完成 |
-| 安装入口：`/install` 一键装机 + 从服务端直接安装（台账/安装器/自举脚本） | ✅ 完成 |
-| 公开端口：默认 80 只放装机页与选手页；管理端与 `/docs` 在那个端口上不存在 | ✅ 完成 |
-| 选手页公告：正文取自下发的 `NOTICE.md`，**不另设公告字段** | ✅ 完成 |
-| 考试时间窗：窗口外拒收；到点**自动**把场次置为「已结束」（不做违规判定） | ✅ 完成 |
+| M1 骨架：enroll / tick / 在线状态 / 管理后台 | ✅ |
+| M2 回收：扫描 / 上传 / 内容寻址存储 / `source/` 落盘 / 删除审计 | ✅ |
+| M3 下发：资产管理 / 任务编排（全员·按人·按分组）/ Range 断点续传 / 进度聚合 | ✅ |
+| M4 成绩：结果扫描回写 / 成绩矩阵 / 手工补录 / 原始记录 | ✅ |
+| M5 运维：RSA 签名自更新 / 安全解包 / 自动回滚 / 幂等安装器 / 可复现打包 | ✅ |
+| 管理界面 + 初始化闭环（建场次 / 导名单 / 维护题目 / 机器配对） | ✅ |
+| 代码归题：题目 glob / 文件台账归类 / 路径试算 / 三层可配置 | ✅ |
+| 交付视图：「未交」「已待评测」「已出成绩」、交题进度 | ✅ |
+| 名单库：全局名单、场次默认名单、一键应用 | ✅ |
+| 永久配对：统一密钥 + 六位配对码 + 指纹自愈 + 克隆告警 | ✅ |
+| API 形状统一：列表信封 / 统一错误体 / 名称确认删除 | ✅ |
+| 局域网发现：UDP 探测 + 签名应答 | ✅ |
+| 服务端主动通告：UDP 通告 + 挑战应答 +「召集机器」 | ✅ |
+| 自带评测：`syncoj-judge` 评测机 + isolate / rlimit 沙箱 | ✅ |
+| 安装入口：`/install` 装机页 + 从服务端直接安装 | ✅ |
+| 公开端口：默认 80，仅装机页与选手页 | ✅ |
+| 选手页公告：取自下发的 `NOTICE.md` | ✅ |
+| 考试时间窗：窗口外拒收，到点自动置「已结束」 | ✅ |
+| 发布：推 `v<版本号>` 标签生成 GitHub Release | ✅ |
 
-### 快速开始（开发）
-
-这一节讲开发机上怎么把三块跑起来；面向教师的开考流程见 [`quickstart.md`](quickstart.md)，
-仓库根 `README.md` 的「三条命令」是最短形式。
+## 快速开始（开发）
 
 ```bash
 # 服务端
@@ -224,23 +180,19 @@ syncoj-server serve --host 0.0.0.0
 
 # 管理界面（开发模式，热更新）
 cd web && npm install
-npm run dev                        # http://localhost:5173，API 自动代理到 :8000
+npm run dev                        # http://localhost:5173，API 代理到 :8000
 
-# 管理界面（构建后由服务端托管 —— 单进程部署，不需要额外的 Caddy/nginx）
-npm run build                      # 产出 web/dist
-# 服务端启动时自动探测 web/dist 并挂载；探测不到就只提供 API，/docs 仍可用
+# 管理界面（构建后由服务端托管）
+npm run build                      # 产出 web/dist；服务端启动时自动挂载，缺失时只提供 API 与 /docs
 
-# Agent（零依赖）
-python agent/run_agent.py --check                          # 用内置默认配置自检
+# Agent
+python agent/run_agent.py --check                          # 内置默认配置自检
 python agent/run_agent.py --config agent/config.example.ini --check
 python agent/run_agent.py --once
 ```
 
-> `--check` **不带 `--config`** 时用的是内置默认值（`ca_file` 留空、服务端
-> `https://127.0.0.1:8000`），所以开箱就能跑。带上 `config.example.ini` 会去
-> 找 `/etc/syncoj/ca.pem` —— 那是个**部署模板**，填好真实路径再用。
-
-> **Agent 必须通过 `run_agent.py` 启动，不能是 `syncoj_agent/main.py`。**
-> 后者使用包内相对导入，当脚本直接执行会报
-> `ImportError: attempted relative import with no known parent package`。
-> `-E` 会连 `PYTHONPATH` 一起忽略，所以只能靠启动器显式设置 `sys.path`。
+| 情况 | 结果 |
+|---|---|
+| `--check` 不带 `--config` | 用内置默认值（`ca_file` 空、服务端 `https://127.0.0.1:8000`） |
+| 带 `agent/config.example.ini` | 读取 `/etc/syncoj/ca.pem`；先填真实路径 |
+| 直接运行 `syncoj_agent/main.py` | `ImportError: attempted relative import with no known parent package`；须经 `run_agent.py` 启动 |

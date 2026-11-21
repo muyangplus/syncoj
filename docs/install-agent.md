@@ -2,108 +2,55 @@
 
 ## 机器注册与配对
 
-**只有一条路**：镜像里放一份统一密钥，机器开机换回本机凭据，教师读机器屏幕上的
-六位配对码把它绑到名单里的**人**。
-
 ```
 装机（root 一次性）        机器首次开机              教师
-bootstrap.key  ──换凭据──▶  桌面「配对码.txt」 ──读码/输入──▶ 绑到名单里的某个人
+bootstrap.key  ──换凭据──▶  桌面「配对码.txt」 ──读码/输入──▶ 绑到名单条目
 ```
 
-| | 说明 |
+| 项 | 值 |
 |---|---|
-| 密钥在哪 | `/etc/syncoj/bootstrap.key`（**root 只读**，0600）。`agent.ini` 选手账号可读，密钥绝不能写进去 |
+| 统一注册密钥 | `/etc/syncoj/bootstrap.key`，0600，属主 root；不得写进 `agent.ini`（选手账号可读） |
 | 签发 | `syncoj-server bootstrap-key issue --out /etc/syncoj/bootstrap.key`（明文只显示一次） |
-| 配对码 | **六位数字**，限时 30 分钟，一次性。只在"绑定那一刻"用 |
-| 配对之后 | 认机器靠 `machine_uuid`，**不再需要配对码** |
-| 配对对象 | 名单条目（**人**），不是某场比赛的选手 —— 所以配对是**永久**的，换场次不用重配 |
+| 本机凭据（token） | 注册时换得；之后收代码、收文件、记成绩、收升级都用它 |
+| 配对码 | 六位数字，30 分钟有效，一次性；不是凭据，配对后不再使用 |
+| 配对对象 | 名单条目（人）；之后按 `machine_uuid` 认机器 |
+| 无需重配 | 换场次、系统重装、快照还原、升级 Agent |
+| 需要重配 | 换人（改派 / 解绑）、删除名单条目 |
 
-**配对一次，之后 N 场比赛零人工**：换场次、系统重装、快照还原、升级 Agent 都不用
-重配；换人（改派 / 解绑）与删掉名单条目要重配。各种情况与依据见
-[`design/04-server.md §4.6`](design/04-server.md)。
+→ 见 [`design/04-server.md §4.6`](design/04-server.md)、[ADR-0002](decisions/ADR-0002-communication-and-identity.md)。
 
-> **配对之后不会再下发任何密钥。** 机器在**注册那一步**就已经拿到了自己的凭据（token），
-> 配对只是把这枚凭据对应的机器绑到名单里的某个人；之后收代码、收文件、记成绩、收升级
-> 都用它。整条链路只有两样凭据：装机时的**统一注册密钥**和注册换来的**本机 token**。
-> **配对码不是凭据**，它是"教师此刻在场"的一次性证明。
->
-> 也就是说，管理页「机器配对」上那两样东西回答的是两个不同的问题：
-> **统一注册密钥**管"这台机器是不是我们机房的"（装 Agent **之前**烤进镜像，全机房一把），
-> **配对码**管"这台机器前面站着的是谁"（服务端发给这台机器、教师读码）。**现场要做的是配对。**
+### 机器状态
 
-## 注册是谁做的：一个 root 一次性单元，不是 Agent 本体
-
-| | 谁 | 干什么 |
+| 状态 | 机器上的表现 | 处理 |
 |---|---|---|
-| `syncoj-agent-enroll.service` | **root**（oneshot；装机时 enable，并立刻跑一次） | 读 `/etc/syncoj/bootstrap.key`，换回本机凭据，写进状态目录并交给运行账号 |
-| `syncoj-agent.service` | **运行账号**（= 跑安装的那个账号） | 只读凭据干活；**没有凭据就等**，绝不自己去读那把密钥 |
+| 未配对 | 桌面出现「配对码.txt」 | 教师在「机器配对」认领 |
+| 已配对、无场次 | 桌面出现「等待场次.txt」 | 把该名单应用到场次 |
+| 正常 | 两个文件被删除，开始收代码 | — |
 
-密钥是 0600、root 只读，服务以选手身份跑**读不到**（设计如此）。所以"服务自己注册"
-必然失败，表现是"机器永远不出现"：服务退出 1、重启 5 次后被 systemd 判成"反复起不来"
-而罢手，而注册单元从来没被跑过。
-
-现场遇到"机器不出现"或服务反复重启，按顺序看这四样：
+查看配对码：
 
 ```bash
-systemctl status syncoj-agent-enroll.service --no-pager -l    # 注册那一步成没成
-journalctl -u syncoj-agent-enroll.service -n 30 --no-pager
-journalctl -u syncoj-agent -n 30 --no-pager                   # 服务本体
-sudo tail -n 40 /var/lib/syncoj/agent.log                     # 两者共用同一个日志文件
+python3 /opt/syncoj/current/run_agent.py --config /etc/syncoj/agent.ini --pair-code
 ```
 
-`Start request repeated too quickly` 说明 systemd 已经罢手 —— 先修掉真正的错误，再清限流状态：
+### 快照还原与克隆
 
-```bash
-sudo systemctl reset-failed syncoj-agent
-sudo systemctl start syncoj-agent-enroll.service    # 需要重新注册时；已有凭据则它直接返回
-sudo systemctl start syncoj-agent
-```
-
-注册失败的常见几种（都在 `journalctl -u syncoj-agent-enroll.service` 里看得到原文）：
-
-| 日志里的话 | 含义 | 怎么办 |
-|---|---|---|
-| `HTTP 403 bootstrap_key_revoked` / `bootstrap_key_invalid` | **机器上那把密钥服务端不认**（吊销过、或换了库/服务器） | 在服务端「机器配对 → 装机设置」重新签发一把，放到 `/etc/syncoj/bootstrap.key`（0600 属主 root，**显式覆盖**旧的那把 —— 安装器默认不替换机器上已有的密钥），再重跑注册单元 |
-| `HTTP 403 pairing_required` 之类 | 凭据有效、但还没绑到人 | 教师到「机器配对」页认领 |
-| `Permission denied: '/etc/syncoj/agent.ini'` | 旧安装留下的配置属主不是当前运行账号 | 重跑一次安装器（它会顺手把属主改成运行账号），再按上面清一次限流状态 |
-| `注册被限速（… 秒后可重试）` | 装机时多台机器同时注册，把服务端限速顶满 | 等它说的秒数；新版注册单元会自己有限重试 |
-| `扫描目录的父目录不存在: /root/...` | 注册单元以 root 跑、却按 root 的家展开路径（老版本的 bug） | 升级到修好的版本；临时可 `sudo HOME=/home/<运行账号> … run_agent.py --provision` 跑一次 |
-
-**配对之后不等于马上能干活。** 场次有没有这个人，取决于那份名单有没有被应用进
-场次，所以客户端的凭据有三个状态：
-
-| 状态 | 机器上的表现 | 原因 |
-|---|---|---|
-| 未配对 | 桌面出现「配对码.txt」 | 还没人认领它 |
-| 已配对、无场次 | 桌面出现「等待场次.txt」 | 应用了名单才会有这个 `player_no` 的选手 |
-| 正常 | 两个文件都被删掉，开始收代码 | —— |
-
-**快照还原能自愈**：机器上的凭据会随还原消失，所以注册时还会带硬件指纹
-（SMBIOS UUID，还原后不变）。服务端按 `machine_uuid`（首选）或指纹（UUID 也没了
-时）认回原来那台机器、**保留配对关系**，不需要教师重新配对一次。但指纹那条只在
-**那台机器当前离线**时才自动认回 —— 指纹只证明硬件相同，母机还在心跳时来了一台
-同指纹的机器，那更可能是克隆，认回就等于把某个学生的身份白送出去。这种情况会
-进待配对并留下告警（「机器配对」页的克隆告警）。
-
-## 部署与安装
-
-## 注册方式：只有一种
-
-注册模型见本文开头「机器注册与配对」。这里只记一条升级兼容规则：「每选手注册码」
-（`--enroll-code`）那条路已经删除，而 `agent.ini` 里若还留着 `enroll_code =`，会被
-静默忽略（升级过来的机器不该因为这个起不来）。
+| 情况 | 服务端行为 |
+|---|---|
+| 状态目录被还原、`machine_uuid` 仍在 | 按 `machine_uuid` 认回，保留配对 |
+| `machine_uuid` 也没了、原机当前离线 | 按硬件指纹（SMBIOS UUID）认回，保留配对 |
+| 同指纹、原机仍在心跳 | 进待配对，「机器配对」页显示克隆告警 |
 
 ## 一键安装（四种入口，共用同一份逻辑）
 
 ```bash
-# 1. 从服务端直接装（推荐：空机器、整间机房一份小镜像）
-#    地址不填也行 —— 那就去局域网里广播着找一次（那时要给 --public-key 才能验应答）
+# 1. 从服务端直接装（空机器 / 小镜像）
 sudo python3 install.py \
     --from-server --server http://10.0.0.1:8000 \
     --bootstrap-key <签发出的密钥> \
     --user student
 
-# 2. 镜像预装（把安装包预先放进镜像）
+# 2. 镜像预装离线包
 sudo python3 install.py \
     --bundle ./syncoj-agent-0.1.0.tar.gz \
     --sha256 <校验和> \
@@ -111,186 +58,277 @@ sudo python3 install.py \
     --bootstrap-key <签发出的密钥> \
     --user student
 
-# 3. 在线自举（**空机器上的第一条命令**）
+# 3. 在线自举（空机器上的第一条命令；--server 省略时用发脚本的那台服务端）
 curl -fsSL http://10.0.0.1:8000/api/v1/agent/install/bootstrap.sh | sudo sh -s -- \
     --server http://10.0.0.1:8000 --bootstrap-key <签发出的密钥> --user student
 
-# 4. 通用下载（任意 URL，比如内网静态文件服务器）
+# 4. 任意 URL 下载
 sudo python3 install.py \
     --download-url http://10.0.0.1/x/syncoj-agent-bundle.tar.gz \
     --sha256 <从服务端界面抄下来的校验和> \
     --server http://10.0.0.1:8000 --user student
 
-# 先看看会做什么（不需要 root，不做任何改动；预览**不联网**）
+# 预览（不需要 root，不改动、不联网）
 python3 install.py --from-server --server http://x --dry-run
 ```
 
-### 从服务端直接装：凭什么信
+### `install.py` 参数
 
-`--from-server` 走的是服务端那四个**不鉴权**的装机端点
-（`/api/v1/agent/install/*`）。不鉴权是有意的：**初次安装时机器手上什么都没有** ——
-没有 Agent、没有凭据，要求鉴权就没有入口。装完之后靠**配对**建立信任：机器注册上来是
-"待认领"状态，教师必须在管理界面「机器配对」里把它绑到名单里的某个人，它才开始
-收代码、收文件、收成绩。
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--bundle` / `--download-url` / `--from-server` / `--from-dir` | — | 安装包来源：本地 tar.gz / URL / 服务端当前已铺开版本 / 已解开的目录 |
+| `--sha256` | 空 | 安装包校验和 |
+| `--server` | 包内 `server.json`，否则局域网发现 | 显式给出则只用它 |
+| `--no-discover` | 关 | 不做局域网发现 |
+| `--discover-address` | 广播 | 改为单播询问该地址 |
+| `--discover-timeout` | `1.5` 秒 | 等发现应答的时间 |
+| `--bootstrap-key` / `--bootstrap-key-file` | — | 统一注册密钥；优先级见下表 |
+| `--user` | `SUDO_USER`，否则当前用户 | 运行账号；以 root 直接运行时必须显式给 |
+| `--scan-root` | `{desktop}/{player_no}` | 扫描目录，逗号分隔多个 |
+| `--scan-prefix` | `none` | 上报路径前缀：`none` / `auto` / 字面量 |
+| `--deploy-root` | `{desktop}` | 下发落地根目录 |
+| `--ca-file` / `--insecure` | 空 / 关 | 自签 CA；`--insecure` 不校验证书（凭据可被中间人读走） |
+| `--force-config` | 关 | 覆盖已有 `agent.ini`（会丢失手工修改） |
+| `--upgrade-mode` | 包内策略，否则 `apply` | `off` / `stage` / `apply` |
+| `--public-key` | — | 发布签名公钥路径；给了才验签 |
+| `--prefix` / `--config-dir` / `--state-dir` / `--unit-dir` | `/opt/syncoj` / `/etc/syncoj` / `/var/lib/syncoj` / `/etc/systemd/system` | 布局 |
+| `--dry-run` / `--quiet` / `--skip-user` / `--skip-service` / `--skip-python-check` | 关 | 行为开关 |
+| `--uninstall` / `--yes` / `--keep-user` / `--keep-state` | 关 | 卸载，见「卸载 Agent」 |
 
-服务端只发**已铺开**的版本 —— 与升级同一条判据。教师刚构建出来、还没敢铺开的包，
-装机入口也拿不到。
+统一注册密钥来源优先级：`--bootstrap-key` > `--bootstrap-key-file` > `<仓库>/.key/bootstrap.key`（存在才用）> 机器上已有 > 包内附带。重复安装时省略 `--bootstrap-key` 不影响已有密钥与注册单元。
 
-安装器把**能验的都验上**，并如实报告做了哪些：
+`bootstrap.sh` 认识的参数：`--server`、`--bootstrap-key`、`--scan-root`、`--deploy-root`、`--sha256`、`--uninstall`、`--yes`、`--dry-run`、`--keep-state`、`--keep-user`；其余原样透传给 `install.py`。
 
-| 机器上有没有发布公钥 | 验到什么程度 |
+### 从服务端直接装的校验
+
+装机端点 `/api/v1/agent/install/*` 不鉴权，只发**已铺开**的版本 → 见 [`design/07-ops-and-install.md`](design/07-ops-and-install.md)。
+
+| 机器上有发布公钥 | 校验内容 |
 |---|---|
-| 有（`--public-key`，或已装好的机器） | sha256 **+ 签名**。这一步才真正挡住"有人替你换了个包" |
-| 没有 | 只验 sha256（对照服务端台账）。**明说未验签**，并打印校验和供人跟界面对一遍 |
+| 有（`--public-key`，或已装好的机器） | sha256 + 签名 |
+| 无 | 仅 sha256（对照服务端台账）；输出"未验签"与校验和，需人工对照界面 |
 
-想把验签也带上：把 `release-key.pub.json` 放进镜像，用
-`--public-key <路径>` 或 `RELEASE_PUBLIC_KEY=<路径>`（自举脚本认这个环境变量）。
-
-> **sha256 挡得住什么、挡不住什么。** 台账与包来自同一个未鉴权的地方，所以它挡的是
-> 传输损坏与"传了一半"，**挡不住恶意服务端**。要挡住后者只有验签。
-
-> **重复执行安装器时不必再传一遍密钥。** 它已经在那台机器上了，而"没传
-> `--bootstrap-key`"不等于"这台机器没有密钥" —— 安装器会认出现有的密钥文件。
-> 误判的后果是上一次装好的开机注册单元被删掉，表现是"什么都没改，但下次开机不再
-> 注册了"。
-
-### 装完会发生什么
-
-装好后多了一个单元 `syncoj-agent-enroll.service`：开机时**以 root 身份**跑一次
-`run_agent.py --provision`，用 `/etc/syncoj/bootstrap.key` 换回本机凭据，
-再 chown 给选手账号。之后 Agent 本体（选手身份）只读凭据，碰不到密钥。
-
-装完的机器有三种状态，桌面上会写出来（见上面「配对之后不等于马上能干活」那张表）。
-
-排障时可以直接看配对码，不用翻日志：
+带验签自举：
 
 ```bash
-python3 /opt/syncoj/current/run_agent.py --config /etc/syncoj/agent.ini --pair-code
+curl -fsSL http://10.0.0.1:8000/api/v1/agent/install/bootstrap.sh \
+  | sudo RELEASE_PUBLIC_KEY=/path/to/release-key.pub.json sh -s -- \
+    --server http://10.0.0.1:8000 --bootstrap-key <签发出的密钥> --user student
 ```
 
-### ⚠️ 建镜像时最容易犯的错
+⚠️ 仅 sha256 时挡不住恶意服务端。
 
-**在母机上装好并跑过一次 Agent，然后把整机做成镜像。**
+### 建镜像
 
-那样每一台克隆机都带着**同一个身份**开机（同一份 `credential.json`、
-同一个 `machine_uuid`），服务端会看到一批同 ID 的机器互相覆盖 ——
-而文件是**静默错的**：看起来一切正常，只有成绩会对不上人。
+⚠️ 母机上跑过 Agent 再做镜像，所有克隆机共用同一身份（`credential.json` + `machine_uuid`），成绩会对错人。
 
-安装器会在状态目录里发现残留身份文件时告警并给出命令，但这条要从流程上避免：
+1. 装 Agent。不要启动服务、不要跑 `--once`、不要跑 `--provision`。
+2. 母机已跑过时，删除状态目录里的 `credential.json` 与 `machine_uuid`。
+3. 做镜像。
+4. 部署到各机器。
+5. 首次开机，`syncoj-agent-enroll.service` 为每台生成各自的凭据与 `machine_uuid`。
 
-```bash
-# 建镜像的正确顺序
-1. 装 Agent（此时不要启动服务、不要跑 --once、不要跑 --provision）
-2. 做镜像
-3. 部署到各机器
-4. 首次开机 → syncoj-agent-enroll.service 生成**每台各自的**凭据 + machine_uuid
-```
+## 注册单元与服务
 
-> 如果母机必须在建镜像前先验证一遍能不能装上，请在建镜像**之前**删掉状态目录里的
-> `credential.json` 与 `machine_uuid`：在母机上跑过一次之后，这两个文件会被烙进
-> 镜像，而每一台克隆机都会带着**同一个身份**开机。删除之后每条机器都会生成
-> 自己的 UUID；即使是快照还原把状态目录整个抹掉的场景，服务端也还有硬件指纹那
-> 第二道依据可以认回原机器。
+| 单元 | 身份 | 作用 |
+|---|---|---|
+| `syncoj-agent-enroll.service` | root，oneshot；安装时 enable 并立即运行一次 | 运行 `run_agent.py --provision`：读 `/etc/syncoj/bootstrap.key` 换本机凭据，写入状态目录并 chown 给运行账号；失败最多重试 5 次、间隔 30 秒 |
+| `syncoj-agent.service` | 运行账号 | 只读凭据；无凭据时等待，不读密钥 |
+| `syncoj-agent-admin.path` / `.service` | root | 处理升级切换与远程卸载请求 |
 
-服务端侧还有第二道防线：多台机器报同一个硬件指纹时会在「机器配对」页
-弹克隆告警。但那是事后发现，不是不犯错的理由。
+→ 见 [ADR-0009](decisions/ADR-0009-registration-is-a-root-unit.md)。
+
+### 机器不出现 / 服务反复重启
+
+1. 查看状态与日志：
+
+   ```bash
+   systemctl status syncoj-agent-enroll.service --no-pager -l
+   journalctl -u syncoj-agent-enroll.service -n 30 --no-pager
+   journalctl -u syncoj-agent -n 30 --no-pager
+   sudo tail -n 40 /var/lib/syncoj/agent.log
+   ```
+
+2. 按下表修复根因。
+3. 出现 `Start request repeated too quickly` 时清限流状态：
+
+   ```bash
+   sudo systemctl reset-failed syncoj-agent
+   sudo systemctl start syncoj-agent-enroll.service
+   sudo systemctl start syncoj-agent
+   ```
+
+| 日志 | 原因 | 处理 |
+|---|---|---|
+| `HTTP 403 bootstrap_key_revoked` / `bootstrap_key_invalid` | 服务端不认机器上的密钥（已吊销 / 换库 / 换服务器） | 「机器配对 → 装机设置」重新签发 → 覆盖 `/etc/syncoj/bootstrap.key`（0600、属主 root；安装器默认不替换已有密钥）→ 重跑注册单元 |
+| `HTTP 403 pairing_required` | 凭据有效，未绑人 | 「机器配对」认领 |
+| `Permission denied: '/etc/syncoj/agent.ini'` | 配置属主不是运行账号 | 重跑安装器（会改属主）→ 清限流状态 |
+| `注册被限速（… 秒后可重试）` | 多台同时注册触发服务端限速 | 等待提示的秒数 |
+| `扫描目录的父目录不存在: /root/...` | 旧版注册单元按 root 的家目录展开路径 | 升级；临时：`sudo HOME=/home/<运行账号> … run_agent.py --provision` |
+| 服务在跑、日志安静、服务端无 tick | 无凭据，等待注册 | 查 `syncoj-agent-enroll.service` |
 
 ## 运行身份
 
-**Agent 以选手登录用户的身份运行**（`--user`），不是专用账号。原因：代码和下发
-文件都在选手自己的桌面上，跨用户授权在现场很容易装成"服务起来了但什么都不传"。
+Agent 以 `--user` 指定的选手登录账号运行 → 见 [`design/03-agent.md`](design/03-agent.md)。
 
-这决定了 systemd 单元的权限模型：
-
-- **不设 `ProtectHome`** —— 设成 `read-only` 会把家目录整个变只读，Agent 一个
-  文件都写不出去
-- `ReadWritePaths=-/home/<运行账号> <状态目录> …` —— 放开运行账号的家目录（桌面在里面）。
-  家目录在安装时解析成绝对路径；曾经写的是 `-%h`，而系统单元里 `%h` 是 `/root`，
-  见 [ADR-0007](decisions/ADR-0007-unit-path-whitelist.md) 的「现状（2026-11）」
-- `ProtectSystem=strict` 保留：`/usr`、`/etc`、`/boot` 等系统目录仍然全部只读
-- `agent.ini` 与状态目录里的文件都 **chown 给这个用户**（0600）。
-  漏掉 chown 的表现是"装完起不来"或"一直重新注册"，而且报的是权限错误，
-  很难联想到属主问题 —— 所以安装器现在会检查并告警
+| 单元设置 | 值 |
+|---|---|
+| `ProtectHome` | 不设 |
+| `ReadWritePaths=` | `-/home/<运行账号> <状态目录> …`，每条带 `-`，家目录安装时解析为绝对路径 → 见 [ADR-0007](decisions/ADR-0007-unit-path-whitelist.md) |
+| `ProtectSystem` | `strict` |
+| `agent.ini`、状态目录文件 | 属主运行账号，0600；安装器检查并告警 |
 
 ## 目录约定
 
-默认落点：
-
 ```
 桌面/                          ← deploy_root = {desktop}
-├── 题面.pdf                    ← 通用资料：目标目录留空 = 直接落桌面
+├── 题面.pdf                    ← 目标目录留空 = 落桌面
 └── <准考证号>/                 ← scan.roots = {desktop}/{player_no}
-    ├── p1/p1.cpp              ← 选手写代码的位置（按题下发目标目录填 {player_no}/<题目名>）
+    ├── p1/p1.cpp              ← 按题下发目标目录填 {player_no}/<题目名>
     └── p2/p2.cpp
 ```
 
-改完路径不用重装，重启服务即可：
+改路径后重启服务，无需重装：
 
 ```bash
 sudo systemctl restart syncoj-agent
-journalctl -u syncoj-agent -n 30     # 第一行就会打印实际扫描目录
+journalctl -u syncoj-agent -n 30     # 第一行打印实际扫描目录
 ```
 
-`{desktop}` 的探测方式、`{desktop}` / `{home}` 按运行账号解析的规则、四个占位符与
-`agent.ini` 写法，见 [`design/04-server.md §4.5`](design/04-server.md)。
+占位符、`{desktop}` 探测与 `agent.ini` 写法 → 见 [`design/04-server.md §4.5`](design/04-server.md)、[ADR-0010](decisions/ADR-0010-run-user-owns-path-templates.md)。
+
+### 文件下发
+
+| 下发内容 | 目标目录 | 落点 |
+|---|---|---|
+| 题面、样例、须知 | 留空 | `桌面/题面.zip` |
+| 某题附件、额外数据、模板 | `{player_no}/<题目名>` | `桌面/<准考证号>/<题目名>/数据.zip` |
+| 考场公告 | 任意 | 同上，并显示在选手页「考场公告」 |
+
+| 操作 | 结果 |
+|---|---|
+| 「实际落点预览」 | 用第一位选手代入模板 |
+| 「写考场公告」→ 下发 | 生成 `NOTICE.md`；文件名大小写不敏感；多份取最后下发的；不下发则无公告 |
+| 「编辑」（`.txt` / `.md` 等，≤ 1 MB） | 已下发的副本重新排队，下一轮心跳生效；⚠️ 考试中修改会替换机器上的测试数据 |
+| 场次填「结束时间」 | 到点自动置为「已结束」，之后拒收上传；开考不自动触发；留空不自动结束 |
+| 下发 zip | 原样落盘，不解压；密码用 `password.txt` 作为普通资产一起发 |
 
 ## 安装后的布局
 
 ```
 /opt/syncoj/
 ├── releases/
-│   ├── 0.1.0/                   每个版本一份，互不覆盖
-│   │   ├── run_agent.py         ← systemd 的 ExecStart 指向它
+│   ├── 0.1.0/                   每个版本一份
+│   │   ├── run_agent.py         ← systemd ExecStart
 │   │   └── syncoj_agent/...
 │   └── 0.1.1/...
 └── current -> releases/0.1.1    原子切换的软链
 
-/etc/syncoj/agent.ini            配置（已存在时**不覆盖**，见下）
+/etc/syncoj/agent.ini            配置（已存在时不覆盖）
+/etc/syncoj/bootstrap.key        统一注册密钥
+/etc/syncoj/release-key.pub.json 升级信任锚
 /var/lib/syncoj/                 凭据、哈希缓存、日志、未完成的下载
+/usr/lib/syncoj/                 root 管理单元代码
 ```
 
-版本化目录 + `current` 软链的布局是自更新的前提。若不用安装器而手工部署成
-单一目录，`upgrade.mode = apply` 会直接失败。
+⚠️ 手工部署成单一目录时 `upgrade.mode = apply` 失败。
 
 ## 幂等性
 
-安装器可以随便重复执行，结果一致。三条关键保证：
-
-1. **绝不覆盖已存在的 `agent.ini`**。教师很可能已经改过扫描目录，
-   覆盖是灾难性的。要重建请显式加 `--force-config`。
-2. **同版本不重复解压**。已装过的版本直接复用。
-3. **已是当前版本则不重启服务**。避免每次跑安装器都打断正在进行的传输。
+| 保证 | 例外 |
+|---|---|
+| 不覆盖已有 `agent.ini` | `--force-config` |
+| 同版本不重复解压 | — |
+| 已是当前版本则不重启服务 | — |
 
 ## 打包
 
 ```bash
-# 产出 dist/syncoj-agent-<版本>.tar.gz
-python3 build_bundle.py
-
-# 再用服务端私钥签一份 .sig（供手工核对）
-python3 build_bundle.py --verify-signature /etc/syncoj/release-key.pem
+python3 build_bundle.py                                             # 产出 dist/syncoj-agent-<版本>.tar.gz
+python3 build_bundle.py --verify-signature /etc/syncoj/release-key.pem   # 另产出 .sig
 ```
 
-打包是**可复现的**：同样的内容产出逐字节相同的压缩包，与输出文件名无关。
-gzip 头里默认嵌的时间戳与文件名、tar 成员里的 mtime 都已被压平 —— 否则
-"同一版本两次打包校验和不同"，签名的确定性和"这个包是不是那个包"的判断都会失效。
+| 参数 | 说明 |
+|---|---|
+| `--out` | 输出路径 |
+| `--public-key` | 打进包的公钥；默认 `.key/release-key.pub.json`（存在才用） |
+| `--no-public-key` | 不打公钥 |
+| `--server-url` | 写入包内 `server.json` |
+| `--print-sha256-only` | 只打印 sha256 |
+
+同样内容产出逐字节相同的包。
+
+## 发版时附带统一注册密钥（可选）
+
+「Agent 发布」→ 构建时勾「附带统一注册密钥」，默认不勾：
+
+| 效果 | 说明 |
+|---|---|
+| 构建时现场签发新密钥 | 明文放进包根 `bootstrap.key`（0600），库里只存哈希，版本记录上可见、可就地吊销（只影响未注册机器） |
+| 装机入口拒发 | `/api/v1/agent/install/*` 返回 409 `install_bundle_has_key`；只能登录管理端下载做离线包 / 镜像 |
+
+⚠️ 附带密钥的包可注册进本服务端；离线包发完即吊销该密钥。在线装机用不带密钥的版本，密钥由 `bootstrap.sh --bootstrap-key …` 给出。
+
+## 发布时的「高级选项」
+
+随包下发，写进装机台账与升级清单：
+
+| 选项 | 默认 | 取值 |
+|---|---|---|
+| 覆盖机器上已有的注册密钥 | 勾「附带密钥」时覆盖 | 旧密钥备份为 `bootstrap.key.replaced-<时间戳>`，回执写明路径 |
+| 升级模式 | `apply` | `apply`：下载→验签→切换→自动重启；`stage`：只下载验签；`off`：不升级 |
+| 更新机器上的 `agent.ini` | 全部「不改」 | 逐键：`不改` / `仅更新默认配置`（缺该键或值仍是上次安装器写的）/ `强制覆盖`；状态与凭据文件不动 |
+
+| 边界 | 处理 |
+|---|---|
+| 自升级只换程序，不改配置与注册密钥 | 改密钥 / 配置需重跑安装器 |
+| 镜像无发布公钥 | 默认 `apply` 降级为 `off` 并报出；显式 `apply` 无公钥报错 → 把 `.key/release-key.pub.json` 打进镜像 |
 
 ## 重装与卸载
 
-**重装 = 再跑一次安装器**，不用先卸载（见上面「幂等性」）：`agent.ini` 与状态目录里的
-凭据都留着，所以**配对关系不变**；机器上已有的统一注册密钥会被认出来，不必再传
-`--bootstrap-key`；版本变了才重启服务。
+重装 = 再跑一次安装器（保留 `agent.ini`、凭据、配对、已有密钥；版本变化才重启服务）：
 
 ```bash
 curl -fsSL http://<服务端>/api/v1/agent/install/bootstrap.sh \
   | sudo sh -s -- --server http://<服务端> --user <运行账号>
 ```
 
-`--user` 照旧显式给：`sudo` 下默认取 `SUDO_USER`，在考试机上那往往是管理员账号，
-不是选手。想连 `agent.ini` 一起按新默认重建，加 `--force-config`（教师改过的扫描目录会丢）。
+| 参数 | 说明 |
+|---|---|
+| `--user` | 必须显式给；`sudo` 下默认 `SUDO_USER`，常为管理员而非选手 |
+| `--force-config` | 按新默认重建 `agent.ini`；⚠️ 丢失教师改过的扫描目录 |
 
-**卸载**用 `install.py --uninstall`，命令与它删什么见文末「卸载 Agent」。安装器取不回来
-（服务端已经下线）时，手工删的清单与它一致：
+### 协议不兼容升级后全部重装
+
+服务端协议变更（如 tick 新增 `scanned_for`、`scan_complete` 必填、下发进度改为 `deploy_progress` / `deploy_done` / `deploy_failed` 按 `target_id`）后，旧 Agent 每次 tick 返回 422，不收代码、不收下发、收不到升级 → 见 [`design/08-milestones-and-open.md`](design/08-milestones-and-open.md) §10.5。
+
+1. 「Agent 发布」构建并铺开新版本。
+2. 每台考试机运行上面的重装命令。
+3. 重做镜像：替换镜像里的旧离线包（重新打包或从「Agent 发布」下载）；已固化 Agent 的镜像 / 还原卡母机重装后重新做镜像（先按「建镜像」删除身份文件）。
+4. 「机器配对」核对各机 Agent 版本与最近心跳。
+
+## 卸载 Agent
+
+```bash
+# 机器上一条命令（装机页有复制按钮；服务端地址与安装器 sha256 已嵌入脚本）
+curl -fsSL http://<服务端>/api/v1/agent/install/bootstrap.sh \
+  | sudo sh -s -- --uninstall --yes
+
+# 已有 install.py 时
+sudo python3 install.py --uninstall --dry-run   # 只列出要删的内容
+sudo python3 install.py --uninstall --yes       # 执行卸载
+```
+
+| 参数 | 说明 |
+|---|---|
+| `--yes` | 非交互时必需；交互时改为输入「syncoj-agent」确认 |
+| `--dry-run` | 预览，无需 `--yes` |
+| `--keep-state` | 保留状态目录与日志 |
+| `--keep-user` | 保留安装器用 `--user` 新建的系统账号 |
+
+⚠️ 会删除 `/etc/syncoj/bootstrap.key`、`release-key.pub.json`、状态目录里的本机身份与 token。不删除：选手桌面上的下发文件、`/tmp` 临时目录、运行账号及其家目录。
+
+离线包不含安装器；服务端已下线时手工卸载：
 
 ```bash
 sudo systemctl disable --now syncoj-agent syncoj-agent-enroll
@@ -299,146 +337,30 @@ sudo rm -f /etc/systemd/system/syncoj-agent.service \
 sudo systemctl daemon-reload
 sudo systemctl disable --now syncoj-agent-admin.path
 sudo rm -f /etc/systemd/system/syncoj-agent-admin.path /etc/systemd/system/syncoj-agent-admin.service
-sudo rm -rf /usr/lib/syncoj                     # root 管理单元的代码（安装器本身的一份拷贝）
-sudo rm -f /etc/sudoers.d/syncoj-uninstall      # 老版本留下的 sudoers 白名单（新版本不再装）
-sudo rm -rf /usr/local/lib/syncoj               # 远程卸载脚本
-sudo rm -rf /opt/syncoj /etc/syncoj             # 程序；配置、统一注册密钥、升级信任锚
-# 状态目录里是凭据与日志，确认不需要留档后再删
-sudo rm -rf /var/lib/syncoj
+sudo rm -rf /usr/lib/syncoj                     # root 管理单元代码
+sudo rm -f /etc/sudoers.d/syncoj-uninstall      # 旧版本的 sudoers 规则
+sudo rm -rf /usr/local/lib/syncoj               # 旧版本的远程卸载脚本
+sudo rm -rf /opt/syncoj /etc/syncoj             # 程序、配置、统一注册密钥、升级信任锚
+sudo rm -rf /var/lib/syncoj                     # ⚠️ 凭据与日志，确认无需留档后再删
 ```
 
-运行账号**不要删**：默认它就是选手的登录账号。安装器只删它自己用 `--user` 新建的系统
-账号（`--keep-user` 连这个也留下），手工卸载时也照此办理。
-
-### 全部重装 / 重做镜像（服务端升级到 2026-11 这一版时必做）
-
-阶段 1 的修复里有**破坏性的协议变更**：tick 上报新增 `scanned_for`，`scan_complete`
-改为必填，下发的进度与回执改按下发目标报（`deploy_progress` / `deploy_done` /
-`deploy_failed`，按 `target_id`，取代 `partials` / `completed_assets`）。服务端对报文
-是严格校验的，旧 Agent 每一次 tick 都会被 422 拒掉 —— **不收代码、不收下发，也收不到
-升级**；何况自更新在真机上本来就写不进 `/opt/syncoj`
-（[`design/08-milestones-and-open.md`](design/08-milestones-and-open.md) §10.5）。
-所以不能等它自己升上来：
-
-1. 服务端升级后，先在「Agent 发布」页构建并**铺开**新版本 —— `--from-server` 与自举脚本
-   只发已铺开的版本。
-2. **每一台**考试机按上面「重装」那条命令重跑一次安装器。配对与 `agent.ini` 都保留。
-3. **镜像里预置的东西一律重做**：
-   * 预先放进镜像的离线包（`install.py --bundle` 用的 tar.gz）是旧版本，重新打包或从
-     「Agent 发布」页下载新包，换掉再做镜像；
-   * 已经装好 Agent 再做成镜像 / 用还原卡固化的机器，每次开机都会还原回旧 Agent ——
-     在母机上重装之后**重新做镜像**（注意上面「建镜像时最容易犯的错」：做镜像前删掉
-     身份文件）。
-4. 装完在「机器配对」页看各机的 Agent 版本与最近心跳，确认没有掉队的。
+不要删除运行账号（默认即选手登录账号）。
 
 ## 排障
 
 ```bash
-systemctl status syncoj-agent          # 进程是否在跑
-journalctl -u syncoj-agent -n 100      # systemd 侧的启动期输出
-tail -f /var/lib/syncoj/agent.log      # Agent 自己的日志（自动轮转）
+systemctl status syncoj-agent          # 进程状态
+journalctl -u syncoj-agent -n 100      # systemd 启动期输出
+tail -f /var/lib/syncoj/agent.log      # Agent 日志（自动轮转）
 /usr/bin/python3 -E -s /opt/syncoj/current/run_agent.py \
     --config /etc/syncoj/agent.ini --check      # 只校验配置
 /usr/bin/python3 -E -s /opt/syncoj/current/run_agent.py \
-    --config /etc/syncoj/agent.ini --once       # 只跑一轮，前台看输出
+    --config /etc/syncoj/agent.ini --once       # 前台跑一轮
 ```
 
-> **必须走 `run_agent.py`，不能是 `syncoj_agent/main.py`。**
-> 后者使用包内相对导入，当脚本直接执行会报
-> `ImportError: attempted relative import with no known parent package`。
-> 而 `-E` 会连 `PYTHONPATH` 一起忽略，没法靠环境变量把包目录告诉解释器 ——
-> 所以只能靠启动器显式设置 `sys.path`。
->
-> 这也是 `--check` / `--once` 手工调试与 systemd 启动**必须用同一条命令**的原因：
-> 换一种启动方式得到的行为就不是真实行为。
+| 规则 | 违反后果 |
+|---|---|
+| 经 `run_agent.py` 启动，不直接运行 `syncoj_agent/main.py` | `ImportError: attempted relative import with no known parent package` |
+| 手工调试带 `-E -s`，与 systemd 用同一条命令 | 行为与线上不一致（`PYTHON*` 环境变量、user site-packages 生效） |
 
-> 注意 `-E -s`：忽略所有 `PYTHON*` 环境变量与 user site-packages。选手怎么
-> `pip install` 都污染不到 Agent。手工调试时也请带上。
-
-## 发版时附带统一注册密钥（可选）
-
-「Agent 发布」页构建版本时有一个勾选项：**附带统一注册密钥**。勾了之后：
-
-* 服务端在**构建那一刻现场签发一把新密钥**（库里照旧只存哈希），把明文放进包的根目录
-  `bootstrap.key`（0600），并把"这一版附带的是哪把"记在版本记录上；
-* 装出来的机器不用再手工拷密钥就能注册 —— 第一次开机就会出现在「机器配对」页；
-* 版本历史里能看见这把密钥，**就地可以吊销**（吊销只影响还没注册的机器，已注册的不受影响）。
-
-默认**不勾**，而且要理解它的后果：**附带密钥的包等于一张"能注册进这台服务端"的通行证**。
-装机入口（`/api/v1/agent/install/*`）**刻意不鉴权**（空机器上没有任何凭据可用），所以它
-**拒发**带密钥的包（409 `install_bundle_has_key`）：这种包只能在管理端登录后下载、做成离线包
-或镜像。要在线装机就铺开一个**不带**密钥的版本，密钥在命令行上给
-（`bootstrap.sh --bootstrap-key …`）。离线包拷出去就收不回来，发完就吊销那把密钥。
-
-## 发布时的「高级选项」
-
-除了「附带统一注册密钥」，构建卡片里还有一个折叠的**高级选项**，决定"机器上已有的东西
-要不要跟着改"。这些选择**随包带下去**（也写进装机台账与升级清单），所以机器那一侧真的会照做：
-
-| 选项 | 默认 | 含义 |
-|---|---|---|
-| **覆盖机器上已有的注册密钥** | 勾了「附带密钥」就**默认覆盖** | 用包里那把替换机器上旧的（旧的会**先备份**成 `bootstrap.key.replaced-<时间戳>`，回执里写明备份路径）。只在勾了「附带密钥」时才有意义 |
-| **升级模式** | **`apply`**（自动） | `apply` = 机器下载→验签→切换→**自动重启**；`stage` = 只下载验签、先不切换；`off` = 不升级 |
-| **更新机器上的 `agent.ini`** | 全部**不改** | 逐键三态：`不改` / `仅更新默认配置`（机器上缺这个键，或它的值还是上次安装器写下的那个，才更新）/ `强制覆盖`。状态与凭据文件**永远不动** |
-
-两条要记住的边界：
-
-* **升级只换程序，不动配置与注册密钥。** 自升级是运行账号在跑，而注册密钥是 root 只读的
-  —— 想换密钥或改配置，就**重跑安装器**（它有 root）。"发一版就把全机房的 `agent.ini`
-  一起改掉"不是这套东西的行为。
-* **升级模式默认 `apply`，但镜像里没有发布公钥时会降级成 `off` 并明确报出来**：没有信任锚
-  的机器验不了包，硬按 `apply` 走会让服务直接起不来、整批机器失联。显式写 `apply` 却没有
-  公钥仍然是错误 —— 那就该把 `.key/release-key.pub.json` 打进镜像。
-
-## 卸载 Agent
-
-**那台机器面前的一条命令**（推荐；装机页上也印着它，带复制按钮）：
-
-```bash
-curl -fsSL http://<服务端>/api/v1/agent/install/bootstrap.sh \
-  | sudo sh -s -- --uninstall --yes
-```
-
-服务端地址就是发这个脚本的那台（服务端发脚本时把自己的地址与安装器的 sha256 嵌进去，
-所以不用再抄一遍；**不再**读机器上的 `agent.ini` —— 那份文件不可信），把安装器抓到
-`mktemp -d` 建的临时目录、对过指纹再跑 —— **离线包里刻意不含安装器**，装完之后机器上只剩 `run_agent.py`，所以想卸载的第一步永远是"先把安装器
-弄回来"。想先看要删什么就别加 `--yes`，加 `--dry-run`。
-
-手上有安装器文件时也可以直接跑：
-
-```bash
-sudo python3 install.py --uninstall --dry-run   # 先看要删什么，什么都不改
-sudo python3 install.py --uninstall --yes       # 真卸
-```
-
-它删掉的不只是程序，还有三样**凭据**：`/etc/syncoj/bootstrap.key`（统一注册密钥，一把能注册
-整间机房的通行证）、`release-key.pub.json`（升级信任锚）、以及状态目录里的本机身份与 token。
-所以非交互时必须显式 `--yes`（`--dry-run` 不需要），交互时要把名字「syncoj-agent」打一遍；
-`--keep-state` 可以保留日志与状态（要复盘时用）。选手桌面上的下发文件、`/tmp` 临时目录、运行
-用户的家目录都**不动** —— 结尾会逐条说明。
-
-「文件下发」里的目标目录怎么填：
-
-| 要发的东西 | 目标目录 | 落点 |
-|---|---|---|
-| 题面、样例、须知（通用资料） | **留空** | `桌面/题面.zip` |
-| 某道题的附件、额外数据、模板 | `{player_no}/<题目名>` | `桌面/<准考证号>/<题目名>/数据.zip` |
-| 考场公告 | 随便（`NOTICE.md` 会被认出来） | 落在上面那个目录，**同时**显示在选手页「考场公告」 |
-
-目标目录是**自己填的模板**（没有"选一道题就自动填好"那套绑定：下发的是文件，不是题目的附属
-物，多数时候留空就够了）。「实际落点预览」那行会把模板代入第一位选手算出来。
-
-**考场公告就是一份下发的 `NOTICE.md`**：在「文件下发」页点「写考场公告」写正文，然后
-照常「下发」给选手。可选，没下发就没有公告。文件名大小写不敏感（`notice.md` 也算）；
-多份就取最后下发的那一份。
-
-**纯文本资产可以直接在页面上改正文**：表格里带「编辑」的那些（`.txt` / `.md` 这类，且
-不超过 1 MB）。改完服务端会把**已经发到机器上的那一份重新排队**，机器下一轮心跳就会
-拉到新正文 —— 所以别在考试中途改一份正在当测试数据用的文本文件。
-
-**到点自动结束**：场次填了「结束时间」的话，时间一到服务端会把它置为「已结束」，之后
-这台机器上的文件修改**不再同步**（上传会被拒绝）。开考时间是**不会**自动触发的 ——
-开考是教师的有意动作。把「结束时间」留空就不会自动结束。
-
-**下发资产一律原样落盘，服务端不解压**：题面和样例本身就是 zip，机器上就是
-`题面.zip` / `样例.zip`。要密码就把 `password.txt` 当普通资产一起发。
+服务端侧排查与更多现象 → 见 [`operate.md`](operate.md)「心跳停了怎么排查」。

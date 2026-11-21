@@ -234,7 +234,28 @@ def test_自举脚本就是仓库里那个文件(env) -> None:
     response = env.client.get("/api/v1/agent/install/bootstrap.sh")
 
     assert response.status_code == 200
-    assert response.content == packaging.bootstrap_path().read_bytes()
+    body = response.content.decode("utf-8")
+    # 两个占位符被换成了真值，其余与仓库里那个文件逐字相同
+    import hashlib
+
+    expected = packaging.bootstrap_path().read_text(encoding="utf-8")
+    expected = expected.replace(
+        'EMBEDDED_SERVER="__SYNCOJ_SERVER__"', 'EMBEDDED_SERVER="http://testserver"'
+    ).replace(
+        'INSTALLER_SHA256="__SYNCOJ_INSTALLER_SHA256__"',
+        'INSTALLER_SHA256="%s"' % hashlib.sha256(packaging.installer_path().read_bytes()).hexdigest(),
+    )
+    assert body == expected
+
+
+def test_自举脚本不嵌形状可疑的_Host(env) -> None:
+    """Host 头是请求方给的，而它要被嵌进一段以 root 执行的 shell。"""
+    response = env.client.get(
+        "/api/v1/agent/install/bootstrap.sh", headers={"Host": 'x";rm -rf /;"'}
+    )
+    assert response.status_code == 200
+    assert 'EMBEDDED_SERVER=""' in response.text
+    assert 'x";' not in response.text
 
 
 def test_自举脚本指着真的端点(env) -> None:
@@ -309,3 +330,20 @@ def test_路径常量与真实路由一致(env) -> None:
     assert ledger["bundle"] == agent_api.INSTALL_BUNDLE_PATH
     assert ledger["installer"] == agent_api.INSTALL_INSTALLER_PATH
     assert ledger["bootstrap"] == agent_api.INSTALL_BOOTSTRAP_PATH
+
+
+def test_夹带注册密钥的版本不经公开装机入口发(env) -> None:
+    """装机入口不鉴权、公开端口可达：带 bootstrap.key 的包从这里发等于把密钥公开。"""
+    from syncoj_server.models import AgentRelease, BootstrapKey
+
+    release = publish(env.client, env.headers, "3.1.4")
+    with env.ctx.db.session() as session:
+        key = BootstrapKey(key_hash="x" * 64, label="随包")
+        session.add(key)
+        session.flush()
+        session.get(AgentRelease, release["id"]).bootstrap_key_id = key.id
+
+    for url in (LEDGER, "/api/v1/agent/install/bundle"):
+        response = env.client.get(url)
+        assert response.status_code == 409, url
+        assert response.json()["code"] == "install_bundle_has_key"

@@ -154,3 +154,53 @@
 * **从题目模式推导"保存规则"给选手看**。服务端不知道每台机器的 `scan.roots` 与
   文件名前缀，推导出来的"把代码存到 X"很容易是错的，而一条错的操作指引比没有指引更
   坏。公告改成教师写一份 `NOTICE.md` 下发（../design/05-api-and-frontend.md §5.6）。
+
+### 10.5 重构遗留（2026-11 四路审计 + 方案盲审）
+
+已拍板的决策：特权模型改 root 管理单元；删除语义**按现状硬删**、改文档承认；传输层文档
+如实写明文；一人一机按考号查重（不建 person 表）；选手页手填保留但降级。
+
+**已完成**（细节见各提交与对应文档）：阶段 0（检查链路全绿、自更新止血）；阶段 1（回收 /
+下发 / 成绩 / 配对正确性）；阶段 4（列表 SQL 分页与聚合、审计索引、批量清理、前端轮询与
+概览聚合接口）；阶段 5（文档对账）。阶段 2 中：发布签名覆盖版本号与大小、未配对机器也能
+升级、带密钥的包不经公开装机入口、`bootstrap.sh` 加固、协议版本 + 426、迁移前备份、单元
+家目录不再用 `%h`、辅助件路径可配置并收回 `needs_layout`、`--skip-service` 管住注册单元、
+**root 管理单元**（升级切换与远程卸载经交接目录由 root 验签执行，Agent 恢复
+`NoNewPrivileges=yes`、删 sudoers 与 `/usr/local/lib/syncoj`，见 ADR-0012「重写」）。
+阶段 3 中：边沿触发的审计事件、删 `agent_status`、`DeployTask` 状态读时聚合 + `cancelled_at`、
+blob 提交后回收（含删资产 / 选手 / 场次）、删除语义前端文案、注册表身份随解析更新与待配对
+心跳记在线、tick 运行参数每轮只读一次。
+
+**还没做**：
+
+* **systemd 245 实机冒烟**（Ubuntu 20.04 / NOI Linux 2.0 虚拟机）：安装、升级（经 root 管理
+  单元）、回滚、卸载、加固项、家目录可写。托管 CI runner 的 systemd 版本不对，证明不了这些。
+  在它之前，root 管理单元与 `NoNewPrivileges` / 家目录这几处都只是按说明书推断正确。
+* **启动守卫与回滚移到 root 一侧**：Agent 侧的 `_guard_boot` 要写 `install_root`，真机上写
+  不进去；改由管理单元（`ExecStartPre=+` 或切换时记录）执行，计数文件不在 install_root 下。
+  核算 `StartLimitBurst` 与守卫重启次数；主单元改 `Restart=always`。
+* **按 uuid 认回已配对机器**需原机离线或出示旧 token（与还原卡场景、注册重试窗口对齐）；
+  可由 root 管理单元持有凭据。`agent.ini` 改 `root:root 0644`、删 `config_policy` 逐键合并器、
+  注册单元不再以 root 执行发布目录里的代码。
+* **安装器拆包**：`syncoj_install/` 包 + zipapp 单文件分发，先 plan 后 apply；顺带 root 对选手
+  目录递归 chown 改安全实现（`fwalk` + `follow_symlinks=False`）、重跑不再无条件重启服务、
+  `--from-dir` 与 `build_bundle` 共用文件清单、`mkdtemp` 泄漏、删 `--service-name`；届时测试
+  宿主沙箱（`conftest._installer_never_touches_the_host`）可收回（现在留作安全网）。
+* **结构**：`api/agent.py` 拆出 `services/tick.py`（返回 `TickOutcome`）与 `services/upload.py`；
+  tar 安全解包、RSA 验签、`parse_version` 各留一份源码，安装器用构建生成的 vendored 拷贝 +
+  逐字节一致测试（路径校验除外，按硬规则保持两份独立实现）。
+* 小项：`agent/syncoj_agent/config.py` 里 "http:// + verify_tls" 告警分支是空的 `pass`；
+  `install.py` 参数组说"三选一"实际四个来源；导出接口 `include_deleted` 默认 False 而界面默认
+  True；选手删掉的文件在 `source/` 里仍留着、照样被评测（要不要清待定）。
+
+**新想法（仅记录，未评估）**：
+
+* **不指定服务端**：服务端上线时在局域网广播自己的存在，考试端 Agent 持续监听并响应
+  （监考端广播问一次、学生端答一次，Agent 不主动扫描）。是否可行待评估 —— 现有的是反方向
+  （Agent 主动发现、服务端用发布私钥签应答，见 07 §7.3），反过来要考虑广播被伪造（仍需验签）、
+  跨网段 / 交换机隔离、Agent 常驻监听端口与沙箱 `RestrictAddressFamilies` 的关系。
+* **系统自带沙箱评测**：不依赖 LemonLime / Arbiter，服务端自己编译运行评测。
+
+**推迟（本轮不做）**：`api/admin.py` 与 `agent/main.py` 的整体拆分；zip 改密码改后台任务
+（纯 Python 约 1.9 MB/s、同步跑在请求线程）；TLS + pinning；全局 person 表；
+"blob 已有就直接物化免上传"（要限定在本人历史出现过的 sha，需单独设计）。

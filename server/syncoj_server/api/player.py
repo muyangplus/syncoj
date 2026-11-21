@@ -36,6 +36,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -44,6 +45,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..services.ratelimit import RateLimitExceeded
 from ..context import AppContext
 from ..errors import ApiError
 from ..models import (
@@ -145,6 +147,16 @@ def player_context(
         )
 
     now = utcnow()
+    if slug and number:
+        # 手填查找按 IP 限速：考号通常连号，不限的话一个循环就能翻遍整场
+        client_ip = request.client.host if request.client else "unknown"
+        try:
+            ctx.player_lookup_limiter.check(client_ip, time.monotonic())
+        except RateLimitExceeded as exc:
+            raise ApiError(
+                429, "rate_limited", "查找太频繁了，请稍后再试",
+                {"retry_after": exc.retry_after},
+            )
     with ctx.db.session() as session:
         if slug and number:
             contest_row, player, matched_by = _resolve_explicit(session, slug, number)
@@ -290,11 +302,14 @@ def _build_context(
             starts_at=_iso(contest_row.starts_at),
             ends_at=_iso(contest_row.ends_at),
         ),
+        # 手填查找（explicit）只回考号：知道"场次 + 考号"的不一定是本人，而姓名、
+        # 座位、分组是别人的个人信息 —— 曾经一个循环就能拿到全班座位表。
+        # 按来源 IP 认出本机（machine）的才回全部。
         player=PlayerProfileOut(
             player_no=player.player_no,
-            name=player.name,
-            seat=player.seat,
-            group_name=player.group_name,
+            name=player.name if matched_by == "machine" else None,
+            seat=player.seat if matched_by == "machine" else None,
+            group_name=player.group_name if matched_by == "machine" else None,
         ),
         # 没下发公告就是 None（不是空对象）：前端只判一次"有没有"，
         # 不需要分辨"{} 和 null 哪个是没公告"。

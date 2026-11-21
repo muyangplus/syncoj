@@ -20,6 +20,7 @@ FastAPI 默认的 ``HTTPException`` 会把 ``detail`` 原样塞进响应体，�
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Dict, Optional
 
@@ -27,6 +28,8 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from .protocol import MIN_AGENT_PROTOCOL_VERSION, VERSIONED_AGENT_PATHS, outdated_detail
 
 __all__ = [
     "ApiError",
@@ -65,6 +68,7 @@ CODE_BY_STATUS = {
     410: "gone",
     413: "payload_too_large",
     422: "validation_error",
+    426: "agent_outdated",
     429: "rate_limited",
     500: "internal_error",
     503: "unavailable",
@@ -97,6 +101,10 @@ ERROR_CODES = {
     "machine_already_bound": "这台机器已经配对给别人了",
     "machine_mismatch": "凭据与这台机器对不上（凭据可能被复制到了别的机器）",
     "stale_upload": "这份内容已经过期，服务端手上是更新的版本",
+    #: 上传了一个台账里**没有在等上传**的路径：没被扫描上报过、不属于任何题目、
+    #: 或者已经存好了。上传端点只收 tick 要过的东西 —— 选手账号读得到 token，
+    #: 不能让它绕过对账往 source/ 里写任意路径。
+    "upload_not_requested": "这个文件当前不在待上传列表里",
     "roster_entry_taken": "这个人已经有一台机器了",
     "no_active_contest": "还没有包含你的场次",
     "ambiguous_contest": "你同时在多个进行中的场次里，需要先指定一个",
@@ -159,6 +167,8 @@ ERROR_CODES = {
     #: 它不是死码，是缺了一条保护。
     "roster_in_use": "这份名单上还有机器绑着人，删掉会让它们全部解除配对",
     "install_unavailable": "这台服务端还没有铺开任何可装机的 Agent 版本",
+    "install_bundle_has_key": "当前铺开的版本夹带了注册密钥，公开装机入口不发它",
+    "agent_outdated": "这台机器上的 Agent 协议太旧，要重新装机",
     "installer_unavailable": "这台服务端不提供安装器（它不在源码仓库里运行）",
     #: 机器不在台账里。**不是** ``not_found`` 的重复：这个码能让人一眼看出
     #: "那条记录已经不在了"，而这在机器相关的接口上是最常见的失败原因
@@ -332,6 +342,30 @@ def _field_label(loc) -> str:
     return out
 
 
+def _outdated_agent(request: Request, exc: RequestValidationError) -> Optional[int]:
+    """Agent 的 enroll / tick 校验失败时，先看是不是旧协议：是就返回它报的版本。
+
+    旧 Agent 的报文里有新服务端不认的字段（``extra="forbid"``），根本走不到处理
+    函数里的版本检查 —— 不在这里拦，现场看到的只是一个"请求内容不合法"。
+    """
+    if request.url.path not in VERSIONED_AGENT_PATHS:
+        return None
+    # 用异常里带的请求体，不再读一次请求：处理器拿到的可能是一个新的 Request，
+    # 在某些 Starlette 版本上再读会一直等下去
+    body = getattr(exc, "body", None)
+    if isinstance(body, (bytes, str)):
+        try:
+            body = json.loads(body)
+        except ValueError:
+            return None
+    if not isinstance(body, dict):
+        return None
+    reported = body.get("protocol_version", 0)
+    if not isinstance(reported, int) or isinstance(reported, bool):
+        return None
+    return reported if reported < MIN_AGENT_PROTOCOL_VERSION else None
+
+
 def describe_validation_error(exc: RequestValidationError) -> str:
     """把 pydantic 的 422 揉成一句话。
 
@@ -431,6 +465,9 @@ def install_error_handlers(app: FastAPI) -> None:
     async def _validation_error(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
+        outdated = _outdated_agent(request, exc)
+        if outdated is not None:
+            return _body(426, "agent_outdated", outdated_detail(outdated), {"protocol_version": outdated})
         # 回显原始错误列表：前端表单要据此把红框标到具体某个输入框上，
         # 而那句汇总的中文只够放在提示条的标题里
         return _body(

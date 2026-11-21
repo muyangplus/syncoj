@@ -116,6 +116,10 @@ def reconcile_scan(
             )
         )
         entries = entries[: settings.max_files_per_scan]
+        # 截掉的那部分服务端没看见 —— 它们不是"被删了"。曾经这里仍按 Agent 报的
+        # scan_complete 做删除判定，被截掉的文件全被标成已删除（多扫描根时 Agent
+        # 按根各算上限，总数可以超过这里）。
+        scan_complete = False
 
     # 一次性读出该选手的全部台账，避免逐文件查库（N+1）
     rows: List[SourceFile] = list(
@@ -159,6 +163,7 @@ def reconcile_scan(
                 player_id=player_id,
                 rel_path=path,
                 sha256=sha256,
+                scanned_sha256=sha256,
                 size=size,
                 mtime=mtime,
                 revision=0,
@@ -185,15 +190,24 @@ def reconcile_scan(
                 )
             )
 
-        content_changed = row.sha256 != sha256
-        if content_changed or not row.content_stored:
+        # 两个指纹分开记（见 SourceFile.scanned_sha256）：
+        #   scanned_sha256 —— 这一轮看到的；只有它在这里被改写
+        #   sha256         —— 已存下的那一版；只有上传成功才改写
+        # 判据是"看到的 ≠ 存下的"，所以一轮没传上，下一轮照样要 —— 不会因为
+        # "上一轮已经记下新指纹"而判成"没变"。
+        previous_scan = row.scanned_sha256 or row.sha256
+        content_changed = previous_scan != sha256
+        row.scanned_sha256 = sha256
+        if not row.content_stored:
+            # 还没存过任何一版：sha256 只是"待上传的那一版"的占位，跟着扫描走
+            row.sha256 = sha256
+        if not row.content_stored or row.sha256 != sha256:
             # 注意：revision 在**上传成功**时才递增，这里不动。
             # 否则"扫描发现变了但上传失败"会白白消耗版本号。
             result.need_upload.append(path)
-            if content_changed:
-                result.changed_files += 1
+        if content_changed:
+            result.changed_files += 1
 
-        row.sha256 = sha256
         row.size = size
         row.mtime = mtime
         if (now - row.last_seen_at).total_seconds() >= LAST_SEEN_REFRESH_SECONDS:

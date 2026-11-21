@@ -78,7 +78,7 @@ watch(visible, (open) => {
 })
 
 /**
- * 导入接口返回的是**动作结果**，不是一页数据（`docs/api-conventions.md` §2）：
+ * 导入接口返回的是**动作结果**，不是一页数据（`docs/reference/api-conventions.md` §2）：
  * 服务端回的是 `{created, updated, players}` —— "新建了几条、更新了几条"才是
  * 教师想看的。`players` 里是受影响的行，紧随其后的"应用名单/批量配对"要用
  * 它们的 id，不该再查一次。

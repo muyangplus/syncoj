@@ -33,6 +33,7 @@ from sqlalchemy.orm import Session
 
 from ..models import Agent, BootstrapKey, Contest, EventLog, Player, RosterEntry, utcnow
 from ..security import hash_bootstrap_key, hash_pair_code, hash_token
+from ..security import new_pair_code as _new_pair_code
 
 __all__ = [
     "PAIR_CODE_TTL_SECONDS",
@@ -42,6 +43,8 @@ __all__ = [
     "bind_machine",
     "enroll_machine",
     "find_unbound_by_pair_code",
+    "machines_holding_player_no",
+    "unique_pair_code",
     "fingerprint_duplicates",
     "issue_pair_code",
     "pair_code_is_valid",
@@ -142,30 +145,73 @@ def pair_code_is_valid(agent: Agent, raw_code: str, now) -> bool:
     return agent.pair_code_hash == hash_pair_code(raw_code)
 
 
-def find_unbound_by_pair_code(
-    session: Session, raw_code: str, now
-) -> Optional[Agent]:
-    """按配对码找一台未配对的机器。
+def _unbound_with_codes(session: Session) -> List[Agent]:
+    return list(
+        session.execute(
+            select(Agent).where(
+                Agent.roster_entry_id.is_(None),
+                Agent.pair_code_hash.isnot(None),
+                Agent.revoked_at.is_(None),
+            )
+        ).scalars()
+    )
+
+
+def find_unbound_by_pair_code(session: Session, raw_code: str, now) -> List[Agent]:
+    """按配对码找未配对的机器，返回**全部**命中的。
+
+    正常情况下至多一台（发码时查过重，见 :func:`unique_pair_code`）。返回列表而不是
+    "第一个"，是为了让调用方在多台命中时**拒绝**：六位数字的码在 50 台机器里
+    撞上的概率约千分之一，曾经的做法是静默绑第一台 —— 把 A 的身份绑给了 B。
 
     逐个比对哈希，而不是按哈希直接查表 —— 后者需要一个"码 → 机器"的索引，
     那意味着要存明文或者可逆的东西，不值得为这点性能换。
     未配对的机器通常只有个位数。
     """
-    for agent in session.execute(
-        select(Agent).where(
-            Agent.roster_entry_id.is_(None),
-            Agent.pair_code_hash.isnot(None),
-            Agent.revoked_at.is_(None),
-        )
-    ).scalars():
-        if pair_code_is_valid(agent, raw_code, now):
-            return agent
-    return None
+    return [
+        agent for agent in _unbound_with_codes(session)
+        if pair_code_is_valid(agent, raw_code, now)
+    ]
+
+
+def unique_pair_code(session: Session, now, length: int, attempts: int = 20) -> str:
+    """生成一个与所有**仍有效**的未配对机器的码都不同的新码。"""
+    taken = {
+        agent.pair_code_hash
+        for agent in _unbound_with_codes(session)
+        if agent.pair_code_expires_at is None or agent.pair_code_expires_at >= now
+    }
+    code = _new_pair_code(length)
+    for _ in range(attempts):
+        if hash_pair_code(code) not in taken:
+            return code
+        code = _new_pair_code(length)
+    return code  # 极端情况下（码空间几乎占满）退回一个随机码；绑定时仍会查重拒绝
 
 
 # --------------------------------------------------------------------------- #
 # 指纹
 # --------------------------------------------------------------------------- #
+
+
+def machines_holding_player_no(
+    session: Session, player_no: str, exclude_agent_id: Optional[int] = None
+) -> List[Agent]:
+    """已经绑到**这个考号**（不论哪份名单里的条目）的未作废机器。
+
+    "一人一机"必须按考号判，不能按名单条目判：机器的身份解析按 ``player_no``
+    跨名单、跨场次找人（``api/deps.resolve_machine``），而班级名单和考场名单同时
+    含同一个人是常态。按条目判时，两台机器分别绑到两份名单里的 S001，tick 出来
+    都是 S001 —— 正是"两台机器往同一个 source/ 目录静默写代码"。
+    """
+    stmt = (
+        select(Agent)
+        .join(RosterEntry, Agent.roster_entry_id == RosterEntry.id)
+        .where(RosterEntry.player_no == player_no, Agent.revoked_at.is_(None))
+    )
+    if exclude_agent_id is not None:
+        stmt = stmt.where(Agent.id != exclude_agent_id)
+    return list(session.execute(stmt).scalars())
 
 
 def _machine_by_uuid(session: Session, machine_uuid: Optional[str]) -> Optional[Agent]:
@@ -294,6 +340,17 @@ def enroll_machine(
             matched_by = None
 
     if agent is None:
+        if machine_uuid:
+            # 早先的"移除待配对"只打 revoked_at、把行留着；而 machine_uuid 有唯一约束、
+            # 认回时又不看被作废的行 —— 于是那台机器再注册就撞约束 500，永远回不来。
+            # 新建之前把同一个 UUID 的**已作废**行清掉（未作废的会在上面被认回）。
+            for stale in session.execute(
+                select(Agent).where(
+                    Agent.machine_uuid == machine_uuid, Agent.revoked_at.is_not(None)
+                )
+            ).scalars():
+                session.delete(stale)
+            session.flush()
         agent = Agent(
             token_hash=token_hash,
             machine_id=machine_id,
@@ -389,13 +446,7 @@ def bind_machine(
             code="machine_already_bound",
         )
 
-    taken = session.execute(
-        select(Agent).where(
-            Agent.roster_entry_id == entry.id,
-            Agent.revoked_at.is_(None),
-            Agent.id != agent.id,
-        )
-    ).scalars().all()
+    taken = machines_holding_player_no(session, entry.player_no, exclude_agent_id=agent.id)
     if taken:
         raise BootstrapRejected(
             "%s 已经有一台机器了（%s）。要换机器请先作废那一台，或用「改派」。"

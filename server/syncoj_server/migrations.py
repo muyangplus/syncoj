@@ -28,7 +28,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Callable, List, Sequence, Tuple
+import sqlite3
+import time
+from pathlib import Path
+from typing import Callable, List, Optional, Sequence, Tuple
 
 from sqlalchemy import Engine, inspect, text
 
@@ -519,6 +522,103 @@ def _migration_012_agent_diagnostics(engine: Engine) -> None:
     _add_column(engine, "agent", "diagnostics_requested_at", "DATETIME")
 
 
+def _migration_013_source_scanned_sha(engine: Engine) -> None:
+    """台账把"最近一次扫描到的"与"已存下的"内容指纹分开（``source_file.scanned_sha256``）。
+
+    曾经只有一列 ``sha256``，tick 在**上传之前**就把它改成新扫描值、却不复位
+    ``content_stored``：那一轮只要没传上，之后就再也不要求上传（见模型上的说明）。
+
+    回填：老行的"最近一次扫描"就是 ``sha256`` —— 老代码每次 tick 都会把它改成
+    扫描值。对于 ``content_stored=1`` 却已经被那个缺陷改坏了指纹的行，回填之后
+    两列相等，仍然判成"已存"：坏掉的那一版找不回来（内容从没到过服务端），
+    但**下一次**选手保存就会被正确地要求上传。
+    """
+    if "source_file" not in _tables(engine):
+        return
+    _add_column(engine, "source_file", "scanned_sha256", "VARCHAR(64)")
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE source_file SET scanned_sha256 = sha256 WHERE scanned_sha256 IS NULL")
+        )
+
+
+def _migration_014_deploy_failure_count(engine: Engine) -> None:
+    """下发目标记连续失败次数（``deploy_target.failure_count``）。
+
+    机器的下载失败曾经只发一条事件、从不回写目标：失败的目标永远显示"进行中"，
+    管理端的"重试"按钮几乎用不上。只加一列可空整数：老行没有失败记录，
+    NULL 读作 0 就是正确的初始状态。
+    """
+    if "deploy_target" not in _tables(engine):
+        return
+    _add_column(engine, "deploy_target", "failure_count", "INTEGER")
+
+
+def _migration_015_deploy_task_cancelled_at(engine: Engine) -> None:
+    """下发任务改为读时聚合状态：加 ``cancelled_at``、删掉存储的 ``status``。
+
+    ``deploy_task.status`` 曾是目标状态的一份缓存，回执、取消、重试、重排四处
+    各自去改，取消接口又按它判断 —— 对不上的时候界面与行为各说各的。现在任务
+    状态每次从目标聚合，唯一要单独记的是「教师取消过」，即 ``cancelled_at``。
+
+    三步，顺序不能换：
+
+    1. 加可空列 ``cancelled_at``；
+    2. 回填：老库里 ``status='cancelled'`` 的任务记成已取消。取消的确切时刻从没
+       记过，用建任务时间代替 —— 这一列只用来判断"取消过没有"，时刻不参与判断；
+    3. 按模型重建表，删掉 ``status``（删列只能重建，配方见 :func:`_rebuild_table`，
+       外键关着做，``deploy_target`` 的行不会被级联删掉）。
+
+    全新库由 ``create_all`` 直接建出没有 ``status`` 的表，第 2、3 步都是空操作。
+    """
+    if "deploy_task" not in _tables(engine):
+        return
+    _add_column(engine, "deploy_task", "cancelled_at", "DATETIME")
+    if "status" not in _columns(engine, "deploy_task"):
+        return
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE deploy_task SET cancelled_at = created_at "
+                "WHERE status = 'cancelled' AND cancelled_at IS NULL"
+            )
+        )
+    _rebuild_table(engine, "deploy_task")
+
+
+#: 迁移 016 要补的索引。名字与模型上 ``index=True`` 生成的一致（``ix_<表>_<列>``），
+#: 全新库由 ``create_all`` 建出同名索引，这里的 ``IF NOT EXISTS`` 就是空操作。
+_EVENT_LOG_INDEXES: Sequence[Tuple[str, str]] = (
+    ("ix_event_log_level", "level"),
+    ("ix_event_log_category", "category"),
+)
+
+
+def _migration_017_drop_agent_status(engine: Engine) -> None:
+    """删 ``agent_status``：后台任务每几秒把内存注册表刷进去，但从来没有任何代码读它。
+
+    注释里说它"让服务端重启后 Web 不会看到空白"，实际上重启后的在线列表来自
+    内存注册表（首个 tick 就填上），这张表只是白白占写入。外键关掉再删（见
+    :func:`_drop_table`）—— 它是 ``agent`` 的子表，不会牵连父表。
+    """
+    _drop_table(engine, "agent_status")
+
+
+def _migration_016_event_log_indexes(engine: Engine) -> None:
+    """审计事件按级别、类别建索引。
+
+    审计页按这两列筛、清理按级别删，而这张表是全库长得最快的一张（每台机器
+    每轮心跳都可能写）。只加索引、不动数据，可以在任何时候重跑。
+    """
+    if "event_log" not in _tables(engine):
+        return
+    with engine.begin() as conn:
+        for name, column in _EVENT_LOG_INDEXES:
+            conn.execute(
+                text("CREATE INDEX IF NOT EXISTS %s ON event_log (%s)" % (name, column))
+            )
+
+
 MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
     (1, "统一密钥注册 + 名单库所需的结构", _migration_001_enrollment),
     (2, "机器永久绑定名单条目；去掉注册码链路", _migration_002_roster_binding),
@@ -564,6 +664,31 @@ MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
         "诊断回传：机器的一次性请求标记与诊断包表",
         _migration_012_agent_diagnostics,
     ),
+    (
+        13,
+        "代码台账分开记录最近一次扫描与已存下的内容指纹",
+        _migration_013_source_scanned_sha,
+    ),
+    (
+        14,
+        "下发目标记连续下载失败次数",
+        _migration_014_deploy_failure_count,
+    ),
+    (
+        15,
+        "下发任务状态改为读时聚合：记取消时刻、删掉存储的状态列",
+        _migration_015_deploy_task_cancelled_at,
+    ),
+    (
+        16,
+        "审计事件按级别、类别建索引",
+        _migration_016_event_log_indexes,
+    ),
+    (
+        17,
+        "删掉只写不读的在线状态快照表 agent_status",
+        _migration_017_drop_agent_status,
+    ),
 ]
 
 LATEST_VERSION = MIGRATIONS[-1][0] if MIGRATIONS else 0
@@ -586,7 +711,39 @@ def _set_version(engine: Engine, version: int) -> None:
         conn.execute(text("PRAGMA user_version=%d" % int(version)))
 
 
-def migrate(engine: Engine, create_missing_tables: bool = True) -> List[str]:
+def _backup_before_migrate(engine: Engine, version: int) -> Optional[Path]:
+    """用 SQLite 在线备份把整库拷到 ``<库名>.bak-v<旧版本>-<时间>``，返回备份路径。
+
+    只对文件库做（内存库没有可备份的东西）。备份失败**不阻止**迁移：拒绝启动的
+    代价（考场上服务端起不来）比"这一次没有备份"更大 —— 但要大声说出来。
+    """
+    database = engine.url.database
+    if not database or database == ":memory:":
+        return None
+    source = Path(database)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    target = source.with_name("%s.bak-v%03d-%s" % (source.name, int(version), stamp))
+    try:
+        raw = engine.raw_connection()
+        try:
+            destination = sqlite3.connect(str(target))
+            try:
+                driver = getattr(raw, "driver_connection", None) or raw.connection  # type: ignore[attr-defined]
+                driver.backup(destination)
+            finally:
+                destination.close()
+        finally:
+            raw.close()
+    except Exception as exc:  # pragma: no cover - 备份失败只告警
+        log.error("迁移前备份数据库失败（%s），继续迁移：%s", target, exc)
+        return None
+    log.warning("数据库结构要从 %03d 升到 %03d，已先备份到 %s", version, LATEST_VERSION, target)
+    return target
+
+
+def migrate(
+    engine: Engine, create_missing_tables: bool = True, target: Optional[int] = None
+) -> List[str]:
     """把库升到最新结构，返回实际执行过的步骤说明。
 
     幂等：已经在最新版本上时是空操作（只建缺失的新表）。
@@ -599,6 +756,12 @@ def migrate(engine: Engine, create_missing_tables: bool = True) -> List[str]:
     而 ``create_all`` 只建缺失的表、不碰已有的表，所以对老库是安全的。
     反过来的话，迁移步骤会撞上"表还不存在"。
     """
+    before = current_version(engine)
+    if before < LATEST_VERSION and _tables(engine):
+        # 已有数据、而且要动结构：先备份。迁移步骤写错（或者中途断电）时，
+        # 这是现场唯一能回到"昨天能用的那个库"的东西。新库（没有表）不备份。
+        _backup_before_migrate(engine, before)
+
     if create_missing_tables:
         from .models import Base
 
@@ -612,6 +775,10 @@ def migrate(engine: Engine, create_missing_tables: bool = True) -> List[str]:
     for number, description, step in MIGRATIONS:
         if number <= version:
             continue
+        if target is not None and number > target:
+            # 只给测试用：停在某个版本上，检查那一刻的库（比如"重建表没有顺着外键
+            # 吃掉子表"的那些看守用例，子表就是后来被删掉的 agent_status）
+            break
         log.info("应用迁移 %03d：%s", number, description)
         step(engine)
         _set_version(engine, number)

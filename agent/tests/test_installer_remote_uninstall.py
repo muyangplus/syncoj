@@ -94,6 +94,7 @@ def test_机器身份是_0644(installer_module, workdir: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.real_system_paths
 def test_sudoers_内容只有一行固定路径(installer_module) -> None:
     content = installer_module.render_uninstall_sudoers("noi")
 

@@ -26,6 +26,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 __all__ = [
+    "AgentOutdated",
+    "PROTOCOL_VERSION",
     "AgentClient",
     "AgentError",
     "NetworkError",
@@ -64,10 +66,18 @@ DIAGNOSTICS_TIMEOUT_SECONDS = 15
 #: Windows 上直接是"主机中的软件中止了一个已建立的连接"。跨端回归测试
 #: （``server/tests/test_e2e_agent.py`` 里那条 keep-alive 用例）会在 Windows 上
 #: 走到这条路 —— 不带上它，那条用例在开发机上是红的、目标机上才是绿的。
+#:
+#: ``BrokenPipeError`` 是**同一类竞态在 Linux 上的另一种表现**：对端关掉之后，
+#: 如果请求体（tick 的 JSON、上传的 multipart）还没写完，``send`` 先撞上 EPIPE，
+#: 根本走不到读响应那一步。空闲节奏 30s 远大于 uvicorn 的 5s keep-alive，所以
+#: 空闲时几乎每一轮的第一条请求都会撞上它；漏掉它，那条 keep-alive 回归用例在
+#: Linux 上恒红（而在 Windows 上恒绿 —— 那边报的是 Reset/Aborted）。
+#: 请求根本没送达服务端，重发是安全的。
 RETRYABLE_CONNECTION_ERRORS = (
     http.client.RemoteDisconnected,
     ConnectionResetError,
     ConnectionAbortedError,
+    BrokenPipeError,
     http.client.BadStatusLine,
     http.client.IncompleteRead,
 )
@@ -113,12 +123,21 @@ class NetworkError(AgentError):
     """连接失败/超时/中断/5xx —— **可重试**，退避后下一轮再试。"""
 
 
+#: 协议版本：只在**破坏性**协议变更时加一，并同步服务端 ``syncoj_server/protocol.py``
+#: （``test_agent_contract`` 对账）。服务端对低于它最低要求的回 426 ``agent_outdated``。
+PROTOCOL_VERSION = 2
+
+
 class ProtocolError(AgentError):
     """服务端返回了不符合协议的内容，或一个我们不认识的 ``code``。
 
     记日志 + 等下一轮，**不要**重新注册：认不出来的东西最可能是版本不匹配，
     而重新注册会换掉凭据，把一个"看不懂"升级成"用不了"。
     """
+
+
+class AgentOutdated(ProtocolError):
+    """426 ``agent_outdated``：协议版本低于服务端的最低要求，要重装。"""
 
 
 class AuthError(AgentError):
@@ -245,6 +264,16 @@ class MultipartBody:
 
     def __len__(self) -> int:
         return self._length
+
+    def rewind(self) -> None:
+        """回到流的开头，供连接竞态后的重试重新发送。
+
+        ``http.client`` 会把请求体读到底；不复位的话，重试只发出请求头和一个
+        声称 N 字节的 Content-Length，服务端干等到超时 —— 那一轮被白白拖住。
+        """
+        self.close()
+        self._index = 0
+        self._offset = 0
 
     def read(self, size: int = -1) -> bytes:
         if size is None or size < 0:
@@ -502,6 +531,9 @@ class AgentClient:
         last_error: Optional[BaseException] = None
         for attempt in range(retries + 1):
             connection = self._connection(transfer, timeout)
+            if attempt and hasattr(body, "rewind"):
+                # 流式请求体（multipart）在上一次尝试里已经被读过了
+                body.rewind()  # type: ignore[union-attr]
             try:
                 connection.request(method, url, body=body, headers=sent_headers)
                 response = connection.getresponse()
@@ -816,6 +848,7 @@ def build_enroll_payload(
     ``machine_id`` **仅供人工辨认**，不参与身份判定。
     """
     payload: Dict[str, object] = {
+        "protocol_version": PROTOCOL_VERSION,
         "machine_id": machine_id,
         "hostname": hostname,
         "agent_version": agent_version,
@@ -967,6 +1000,11 @@ def _as_error(status: int, data: object, context: str) -> AgentError:
 
     if status == 413:
         return PayloadTooLarge(message, **kwargs)
+
+    if status == 426 or code == "agent_outdated":
+        # 服务端说这个 Agent 太旧：自己升级不了（升级清单就在 tick 响应里，而 tick
+        # 已经被拒），只能重装。记日志、按普通协议错误退避，别重新注册。
+        return AgentOutdated(message, **kwargs)
 
     if status >= 500:
         return NetworkError(message, **kwargs)

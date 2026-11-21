@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import os
 import shutil
 import sys
 import uuid
@@ -54,7 +55,7 @@ def _basetemp_must_not_be_our_workdir_root(pytestconfig) -> None:
         "--basetemp（%s）把 TMP_ROOT（%s）包住了，或者就等于它。\n"
         "pytest 会清空 basetemp，于是这里正在用的临时目录会被一起删掉；\n"
         "表现是 Windows 上删文件失败引发的 PermissionError。\n"
-        "请在 scripts/check.sh 里把 basetemp 指到 .pytest-tmp/basetemp/ 这类独立目录。"
+        "请在 scripts/check.py 里把 basetemp 指到 .pytest-tmp/basetemp/ 这类独立目录。"
         % (base, ours)
     )
 
@@ -143,3 +144,62 @@ def installer_module():
     sys.modules["syncoj_installer"] = module
     spec.loader.exec_module(module)
     return module
+
+
+# --------------------------------------------------------------------------- #
+# 安装器沙箱：测试绝不碰宿主的系统路径
+# --------------------------------------------------------------------------- #
+#
+# ``install.py`` 里有几处**写死的系统路径**（``/usr/local/lib/syncoj``、
+# ``/etc/sudoers.d/syncoj-uninstall``），而且 ``--skip-service`` 管不住注册单元的
+# ``systemctl enable/start``。以 root 跑测试时（容器里的 CI 通常就是 root），整机
+# 安装用例会**真的往宿主写 sudoers、真的去 enable 单元** —— 审计时实测发生过。
+#
+# 根治是让所有路径由一个 ``Layout(root)`` 派生（重构计划阶段 2）；在那之前，
+# 这里对**每一个**测试兜底：
+#
+# * 把那几处常量改指到本次会话的临时目录；
+# * ``systemctl`` 一律"不存在"（测试从不需要真的管理宿主的服务）；
+# * 以 root 跑时模拟"用 sudo 装机"（``SUDO_USER``）：默认运行账号就不会算成
+#   root，否则 preflight 会按设计拒绝，整批用例因为"跑测试的人是谁"而红。
+
+SANDBOX_SYSTEM_ROOT = REPO_ROOT / ".pytest-tmp" / "agent-sysroot"
+
+#: 以 root 跑测试时模拟的装机人。它在宿主上多半不存在 —— chown 失败会被安装器
+#: 报成警告，这正是"用户名有了、账号还没建"的真实情形。
+SANDBOX_SUDO_USER = "syncoj-test"
+
+
+def pytest_configure(config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "real_system_paths: 只**渲染**单元 / sudoers 文本、断言其中的真实系统路径；"
+        "沙箱不改写路径常量（systemctl 与 SUDO_USER 仍然隔离）。"
+        "带这个标记的用例不得写盘到那些路径。",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _installer_never_touches_the_host(installer_module, monkeypatch, request) -> None:
+    root = SANDBOX_SYSTEM_ROOT / uuid.uuid4().hex[:8]
+    if request.node.get_closest_marker("real_system_paths") is None:
+        helper = root / "usr" / "local" / "lib" / "syncoj"
+        monkeypatch.setattr(installer_module, "HELPER_DIR", helper)
+        monkeypatch.setattr(installer_module, "SELF_UNINSTALL_PATH", helper / "self_uninstall.sh")
+        monkeypatch.setattr(installer_module, "VERIFY_TOKEN_PATH", helper / "verify_uninstall_token.py")
+        monkeypatch.setattr(
+            installer_module, "SUDOERS_PATH", root / "etc" / "sudoers.d" / "syncoj-uninstall"
+        )
+        monkeypatch.setattr(installer_module, "DEFAULT_ADMIN_DIR", root / "usr" / "lib" / "syncoj")
+    real_which = installer_module._which
+    monkeypatch.setattr(
+        installer_module, "_which",
+        lambda name: None if name == "systemctl" else real_which(name),
+    )
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is not None and geteuid() == 0:
+        monkeypatch.setenv("SUDO_USER", SANDBOX_SUDO_USER)
+    try:
+        yield
+    finally:
+        shutil.rmtree(root, ignore_errors=True)

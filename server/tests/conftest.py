@@ -60,7 +60,7 @@ def _basetemp_must_not_be_our_workdir_root(pytestconfig) -> None:
         "--basetemp（%s）把 TMP_ROOT（%s）包住了，或者就等于它。\n"
         "pytest 会清空 basetemp，于是这里正在用的临时目录会被一起删掉；\n"
         "表现是 Windows 上删文件失败引发的 PermissionError。\n"
-        "请在 scripts/check.sh 里把 basetemp 指到 .pytest-tmp/basetemp/ 这类独立目录。"
+        "请在 scripts/check.py 里把 basetemp 指到 .pytest-tmp/basetemp/ 这类独立目录。"
         % (base, ours)
     )
 
@@ -110,19 +110,64 @@ def do_tick(client, token: str, entries, *, machine_id: str, **kwargs) -> dict:
     """
     stats = {"disk_free": 10 ** 10, "last_error": None, "queue": 0}
     stats.update(kwargs.pop("stats", {}) or {})
+    completed = kwargs.pop("completed_assets", None)
+    if completed:
+        # 测试里的简写："这几个资产已经下好了"。协议早已改成按**下发目标**回报、
+        # 并带落地内容的 sha256，这里替测试把它翻译成真回执（服务端只认本人的目标）。
+        kwargs.setdefault("deploy_done", done_receipts(client, completed))
     payload = {
+        "protocol_version": 2,
         "agent_version": "0.1.0",
         "machine_id": machine_id,
         "ts": 1767225600,
         "scan_root": "/home/student/code",
         "scan": entries,
-        "partials": [],
+        "scan_complete": True,
         "stats": stats,
     }
     payload.update(kwargs)
     response = client.post("/api/v1/agent/tick", json=payload, headers=agent_headers(token))
     assert response.status_code == 200, response.text
     return response.json()
+
+
+def done_receipts(client, asset_ids) -> list:
+    """这些资产的全部"还在派发中"的下发目标 → ``deploy_done`` 回执（带当前内容 sha256）。"""
+    from sqlalchemy import select
+
+    from syncoj_server.models import Asset, DeployStatus, DeployTarget, DeployTask
+
+    with client.app.state.ctx.db.session() as session:
+        rows = session.execute(
+            select(DeployTarget.id, Asset.sha256)
+            .join(DeployTask, DeployTarget.task_id == DeployTask.id)
+            .join(Asset, DeployTask.asset_id == Asset.id)
+            .where(
+                DeployTask.asset_id.in_(list(asset_ids)),
+                DeployTarget.status.in_((DeployStatus.PENDING, DeployStatus.READY)),
+            )
+        ).all()
+    return [{"target_id": int(target_id), "sha256": sha} for target_id, sha in rows]
+
+
+def declared_upload(client, enrolled: dict, path: str, content: bytes, filename: str = None):
+    """按协议上传一个文件：先用一次 tick 声明它，再 POST /files。
+
+    上传端点只收"台账里正在等上传"的路径（``upload_not_requested``），所以测试
+    不能再跳过 tick 直接传。声明用的 tick 报 ``scan_complete=false``：只声明这一个
+    文件，不让服务端把别的文件判成删除。时间窗之外 tick 不对账，上传随后由门禁
+    以 contest_ended / contest_not_started 拒绝 —— 与真机上的顺序一致。
+    """
+    do_tick(
+        client, enrolled["token"], [scan_entry(path, content)],
+        machine_id=enrolled["machine_id"], scan_complete=False,
+    )
+    return client.post(
+        "/api/v1/agent/files",
+        data={"path": path, "sha256": sha256_of(content)},
+        files={"file": (filename or path.rsplit("/", 1)[-1], content, "application/octet-stream")},
+        headers=agent_headers(enrolled["token"]),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -165,7 +210,7 @@ def enroll_machine(
     machine_uuid = machine_uuid or uuid.uuid4().hex
     response = client.post(
         "/api/v1/agent/enroll",
-        json={
+        json={"protocol_version": 2,
             "bootstrap_key": bootstrap_key,
             "machine_id": machine_id,
             "machine_uuid": machine_uuid,

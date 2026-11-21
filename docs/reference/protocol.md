@@ -62,9 +62,11 @@ Agent 只应对下面这几个 `code` 做分支，其余一律"记日志 + 等�
 | **401** | **凭据本身无效** | 清空本地凭据，重新 `/enroll` |
 | **403** | **凭据有效，但还没配对/无权访问** | **不要重新注册**。显示配对码，等下一轮 |
 | 404 | 资源不存在 | 记日志，不重试 |
-| 409 | **内容已不是当前版本**（迟到旧版本） | **静默丢弃**，下一轮 tick 会拿到正确版本 |
+| 409 | 上传被拒：`stale_upload`（不是最近一次扫描到的那一版）、`upload_not_requested`（这个路径当前不在待上传列表里）、`contest_not_started` / `contest_ended`（时间窗之外） | **静默丢弃**，下一轮 tick 会说清现在要什么 |
+| 411 | 上传 / tick 没带 `Content-Length` | 不该发生（Agent 总带长度） |
 | 410 | 服务端资源内容缺失 | 上报审计事件 |
-| 413 | 文件超过策略上限 | 跳过该文件，不重试 |
+| 413 | 文件超过策略上限；或请求体超过 `max_upload_request_bytes` / `max_tick_request_bytes`（按 `Content-Length` 在读请求体之前就挡） | 跳过该文件，不重试 |
+| **426** | `agent_outdated`：`enroll` / `tick` 的 `protocol_version` 低于服务端最低要求（缺省按 0 算）。旧 Agent 的报文即使字段对不上（本该 422）也先判成 426 | 记日志、按协议错误退避；**自己升级不了**（升级清单就在被拒的 tick 响应里），只能重装 |
 | 429 | 触发限速，带 `Retry-After` | 按 `Retry-After` 退避 |
 | 5xx | 服务端故障 | 指数退避重试 |
 
@@ -136,6 +138,7 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
 
 ```json
 {
+  "protocol_version": 2,
   "bootstrap_key": "43 字符的镜像内置密钥",
   "machine_id": "0123456789abcdef0123456789abcdef",
   "machine_uuid": "3f2a…",
@@ -145,6 +148,10 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
   "os_info": "Linux 5.4.0 Ubuntu 20.04.6 LTS"
 }
 ```
+
+`protocol_version` 是协议版本（`enroll` 与 `tick` 都带）：只在**破坏性**协议变更时加一，
+服务端 `syncoj_server/protocol.py` 与 Agent `client.PROTOCOL_VERSION` 各一份、契约测试对账。
+2 = 2026-11 那一代（`scanned_for`、下发按目标回执、`scan_complete` 必填）。
 
 `bootstrap_key` 必填。它从 **root 只读**的单独文件读（默认
 `/etc/syncoj/bootstrap.key`），**不要**写进选手账号可读的 `agent.ini`。
@@ -226,6 +233,7 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
 
 ```json
 {
+  "protocol_version": 2,
   "agent_version": "0.1.0",
   "machine_id": "0123456789abcdef0123456789abcdef",
   "hostname": "exam-pc-01",
@@ -235,18 +243,23 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
     { "path": "code/main.cpp", "sha256": "ab12…", "size": 1234, "mtime": 1767225500 }
   ],
   "scan_complete": true,
-  "partials": [ { "asset_id": 42, "bytes_done": 3145728 } ],
-  "completed_assets": [42],
+  "deploy_progress": [ { "target_id": 42, "bytes_done": 3145728 } ],
+  "deploy_done": [ { "target_id": 7, "sha256": "cd34…" } ],
+  "deploy_failed": [ { "target_id": 9, "reason": "写盘失败: [Errno 28] No space left on device" } ],
+  "scanned_for": { "player_no": "S001", "contest_slug": "mock-1" },
   "stats": { "disk_free": 10737418240, "last_error": null, "queue": 0 }
 }
 ```
 
 | 字段 | 说明 |
 |---|---|
-| `scan` | **全量**文件索引，不含内容。路径 = `<扫描根目录名>/<相对路径>` |
-| `scan_complete` | 本次扫描是否完整覆盖了所有根目录。**为 `false` 时服务端跳过删除判定** |
-| `partials` | 本地未完成下载的已下载字节数。Agent 重启后从磁盘实况重建 |
-| `completed_assets` | 本地已确认完整的下发资源 id。**显式上报**而不由服务端从 `partials` 推断 —— "分片不见了"既可能是下完了，也可能是被清理了 |
+| `scan` | **全量**文件索引，不含内容。路径 = `<扫描根目录名>/<相对路径>`，**NFC 归一化**（服务端按 NFC 存、按 NFC 回 `need_upload`；Agent 上传时按本地真实文件名打开）。文件名不是合法 UTF-8 的文件不进 `scan`，只在 `stats.last_error` 里说一声 |
+| `scan_complete` | **必填**。本次扫描是否完整覆盖了所有根目录。**为 `false` 时服务端跳过删除判定**。服务端因 `scan` 超过上限而截断时，按 `false` 处理（截掉的文件服务端没看见，不是被删了）。Agent 的 `max_files` 是**整台机器**的总数，不是每个根各一份 |
+| `deploy_progress` | 上一轮派下来的作业在本机分片里已有多少字节（**按下发目标** `target_id`）。只用于管理端的进度条 |
+| `deploy_done` | 已落地的下发目标，**连同落地内容的 sha256**。服务端只认与资产**当前**内容一致的回执：教师在线改了正文之后，迟到的旧版回执不会把新内容标成已完成。**显式上报**而不由服务端从"没有进度了"推断 —— "分片不见了"既可能是下完了，也可能是被清理了 |
+| `deploy_failed` | 本轮没下成的目标与原因（≤300 字）。连续失败 5 次服务端判 `failed`、不再派发，原因显示在管理端；内容变更、手工重试，或 `deploy_progress` 显示分片比上次长（断网续传有进展）都清零 |
+| *(时间窗)* | 场次设了开考 / 结束时间时，窗口 `[starts_at, ends_at)` 之外的 tick **不对账**：台账不动、`need_upload` 为空、按空闲节奏回 `next_tick_seconds`。机器照常在线、照常拿下发文件 |
+| `scanned_for` | 这一轮的扫描根是按**哪个身份**展开的（`{player_no}` / `{contest_slug}`）。与服务端此刻解析出的身份不同 = 机器刚被改派或换了场次，这份扫描是上一个人的目录：服务端**整份不对账**（不进台账、`need_upload` 为空，记一条 `scan_identity_mismatch`），响应照常带新身份；Agent 发现身份变了就重算扫描根、清掉哈希缓存，本轮不再上传下载。缺省按"一致"处理 |
 | `stats.queue` | 待上报审计事件数 |
 
 > ⚠️ `scan` 必须是完整扫描。若 Agent 因权限错误等原因漏扫了一批文件，
@@ -261,16 +274,15 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
   "need_upload": ["code/main.cpp"],
   "deploy_jobs": [
     {
+      "target_id": 42,
       "asset_id": 42,
       "url": "/api/v1/agent/assets/42",
       "sha256": "cd34…",
       "size": 10485760,
       "dest": "题面.zip",
-      "offset": 3145728,
       "mode": "overwrite"
     }
   ],
-  "cancel_assets": [],
   "upgrade": null,
   "diagnostics_request": false,
   "config": { "…见 §7…" },
@@ -282,6 +294,13 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
   "contest_slug": "mock-1"
 }
 ```
+
+**下发作业按下发目标（`target_id`）派发**，回执也按它报（同一资产可以发到同一个人
+的两个目录，按资产计的话一条回执会把两个都标完成）。作业**不带续传偏移**：续传位置
+只看 Agent 本地分片（`deploy_root/.syncoj-parts/<sha256>.part`，按内容命名，内容一换
+自然从头来）。服务端在收到 `deploy_done` 之前**每一轮都派发**，哪怕机器报的进度已经
+满长 —— 落盘前崩溃过一次的机器只有再收到作业才会完成最后一步。已取消的目标不再派发，
+下载接口也不再给。
 
 **`diagnostics_request` 是一次性字段**：管理端点过「要一份」之后，这个字段在
 **下一次**心跳里为 `true`，服务端在返回它的同时就把标记清掉 —— 机器没收到就让教师
@@ -298,6 +317,9 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
   `scan` + `true` 与"选手把所有文件都删了"在报文里无法区分，服务端只能靠"记得丢弃"
   避免误判，而这一行在重构中最容易漏。报 `false` 让歧义在协议层不存在，代价是零。
 - `need_upload` 与 `deploy_jobs` 一律为空
+- `upgrade` **照常给**：装好后迟迟没配对的机器同样要能换上修好的版本。`upgrade`
+  只有 `version` / `url` / `sha256` / `signature` / `size` / `notes`；安装策略（密钥、
+  配置、升级模式）以**包内** `install_policy.json` 为准，不在清单里
 - `claimed=false` 时响应里**带上 `pair_code`**（每次 tick 都会确认它还有效；
   过期就发一个新的，理由见 §1 —— 心跳是未配对机器唯一稳定的上行通道）
 
@@ -350,7 +372,7 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
 
 | 字段 | 位置 | 说明 |
 |---|---|---|
-| `path` | form | POSIX 相对路径，须与 tick 中上报的一致 |
+| `path` | form | POSIX 相对路径，须与 tick 中上报的一致，并且**此刻在台账的待上传列表里**（否则 409 `upload_not_requested`，内容一个字节都不落盘）。已存好的同一份内容重传是幂等成功，不加 `revision` |
 | `sha256` | form | **文件内容的** sha256（不是 tick 里那个的简单复制，见下） |
 | `file` | file | 文件内容 |
 
@@ -362,11 +384,16 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
 
 ### 旧版本保护（重要）
 
-服务端会比对 `sha256` 与台账中该文件当前记录的版本：
+服务端会比对 `sha256` 与台账中该文件**最近一次扫描到的**版本（`scanned_sha256`）：
 
-- **一致** → 接受，`revision += 1`
-- **不一致** → `409` + `code=conflict`，`details.reason = "stale"`，
-  `details.expected` = 服务端记录值
+- **一致** → 先落到 `source/`，再记成已存下，`revision += 1`
+- **不一致** → `409` + `code=stale_upload`，`details.reason = "stale"`，
+  `details.expected` = 最近一次扫描到的 sha256
+
+台账分开记"最近一次扫描到的"与"已存下的"两个指纹：tick 只改前者，上传成功才改
+后者；两者不等就一直出现在 `need_upload` 里。所以**某一轮没传上的新版本，下一轮
+照样会被要求**（曾经只有一个指纹，tick 先改写它，那一轮没传上就再也不要了）。
+落盘失败（磁盘满、`source/` 里同名路径是个目录）时台账不动、返回 500，下一轮照样再要。
 
 这是断网补传 / 乱序重传场景下的正确性保证：**迟到的旧内容绝不能覆盖新版本**。
 Agent 收到 409 应当静默丢弃，下一轮 tick 自然会拿到真正需要的版本。

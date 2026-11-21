@@ -463,7 +463,7 @@ def test_吊销附带密钥后注册被拒而版本记录还在(build_env: Simpl
     raw = _bundle_bootstrap_key(blob_bytes(build_env.ctx, built["sha256"])).decode().strip()
     denied = build_env.client.post(
         "/api/v1/agent/enroll",
-        json={"bootstrap_key": raw, "machine_id": "m-after-revoke"},
+        json={"protocol_version": 2, "bootstrap_key": raw, "machine_id": "m-after-revoke"},
     )
     assert denied.status_code == 403, denied.text
     assert denied.json()["code"] == "bootstrap_key_revoked"

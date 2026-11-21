@@ -359,7 +359,7 @@ def test_bootstrap_key_created_by_init_actually_works(
 
     response = client.post(
         "/api/v1/agent/enroll",
-        json={
+        json={"protocol_version": 2,
             "bootstrap_key": raw,
             "machine_id": "machine-from-init",
             "hostname": "pc-init",
@@ -401,7 +401,7 @@ def test_init_re_registers_a_bootstrap_key_whose_hash_is_gone(
     with TestClient(app) as probe:
         response = probe.post(
             "/api/v1/agent/enroll",
-            json={"bootstrap_key": bootstrap.read_text(encoding="utf-8").strip(),
+            json={"protocol_version": 2, "bootstrap_key": bootstrap.read_text(encoding="utf-8").strip(),
                   "machine_id": "machine-after-reset"},
         )
     assert response.status_code == 200, response.text
@@ -444,7 +444,7 @@ def test_init_does_not_resurrect_a_revoked_key(
         # 端到端再确认一次：这把密钥现在注册不了
         rejected = probe.post(
             "/api/v1/agent/enroll",
-            json={"bootstrap_key": (isolated_key_dir / keys.BOOTSTRAP_KEY_NAME)
+            json={"protocol_version": 2, "bootstrap_key": (isolated_key_dir / keys.BOOTSTRAP_KEY_NAME)
                   .read_text(encoding="utf-8").strip(),
                   "machine_id": "machine-revoked"},
         )

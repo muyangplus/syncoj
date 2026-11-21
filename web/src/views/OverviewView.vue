@@ -4,7 +4,7 @@ import { ElMessageBox } from 'element-plus'
 
 import { agentApi, authApi, playerApi, rosterApi, scoreApi } from '@/api'
 import type { AdminHealth } from '@/api'
-import type { AgentRuntimeOut, PlayerOut, ScoreMatrixOut } from '@/api/types'
+import type { AgentRuntimeOut, PlayerOut, PlayerProgressOut } from '@/api/types'
 import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
 import DataTable from '@/components/DataTable.vue'
 import DiagnosticsDialog from '@/components/DiagnosticsDialog.vue'
@@ -28,7 +28,7 @@ const contest = useContestStore()
  * 而教师在用的正是这种画面做判断。
  */
 const agents = ref<AgentRuntimeOut[]>([])
-const matrix = ref<ScoreMatrixOut | null>(null)
+const progress = ref<PlayerProgressOut[]>([])
 const health = ref<AdminHealth | null>(null)
 
 const list = useList<PlayerOut>({
@@ -37,16 +37,17 @@ const list = useList<PlayerOut>({
     const contestId = contest.currentId
     // 还没选场次：列表空着但不报错 —— "没选场次"不是错误
     if (!contestId) return null
-    const [players, agentRows, scoreMatrix, serverHealth] = await Promise.all([
+    const [players, agentRows, progressPage, serverHealth] = await Promise.all([
       playerApi.list(contestId, { limit, offset }, signal),
       // 机器列表也走信封；一个场次的机器数量天然有界，一次取满
       agentApi.list(contestId, { limit: 500 }, signal),
-      scoreApi.matrix(contestId),
+      // 交题进度与选手列表同序同页：只取这一页人的几个计数，整张成绩矩阵只在成绩页拉
+      scoreApi.progress(contestId, { limit, offset }, signal),
       // 服务端级的总览：它跨所有场次，与这一页的统计口径不同，所以要分开说
       authApi.health().catch(() => null),
     ])
     agents.value = agentRows.items
-    matrix.value = scoreMatrix
+    progress.value = progressPage.items
     health.value = serverHealth
     return players
   },
@@ -82,29 +83,14 @@ const progressByPlayer = computed(() => {
     number,
     { submitted: number; missing: number; pending: number; total: number }
   >()
-  const current = matrix.value
-  if (!current) return map
-
-  const declared = new Set(
-    (current.columns ?? []).filter((column) => column.declared).map((column) => column.ident),
-  )
-  const total = declared.size
-
-  for (const row of current.rows ?? []) {
-    let submitted = 0
-    let missing = 0
-    let pending = 0
-    for (const cell of row.cells ?? []) {
-      if (!declared.has(cell.problem)) continue
-      if (cell.parse_status === 'missing') {
-        // 交了没评测 vs 根本没交 —— 前者不用管，后者要去找人
-        if (cell.submitted) pending += 1
-        else missing += 1
-      } else {
-        submitted += 1
-      }
-    }
-    map.set(row.player_id, { submitted, missing, pending, total })
+  // 「交了没评测」与「根本没交」由服务端分开数好 —— 前者不用管，后者要去找人
+  for (const row of progress.value) {
+    map.set(row.player_id, {
+      submitted: row.submitted,
+      missing: row.missing,
+      pending: row.pending,
+      total: row.total,
+    })
   }
   return map
 })

@@ -42,6 +42,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     settings = settings or default_settings()
     ctx = AppContext.create(settings)
     ctx.db.create_all()
+    _resign_releases(ctx)
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -85,6 +86,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     app.include_router(admin_api.router)
 
     _install_public_port_gate(app)
+    _install_agent_body_limits(app)
     _remember_public_url(app, ctx)
 
     @app.exception_handler(PathValidationError)
@@ -121,27 +123,27 @@ def _remember_public_url(app: FastAPI, ctx: AppContext) -> None:
 
     * **回环**（``127.0.0.1`` / ``localhost``）永远不记。把它当成对外地址是这里
       最坏的一种错：50 台机器会各自连自己，现场只有"注册不上"，没有任何线索。
-    * **只记成功的请求**（``< 400``）。少了这一条，局域网里任何人都能发一个
-      ``Host: 1.2.3.4:9`` 的匿名请求把这里污染掉 —— 之后所有新打的包都会内嵌
-      那个地址、发现应答也会报它，等于让外人替我们挑服务器地址。
+    * **只记登录了的教师发来的请求**（``require_admin`` 通过时会在
+      ``request.state`` 上留标记）。曾经的判据是"成功的管理端或探活请求"，而
+      ``/healthz`` 与 ``/admin/health`` 都不鉴权、恒回 200 —— 局域网里任何一个
+      学生发一个 ``Host: 6.6.6.6:9`` 的匿名请求就能把这里污染掉，之后打的离线包
+      会内嵌那个地址、发现应答也会报它，等于让学生替全机房挑服务器。
       （更可信的那一路是"从来源 IP 反推本机地址"，它由内核给出，伪造不了，
       在 :func:`discovery.describe_advertised_url` 里排在前面。）
-    * 只认管理端与探活路径：Agent 的 Host 也可能到达，但那不能当权威 ——
-      手工填错的地址只会被拒，不会成为真相。
+    * 协议一律按 ``http`` 记，不信 ``X-Forwarded-Proto``：服务端本身不跑 TLS，
+      这个头只可能是客户端自己写的。
 
     只记最后一个，不做多数投票：教师在考场上换一次网线（比如从 Wi-Fi 换到
     有线）之后，**新的那个**才是对的。
     """
-    observed_prefixes = ("/api/v1/admin", "/healthz")
 
     @app.middleware("http")
     async def _capture_host(request: Request, call_next):
         response = await call_next(request)
-        if response.status_code < 400 and request.url.path.startswith(observed_prefixes):
+        if response.status_code < 400 and getattr(request.state, "admin_authenticated", False):
             host = (request.headers.get("host") or "").strip()
             if host and not _is_loopback_host(host):
-                scheme = (request.headers.get("x-forwarded-proto") or "http").split(",")[0].strip()
-                new_hint = "%s://%s" % (scheme or "http", host)
+                new_hint = "http://%s" % host
                 if new_hint != ctx.public_url_hint:
                     ctx.public_url_hint = new_hint
                     # **把算出来的地址直接打出来**：现场第一个问题永远是"这台服务端
@@ -236,6 +238,71 @@ def _install_public_port_gate(app: FastAPI) -> None:
             # 回 404 而不是 403：这个端口上**没有**这个接口，不是"你不配"。
             # 后者等于告诉你"管理接口在别处，去另一个端口试试"。
             return errors.error_response(404, "not_found", "Not Found")
+        return await call_next(request)
+
+
+def _resign_releases(ctx: AppContext) -> None:
+    """按当前签名格式重签库里已有的发布记录（启动时跑一次，幂等）。
+
+    发布签名的对象从"只签 sha256"换成了 ``release_signing_message``（含版本号与
+    大小）。库里旧格式签名的记录在新 Agent 上一律验不过 —— 教师看到的是"铺开了
+    却没有一台升级"。PKCS#1 v1.5 签名是确定性的，所以每次启动都算一遍、只有不同
+    才写回，不需要额外的"已迁移"标记。没配签名私钥就什么都不做（也签不了）。
+    """
+    if ctx.signing_key is None:
+        return
+    from sqlalchemy import select
+
+    from .models import AgentRelease
+    from .services.signing import b64url_encode, release_signing_message
+
+    with ctx.db.session() as session:
+        for row in session.execute(select(AgentRelease)).scalars():
+            try:
+                message = release_signing_message(row.version, row.sha256, int(row.size))
+            except ValueError as exc:
+                log.warning("发布记录 %s 无法按新格式重签（%s），保持原样", row.version, exc)
+                continue
+            signature = b64url_encode(ctx.signing_key.sign(message))
+            if signature != row.signature:
+                row.signature = signature
+                log.info("发布记录 %s 已按新签名格式重签", row.version)
+
+
+def _install_agent_body_limits(app: FastAPI) -> None:
+    """Agent 的两个"大请求体"端点：按 ``Content-Length`` 在**读请求体之前**挡掉。
+
+    FastAPI 解析 multipart / JSON 时会先把整个请求体收下来，处理函数里的大小检查
+    来得太晚 —— 那时内存与临时文件已经被占满了。Agent 的凭据属于选手账号，选手
+    读得到 token，所以这里按"对端不可信"设防：
+
+    * 没有 ``Content-Length``（分块传输）一律拒收：Agent 从来都带长度，
+      不带长度的只可能是别的东西；
+    * 超过上限回 413（``payload_too_large``）。
+
+    上限：上传 = ``max_upload_request_bytes``（曾经只是配置里的一个数，没有任何
+    代码读它）；tick = ``max_tick_request_bytes``。
+    """
+    #: 路径 -> 配置项名。**每个请求现读**，不在装配时把数值抄下来。
+    limits = {
+        "/api/v1/agent/files": "max_upload_request_bytes",
+        "/api/v1/agent/tick": "max_tick_request_bytes",
+    }
+
+    @app.middleware("http")
+    async def _limit_agent_bodies(request: Request, call_next):
+        key = limits.get(request.url.path) if request.method == "POST" else None
+        if key is not None:
+            limit = int(getattr(request.app.state.ctx.settings, key))
+            raw = request.headers.get("content-length")
+            if raw is None or not raw.isdigit():
+                return errors.error_response(
+                    411, "bad_request", "请求必须带 Content-Length"
+                )
+            if int(raw) > limit:
+                return errors.error_response(
+                    413, "payload_too_large", "请求体 %s 字节，超过上限 %d" % (raw, limit)
+                )
         return await call_next(request)
 
 

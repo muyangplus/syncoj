@@ -1,16 +1,25 @@
 ## 7. 运维与装机
 
-安装器做成**幂等三入口、同一份逻辑**：
+安装器做成**幂等多入口、同一份逻辑**：只有一个 `agent/packaging/install.py`
+（没有 `install.sh`，也没有 `--mode`），入口由"安装包从哪来"决定：
 
 ```bash
-install.sh --mode=offline|online|image
+python3 install.py --from-server --server http://<服务端>   # 从服务端拿已铺开的版本
+python3 install.py --bundle <tar.gz> --sha256 <校验和>       # 离线包 / 镜像预装
+python3 install.py --download-url <URL> --sha256 <校验和>    # 任意 URL
+python3 install.py --from-dir <已解开的 Agent 目录>
+curl … /api/v1/agent/install/bootstrap.sh | sudo sh -s -- …  # 在线自举：取回 install.py 再 --from-server
+python3 install.py --uninstall [--yes] [--dry-run]           # 卸载
 ```
+
+完整参数与步骤见 [`../install-agent.md`](../install-agent.md)。
 
 - 检测已装版本 → 存在则原地升级，不存在则全量安装
 - 幂等：重复执行结果一致；凭据丢失自动重新 enroll（配对关系**不受影响** —— 那
   是服务端按 `machine_uuid` / 硬件指纹认回来的，不依赖机器上的任何文件）
-- 离线包 = tar.gz（Agent 目录 + systemd unit + 配置模板），不需要 pip、不需要网络
-- 在线自举 = 拉 tar.gz + 校验 sha256 后走同一条路径
+- 离线包 = tar.gz（`syncoj_agent/` + `run_agent.py` 启动器，**不含安装器**；systemd 单元与
+  `agent.ini` 由安装器现场生成），不需要 pip、不需要网络
+- 在线自举 = `bootstrap.sh` 取回 `install.py`，再由它拉 tar.gz、对照台账校验 sha256 后走同一条路径
 
 装机时的三个坑（都已修，保留在这里防止改回去）：
 
@@ -97,7 +106,7 @@ sha256 前 12 位、以及操作人。`EventLog` 没有管理员外键（它记�
 交给 Agent 自己的 `verify_bundle` 验签验摘要 → `safe_extract_tar` 解开。全程用目标机
 上会跑的那份代码，没有一步是"再实现一遍"。信任锚取的是**包里内嵌的那份**而
 不是密钥目录里再读一次 —— 于是「`.key/` 那对文件是否配套」「公钥有没有真的内嵌进去」
-「签名对象是不是 sha256 的十六进制串」这三件事任何一件错，它都会红。
+「签名对象是不是 `release_signing_message` 那段文本」这三件事任何一件错，它都会红。
 
 
 **判据是"这个哈希在库里登记了没有"，不是"文件在不在"。** 密钥明文在 `.key/`、
@@ -207,6 +216,13 @@ sha256 前 12 位、以及操作人。`EventLog` 没有管理员外键（它记�
 
 ### 7.4 远程卸载：管理端点一下，机器自己清干净
 
+> **2026-11 重写**：机器侧不再经过 sudo。Agent 把令牌写进 `<状态目录>/handoff/request.json`，
+> root 管理单元（`syncoj-agent-admin.path` → `.service` → `install.py --admin-handoff`）
+> no-follow 读取、自己验签后走 `--uninstall` 同一条路。下文"机器侧的执行链"与"为此必须
+> 放开的两处沙箱"是被替换掉的 v1，留作历史；现行做法见
+> [ADR-0012](../decisions/ADR-0012-remote-uninstall-authorization.md)「重写（2026-11）」。
+> 仍待 systemd 245 实机冒烟。
+
 **起点是权限**：Agent 以选手账号运行（../design/00-decisions.md §0），而卸载要删的 `/opt/syncoj`、`/etc/syncoj`
 （里面有统一注册密钥）、systemd 单元全是 root 的。所以"按钮 → Agent 自己删"这条链
 缺一件东西 —— root 权限，而给谁、怎么给，决定了这套东西安不安全。
@@ -238,7 +254,7 @@ root 删除的凭据留在 `syncoj.db` 里，而备份、误传、随手拷走�
 只会让前端多一个没有分支价值的分支。这条也是"心跳要上报 `release_public_key`"的全部
 理由。卸载与配对状态**无关**：要卸的可能是配错人的机器，也可能是台还没认领的测试机。
 
-**机器侧的执行链**：
+**机器侧的执行链（v1，已被 root 管理单元替换）**：
 
 1. `/etc/sudoers.d/syncoj-uninstall` 只允许一条命令、且**没有参数**
    （`<运行账号> ALL=(root) NOPASSWD: <固定路径>`）。写之前先 `visudo -c -f` 校验：
@@ -261,10 +277,11 @@ root 删除的凭据留在 `syncoj.db` 里，而备份、误传、随手拷走�
 运行账号在 DAC 上写不进去，唯一能用上它们的是"令牌验过签的那个 root 脚本"。
 同时也正因为如此，**不选另外两条路**：`nsenter` 进 PID 1 的 mount namespace 是往
 沙箱里开一条逃逸通道、还依赖 util-linux 的在场；`PathExists=` 触发的独立 root 单元
-则要求令牌**落一次盘**。另外脚本**不调用 `systemctl`**：单元里的
-`RestrictAddressFamilies=AF_INET AF_INET6` 挡掉了 AF_UNIX，systemd 的 D-Bus 本来就
+则要求令牌**落一次盘**。另外脚本**不依赖 `systemctl`**（只 best-effort 地调一次
+`disable` / `daemon-reload`，失败不管）：单元里的
+`RestrictAddressFamilies=AF_INET AF_INET6` 挡掉了 AF_UNIX，systemd 的 D-Bus 多半
 连不上，而"禁用"的效果本来就是去掉那个软链，直接删更省事也少一个失败点。
 
 **审计里不写令牌。** 那枚令牌能在那台机器上换一次 root 删除，抄进事件表等于把一把
-一次性钥匙写进一份到处被导出、被翻看的日志里 —— 与"审计不写 zip 密码"（../design/05-api-and-frontend.md §5.4）
+一次性钥匙写进一份到处被导出、被翻看的日志里 —— 与"审计不写 zip 密码"（../design/05-api-and-frontend.md §5.5）
 是同一条纪律。

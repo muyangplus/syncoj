@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Dict, List, Sequence, Tuple
+from typing import List, Sequence, Tuple
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -17,6 +17,8 @@ from ..paths import PathValidationError, validate_relpath
 from ..schemas import DeployJob
 
 __all__ = [
+    "MAX_CONSECUTIVE_FAILURES",
+    "apply_deploy_reports",
     "collect_deploy_jobs",
     "expand_dest_template",
     "validate_dest_template",
@@ -99,17 +101,23 @@ def validate_dest_template(raw: str) -> str:
     return text
 
 
+#: 连续这么多次下载失败就判 FAILED、不再派发（管理端可以手工重试）。
+MAX_CONSECUTIVE_FAILURES = 5
+
+
 def collect_deploy_jobs(
     session: Session,
     player_id: int,
     player_no: str,
-    partials: Dict[int, int],
 ) -> List[DeployJob]:
     """算出该选手当前待完成的下发作业。
 
-    ``partials`` 是客户端上报的 ``{asset_id: 已下载字节数}``，用来回填 ``offset``。
-    服务端不保存下载进度 —— 进度是客户端的本地事实，服务端只做记录与汇总，
-    这样 Agent 重装/快照还原后也不会因为"服务端以为已经传了一半"而错位。
+    **不再回填续传偏移**：续传位置以 Agent 本地分片为准（分片按内容 sha256 命名，
+    内容换了自然从头来）。曾经服务端按上报的偏移在"分片已满长"时**跳过派发**，
+    而 Agent 只在收到作业时才做最后一步落盘 —— 落盘前崩溃 / 改名失败过一次，
+    这个目标就永远卡在进行中，管理端也看不到任何错误。
+
+    已取消任务下的目标不派发（目标自身不在 pending/ready 也不派发）。
 
     ``player_no`` 用于展开 ``dest_dir`` 里的 ``{player_no}``：全员下发时每台机器的
     目标目录都不同（``桌面/<各自的准考证号>/…``），这个替换只能由服务端做。
@@ -122,6 +130,7 @@ def collect_deploy_jobs(
             .where(
                 DeployTarget.player_id == player_id,
                 DeployTarget.status.in_(ACTIVE_STATUSES),
+                DeployTask.cancelled_at.is_(None),
             )
             .order_by(DeployTarget.id)
         )
@@ -129,14 +138,6 @@ def collect_deploy_jobs(
 
     jobs: List[DeployJob] = []
     for target, task, asset in rows:
-        offset = int(partials.get(asset.id, 0) or 0)
-        if offset < 0 or offset > asset.size:
-            # 客户端报了个不可能的偏移量，从头发
-            offset = 0
-        if offset == asset.size:
-            # 内容已完整下载但尚未上报结果，不再重复下发
-            continue
-
         dest_dir = expand_dest_template(task.dest_dir, player_no)
         dest = _join_dest(dest_dir, asset.filename)
 
@@ -155,12 +156,12 @@ def collect_deploy_jobs(
 
         jobs.append(
             DeployJob(
+                target_id=target.id,
                 asset_id=asset.id,
                 url=AGENT_ASSET_URL % asset.id,
                 sha256=asset.sha256,
                 size=int(asset.size),
                 dest=dest,
-                offset=offset,
                 mode=task.mode,
             )
         )
@@ -169,6 +170,84 @@ def collect_deploy_jobs(
             target.status = DeployStatus.READY
 
     return jobs
+
+
+def apply_deploy_reports(
+    session: Session,
+    player_id: int,
+    progress: Sequence[object],
+    done: Sequence[object],
+    failed: Sequence[object],
+    now,
+) -> List[int]:
+    """把机器回报的进度 / 完成 / 失败写回下发目标，返回状态有变化的任务 id。
+
+    只碰**这个选手自己的、还在派发中的**目标（pending/ready），别的一律忽略 ——
+    回执里的 target_id 是机器给的，不可信。
+
+    * 完成：只认 ``sha256`` 与资产**当前**内容一致的回执。教师在线改了正文之后，
+      迟到的旧版回执不能把新内容标成已完成（曾经按 asset_id、不看内容就标）。
+    * 失败：记原因、连续失败计数 +1，到 :data:`MAX_CONSECUTIVE_FAILURES` 判 FAILED。
+    * 进度：更新 ``bytes_done``（管理端的进度条）；分片比上次记的长 = 有进展，
+      连续失败计数清零（先于失败处理，所以"断在更远处"的那次失败只记 1）。
+    """
+    ids = {int(getattr(r, "target_id")) for r in list(progress) + list(done) + list(failed)}
+    if not ids:
+        return []
+    rows = {
+        target.id: (target, asset)
+        for target, asset in session.execute(
+            select(DeployTarget, Asset)
+            .join(DeployTask, DeployTarget.task_id == DeployTask.id)
+            .join(Asset, DeployTask.asset_id == Asset.id)
+            .where(
+                DeployTarget.id.in_(sorted(ids)[:1000]),
+                DeployTarget.player_id == player_id,
+                DeployTarget.status.in_(ACTIVE_STATUSES),
+            )
+        ).all()
+    }
+    changed = set()
+
+    for item in progress:
+        hit = rows.get(int(item.target_id))
+        if hit is not None:
+            target = hit[0]
+            reported = min(int(item.bytes_done), int(hit[1].size))
+            if reported > int(target.bytes_done or 0):
+                # 分片在长：断网续传是常态，不是"连续失败"。不清零的话，弱网下
+                # 大文件每轮断一次、5 轮后被判 FAILED，再也不派发。
+                target.failure_count = 0
+            target.bytes_done = reported
+
+    for item in done:
+        hit = rows.get(int(item.target_id))
+        if hit is None:
+            continue
+        target, asset = hit
+        if str(item.sha256).lower() != asset.sha256:
+            # 落地的是旧内容（或别的东西）：不算完成，下一轮照常派发新内容
+            continue
+        target.status = DeployStatus.DONE
+        target.bytes_done = int(asset.size)
+        target.last_error = None
+        target.failure_count = 0
+        target.updated_at = now
+        changed.add(target.task_id)
+
+    for item in failed:
+        hit = rows.get(int(item.target_id))
+        if hit is None or hit[0].status == DeployStatus.DONE:
+            continue
+        target = hit[0]
+        target.failure_count = int(target.failure_count or 0) + 1
+        target.last_error = (str(item.reason) or "下载失败")[:300]
+        target.updated_at = now
+        if target.failure_count >= MAX_CONSECUTIVE_FAILURES:
+            target.status = DeployStatus.FAILED
+            changed.add(target.task_id)
+
+    return sorted(changed)
 
 
 def _join_dest(dest_dir: str, filename: str) -> str:

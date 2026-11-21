@@ -307,16 +307,14 @@ def test_可以显式让包内的密钥不覆盖机器上那把(env: SimpleNames
 
 
 @requires_source
-def test_台账_升级清单_包内清单三处逐字相同(env: SimpleNamespace) -> None:
-    """这就是整个功能的判据：同一份真相出现在三个地方，而且**由同一个 helper 产生**。
+def test_台账与包内清单逐字相同_升级清单不带策略(env: SimpleNamespace) -> None:
+    """同一份真相出现在两处（装机台账、包内 install_policy.json），由同一个 helper 产生。
 
-    三处只要有一处不同，同一个包在联网装机与离线装机下就会按不同的策略行动 ——
-    而那种不一致在服务端这边看不出来（三处都是 200）。
+    升级清单曾经是第三处，但 Agent 从来不读它 —— 升级时生效的是包内那份 ——
+    已删掉。带密钥的版本不经公开装机入口（409），所以这里用不带密钥的构建。
     """
     release = build(
         env,
-        include_bootstrap_key=True,
-        bootstrap_key_policy="replace",
         config_policy={"scan.roots": "force"},
         upgrade_mode="stage",
     )
@@ -324,14 +322,12 @@ def test_台账_升级清单_包内清单三处逐字相同(env: SimpleNamespace
 
     from_bundle = bundle_policy(env, release)
     from_ledger = {key: ledger(env)[key] for key in POLICY_FIELDS}
-    from_manifest = {key: upgrade_manifest(env)[key] for key in POLICY_FIELDS}
 
     assert set(from_bundle) == POLICY_FIELDS
-    assert from_ledger == from_bundle, "台档里的策略与包内那份不一致"
-    assert from_manifest == from_bundle, "升级清单里的策略与包内那份不一致"
+    assert from_ledger == from_bundle, "台账里的策略与包内那份不一致"
+    assert not POLICY_FIELDS & set(upgrade_manifest(env)), "升级清单不该再带安装策略"
 
-    # 具体值也钉一遍，免得"三处都很一致地什么都不对"
-    assert from_bundle["bootstrap_key_policy"] == "replace"
+    # 具体值也钉一遍，免得"两处都很一致地什么都不对"
     assert from_bundle["upgrade_mode"] == "stage"
     assert from_bundle["config_policy"]["scan.roots"] == "force"
 
@@ -542,19 +538,17 @@ def _plant_legacy(
 
 
 @requires_source
-def test_老记录夹带了密钥时默认覆盖(env: SimpleNamespace) -> None:
-    """**这条就是这个默认值的由来。**
+def test_老记录夹带了密钥时公开装机入口不发(env: SimpleNamespace) -> None:
+    """迁移之前建的、夹带过密钥的版本：判据是 ``bootstrap_key_id``，与新记录一样 409。
 
-    迁移之前建的版本没有策略列，可它确实夹带过密钥。若拿一个固定的 ``keep`` 去补，
-    就等于把那批记录当成"教师选了不覆盖" —— 机器上那把已吊销的旧钥继续挡着包内
-    新钥，机器永远注册不上，而服务端这边一切正常。
+    （曾经这里验的是"补 replace 而不是 keep"。带密钥的包不再经公开入口发之后，
+    这个默认值只剩包内 install_policy.json 那一处，由构建时写定。）
     """
     _plant_legacy(env, "legacy-1.0.0", bundled_key_id=1)
 
-    # 台账
-    assert ledger(env)["bootstrap_key_policy"] == "replace"
-    # 升级清单
-    assert upgrade_manifest(env)["bootstrap_key_policy"] == "replace"
+    response = env.client.get(LEDGER_URL)
+    assert response.status_code == 409
+    assert response.json()["code"] == "install_bundle_has_key"
 
 
 @requires_source
@@ -563,4 +557,4 @@ def test_老记录没夹带密钥时默认不改(env: SimpleNamespace) -> None:
     _plant_legacy(env, "legacy-1.0.0", bundled_key_id=None)
 
     assert ledger(env)["bootstrap_key_policy"] == "keep"
-    assert upgrade_manifest(env)["bootstrap_key_policy"] == "keep"
+    assert "bootstrap_key_policy" not in upgrade_manifest(env)

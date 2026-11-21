@@ -22,7 +22,7 @@
 ```python
 while True:
     files  = scan(root)                       # os.scandir + sha256(mtime/size 缓存)
-    tick   = post("/agent/tick", files, partials, stats)
+    tick   = post("/agent/tick", files, deploy_progress/done/failed, stats)
     for f in tick["need_upload"]:
         upload(f)                             # ThreadPoolExecutor 并发 2
     for j in tick["deploy_jobs"]:
@@ -97,6 +97,8 @@ StandardOutput=null            # 静默：不往终端/日志设备写任何东�
 StandardError=journal
 Restart=on-failure             # 自卸载成功时 Agent 以 exit 0 退出，always 会把它拉回来
 RestartSec=5
+SuccessExitStatus=75           # 切换版本（自更新激活 / 守卫回滚）的专用退出码：不算 failed
+RestartForceExitStatus=75      # ……但仍然要重启，拉起新版本
 User=<运行账号>                 # 默认 = 跑安装的那个账号；刻意不写 Group=（交给 NSS）
 PrivateTmp=yes
 PrivateDevices=yes
@@ -111,8 +113,8 @@ RestrictAddressFamilies=AF_INET AF_INET6
 MemoryMax=200M
 CPUQuota=25%
 IOSchedulingClass=idle
-ReadWritePaths=-%h -/opt/syncoj -/var/lib/syncoj \
-               -/etc/syncoj -/etc/systemd/system -/etc/sudoers.d -/usr/local/lib/syncoj
+NoNewPrivileges=yes
+ReadWritePaths=-/home/noi -/opt/syncoj -/var/lib/syncoj
 
 [Install]
 WantedBy=multi-user.target
@@ -136,20 +138,31 @@ ReadWritePaths=-/var/lib/syncoj
   `always` 会立刻把它重新拉起来 —— 而那时 `/opt/syncoj`、`/etc/syncoj` 都已经删了，
   拉起来只会刷一堆"找不到文件"，现场看起来像"卸载失败"。崩溃仍然自愈；
   "反复起不来"的上限交给 `StartLimit*`（真机上见到过重启到 249 次）。
+* **切换版本用专用退出码 75，不是 0**：自更新激活新版本、启动守卫回滚之后，Agent
+  要退出让 systemd 拉起新代码。`on-failure` 不重启 exit 0 —— 曾经就是 0，于是铺开
+  一个版本整个机房停摆到重启机器。非 0 让旧单元也能拉起；新单元再用
+  `SuccessExitStatus=75` 不显示 failed、`RestartForceExitStatus=75` 保证重启。
+  代码里是 `main.EXIT_RESTART` 与 `install.py:AGENT_EXIT_RESTART`，测试对账。
 * **刻意不写 `Group=`**：systemd 按 NSS 解析该账号的主组。写死 `Group=<账号名>`
   会在"主组与账号名不同"的机器上撞 `217/GROUP`。
-* **刻意不要 `NoNewPrivileges=yes`**：它会让 setuid 的 sudo 无法提权，
-  `sudo -n <自卸载脚本>` 必然失败（`effective uid is not 0`），管理端授权的远程卸载
-  整条链就是死的。服务以普通账号运行，而**那个账号本人在这台机器上同样能执行任何
-  setuid 程序**，所以这一条对"防选手"没有增量价值。其余加固一条都没少。
+* **`NoNewPrivileges=yes`**（2026-11 恢复）：曾经为了让 Agent 能 `sudo -n <自卸载脚本>`
+  而关掉它，而别的加固项在非 root 服务上本来就会隐式打开它。现在需要 root 的两件事 ——
+  切换已验签的升级、按授权卸载 —— 由 Agent 写进 `<状态目录>/handoff/request.json`，
+  **root 管理单元**（`syncoj-agent-admin.path` 触发 `syncoj-agent-admin.service`，执行
+  `/usr/lib/syncoj/install.py --admin-handoff`，升级不替换）no-follow 读取、自己再验签后
+  走装机 / 卸载同一条路。见 [ADR-0012](../decisions/ADR-0012-remote-uninstall-authorization.md)
+  「重写（2026-11）」与 [ADR-0008](../decisions/ADR-0008-systemd-unit-hardening.md)。
 * **`ReadWritePaths=` 里每一条都带 `-`**：路径不存在时 systemd 跳过它，而不是让单元
   在设沙箱时报 `226/NAMESPACE` 起不来。实例：单元里写了一条 `/home/student/code`，
-  而那台机器没有这个目录。前三条是服务自己要写的地方（家目录、安装根、状态目录）；
+  而那台机器没有这个目录。前三条是服务自己要写的地方（家目录、安装根、状态目录）——
+  家目录是安装时按运行账号解析出的绝对路径（曾经是 `%h`，而系统单元里 `%h` 是 `/root`，
+  见 [ADR-0007](../decisions/ADR-0007-unit-path-whitelist.md) 的「现状（2026-11）」）；
   后四条只服务于"以 root 执行远程卸载"（../design/07-ops-and-install.md §7.4）：
   它们是 root:0755/0644，运行账号在 DAC 上写不进去，所以**放开 mount 层面的写权限
   不构成提权**，唯一用得上的是验过令牌的那个 root 脚本。
 * **刻意不列 `deploy_root` / `scan.roots` 的具体值**：它们是可选配置、真机上可能
-  不存在，而默认值都在 `%h` 之下（已经被覆盖）。多列一条就多一个 226 的机会。
+  不存在，而默认值都在运行账号家目录之下（已经被覆盖）。多列一条就多一个
+  226 的机会。
 * **注册单元刻意不用 `Restart=`**：oneshot 的重启策略在各版本 systemd 上行为不一致；
   "试几次"由 ExecStart 里的 shell 循环自己数，并把手工恢复的命令打进日志。
 

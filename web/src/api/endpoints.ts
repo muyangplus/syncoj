@@ -8,7 +8,7 @@
  * 3. 能拿这份清单跟服务端实际注册的路由对账 —— "界面点了没反应"最常见的
  *    原因就是某个路径在服务端已经改名/删掉了，而对账能在跑起来之前就抓到它
  *
- * 命名与形状遵循 `docs/api-conventions.md` §4：集合用复数、嵌套最多两层、
+ * 命名与形状遵循 `docs/reference/api-conventions.md` §4：集合用复数、嵌套最多两层、
  * 状态变更走子路径动词（`/bind`、`/revoke`）而不是 `PATCH` 一个状态字段。
  *
  * ## 清空全是 `POST .../clear`，不是 `DELETE`
@@ -36,7 +36,7 @@ export const API_ROOT = '/api/v1'
 /** 全局清空时要输入的确认字面量。与服务端 `schemas.GLOBAL_CONFIRM` 对齐。 */
 export const GLOBAL_CONFIRM = 'all'
 
-/** 列表接口统一接受的查询参数（`docs/api-conventions.md` §2）。 */
+/** 列表接口统一接受的查询参数（`docs/reference/api-conventions.md` §2）。 */
 export interface ListQuery {
   limit?: number
   offset?: number
@@ -160,6 +160,8 @@ export const paths = {
 
   // ---- 成绩 ----
   contestScores: (contestId: number) => `${ADMIN}/contests/${contestId}/scores`,
+  /** 每位选手的交题进度（概览页用，分页与选手列表一致）。 */
+  contestScoreProgress: (contestId: number) => `${ADMIN}/contests/${contestId}/scores/progress`,
   contestJudgeRuns: (contestId: number) => `${ADMIN}/contests/${contestId}/judge/runs`,
   contestJudgeRescan: (contestId: number) => `${ADMIN}/contests/${contestId}/judge/rescan`,
   contestJudgeScore: (contestId: number) => `${ADMIN}/contests/${contestId}/judge/score`,

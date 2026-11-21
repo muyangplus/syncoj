@@ -21,6 +21,7 @@ import base64
 import hashlib
 import json
 import logging
+import re
 import os
 import shutil
 import subprocess
@@ -36,10 +37,55 @@ __all__ = [
     "generate_keypair",
     "openssl_available",
     "parse_version",
+    "release_signing_message",
+    "validate_release_version",
     "write_public_key_json",
     "b64url_encode",
     "b64url_decode",
 ]
+
+
+#: 发布版本号的形状白名单：数字段 + 可选 ``-rc1`` / ``+build.7`` 后缀。
+#:
+#: Agent 会把版本号直接拼进路径（下载落点、``releases/<v>/``），所以它那边
+#: 对形状有一道白名单（``syncoj_agent.upgrade.RELEASE_VERSION_RE``），不合形状的
+#: 清单**整份拒收**。这里在发布时用同一个形状把关：否则教师能发出一个
+#: "服务端接受、所有机器静默拒收"的版本。两边是**独立实现**，由
+#: ``test_signing`` 里的对账用例守住一致。
+RELEASE_VERSION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)*(?:[-+][0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$")
+MAX_RELEASE_VERSION_LENGTH = 64
+
+
+def validate_release_version(text: str) -> Tuple[int, ...]:
+    """形状合法且可比较则返回 :func:`parse_version` 的结果，否则抛 ``ValueError``。"""
+    if not isinstance(text, str):
+        raise ValueError("版本号必须是字符串")
+    if len(text) > MAX_RELEASE_VERSION_LENGTH or not RELEASE_VERSION_RE.match(text):
+        raise ValueError(
+            "版本号形状不合法：%r（只允许数字段加可选的 -rc1 / +build.7 这类后缀）" % text[:80]
+        )
+    return parse_version(text)
+
+
+#: 发布签名对象的格式标签。曾经签的只是包的 sha256：版本号不在签名覆盖范围内，
+#: 篡改过的 tick 响应可以拿一个合法的旧包冒充"新版本"（降级），或者给同一个包
+#: 换个版本号让机器反复升级。现在版本号与大小一起进签名。
+RELEASE_SIGNATURE_TAG = "syncoj-release-v1"
+
+
+def release_signing_message(version: str, sha256: str, size: int) -> bytes:
+    """发布包签名的对象：``syncoj-release-v1\n<版本>\n<sha256>\n<字节数>\n``。
+
+    Agent（``syncoj_agent.upgrade``）与安装器（``packaging/install.py``）各有一份
+    **独立实现**，由 ``test_signing`` 的对账用例守住逐字节一致。
+    """
+    validate_release_version(version)
+    digest = str(sha256).lower()
+    if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+        raise ValueError("sha256 格式不合法")
+    if int(size) <= 0:
+        raise ValueError("size 必须为正")
+    return ("%s\n%s\n%s\n%d\n" % (RELEASE_SIGNATURE_TAG, version, digest, int(size))).encode("ascii")
 
 
 def parse_version(text: str) -> Tuple[int, ...]:

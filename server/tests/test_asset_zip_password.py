@@ -900,7 +900,7 @@ def test_打包后目标被重排且偏移清零(
         machine_id=enrolled["machine_id"],
         completed_assets=[asset["id"]],
     )
-    assert target_states(client, asset["id"]) == [(DeployStatus.DONE, 0)]
+    assert [state for state, _ in target_states(client, asset["id"])] == [DeployStatus.DONE]  # 完成时进度记满长
     pin_bytes_done(client, asset["id"], PINNED_OFFSET)
 
     body = set_password(
@@ -916,7 +916,7 @@ def test_打包后目标被重排且偏移清零(
     job = next(item for item in jobs if item["asset_id"] == asset["id"])
     assert job["sha256"] == body["asset"]["sha256"]
     assert job["size"] == body["asset"]["size"]
-    assert job["offset"] == 0
+    assert "offset" not in job  # 续传位置只看 Agent 本地分片（按内容 sha256 命名，换内容自然从头）
 
 
 def test_打包的审计写清了动作与改名且不含密码(
@@ -1169,7 +1169,7 @@ def test_已经下发的目标被重排且偏移清零(
         machine_id=enrolled["machine_id"],
         completed_assets=[asset["id"]],
     )
-    assert target_states(client, asset["id"]) == [(DeployStatus.DONE, 0)]
+    assert [state for state, _ in target_states(client, asset["id"])] == [DeployStatus.DONE]  # 完成时进度记满长
     pin_bytes_done(client, asset["id"], PINNED_OFFSET)
 
     body = set_password(
@@ -1186,7 +1186,7 @@ def test_已经下发的目标被重排且偏移清零(
     job = next(item for item in jobs if item["asset_id"] == asset["id"])
     assert job["sha256"] == body["asset"]["sha256"]
     assert job["size"] == body["asset"]["size"]
-    assert job["offset"] == 0
+    assert "offset" not in job  # 续传位置只看 Agent 本地分片（按内容 sha256 命名，换内容自然从头）
 
 
 def test_还没落地的目标不被重排也不被清零(
@@ -1263,7 +1263,7 @@ def test_password_txt_自己被更新时也会重排(
         machine_id=enrolled["machine_id"],
         completed_assets=[password_id],
     )
-    assert target_states(client, password_id) == [(DeployStatus.DONE, 0)]
+    assert [state for state, _ in target_states(client, password_id)] == [DeployStatus.DONE]  # 完成时进度记满长
 
     set_password(
         client,

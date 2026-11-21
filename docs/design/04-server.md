@@ -20,9 +20,8 @@
 | `roster` / `roster_entry` | 全局可复用的名单（人）。机器永久绑的是 `roster_entry` |
 | `bootstrap_key` | 镜像内置的统一注册密钥（只存哈希、可吊销、带过期） |
 | `agent` | 每机 Token 哈希、`machine_uuid`、指纹、`roster_entry_id`、可选 `contest_id`、配对码哈希、吊销状态 |
-| `agent_status` | 在线状态快照，`last_tick_at`、指标 |
 | `agent_diagnostic` | 每台机器**最新一份**诊断包（解压后的 JSON 文本），新的一份覆盖旧的 |
-| `source_file` | 回收台账：`(contest, player, path, sha256, size, revision, first_seen, last_seen)` |
+| `source_file` | 回收台账：`(contest, player, path, sha256, scanned_sha256, size, revision, first_seen, last_seen)` —— `sha256` 是已存下的那一版，`scanned_sha256` 是最近一次扫描到的；不等即待上传 |
 | `asset` | 内容寻址的下发文件 |
 | `deploy_task` / `deploy_target` | 下发任务与逐选手进度（含 `bytes_done`） |
 | `judge_run` | 成绩回写 |
@@ -46,12 +45,23 @@
 
 ### 4.3 写入策略（SQLite 的命门）
 
-50 台 × 每 20s 一次 tick = **2.5 req/s**。每次 tick 都要 upsert 在线状态 + 比对文件台账，**绝不能每个请求开事务写库**：
+50 台 × 每 20s 一次 tick = **2.5 req/s**。收敛高频写的办法只有"在线状态不逐请求落库"
+这一条，**没有**单写连接或写队列：
 
-- **内存优先**：`AgentRegistry` 用 dict 持有实时状态，Web 读路径走内存（后续经 SSE 推送）
-- **批量落库**：后台任务每 5s 把脏数据合并成**一个事务**刷入
-- **单写连接**：所有写操作走一个队列 + 独立线程，避免 `database is locked`
-- SQLite 参数：`journal_mode=WAL`、`synchronous=NORMAL`、`busy_timeout=5000`、`foreign_keys=ON`
+- **内存优先**：`AgentRegistry`（`registry.py`）用 dict + `threading.Lock` 持有在线状态，
+  管理端读在线状态走内存。没有 SSE，前端靠轮询
+- **维护循环**：`tasks/flush.py` 每 `flush_interval_seconds`（默认 5s）做离线判定与到点结束
+  场次。在线状态**不落库**（曾经每轮 upsert 进 `agent_status`，那张表从来没人读，迁移 017 删了）
+- **其余写照常逐请求提交**：每次 tick 本身就开一个会话（`db.py` 的 `Database.session()`，
+  退出时 commit）—— 对账文件台账、写审计事件、收下发回执、更新 `agent.last_seen_at`
+  都在里面；上传、注册、管理操作也一样。会话来自 SQLAlchemy 默认连接池，
+  `check_same_thread=False`，FastAPI 线程池里的请求**并发**拿连接，写锁由 SQLite 自己排队
+- SQLite 参数（`db.py:_install_pragmas`）：`journal_mode=WAL`、`synchronous=NORMAL`、
+  `busy_timeout=5000`、`foreign_keys=ON`、`temp_store=MEMORY`；连接本身另有 30s 超时。
+  写锁争抢靠 WAL + `busy_timeout` 兜住
+
+`db.py` 模块说明写了为什么不做写串行化（高频写已收敛、剩余的写低频），并把"单写线程 +
+队列"留到单场次超过 500 台时再说。早先这一节把它写成已经存在，是错的。
 
 ### 4.4 评测结果回写
 
@@ -315,6 +325,8 @@ delete-orphan"`），外键又是 `ON DELETE SET NULL`。于是：
 `Base.metadata.create_all()` 只建缺失的表，看不见"已有表少了一列"。所以有了
 `migrations.py`：`PRAGMA user_version` + 一串"从 N 到 N+1"的步骤，幂等、
 每步一个事务、**失败不推进版本号**（下次启动重试同一步，绝不跳过）。
+已有数据的库要往上迁时，**先用 SQLite 在线备份整库**到 `<库名>.bak-v<旧版本>-<时间>`
+（同目录；新库不备份，已是最新的库不备份；备份失败只告警、不阻止启动）。
 
 **重建表（rebuild）的安全配方。** 删一列、改一次可空性，在 SQLite 里都只能
 "建新表 → 搬数据 → 换名"。最初的写法是"绝不重建"（怕关不掉外键，让

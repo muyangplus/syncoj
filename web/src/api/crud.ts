@@ -2,7 +2,7 @@
  * 分页、信封与删除语义的公共实现。
  *
  * 这一层存在的理由是"同一件事不要写第二遍"：所有列表都返回同一个信封
- * （`docs/api-conventions.md` §2），所有错误都是同一个错误体，所有**结构性
+ * （`docs/reference/api-conventions.md` §2），所有错误都是同一个错误体，所有**结构性
  * 数据**的删除都要带 `confirm`。页面代码因此不需要再碰 `items`/`total`、
  * 也不需要自己拼 `?confirm=`。
  *
@@ -104,8 +104,11 @@ export async function removeItem(path: string, confirmName?: string): Promise<Si
   return request<SimpleAck>(`${path}${query({ confirm: confirmName })}`, { method: 'DELETE' })
 }
 
-/** 软删除（墓碑）。产物性数据用它 —— 行还在，`deleted_at` 被置上。 */
-export async function softRemoveItem(path: string): Promise<SimpleAck> {
+/**
+ * 产物性数据（代码、资产）的删除：不带 `confirm` 的 `DELETE`。服务端是**硬删**，
+ * 没有墓碑（见 ADR-0003 的 2026-11 修订）。曾经叫 `softRemoveItem`，名字与事实相反。
+ */
+export async function removeArtifact(path: string): Promise<SimpleAck> {
   return request<SimpleAck>(path, { method: 'DELETE' })
 }
 

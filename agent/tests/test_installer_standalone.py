@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import getpass
 import hashlib
 import http.server
 import io
@@ -94,6 +95,9 @@ class Standalone:
         self.env = dict(os.environ)
         # 真机上没有 PYTHONPATH；清掉它，"repo 在 sys.path 里"这条退路就不存在了
         self.env.pop("PYTHONPATH", None)
+        # conftest 的沙箱在 root 下会设 SUDO_USER；子进程不该继承它 —— 否则 root
+        # 身份的安装器会把它当成"用 sudo 装机的人"，越过 preflight 去写真实系统路径
+        self.env.pop("SUDO_USER", None)
         # 管道里也按 UTF-8 写，下面按文案断言才可靠
         self.env["PYTHONIOENCODING"] = "utf-8"
         self.env["PYTHONUNBUFFERED"] = "1"
@@ -136,6 +140,12 @@ def layout_args(standalone: Standalone, prefix: Path = None):
         "--config-dir", str(standalone.tmp / "etc"),
         "--state-dir", str(standalone.tmp / "state"),
         "--unit-dir", str(standalone.tmp / "units"),
+        # 远程卸载辅助件也落在临时目录里：子进程够不着 conftest 的沙箱补丁，
+        # 不给这两个选项就会写宿主的 /usr/local/lib/syncoj 与 /etc/sudoers.d
+        "--helper-dir", str(standalone.tmp / "helper"),
+        "--sudoers-path", str(standalone.tmp / "sudoers.d" / "syncoj-uninstall"),
+        # 显式给运行账号：以 root 跑测试时安装器拒绝"默认成 root"
+        "--user", getpass.getuser(),
         "--skip-user", "--skip-service", "--skip-python-check",
     ]
 
@@ -180,10 +190,12 @@ def make_bundle(path: Path, version: str = "0.1.0") -> Path:
 
 
 def make_ledger(bundle: bytes, key, version: str = "0.1.0") -> dict:
-    """服务端那份装机台账（签名盖在 sha256 上）。"""
+    """服务端那份装机台账（签名盖在"标签 + 版本 + sha256 + 大小"那段文本上）。"""
     sha = hashlib.sha256(bundle).hexdigest()
+    # 手写签名对象，不 import 任何一端 —— 要能发现"某一边把格式改了"
+    message = "syncoj-release-v1\n%s\n%s\n%d\n" % (version, sha, len(bundle))
     signature = (
-        base64.urlsafe_b64encode(key.sign(sha.encode("ascii"))).decode("ascii").rstrip("=")
+        base64.urlsafe_b64encode(key.sign(message.encode("ascii"))).decode("ascii").rstrip("=")
     )
     return {
         "version": version,

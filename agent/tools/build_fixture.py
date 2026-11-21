@@ -74,7 +74,6 @@ def build_fixture() -> Dict[str, Any]:
         agent_version=__version__,
         scan_root="/home/student/code, /home/student/backup",
         results=_sample_results(),
-        partials=[{"asset_id": 42, "bytes_done": 3145728}],
         # scan_missing：本轮"扫描根不存在"的那几条绝对路径。样本里放一条，
         # 服务端那份 TickStats 才有一个真实取值可校验（"目录没建"只能靠报文学到）。
         stats={
@@ -82,7 +81,11 @@ def build_fixture() -> Dict[str, Any]:
             "queue": 0,
             "scan_missing": ["/home/student/notyet"],
         },
-        completed_assets=[7],
+        deploy_progress=[{"target_id": 42, "bytes_done": 3145728}],
+        deploy_done=[{"target_id": 7, "sha256": "ab" * 32}],
+        deploy_failed=[{"target_id": 9, "reason": "写盘失败: [Errno 28] No space left on device"}],
+        # 扫描根按哪个身份展开：放一份真实取值，服务端的 ScanIdentity 才有东西可校验
+        scanned_for={"player_no": "S001", "contest_slug": "mock-1"},
     )
 
     return {

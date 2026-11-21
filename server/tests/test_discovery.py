@@ -19,6 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastapi import Request
 
 from syncoj_server.config import Settings
 from syncoj_server.services import discovery
@@ -378,7 +379,9 @@ def test_第一次从局域网打开管理界面时把算出来的地址打出�
     app_module._remember_public_url(app, ctx)
 
     @app.get("/api/v1/admin/ping")
-    def _ping() -> dict:  # pragma: no cover - 只为触发中间件
+    def _ping(request: Request) -> dict:  # pragma: no cover - 只为触发中间件
+        # 只有登录了的教师请求才会被学（真接口由 require_admin 留这个标记）
+        request.state.admin_authenticated = True
         return {"ok": True}
 
     with TestClient(app) as client:

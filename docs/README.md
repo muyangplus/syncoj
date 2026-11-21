@@ -45,7 +45,7 @@
 | [`design/03-agent.md`](design/03-agent.md) | 客户端 Agent：零依赖、主循环、扫描、注册、systemd unit、py38 清单（原 §3） |
 | [`design/04-server.md`](design/04-server.md) | 服务端：目录、数据模型、写入策略、成绩回写、代码归题、注册配对、名单、迁移（原 §4） |
 | [`design/05-api-and-frontend.md`](design/05-api-and-frontend.md) | 接口约定与前端：契约测试、信封、前端架构、文案口径、删除语义、公开端口（原 §5） |
-| [`design/06-security.md`](design/06-security.md) | 安全面清单与签名算法选型（原 §6） |
+| [`design/06-security.md`](design/06-security.md) | 安全面清单、签名算法选型、信任边界现状（明文 HTTP、自举链、发布私钥）（原 §6） |
 | [`design/07-ops-and-install.md`](design/07-ops-and-install.md) | 运维与装机：`.key/`、发布、安装策略三档、服务端发现、远程卸载（原 §7） |
 | [`design/08-milestones-and-open.md`](design/08-milestones-and-open.md) | 里程碑、待补信息、待办与被明确否决的想法（原 §8 / §9 / §10） |
 
@@ -59,12 +59,12 @@
 | [`decisions/README.md`](decisions/README.md) | ADR 清单与写法 |
 | [`decisions/ADR-0001-tech-stack-and-dependencies.md`](decisions/ADR-0001-tech-stack-and-dependencies.md) | 技术栈与依赖：为什么是 Python 3.8 + 零依赖、INI 而不是 TOML |
 | [`decisions/ADR-0002-communication-and-identity.md`](decisions/ADR-0002-communication-and-identity.md) | 通信与身份：为什么轮询、机器怎么被认出来、配对为什么绑"人" |
-| [`decisions/ADR-0003-delete-semantics.md`](decisions/ADR-0003-delete-semantics.md) | 删除语义：结构性数据硬删、产物性数据留墓碑 |
+| [`decisions/ADR-0003-delete-semantics.md`](decisions/ADR-0003-delete-semantics.md) | 删除语义：结构性数据硬删 + 输名称确认；代码 / 资产也硬删（2026-11 修订） |
 | [`decisions/ADR-0004-ui-copy-and-notice.md`](decisions/ADR-0004-ui-copy-and-notice.md) | 界面文案口径与考场公告为什么用 `NOTICE.md` |
 | [`decisions/ADR-0005-public-port.md`](decisions/ADR-0005-public-port.md) | 公开端口：默认 80、白名单还是黑名单、为什么回 404 |
 | [`decisions/ADR-0006-delete-nothing-of-the-verifier.md`](decisions/ADR-0006-delete-nothing-of-the-verifier.md) | 验收不许拿自己人替代：信任锚取包里那一份、交叉验证 |
 | [`decisions/ADR-0007-unit-path-whitelist.md`](decisions/ADR-0007-unit-path-whitelist.md) | 单元里的 `ReadWritePaths` 每条都要带 `-` |
-| [`decisions/ADR-0008-systemd-unit-hardening.md`](decisions/ADR-0008-systemd-unit-hardening.md) | 单元加固的四处刻意例外（`Restart=`/`Group=`/`NoNewPrivileges=`） |
+| [`decisions/ADR-0008-systemd-unit-hardening.md`](decisions/ADR-0008-systemd-unit-hardening.md) | 单元加固的刻意例外（`Restart=`/`Group=`；`NoNewPrivileges=` 那条 2026-11 已撤销） |
 | [`decisions/ADR-0009-registration-is-a-root-unit.md`](decisions/ADR-0009-registration-is-a-root-unit.md) | 注册由 root 的一次性单元做，服务本体永不自己注册 |
 | [`decisions/ADR-0010-run-user-owns-path-templates.md`](decisions/ADR-0010-run-user-owns-path-templates.md) | `{home}`/`{desktop}` 恒按**运行账号**展开 |
 | [`decisions/ADR-0011-zipcrypto-not-aes.md`](decisions/ADR-0011-zipcrypto-not-aes.md) | zip 密码用 ZipCrypto 而不是 AES，口径只到"挡得住随手翻看" |
@@ -112,7 +112,7 @@ SyncOJ/
 │   ├── packaging/            幂等安装器 / 打包器 / 在线自举
 │   ├── tools/                py38 兼容门禁、协议 fixture 生成
 │   └── tests/
-├── scripts/                  一键跑全部检查（check.sh / check.ps1，步骤一一对应）
+├── scripts/                  一键跑全部检查（check.py 写步骤；check.sh / check.ps1 只是壳）
 └── web/                      管理界面（Vue3 + TS + Vite + Element Plus）
     ├── src/api/              client + resource 声明 + 从 OpenAPI 生成的类型
     ├── src/composables/      useList / useMutation —— 所有页面共用的数据层
@@ -143,7 +143,7 @@ SyncOJ/
   python server/tools/dump_openapi.py && (cd web && npm run gen:types)
   ```
 
-  `scripts/check.sh` 会校验 `web/openapi.json` 是否已同步，不同步直接失败。
+  `scripts/check.py` 会校验 `web/openapi.json` 是否已同步，不同步直接失败。
 
 ## 跑全部检查
 
@@ -155,22 +155,28 @@ SyncOJ/
 .\scripts\check.ps1            # Windows PowerShell 5.1 与 pwsh 7 都能跑
 ```
 
-两个脚本**步骤一一对应**，只换执行方式：改了其中一个就要改另一个，否则两个平台
-给出的"通过"含义不同。
+步骤只写在 `scripts/check.py` 一处（只用标准库、能在 Python 3.8 上跑）。两个壳只做
+一件事：挑一个**真的能跑**的 Python 3.8+，把参数原样转过去。两者都先找仓库里的
+`.venv`（装着 `server[dev]`），再退回系统解释器；也可以用环境变量 `PYTHON` 指定。
 
-- `check.sh` 自动挑可用的 Python：先 `python3`，不行就退回仓库里的 `.venv`。
-  Windows 上 `python3` 常常指向应用商店的占位程序（`command -v` 找得到、执行直接
-  失败），所以判据是"**真的能跑起来**且 ≥3.8"，不是"命令存在"。实测在 Git bash 里
-  可以直接跑通全程。
-- `check.ps1` 是 Windows 原生入口，少跨一层 msys 路径翻译，出错信息更直白。
+> 为什么收成一份：两个 shell 入口曾经各写一遍全部步骤、靠"一一对应"的约定同步，
+> 实际已经漂开 —— `check.ps1` 全局设了 `SYNCOJ_STATE_DIR` 而 `check.sh` 没设，于是
+> 有两条用例只在其中一个入口下能过；两边都建了一个从未用到的 `basetemp`；
+> 前端类型检查跑了两遍。
+
+- **默认跑完全部步骤再汇总**，`--fail-fast` 才在第一处失败时停。旧脚本 `set -e`，
+  Agent 测试一红，后面的服务端测试与前端构建就都不跑了，"红了几处"永远只看得见第一处。
+- `--list` 列出步骤名，`--only <步骤>` 只跑某几步，`--skip-web` 跳过前端两步。
+- Windows 上 `python3` 常常指向应用商店的占位程序（`command -v` 找得到、执行直接
+  失败），所以 `check.sh` 的判据是"**真的能跑起来**且 ≥3.8"，不是"命令存在"。
 
 > **`.ps1` 必须带 UTF-8 BOM。** Windows PowerShell 5.1 在**没有 BOM** 时按当前
 > ANSI 代码页（简体中文 Windows 上是 GBK）解码脚本文件，于是仓库里这些中文注释
 > 会让它**整个脚本解析失败**，报的还是"字符串缺少终止符"这种指向完全无关位置的
 > 错。PS 7 认 BOM，所以带上两边都对。编辑类工具保存时**不会保留 BOM** ——
-> 改一行中文注释就可能把它弄丢，所以这件事由 `check.sh` 里一步专门守着。
+> 改一行中文注释就可能把它弄丢，所以这件事由 `check.py` 的 `ps1-bom` 一步专门守着。
 
-检查内容：`PowerShell` 脚本编码 → py38 兼容门禁 → Agent 测试 → 服务端测试
+检查内容：py38 兼容门禁 → `PowerShell` 脚本编码 → Agent 测试 → 服务端测试
 → `openapi.json` 是否已同步 → `schema.d.ts` 是否与 `openapi.json` 一致
 （**重新生成一遍再逐字节比对**）→ 前端入口对账 + `typecheck` + `build`。
 

@@ -256,10 +256,21 @@ class Settings:
     #: 全局每秒允许的注册次数（所有 IP 合计）。挡住"从很多 IP 一起刷"。
     #: 50 台机器开机时同时注册是真实场景，所以这里比单 IP 宽得多。
     enroll_global_per_second: int = 50
+    #: 单 IP 每分钟允许的管理端登录尝试。0 = 不限。scrypt 让单次尝试变慢，
+    #: 但局域网里可以无限次地试 —— 一个考场的学生有整整一场考试的时间。
+    login_per_ip_per_minute: int = 10
+    #: 单 IP 每分钟允许的选手页**手填查找**（场次 + 考号）。考号通常连号，
+    #: 不限的话一个循环就能把整场的下发清单都翻一遍。
+    player_lookup_per_ip_per_minute: int = 30
 
     # ---- 上传 ----
-    # 单次 multipart 请求体上限，略高于 max_file_size 以容纳 multipart 开销
+    # 单次 multipart 请求体上限，略高于 max_file_size 以容纳 multipart 开销。
+    # 由 main.py 的请求体闸门按 Content-Length 在**读请求体之前**挡掉（FastAPI 解析
+    # multipart 时会先把整个请求体收下来，等到处理函数里再比大小就晚了）。
     max_upload_request_bytes: int = 4 * 1024 * 1024
+    # 单次 tick 请求体上限。5000 个文件 × 每条约 200 字节 ≈ 1MB，留足余量；
+    # 挡的是"一份几百 MB 的扫描结果先被整个解析一遍"。
+    max_tick_request_bytes: int = 8 * 1024 * 1024
     # 教师上传的待下发资产（题面、测试点包）上限。远大于选手代码上限 ——
     # 测试点包动辄几百 MB，而源码只有几十 KB
     max_asset_size: int = 2 * 1024 * 1024 * 1024

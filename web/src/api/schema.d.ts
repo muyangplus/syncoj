@@ -628,11 +628,14 @@ export interface paths {
          * Clear Source Files
          * @description 清理代码台账。
          *
-         *     这是**软删除**（打墓碑）的批量版本：行先删掉，``blobs/`` 里的内容只在
-         *     没有任何记录再引用它时才释放 —— 见 ``docs/reference/api-conventions.md`` §5.2。
+         *     这是**硬删除**：行直接删掉，``blobs/`` 里的内容只在没有任何记录再引用它时
+         *     才一并删掉；``source/`` 里已落盘的文件不碰。被删的行找不回来，也不会出现在
+         *     ``?include_deleted=true`` 里 —— 见 ``docs/reference/api-conventions.md`` §5.2。
+         *     （ADR-0003 v1 原定这里是软删留墓碑，从未实现；2026-11 修订改为承认硬删。）
          *
-         *     默认 ``purge=false``：只清掉**已经消失**的墓碑记录（选手删了文件之后留下的
-         *     那些），这不会影响任何还在的东西 —— 也是这个操作最常见的用途。
+         *     默认 ``purge=false``：只删扫描对账标成**已消失**的行（选手在机器上删掉的文件，
+         *     ``deleted_at`` 非空 —— 系统里唯一的墓碑），这不会影响任何还在的东西 ——
+         *     也是这个操作最常见的用途。
          *
          *     ``purge=true`` 会连活的一起删，但**机器还在报的文件下一轮就会回来**，
          *     所以它只适合"比赛结束后归档完毕、准备清场"。界面上的按钮要写明这一点。
@@ -956,6 +959,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/contests/{contest_id}/scores/progress": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Score Progress
+         * @description 每位选手交了几道、待评测几道、没交几道（只数登记过的题目）。
+         *
+         *     概览页要的只是这几个数。排序与分页和选手列表一致（按考号），
+         *     所以概览页拿同一组 ``limit/offset`` 取到的正好是同一页人；
+         *     代码文件与评测记录也只查这一页，不扫全场。
+         */
+        get: operations["score_progress_api_v1_admin_contests__contest_id__scores_progress_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/deploys/{task_id}": {
         parameters: {
             query?: never;
@@ -1144,7 +1171,13 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Health */
+        /**
+         * Health
+         * @description 管理端探活（要登录）。
+         *
+         *     曾经不鉴权：匿名就能拿到 ``data_root`` 的绝对路径，而且它恒回 200，于是匿名
+         *     请求能借它的 Host 头改写"对外地址"（见 main._remember_public_url）。
+         */
         get: operations["health_api_v1_admin_health_get"];
         put?: never;
         post?: never;
@@ -1305,6 +1338,10 @@ export interface paths {
          *
          *     作废它的凭据 —— 那台机器下次心跳会拿到 401，然后等下一次开机由注册单元
          *     重新注册。真正的垃圾机器应该先吊销统一密钥，否则它会一直回来。
+         *
+         *     **硬删**，与 :func:`revoke_agent` 同理：曾经只打 ``revoked_at`` 标记，而
+         *     ``machine_uuid`` 有唯一约束、认回时又不看作废的行 —— 同一台机器再注册就撞约束
+         *     500，"它下次开机还会回来"这句话不成立。
          */
         delete: operations["revoke_pending_machine_api_v1_admin_machines_pending__agent_id__delete"];
         options?: never;
@@ -1965,7 +2002,8 @@ export interface paths {
         };
         /**
          * Download Release
-         * @description 下载 Agent 升级包。
+         * @description 下载 Agent 升级包。**任意有效凭据都行**（未配对 / 无场次的机器也要能升级 ——
+         *     待配对的心跳会给它升级清单；曾经这里要求能干活的身份，清单给了却下不动）。
          *
          *     只提供**已铺开且未撤回**的版本 —— 上传但未 rollout 的包对 Agent 不可见，
          *     这样"上传"和"铺开"的风险边界在服务端也是硬的，而不是只靠 Agent 自觉。
@@ -2068,6 +2106,20 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * AdminHealthOut
+         * @description 管理端探活：概览卡片直接要用的几个数。
+         */
+        AdminHealthOut: {
+            /** Agents Online */
+            agents_online: number;
+            /** Agents Total */
+            agents_total: number;
+            /** Data Root */
+            data_root: string;
+            /** Ok */
+            ok: boolean;
+        };
         /** AdminInfo */
         AdminInfo: {
             /** Is Active */
@@ -2680,6 +2732,32 @@ export interface components {
              */
             target_kind: string;
         };
+        /**
+         * DeployDone
+         * @description 一个下发目标已经在本机落地，落地的是**哪一份内容**。
+         *
+         *     带 ``sha256`` 是为了让服务端只认"当前这一版"的回执：教师在线改了正文 /
+         *     改了 zip 密码之后，迟到的旧版回执不能把新内容标成已完成。
+         */
+        DeployDone: {
+            /** Sha256 */
+            sha256: string;
+            /** Target Id */
+            target_id: number;
+        };
+        /**
+         * DeployFailed
+         * @description 一个下发目标本轮没下成，以及原因（给教师看的）。
+         */
+        DeployFailed: {
+            /**
+             * Reason
+             * @default
+             */
+            reason: string;
+            /** Target Id */
+            target_id: number;
+        };
         /** DeployJob */
         DeployJob: {
             /** Asset Id */
@@ -2691,17 +2769,24 @@ export interface components {
              * @default overwrite
              */
             mode: string;
-            /**
-             * Offset
-             * @default 0
-             */
-            offset: number;
             /** Sha256 */
             sha256: string;
             /** Size */
             size: number;
+            /** Target Id */
+            target_id: number;
             /** Url */
             url: string;
+        };
+        /**
+         * DeployProgress
+         * @description 一个下发目标在本机的进度（分片里已经有多少字节）。
+         */
+        DeployProgress: {
+            /** Bytes Done */
+            bytes_done: number;
+            /** Target Id */
+            target_id: number;
         };
         /** DeployTargetOut */
         DeployTargetOut: {
@@ -2728,6 +2813,11 @@ export interface components {
         DeployTaskOut: {
             /** Asset Id */
             asset_id: number;
+            /**
+             * Cancelled
+             * @default 0
+             */
+            cancelled: number;
             /** Contest Id */
             contest_id: number;
             /** Created At */
@@ -2843,6 +2933,11 @@ export interface components {
             machine_uuid?: string | null;
             /** Os Info */
             os_info?: string | null;
+            /**
+             * Protocol Version
+             * @default 0
+             */
+            protocol_version: number;
         };
         /**
          * EnrollResponse
@@ -2927,11 +3022,11 @@ export interface components {
         };
         /**
          * FileClearIn
-         * @description 清代码台账。
+         * @description 清代码台账（硬删，见 ``docs/reference/api-conventions.md`` §5.3）。
          *
-         *     ``purge=False``（默认）只打墓碑 —— 行还在、``?include_deleted=true`` 仍能
-         *     查到，导出里也仍然带着（见 ``docs/reference/api-conventions.md`` §5.2）。
-         *     ``purge=True`` 才连行一起删，只在"这些记录本来就是误传"时才该用。
+         *     ``purge=False``（默认）只删扫描对账标成"已消失"的行（``deleted_at`` 非空）。
+         *     ``purge=True`` 连还在的行一起删 —— 机器还在报的文件下一轮会重新收上来，
+         *     所以只在"归档完毕准备清场"或"这些记录本来就是误传"时才该用。
          */
         FileClearIn: {
             /** Confirm */
@@ -3323,6 +3418,26 @@ export interface components {
              */
             total: number;
         };
+        /** Page[PlayerProgressOut] */
+        Page_PlayerProgressOut_: {
+            /** Items */
+            items?: components["schemas"]["PlayerProgressOut"][];
+            /**
+             * Limit
+             * @default 50
+             */
+            limit: number;
+            /**
+             * Offset
+             * @default 0
+             */
+            offset: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        };
         /** Page[ProblemOut] */
         Page_ProblemOut_: {
             /** Items */
@@ -3382,16 +3497,6 @@ export interface components {
              * @default 0
              */
             total: number;
-        };
-        /**
-         * PartialDownload
-         * @description 客户端本地未完成的下载，服务端据此回填 offset。
-         */
-        PartialDownload: {
-            /** Asset Id */
-            asset_id: number;
-            /** Bytes Done */
-            bytes_done: number;
         };
         /**
          * PendingMachineOut
@@ -3610,6 +3715,40 @@ export interface components {
             /** Seat */
             seat?: string | null;
         };
+        /**
+         * PlayerProgressOut
+         * @description 一位选手的交题进度（概览页巡场用）。
+         *
+         *     只数**清单里登记过的题目**，口径与成绩矩阵一致：有评测记录算"已出成绩"，
+         *     没有记录但收到了这道题的代码算"待评测"，两样都没有算"未交"。
+         *     概览页每 5 秒刷一次，只要这几个数，不该为此拉整张成绩矩阵。
+         */
+        PlayerProgressOut: {
+            /**
+             * Missing
+             * @default 0
+             */
+            missing: number;
+            /**
+             * Pending
+             * @default 0
+             */
+            pending: number;
+            /** Player Id */
+            player_id: number;
+            /** Player No */
+            player_no: string;
+            /**
+             * Submitted
+             * @default 0
+             */
+            submitted: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        };
         /** PlayerUpsert */
         PlayerUpsert: {
             /** Group Name */
@@ -3743,9 +3882,9 @@ export interface components {
          *     因为已经升级过的机器会因为"版本不高于当前"拒绝升级，而界面上一切正常。
          *
          *     ``include_bootstrap_key`` **默认关**，因为打开它的后果是"这个包从此等于一张
-         *     能注册进这台服务端的通行证"。装机入口（``/api/v1/agent/install/*``）刻意不鉴权
-         *     —— 空机器上没有任何凭据可用 —— 于是**任何能打开装机页的人都能把这个包下载下来，
-         *     也就拿到了那把密钥**。只有"局域网里确定没有外人"时才该打开它，而且发完就该吊销。
+         *     能注册进这台服务端的通行证"。装机入口（``/api/v1/agent/install/*``）刻意不鉴权，
+         *     所以它**拒发**带密钥的包（409 ``install_bundle_has_key``）：这种包只经管理端登录
+         *     后下载、做成离线包或镜像。离线包拷出去就收不回来，发完就该吊销。
          */
         ReleaseBuildIn: {
             /** Bootstrap Key Policy */
@@ -4036,6 +4175,22 @@ export interface components {
             /** Size */
             size: number;
         };
+        /**
+         * ScanIdentity
+         * @description 这一轮的扫描根是按哪个身份展开的（Agent 的 ``{player_no}`` / ``{contest_slug}``）。
+         */
+        ScanIdentity: {
+            /**
+             * Contest Slug
+             * @default
+             */
+            contest_slug: string;
+            /**
+             * Player No
+             * @default
+             */
+            player_no: string;
+        };
         /** ScoreCellOut */
         ScoreCellOut: {
             /** Detail */
@@ -4149,14 +4304,21 @@ export interface components {
         TickRequest: {
             /** Agent Version */
             agent_version?: string | null;
-            /** Completed Assets */
-            completed_assets?: number[];
+            /** Deploy Done */
+            deploy_done?: components["schemas"]["DeployDone"][];
+            /** Deploy Failed */
+            deploy_failed?: components["schemas"]["DeployFailed"][];
+            /** Deploy Progress */
+            deploy_progress?: components["schemas"]["DeployProgress"][];
             /** Hostname */
             hostname?: string | null;
             /** Machine Id */
             machine_id: string;
-            /** Partials */
-            partials?: components["schemas"]["PartialDownload"][];
+            /**
+             * Protocol Version
+             * @default 0
+             */
+            protocol_version: number;
             /**
              * Release Public Key
              * @default false
@@ -4164,13 +4326,11 @@ export interface components {
             release_public_key: boolean;
             /** Scan */
             scan?: components["schemas"]["ScanEntry"][];
-            /**
-             * Scan Complete
-             * @default true
-             */
+            /** Scan Complete */
             scan_complete: boolean;
             /** Scan Root */
             scan_root?: string | null;
+            scanned_for?: components["schemas"]["ScanIdentity"] | null;
             stats?: components["schemas"]["TickStats"];
             /** Ts */
             ts: number;
@@ -4182,8 +4342,6 @@ export interface components {
              * @default false
              */
             bound: boolean;
-            /** Cancel Assets */
-            cancel_assets?: number[];
             /**
              * Claimed
              * @default true
@@ -4234,15 +4392,6 @@ export interface components {
         };
         /** UpgradeInfo */
         UpgradeInfo: {
-            /**
-             * Bootstrap Key Policy
-             * @default keep
-             */
-            bootstrap_key_policy: string;
-            /** Config Policy */
-            config_policy?: {
-                [key: string]: string;
-            };
             /** Notes */
             notes?: string | null;
             /** Sha256 */
@@ -4254,11 +4403,6 @@ export interface components {
              * @default 0
              */
             size: number;
-            /**
-             * Upgrade Mode
-             * @default apply
-             */
-            upgrade_mode: string;
             /** Url */
             url: string;
             /** Version */
@@ -5860,6 +6004,42 @@ export interface operations {
             };
         };
     };
+    score_progress_api_v1_admin_contests__contest_id__scores_progress_get: {
+        parameters: {
+            query?: {
+                /** @description 每页条数 */
+                limit?: number;
+                /** @description 起始位置 */
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                contest_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_PlayerProgressOut_"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_deploy_api_v1_admin_deploys__task_id__get: {
         parameters: {
             query?: never;
@@ -6134,9 +6314,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["AdminHealthOut"];
                 };
             };
         };

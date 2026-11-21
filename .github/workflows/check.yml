@@ -1,0 +1,96 @@
+# 全量检查（scripts/check.py）在 Linux 上跑。
+#
+# 为什么要有 CI：日常开发在 Windows 上，而那边有一批用例被 requires_symlinks 跳过、
+# 有些真缺陷只在 Linux 上出现（BrokenPipe 那次）。结果是 check 在 Linux 上从来没绿过，
+# 却没人知道。这里补上三个视角：
+#
+#   py38   真的 Python 3.8 解释器（目标机 NOI Linux 2.0 是 3.8.10）。AST 门禁
+#          （agent/tools/check_py38.py）只是尽力而为，对 list[int]、dict | dict
+#          这类运行期写法会放行；真解释器上 compileall + 跑测试才算数。
+#   latest 最新 Python + 前端构建。
+#   root   以 root 跑 Agent 测试：容器里的 CI 通常是 root，安装器测试曾在那种环境下
+#          往宿主写 /etc/sudoers.d。这一路守住测试沙箱。
+#
+# 注意：托管 runner 上的 systemd 不是 NOI Linux 的 245，单元加固 / 退出码 / NNP
+# 这类行为证明不了 —— 那些要在 Ubuntu 20.04 虚拟机上冒烟（重构计划第 18 步）。
+
+name: check
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONIOENCODING: utf-8
+  PYTHONUTF8: "1"
+  SYNCOJ_TEST_JOBS: "4"
+
+jobs:
+  py38:
+    name: Python 3.8（目标机版本）
+    # ubuntu-24.04 的 setup-python 已不再提供 3.8
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.8"
+          cache: pip
+          cache-dependency-path: server/pyproject.toml
+      - name: 安装服务端依赖
+        run: python -m pip install -e "server[dev]"
+      - name: 真 3.8 解释器编译全部代码
+        run: python -m compileall -q agent/syncoj_agent agent/packaging agent/run_agent.py agent/tools server/syncoj_server scripts
+      # openapi.json 是生成物，只在规范环境（latest 那一路的最新依赖）里对账：
+      # 3.8 只能装到较老的 pydantic，生成结果有无害差异（如 additionalProperties）。
+      - name: 全量检查（不含前端与 OpenAPI 对账）
+        env:
+          SYNCOJ_SKIP_OPENAPI_PARITY: "1"
+        run: ./scripts/check.sh --skip-web --skip openapi
+
+  latest:
+    name: 最新 Python + 前端
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+          cache: pip
+          cache-dependency-path: server/pyproject.toml
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: 安装依赖
+        run: |
+          python -m pip install -e "server[dev]"
+          npm ci --prefix web
+      - name: 全量检查
+        run: ./scripts/check.sh
+
+  root:
+    name: 以 root 跑 Agent 测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: 安装服务端依赖（Agent 测试里有几条要用服务端的签名实现）
+        run: python -m pip install -e "server[dev]"
+      - name: Agent 测试（root）
+        run: sudo -E env "PATH=$PATH" "$(command -v python)" scripts/check.py --only agent-tests
+      - name: 宿主系统路径没被碰过
+        run: |
+          test ! -e /etc/sudoers.d/syncoj-uninstall
+          test ! -e /usr/local/lib/syncoj
+          test ! -e /usr/lib/syncoj

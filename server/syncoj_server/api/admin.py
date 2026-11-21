@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import shutil
 import tempfile
 import zipfile
@@ -33,9 +34,11 @@ from fastapi import (
 # 它会试图把 ``ForwardRef('Response')`` 当成响应模型来建模，然后炸在
 # /openapi.json 上 —— 而 /docs 和前端类型生成都依赖那个端点。
 from fastapi.responses import FileResponse, Response, StreamingResponse
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
+from ..services.player_no import player_no_problem
+from ..services.ratelimit import RateLimitExceeded
 from .. import keys
 from ..config import Settings
 from ..context import AppContext
@@ -65,6 +68,7 @@ from ..models import (
 )
 from ..paths import PathValidationError, safe_join, slugify, validate_relpath
 from ..schemas import (
+    AdminHealthOut,
     GLOBAL_CONFIRM,
     AdminInfo,
     AgentRuntimeOut,
@@ -107,6 +111,7 @@ from ..schemas import (
     PlayerClearIn,
     PlayerImportOut,
     PlayerOut,
+    PlayerProgressOut,
     PlayerUpsert,
     ProblemColumnOut,
     ProblemImportOut,
@@ -159,7 +164,7 @@ from ..services import (
     zipcrypto,
 )
 from ..services.deploy import validate_dest_template
-from ..services.signing import parse_version
+from ..services.signing import release_signing_message, validate_release_version
 from ..storage import BlobTooLarge, HashMismatch
 from .deps import PageParams, get_ctx
 
@@ -294,7 +299,10 @@ def require_admin(request: Request, ctx: AppContext = Depends(get_ctx)) -> Admin
             raise _unauthorized("登录已过期，请重新登录", code="token_expired")
         if not admin.is_active:
             raise _unauthorized("账号已停用")
-        return AdminIdentity(id=admin.id, username=admin.username)
+    # 告诉"对外地址"学习中间件：这个请求是**登录了的教师**发的（见
+    # main._remember_public_url —— 只从这种请求的 Host 头学）
+    request.state.admin_authenticated = True
+    return AdminIdentity(id=admin.id, username=admin.username)
 
 
 # --------------------------------------------------------------------------- #
@@ -303,7 +311,19 @@ def require_admin(request: Request, ctx: AppContext = Depends(get_ctx)) -> Admin
 
 
 @router.post("/login", response_model=LoginResponse)
-def login(payload: LoginRequest, ctx: AppContext = Depends(get_ctx)) -> LoginResponse:
+def login(
+    payload: LoginRequest, request: Request, ctx: AppContext = Depends(get_ctx)
+) -> LoginResponse:
+    # 按来源 IP 限速：scrypt 让单次尝试变慢，但不限次数的话局域网里可以一直试下去
+    client_ip = request.client.host if request.client else "unknown"
+    try:
+        ctx.login_limiter.check(client_ip, time.monotonic())
+    except RateLimitExceeded as exc:
+        log.warning("管理员登录被限速：ip=%s", client_ip)
+        raise ApiError(
+            429, "rate_limited", "登录尝试太频繁，请一分钟后再试",
+            {"retry_after": exc.retry_after},
+        )
     now = utcnow()
     raw_token = new_token(ctx.settings.token_bytes)
     expires_at = now + timedelta(seconds=ctx.settings.admin_session_ttl_seconds)
@@ -564,16 +584,18 @@ def list_rosters(
     admin: AdminIdentity = Depends(require_admin),
 ) -> Page[RosterOut]:
     with ctx.db.session() as session:
-        counts = dict(
+        # 分页在 SQL 里做，条目数只数这一页的名单（名单名唯一，按名排序就是全序）
+        total = _count(session, Roster)
+        rows = list(
             session.execute(
-                select(RosterEntry.roster_id, func.count(RosterEntry.id)).group_by(
-                    RosterEntry.roster_id
-                )
-            ).all()
+                select(Roster).order_by(Roster.name).limit(page.limit).offset(page.offset)
+            ).scalars()
         )
-        rows = list(session.execute(select(Roster).order_by(Roster.name)).scalars())
-        return slice_page(
-            [_roster_out(row, counts.get(row.id, 0)) for row in rows], page
+        counts = _counts_by(
+            session, RosterEntry.roster_id, RosterEntry.id, [row.id for row in rows]
+        )
+        return page_of(
+            [_roster_out(row, counts.get(row.id, 0)) for row in rows], total, page
         )
 
 
@@ -751,13 +773,10 @@ def import_roster_entries(
         for offset, item in enumerate(payload):
             line_no = offset + 1
             player_no = item.player_no.strip()
-            if not player_no:
+            problem = player_no_problem(player_no)
+            if problem:
                 result.skipped += 1
-                result.errors.append("第 %d 行：选手编号为空" % line_no)
-                continue
-            if len(player_no) > 64:
-                result.skipped += 1
-                result.errors.append("第 %d 行：选手编号超过 64 字符" % line_no)
+                result.errors.append("第 %d 行：%s" % (line_no, problem))
                 continue
             # 姓名字段在库里是 VARCHAR(64/32)，超了 SQLite 也不会报错，只会静默
             # 存进去。宁可在这里逐条拒绝 —— 同一份名单重新导一次就能修好
@@ -804,10 +823,9 @@ def update_roster_entry(
             raise HTTPException(status_code=404, detail="名单条目不存在")
 
         player_no = payload.player_no.strip()
-        if not player_no:
-            raise HTTPException(status_code=400, detail="选手编号不能为空")
-        if len(player_no) > 64:
-            raise HTTPException(status_code=400, detail="选手编号超过 64 字符")
+        problem = player_no_problem(player_no)
+        if problem:
+            raise HTTPException(status_code=400, detail=problem)
         too_long = _first_overlong(
             (payload.name, 64, "姓名"), (payload.seat, 32, "座位"), (payload.group_name, 64, "分组")
         )
@@ -853,12 +871,9 @@ def clear_roster_entries(
         bound = _bound_player_nos(session, roster_id)
         if bound:
             raise _roster_in_use_error(bound, "这份名单")
-        removed = 0
-        for entry in session.execute(
-            select(RosterEntry).where(RosterEntry.roster_id == roster_id)
-        ).scalars():
-            session.delete(entry)
-            removed += 1
+        # 一条 DELETE：条目没有挂 ORM 级联（机器那一侧的外键是库里的 SET NULL，
+        # 而且上面已经拒绝了有机器绑着的情况），不用逐行载入再删
+        removed = _bulk_delete(session, RosterEntry, RosterEntry.roster_id == roster_id)
         name = roster.name
     return SimpleAck(ok=True, detail="已清空名单「%s」的 %d 条记录" % (name, removed))
 
@@ -1108,7 +1123,18 @@ def bind_machine_by_code(
         if entry is None:
             raise HTTPException(status_code=404, detail="名单条目不存在")
 
-        agent = enrollment.find_unbound_by_pair_code(session, payload.pair_code, now)
+        matches = enrollment.find_unbound_by_pair_code(session, payload.pair_code, now)
+        if len(matches) > 1:
+            # 同一个码对上了好几台：绑哪一台都是猜。宁可让教师在列表里按机器绑
+            raise ApiError(
+                409,
+                "conflict",
+                "这个配对码同时对上了 %d 台机器，没法确定是哪一台。"
+                "请在「待配对机器」列表里直接选那台机器绑定，或让它重启 Agent 换一个码。"
+                % len(matches),
+                {"matches": len(matches)},
+            )
+        agent = matches[0] if matches else None
         if agent is None:
             # 不区分"没这个码"和"码过期了"：对外说法一致，
             # 免得有人拿它当预言机去猜码
@@ -1190,6 +1216,10 @@ def revoke_pending_machine(
 
     作废它的凭据 —— 那台机器下次心跳会拿到 401，然后等下一次开机由注册单元
     重新注册。真正的垃圾机器应该先吊销统一密钥，否则它会一直回来。
+
+    **硬删**，与 :func:`revoke_agent` 同理：曾经只打 ``revoked_at`` 标记，而
+    ``machine_uuid`` 有唯一约束、认回时又不看作废的行 —— 同一台机器再注册就撞约束
+    500，"它下次开机还会回来"这句话不成立。
     """
     with ctx.db.session() as session:
         agent = session.get(Agent, agent_id)
@@ -1198,7 +1228,7 @@ def revoke_pending_machine(
         # 主机名可能是空的（Agent 读不到 hostname 时），退回 machine_id 作为标识 ——
         # 空字符串会让"原样输入"变成一个谁都不用输入的空操作
         require_confirm(agent.hostname or agent.machine_id, confirm, "机器名")
-        agent.revoked_at = utcnow()
+        session.delete(agent)
     ctx.registry.forget(agent_id)
     ctx.pair_codes.forget(agent_id)
     return SimpleAck(ok=True, detail="已移除")
@@ -1228,9 +1258,9 @@ def clear_pending_machines(
                 )
             ).scalars()
         )
-        now = utcnow()
+        # 硬删（理由见 revoke_pending_machine）：打标记会让整批机器永久回不来
         for agent in rows:
-            agent.revoked_at = now
+            session.delete(agent)
         if rows:
             session.add(
                 EventLog(
@@ -1346,10 +1376,16 @@ def list_bootstrap_keys(
     admin: AdminIdentity = Depends(require_admin),
 ) -> Page[BootstrapKeyOut]:
     with ctx.db.session() as session:
+        total = _count(session, BootstrapKey)
         rows = list(
-            session.execute(select(BootstrapKey).order_by(BootstrapKey.id)).scalars()
+            session.execute(
+                select(BootstrapKey)
+                .order_by(BootstrapKey.id)
+                .limit(page.limit)
+                .offset(page.offset)
+            ).scalars()
         )
-        return slice_page([_bootstrap_key_out(row) for row in rows], page)
+        return page_of([_bootstrap_key_out(row) for row in rows], total, page)
 
 
 @router.post("/bootstrap-keys", response_model=BootstrapKeyIssuedOut)
@@ -1487,12 +1523,22 @@ def import_players(
         touched: List[Player] = []
         created = 0
         updated = 0
+        # 考号先整批验：这个接口没有逐条报错的回执，宁可整批拒绝，也不写进去一半
+        problems = [
+            "第 %d 条：%s" % (index + 1, problem)
+            for index, item in enumerate(payload)
+            for problem in [player_no_problem(item.player_no.strip())]
+            if problem
+        ]
+        if problems:
+            raise ApiError(400, "bad_request", "；".join(problems[:20]), {"errors": problems[:50]})
         for item in payload:
-            row = existing.get(item.player_no)
+            number = item.player_no.strip()
+            row = existing.get(number)
             if row is None:
-                row = Player(contest_id=contest_id, player_no=item.player_no)
+                row = Player(contest_id=contest_id, player_no=number)
                 session.add(row)
-                existing[item.player_no] = row
+                existing[number] = row
                 created += 1
             else:
                 updated += 1
@@ -1533,6 +1579,10 @@ def list_players(
                 .offset(page.offset)
             ).scalars()
         )
+        # 两项统计都只算**这一页**的选手：曾经按全库分组再取用，
+        # 机器、代码文件一多，翻一页选手列表就要扫一遍整张表。
+        page_nos = [player.player_no for player in players]
+        page_ids = [player.id for player in players]
         # 机器数是**跨场次**的：机器绑的是人（名单条目），不是这场比赛的选手记录。
         # 所以按准考证号去数，而不是按 player_id —— 同一个人在别的场次绑的机器
         # 也该算"他有机器"，否则每一场的列表都会显示成"未注册"。
@@ -1541,16 +1591,16 @@ def list_players(
             for player_no, count in session.execute(
                 select(RosterEntry.player_no, func.count(Agent.id))
                 .join(Agent, Agent.roster_entry_id == RosterEntry.id)
-                .where(Agent.revoked_at.is_(None))
+                .where(Agent.revoked_at.is_(None), RosterEntry.player_no.in_(page_nos))
                 .group_by(RosterEntry.player_no)
             ).all()
-        }
-        file_counts = dict(
-            session.execute(
-                select(SourceFile.player_id, func.count(SourceFile.id))
-                .where(SourceFile.deleted_at.is_(None))
-                .group_by(SourceFile.player_id)
-            ).all()
+        } if page_nos else {}
+        file_counts = _counts_by(
+            session,
+            SourceFile.player_id,
+            SourceFile.id,
+            page_ids,
+            SourceFile.deleted_at.is_(None),
         )
 
     # 在线状态走内存注册表，不查库
@@ -1612,10 +1662,9 @@ def update_player(
             raise HTTPException(status_code=404, detail="选手不存在")
 
         player_no = payload.player_no.strip()
-        if not player_no:
-            raise HTTPException(status_code=400, detail="选手编号不能为空")
-        if len(player_no) > 64:
-            raise HTTPException(status_code=400, detail="选手编号超过 64 字符")
+        problem = player_no_problem(player_no)
+        if problem:
+            raise HTTPException(status_code=400, detail=problem)
         too_long = _first_overlong(
             (payload.name, 64, "姓名"), (payload.seat, 32, "座位"), (payload.group_name, 64, "分组")
         )
@@ -1700,6 +1749,9 @@ def delete_player(
             )
         ).scalar_one()
 
+        hashes = list(session.execute(
+            select(SourceFile.sha256).where(SourceFile.player_id == player_id).distinct()
+        ).scalars())
         session.delete(player)
         session.add(
             EventLog(
@@ -1711,6 +1763,8 @@ def delete_player(
             )
         )
 
+    # 代码台账随选手级联删掉了；内容曾经不回收，永远留在 blobs/ 里
+    _reclaim_blobs(ctx, hashes)
     detail = "已删除选手 %s（代码 %d 条，成绩 %d 条）" % (player_no, files, runs)
     if bound_machines:
         detail += "。他的 %d 台机器没有动 —— 那些机器绑的是人，不是这场比赛的记录" % (
@@ -1907,13 +1961,11 @@ def rebind_agent(
         if current is not None and current.id == entry.id:
             return SimpleAck(ok=True, detail="这台机器本来就属于 %s" % entry.player_no)
 
-        clash = session.execute(
-            select(Agent).where(
-                Agent.roster_entry_id == entry.id,
-                Agent.revoked_at.is_(None),
-                Agent.id != agent_id,
-            )
-        ).scalar_one_or_none()
+        # 按考号判，不按名单条目判（理由见 machines_holding_player_no）
+        holders = enrollment.machines_holding_player_no(
+            session, entry.player_no, exclude_agent_id=agent_id
+        )
+        clash = holders[0] if holders else None
         if clash is not None:
             raise ApiError(
                 409,
@@ -2433,7 +2485,8 @@ def delete_source_file(
         player_no = player.player_no if player else "?"
         session.delete(row)
         session.flush()
-        freed = _release_blob_if_unreferenced(session, ctx, sha256)
+        candidates = _unreferenced(session, [sha256])
+    freed = _reclaim_blobs(ctx, candidates)
 
     detail = "已删除 %s 的台账记录 %s" % (player_no, rel_path)
     if was_live:
@@ -2443,38 +2496,54 @@ def delete_source_file(
     return SimpleAck(ok=True, detail=detail)
 
 
-def _release_blob_if_unreferenced(session, ctx: AppContext, sha256: str) -> bool:
-    """没有任何记录再引用这份内容时，把它从存储里删掉。
+#: 内容寻址存储的全部消费者：回收上来的代码、下发的资产、发布的 Agent 包。
+#: **只有这一份清单**（第一版按用途各写了一份同名函数，后定义的静默覆盖了先定义的）。
+#: 以后再加消费者，改这一处。
+_BLOB_REFERENCES = (
+    (SourceFile, SourceFile.sha256),
+    (Asset, Asset.sha256),
+    (AgentRelease, AgentRelease.sha256),
+)
 
-    内容寻址存储是**三处共用**的：回收上来的代码、下发的资产、发布的 Agent 包。
-    所以"还有没有人用"必须一次查全 —— 只查一处会在跨用途共享时报错删掉
-    别人还在用的内容，而表现是"某个早就归档的文件突然取不到内容"，
-    不报错、只是 404，事后极难对上原因。
 
-    **这个函数只能有一个定义。** 第一版按用途各写了一份，
-    于是同名的那个把先定义的静默覆盖掉了 —— 而 Python 不会为此发任何警告。
-    现在收成一个：以后再加内容消费者，改这一处。
+def _unreferenced(session, hashes) -> List[str]:
+    """在**当前事务**里（删除已 flush）看哪些内容已经没人引用 —— 只用来算回执里的数字。
+
+    真正删文件在提交之后（:func:`_reclaim_blobs`）：曾经在事务里就 unlink，提交一旦
+    失败，行回来了、内容却没了，表现是"某个早就归档的文件突然取不到内容"。
     """
-    references = (
-        (SourceFile, SourceFile.sha256),
-        (Asset, Asset.sha256),
-        (AgentRelease, AgentRelease.sha256),
-    )
-    for model, column in references:
-        left = session.execute(
-            select(func.count(model.id)).where(column == sha256)
-        ).scalar_one() or 0
-        if left:
-            return False
+    candidates = sorted(set(h for h in hashes if h))
+    used = set()
+    # 成批查（每批 500，SQLite 参数上限之内）：曾经每个指纹三条 COUNT，一场上万份
+    # 内容的清理在写事务里跑几万条查询，期间所有机器的心跳都在等写锁
+    for start in range(0, len(candidates), 500):
+        chunk = candidates[start:start + 500]
+        for _model, column in _BLOB_REFERENCES:
+            used.update(session.execute(select(column).where(column.in_(chunk)).distinct()).scalars())
+    return [sha for sha in candidates if sha not in used]
 
-    try:
-        ctx.blobs.path_for(sha256).unlink()
-        return True
-    except FileNotFoundError:
-        return False
-    except OSError as exc:  # pragma: no cover
-        log.warning("删除 blob %s 失败：%s", sha256, exc)
-        return False
+
+def _reclaim_blobs(ctx: AppContext, hashes) -> int:
+    """**提交之后**回收没人引用的内容：新开一个会话再查一遍引用，确实没人用才删。
+
+    再查一遍是为了窄化"提交与删除之间有人刚好上传了同一份内容"的窗口（上传先写
+    blob、后写台账）。返回实际删掉的份数。
+    """
+    candidates = sorted(set(h for h in hashes if h))
+    if not candidates:
+        return 0
+    with ctx.db.session() as session:
+        unused = _unreferenced(session, candidates)
+    freed = 0
+    for sha in unused:
+        try:
+            ctx.blobs.path_for(sha).unlink()
+            freed += 1
+        except FileNotFoundError:
+            pass
+        except OSError as exc:  # pragma: no cover
+            log.warning("删除 blob %s 失败：%s", sha, exc)
+    return freed
 
 
 @router.post("/contests/{contest_id}/files/clear", response_model=SimpleAck)
@@ -2487,11 +2556,14 @@ def clear_source_files(
 ) -> SimpleAck:
     """清理代码台账。
 
-    这是**软删除**（打墓碑）的批量版本：行先删掉，``blobs/`` 里的内容只在
-    没有任何记录再引用它时才释放 —— 见 ``docs/reference/api-conventions.md`` §5.2。
+    这是**硬删除**：行直接删掉，``blobs/`` 里的内容只在没有任何记录再引用它时
+    才一并删掉；``source/`` 里已落盘的文件不碰。被删的行找不回来，也不会出现在
+    ``?include_deleted=true`` 里 —— 见 ``docs/reference/api-conventions.md`` §5.2。
+    （ADR-0003 v1 原定这里是软删留墓碑，从未实现；2026-11 修订改为承认硬删。）
 
-    默认 ``purge=false``：只清掉**已经消失**的墓碑记录（选手删了文件之后留下的
-    那些），这不会影响任何还在的东西 —— 也是这个操作最常见的用途。
+    默认 ``purge=false``：只删扫描对账标成**已消失**的行（选手在机器上删掉的文件，
+    ``deleted_at`` 非空 —— 系统里唯一的墓碑），这不会影响任何还在的东西 ——
+    也是这个操作最常见的用途。
 
     ``purge=true`` 会连活的一起删，但**机器还在报的文件下一轮就会回来**，
     所以它只适合"比赛结束后归档完毕、准备清场"。界面上的按钮要写明这一点。
@@ -2505,23 +2577,22 @@ def clear_source_files(
             raise HTTPException(status_code=404, detail="场次不存在")
         require_confirm(contest.slug, payload.confirm, "场次标识")
 
-        stmt = (
-            select(SourceFile)
-            .join(Player, SourceFile.player_id == Player.id)
-            .where(Player.contest_id == contest_id)
-        )
+        conditions = [
+            SourceFile.player_id.in_(select(Player.id).where(Player.contest_id == contest_id))
+        ]
         if player_id is not None:
-            stmt = stmt.where(SourceFile.player_id == player_id)
+            conditions.append(SourceFile.player_id == player_id)
         if not purge:
-            stmt = stmt.where(SourceFile.deleted_at.isnot(None))
+            conditions.append(SourceFile.deleted_at.isnot(None))
 
-        rows = list(session.execute(stmt).scalars())
-        hashes = {row.sha256 for row in rows}
-        for row in rows:
-            session.delete(row)
-        session.flush()
+        # 一场比赛的台账能有上万行：只取要回收的内容指纹，删除走一条 DELETE
+        hashes = set(
+            session.execute(select(SourceFile.sha256).where(*conditions).distinct()).scalars()
+        )
+        removed = _bulk_delete(session, SourceFile, *conditions)
 
-        freed = sum(1 for sha in hashes if _release_blob_if_unreferenced(session, ctx, sha))
+        candidates = _unreferenced(session, hashes)
+        freed = len(candidates)
 
         session.add(
             EventLog(
@@ -2529,11 +2600,12 @@ def clear_source_files(
                 category="files_clear",
                 contest_id=contest_id,
                 message="清理代码台账：%d 条%s（释放 %d 份内容）"
-                % (len(rows), "（含未消失的）" if purge else "（只清已消失的）", freed),
+                % (removed, "（含未消失的）" if purge else "（只清已消失的）", freed),
             )
         )
 
-    detail = "已清理 %d 条台账记录，释放 %d 份内容" % (len(rows), freed)
+    _reclaim_blobs(ctx, candidates)
+    detail = "已清理 %d 条台账记录，释放 %d 份内容" % (removed, freed)
     if purge:
         detail += "。机器还在报的文件会在下一轮重新出现"
     return SimpleAck(ok=True, detail=detail)
@@ -2790,19 +2862,18 @@ def clear_events(
         else:
             require_confirm(GLOBAL_CONFIRM, payload.confirm, "清空确认")
 
-        stmt = select(EventLog)
+        conditions = []
         if contest_id is not None:
-            stmt = stmt.where(EventLog.contest_id == contest_id)
+            conditions.append(EventLog.contest_id == contest_id)
         if level:
-            stmt = stmt.where(EventLog.level == level)
+            conditions.append(EventLog.level == level)
         if older_than_days is not None:
             cutoff = utcnow() - timedelta(days=max(0, older_than_days))
-            stmt = stmt.where(EventLog.ts < cutoff)
+            conditions.append(EventLog.ts < cutoff)
 
-        rows = list(session.execute(stmt).scalars())
-        for row in rows:
-            session.delete(row)
-        if rows:
+        # 审计日志动辄几十万行，逐行载入再删能把一次清理拖上几分钟
+        removed = _bulk_delete(session, EventLog, *conditions)
+        if removed:
             # 记一条"谁清的"—— 否则日志被清这件事本身没有痕迹
             session.add(
                 EventLog(
@@ -2810,7 +2881,7 @@ def clear_events(
                     category="events_clear",
                     message="清理审计日志 %d 条（场次=%s，级别=%s，早于 %s 天）"
                     % (
-                        len(rows),
+                        removed,
                         contest_id if contest_id is not None else "全部",
                         level or "全部",
                         older_than_days if older_than_days is not None else "不限",
@@ -2818,7 +2889,7 @@ def clear_events(
                 )
             )
 
-    return SimpleAck(ok=True, detail="已清理 %d 条审计日志" % len(rows))
+    return SimpleAck(ok=True, detail="已清理 %d 条审计日志" % removed)
 
 
 def _event_out(row: EventLog, player_no: Optional[str]) -> EventOut:
@@ -2877,6 +2948,13 @@ def delete_contest(
         }
         slug = contest.slug
         name = contest.name
+        hashes = list(session.execute(
+            select(SourceFile.sha256).where(
+                SourceFile.player_id.in_(select(Player.id).where(Player.contest_id == contest_id))
+            ).distinct()
+        ).scalars()) + list(session.execute(
+            select(Asset.sha256).where(Asset.contest_id == contest_id)
+        ).scalars())
         session.delete(contest)
         session.add(
             EventLog(
@@ -2891,6 +2969,8 @@ def delete_contest(
             )
         )
 
+    # 代码与资产随场次级联删掉了；内容曾经不回收，永远留在 blobs/ 里
+    _reclaim_blobs(ctx, hashes)
     # 内存里的在线状态也要跟着清，否则顶栏会继续显示一台已经不存在的场次的机器
     for runtime in list(ctx.registry.all(contest_id)):
         ctx.registry.forget(runtime.agent_id)
@@ -2908,15 +2988,52 @@ def _count(session, model, *conditions) -> int:
     )
 
 
-@router.get("/health")
-def health(ctx: AppContext = Depends(get_ctx)) -> Dict[str, Any]:
+def _bulk_delete(session, model, *conditions) -> int:
+    """一条 ``DELETE ... WHERE``，返回删掉的行数。
+
+    只用在**没有 ORM 级联**的表上（事件、台账、成绩、名单条目）：它绕过
+    ``session.delete()``，ORM 层的 ``cascade=`` 不会触发；库里的外键级联照常生效。
+    调用方在同一事务里没有载入过这些行，所以不同步会话（``synchronize_session=False``）。
+    """
+    result = session.execute(
+        delete(model).where(*conditions).execution_options(synchronize_session=False)
+    )
+    return int(result.rowcount or 0)
+
+
+def _counts_by(session, key_col, id_col, keys: List[Any], *conditions) -> Dict[Any, int]:
+    """``{key: 行数}``，只数 ``keys`` 里这几个（列表页的"这一页"）。
+
+    列表接口的统计列一律这样算：先在 SQL 里切出一页，再对这一页的主键做一次
+    ``GROUP BY``。对全表分组再在 Python 里挑，翻一页就要扫一遍整张表。
+    """
+    if not keys:
+        return {}
+    rows = session.execute(
+        select(key_col, func.count(id_col))
+        .where(key_col.in_(keys), *conditions)
+        .group_by(key_col)
+    ).all()
+    return {key: int(count) for key, count in rows}
+
+
+@router.get("/health", response_model=AdminHealthOut)
+def health(
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> AdminHealthOut:
+    """管理端探活（要登录）。
+
+    曾经不鉴权：匿名就能拿到 ``data_root`` 的绝对路径，而且它恒回 200，于是匿名
+    请求能借它的 Host 头改写"对外地址"（见 main._remember_public_url）。
+    """
     agents = ctx.registry.all()
-    return {
-        "ok": ctx.db.healthcheck(),
-        "agents_total": len(agents),
-        "agents_online": sum(1 for a in agents if a.online),
-        "data_root": str(ctx.settings.data_root),
-    }
+    return AdminHealthOut(
+        ok=ctx.db.healthcheck(),
+        agents_total=len(agents),
+        agents_online=sum(1 for a in agents if a.online),
+        data_root=str(ctx.settings.data_root),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -3386,14 +3503,19 @@ def list_assets(
     admin: AdminIdentity = Depends(require_admin),
 ) -> Page[AssetOut]:
     with ctx.db.session() as session:
+        total = _count(session, Asset, Asset.contest_id == contest_id)
         rows = list(
             session.execute(
-                select(Asset).where(Asset.contest_id == contest_id).order_by(Asset.id.desc())
+                select(Asset)
+                .where(Asset.contest_id == contest_id)
+                .order_by(Asset.id.desc())
+                .limit(page.limit)
+                .offset(page.offset)
             ).scalars()
         )
-        pending = _pending_target_counts(session, contest_id)
-        return slice_page(
-            [_asset_out(row, pending.get(row.id, 0)) for row in rows], page
+        pending = _pending_target_counts(session, [row.id for row in rows])
+        return page_of(
+            [_asset_out(row, pending.get(row.id, 0)) for row in rows], total, page
         )
 
 
@@ -3413,17 +3535,19 @@ def _asset_out(asset: Asset, pending_targets: int = 0) -> AssetOut:
     )
 
 
-def _pending_target_counts(session, contest_id: int) -> Dict[int, int]:
-    """每个资产还有几个选手没下载完。
+def _pending_target_counts(session, asset_ids: List[int]) -> Dict[int, int]:
+    """这一页的每个资产还有几个选手没下载完。
 
     一次分组查询，而不是逐行去数 —— 资产列表一屏几十行，
-    N+1 会把一次列表请求变成几十次查询。
+    N+1 会把一次列表请求变成几十次查询。只数传进来的这几个资产，不扫全场。
     """
+    if not asset_ids:
+        return {}
     rows = session.execute(
         select(DeployTask.asset_id, func.count(DeployTarget.id))
         .join(DeployTarget, DeployTarget.task_id == DeployTask.id)
         .where(
-            DeployTask.contest_id == contest_id,
+            DeployTask.asset_id.in_(asset_ids),
             DeployTarget.status.in_(ACTIVE_DEPLOY_STATUSES),
         )
         .group_by(DeployTask.asset_id)
@@ -3463,27 +3587,22 @@ def _requeue_done_targets(session: Session, asset_id: int) -> int:
     迟早有一处忘了清零偏移，而那种坏文件要到选手解压时才会被发现。
     """
     requeued = 0
-    tasks: Dict[int, DeployTask] = {}
-    for target, task in session.execute(
-        select(DeployTarget, DeployTask)
+    for target in session.execute(
+        select(DeployTarget)
         .join(DeployTask, DeployTarget.task_id == DeployTask.id)
         .where(
             DeployTask.asset_id == asset_id,
-            DeployTarget.status == DeployStatus.DONE,
+            # 失败过的也给一次新机会：失败的可能正是旧内容（比如旧 zip 坏了）
+            DeployTarget.status.in_((DeployStatus.DONE, DeployStatus.FAILED)),
         )
-    ).all():
+    ).scalars():
         target.status = DeployStatus.PENDING
         target.bytes_done = 0
+        target.failure_count = 0
+        target.last_error = None
         target.updated_at = utcnow()
         requeued += 1
-        tasks[int(task.id)] = task
-
-    # 任务状态是目标状态的聚合缓存（`_derive_task_status`），读的时候会重算，
-    # 但**写**的路径上有两处按它判断：取消接口会看它是不是 done。留在 done
-    # 会让"刚被重排的任务"报"任务已完成，无法取消"。
-    for task in tasks.values():
-        if task.status != DeployStatus.CANCELLED:
-            task.status = DeployStatus.PENDING
+    # 任务状态是读时从目标聚合的（`_derive_task_status`），这里不用、也没有可改的
     return requeued
 
 
@@ -4078,10 +4197,13 @@ def delete_asset(
         if asset is None:
             return SimpleAck(ok=True, detail="资产不存在")
         filename = asset.filename
+        sha256 = asset.sha256
         tasks = session.execute(
             select(func.count(DeployTask.id)).where(DeployTask.asset_id == asset_id)
         ).scalar_one()
         session.delete(asset)
+    # 曾经不回收：删掉的资产内容永远留在 blobs/ 里
+    _reclaim_blobs(ctx, [sha256])
 
     return SimpleAck(
         ok=True,
@@ -4147,7 +4269,6 @@ def create_deploy(
             target_desc=payload.target_group or _describe_targets(payload, players),
             dest_dir=dest_dir,
             mode=payload.mode,
-            status=DeployStatus.PENDING,
         )
         session.add(task)
         session.flush()
@@ -4171,7 +4292,7 @@ def create_deploy(
                 % (asset.filename, len(players), dest_dir or "<根目录>"),
             )
         )
-        return _deploy_task_out(session, task, asset, include_targets=False)
+        return _one_deploy_task_out(session, task, include_targets=False)
 
 
 def _resolve_target_players(session, contest_id: int, payload: DeployCreate):
@@ -4223,18 +4344,42 @@ def list_deploys(
     admin: AdminIdentity = Depends(require_admin),
 ) -> Page[DeployTaskOut]:
     with ctx.db.session() as session:
+        # 一页任务固定三条查询（任务 / 资产 / 按状态分组计数），外加要明细时的一条；
+        # 曾经是逐任务各查一次资产、一次全部目标 —— 任务一多就是几百条查询。
+        total = _count(session, DeployTask, DeployTask.contest_id == contest_id)
         tasks = list(
             session.execute(
                 select(DeployTask)
                 .where(DeployTask.contest_id == contest_id)
                 .order_by(DeployTask.id.desc())
+                .limit(page.limit)
+                .offset(page.offset)
             ).scalars()
         )
-        out = []
-        for task in tasks:
-            asset = session.get(Asset, task.asset_id)
-            out.append(_deploy_task_out(session, task, asset, include_targets=include_targets))
-        return slice_page(out, page)
+        task_ids = [task.id for task in tasks]
+        asset_ids = sorted({task.asset_id for task in tasks})
+        assets = (
+            {
+                asset.id: asset
+                for asset in session.execute(
+                    select(Asset).where(Asset.id.in_(asset_ids))
+                ).scalars()
+            }
+            if asset_ids
+            else {}
+        )
+        counts = _deploy_status_counts(session, task_ids)
+        targets = _deploy_targets_out(session, task_ids) if include_targets else {}
+        out = [
+            _deploy_task_out(
+                task,
+                assets.get(task.asset_id),
+                counts.get(task.id, {}),
+                targets.get(task.id, []),
+            )
+            for task in tasks
+        ]
+        return page_of(out, total, page)
 
 
 @router.get("/deploys/{task_id}", response_model=DeployTaskOut)
@@ -4247,8 +4392,7 @@ def get_deploy(
         task = session.get(DeployTask, task_id)
         if task is None:
             raise HTTPException(status_code=404, detail="下发任务不存在")
-        asset = session.get(Asset, task.asset_id)
-        return _deploy_task_out(session, task, asset, include_targets=True)
+        return _one_deploy_task_out(session, task, include_targets=True)
 
 
 @router.post("/deploys/{task_id}/cancel", response_model=SimpleAck)
@@ -4266,7 +4410,9 @@ def cancel_deploy(
         task = session.get(DeployTask, task_id)
         if task is None:
             raise HTTPException(status_code=404, detail="下发任务不存在")
-        if task.status == DeployStatus.DONE:
+        # 按目标的**当前**状态判断，与界面上显示的是同一个判据
+        counts = _deploy_status_counts(session, [task_id]).get(task_id, {})
+        if _derive_task_status(task, counts) == DeployStatus.DONE:
             raise HTTPException(status_code=409, detail="任务已完成，无法取消")
 
         affected = 0
@@ -4278,7 +4424,8 @@ def cancel_deploy(
         ).scalars():
             target.status = DeployStatus.CANCELLED
             affected += 1
-        task.status = DeployStatus.CANCELLED
+        if task.cancelled_at is None:
+            task.cancelled_at = utcnow()
         session.add(
             EventLog(
                 level="info",
@@ -4311,38 +4458,67 @@ def retry_deploy(
         ).scalars():
             target.status = DeployStatus.PENDING
             target.retry_count += 1
+            target.failure_count = 0
             target.last_error = None
             affected += 1
         if affected:
-            task.status = DeployStatus.PENDING
+            # 重试 = 重新开始下发：已取消的任务不撤销取消的话，这几个目标
+            # 永远不会被派发（派发只看没取消的任务），重试按钮就成了摆设
+            task.cancelled_at = None
     return SimpleAck(ok=True, detail="已重置 %d 个失败目标" % affected)
 
 
-def _deploy_task_out(session, task: DeployTask, asset, include_targets: bool) -> DeployTaskOut:
-    rows = list(
-        session.execute(
-            select(DeployTarget, Player.player_no)
-            .join(Player, DeployTarget.player_id == Player.id)
-            .where(DeployTarget.task_id == task.id)
-            .order_by(Player.player_no)
-        )
-    )
-    counts: Dict[str, int] = {}
-    targets: List[DeployTargetOut] = []
-    for target, player_no in rows:
-        counts[target.status] = counts.get(target.status, 0) + 1
-        if include_targets:
-            targets.append(
-                DeployTargetOut(
-                    player_id=target.player_id,
-                    player_no=player_no,
-                    status=target.status,
-                    bytes_done=int(target.bytes_done),
-                    retry_count=int(target.retry_count),
-                    last_error=target.last_error,
-                )
-            )
+def _deploy_status_counts(session, task_ids: List[int]) -> Dict[int, Dict[str, int]]:
+    """``{task_id: {目标状态: 台数}}`` —— 一条 ``GROUP BY`` 算完一页任务。"""
+    result: Dict[int, Dict[str, int]] = {}
+    if not task_ids:
+        return result
+    for task_id, status_, count in session.execute(
+        select(DeployTarget.task_id, DeployTarget.status, func.count(DeployTarget.id))
+        .where(DeployTarget.task_id.in_(task_ids))
+        .group_by(DeployTarget.task_id, DeployTarget.status)
+    ).all():
+        result.setdefault(int(task_id), {})[status_] = int(count)
+    return result
 
+
+def _deploy_targets_out(session, task_ids: List[int]) -> Dict[int, List[DeployTargetOut]]:
+    """``{task_id: 逐选手进度}``，每个任务内按考号排序。一条查询取完一页任务。"""
+    result: Dict[int, List[DeployTargetOut]] = {}
+    if not task_ids:
+        return result
+    for target, player_no in session.execute(
+        select(DeployTarget, Player.player_no)
+        .join(Player, DeployTarget.player_id == Player.id)
+        .where(DeployTarget.task_id.in_(task_ids))
+        .order_by(DeployTarget.task_id, Player.player_no)
+    ):
+        result.setdefault(int(target.task_id), []).append(
+            DeployTargetOut(
+                player_id=target.player_id,
+                player_no=player_no,
+                status=target.status,
+                bytes_done=int(target.bytes_done),
+                retry_count=int(target.retry_count),
+                last_error=target.last_error,
+            )
+        )
+    return result
+
+
+def _one_deploy_task_out(session, task: DeployTask, include_targets: bool) -> DeployTaskOut:
+    """单个任务的出参（建任务、看详情）。与列表走同一套计数与明细查询。"""
+    counts = _deploy_status_counts(session, [task.id]).get(task.id, {})
+    targets = _deploy_targets_out(session, [task.id]).get(task.id, []) if include_targets else []
+    return _deploy_task_out(task, session.get(Asset, task.asset_id), counts, targets)
+
+
+def _deploy_task_out(
+    task: DeployTask,
+    asset: Optional[Asset],
+    counts: Dict[str, int],
+    targets: List[DeployTargetOut],
+) -> DeployTaskOut:
     return DeployTaskOut(
         id=task.id,
         contest_id=task.contest_id,
@@ -4355,36 +4531,40 @@ def _deploy_task_out(session, task: DeployTask, asset, include_targets: bool) ->
         mode=task.mode,
         status=_derive_task_status(task, counts),
         created_at=_iso(task.created_at) or "",
-        total=len(rows),
+        total=sum(counts.values()),
         done=counts.get(DeployStatus.DONE, 0),
         failed=counts.get(DeployStatus.FAILED, 0),
-        pending=(
-            counts.get(DeployStatus.PENDING, 0)
-            + counts.get(DeployStatus.READY, 0)
-            + counts.get(DeployStatus.CANCELLED, 0)
-        ),
+        pending=counts.get(DeployStatus.PENDING, 0) + counts.get(DeployStatus.READY, 0),
+        cancelled=counts.get(DeployStatus.CANCELLED, 0),
         targets=targets,
     )
 
 
 def _derive_task_status(task: DeployTask, counts: Dict[str, int]) -> str:
-    """任务状态由目标聚合得出，而不是单独维护 —— 避免两者不一致。
+    """任务状态**每次读时**由目标聚合得出，库里不存 —— 存了就会和目标对不上。
 
-    单独维护会出现的典型问题：某个目标失败后任务状态仍是 pending，Web 上
-    进度条卡在 90% 永远不动。
+    单独维护出过的问题：某个目标失败后任务状态仍是 pending，进度条卡在 90%
+    永远不动；重排过的任务仍记着 done，取消接口报"已完成，无法取消"。
+
+    判据（``counts`` 是 ``{目标状态: 台数}``）：
+
+    * 教师取消过（``cancelled_at``）→ cancelled
+    * 还有 pending / ready 的目标 → pending（还在下发）
+    * 都停了：有失败的 → failed（含部分失败）；没失败但有被取消的 → cancelled
+      （取消后又重试过、剩下的是取消那次留下的）；否则 → done
+    * 没有任何目标 → pending（建任务时就拒绝了空目标，只在目标被连带删光后出现）
     """
-    if task.status == DeployStatus.CANCELLED:
+    if task.cancelled_at is not None:
         return DeployStatus.CANCELLED
-    total = sum(counts.values())
-    if total == 0:
-        return task.status
-    if counts.get(DeployStatus.DONE, 0) == total:
-        return DeployStatus.DONE
-    if counts.get(DeployStatus.FAILED, 0) == total:
+    if not sum(counts.values()):
+        return DeployStatus.PENDING
+    if counts.get(DeployStatus.PENDING, 0) + counts.get(DeployStatus.READY, 0):
+        return DeployStatus.PENDING
+    if counts.get(DeployStatus.FAILED, 0):
         return DeployStatus.FAILED
-    if counts.get(DeployStatus.DONE, 0) + counts.get(DeployStatus.FAILED, 0) == total:
-        return DeployStatus.FAILED  # 部分失败
-    return DeployStatus.PENDING
+    if counts.get(DeployStatus.CANCELLED, 0):
+        return DeployStatus.CANCELLED
+    return DeployStatus.DONE
 
 
 @router.delete("/deploys/{task_id}", response_model=SimpleAck)
@@ -4850,6 +5030,93 @@ def score_matrix(
     )
 
 
+@router.get("/contests/{contest_id}/scores/progress", response_model=Page[PlayerProgressOut])
+def score_progress(
+    contest_id: int,
+    page: PageParams = Depends(),
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> Page[PlayerProgressOut]:
+    """每位选手交了几道、待评测几道、没交几道（只数登记过的题目）。
+
+    概览页要的只是这几个数。排序与分页和选手列表一致（按考号），
+    所以概览页拿同一组 ``limit/offset`` 取到的正好是同一页人；
+    代码文件与评测记录也只查这一页，不扫全场。
+    """
+    with ctx.db.session() as session:
+        if session.get(Contest, contest_id) is None:
+            raise HTTPException(status_code=404, detail="场次不存在")
+        total_players = _count(session, Player, Player.contest_id == contest_id)
+        players = list(
+            session.execute(
+                select(Player)
+                .where(Player.contest_id == contest_id)
+                .order_by(Player.player_no)
+                .limit(page.limit)
+                .offset(page.offset)
+            ).scalars()
+        )
+        declared = list(
+            session.execute(
+                select(Problem)
+                .where(Problem.contest_id == contest_id)
+                .order_by(Problem.order_index, Problem.ident)
+            ).scalars()
+        )
+        idents = [row.ident for row in declared]
+        page_ids = [player.id for player in players]
+
+        judged = set()
+        submitted_pairs = set()
+        if page_ids and idents:
+            judged = set(
+                session.execute(
+                    select(JudgeRun.player_id, JudgeRun.problem).where(
+                        JudgeRun.contest_id == contest_id,
+                        JudgeRun.player_id.in_(page_ids),
+                        JudgeRun.problem.in_(idents),
+                    )
+                ).all()
+            )
+            rules = [
+                matching.ProblemRule(
+                    ident=row.ident,
+                    title=row.title,
+                    patterns=problem_rules.patterns_for(row, ctx.settings),
+                )
+                for row in declared
+            ]
+            # 与成绩矩阵同一口径：只看活着的文件
+            for player_id, rel_path in session.execute(
+                select(SourceFile.player_id, SourceFile.rel_path).where(
+                    SourceFile.player_id.in_(page_ids), SourceFile.deleted_at.is_(None)
+                )
+            ):
+                ident = matching.match_problem(rel_path, rules)
+                if ident is not None:
+                    submitted_pairs.add((player_id, ident))
+
+        items = []
+        for player in players:
+            done = sum(1 for ident in idents if (player.id, ident) in judged)
+            waiting = sum(
+                1
+                for ident in idents
+                if (player.id, ident) not in judged and (player.id, ident) in submitted_pairs
+            )
+            items.append(
+                PlayerProgressOut(
+                    player_id=player.id,
+                    player_no=player.player_no,
+                    submitted=done,
+                    pending=waiting,
+                    missing=len(idents) - done - waiting,
+                    total=len(idents),
+                )
+            )
+        return page_of(items, total_players, page)
+
+
 @router.get("/contests/{contest_id}/judge/runs", response_model=Page[JudgeRunOut])
 def list_judge_runs(
     contest_id: int,
@@ -4901,9 +5168,10 @@ def rescan_judge_results(
     admin: AdminIdentity = Depends(require_admin),
 ) -> JudgeScanOut:
     """立即重扫成绩目录（忽略 mtime 缓存）。"""
-    from ..services.judge import scan_contest_results
+    from ..services.judge import SCAN_LOCK, scan_contest_results
 
-    with ctx.db.session() as session:
+    # 与后台扫描循环共用一把锁：两边同时给同一格插新行会撞唯一约束
+    with SCAN_LOCK, ctx.db.session() as session:
         contest = session.get(Contest, contest_id)
         if contest is None:
             raise HTTPException(status_code=404, detail="场次不存在")
@@ -5046,19 +5314,15 @@ def clear_judge_runs(
             raise HTTPException(status_code=404, detail="场次不存在")
         require_confirm(contest.slug, payload.confirm, "场次标识")
 
-        stmt = select(JudgeRun).where(JudgeRun.contest_id == contest_id)
+        conditions = [JudgeRun.contest_id == contest_id]
         if player_id is not None:
-            stmt = stmt.where(JudgeRun.player_id == player_id)
+            conditions.append(JudgeRun.player_id == player_id)
 
-        rows = list(session.execute(stmt).scalars())
-        removed = 0
         kept = 0
-        for run in rows:
-            if keep_manual and run.parse_status == "manual":
-                kept += 1
-                continue
-            session.delete(run)
-            removed += 1
+        if keep_manual:
+            kept = _count(session, JudgeRun, *conditions, JudgeRun.parse_status == "manual")
+            conditions.append(JudgeRun.parse_status != "manual")
+        removed = _bulk_delete(session, JudgeRun, *conditions)
 
         session.add(
             EventLog(
@@ -5227,10 +5491,10 @@ def _store_release(
     except BlobTooLarge as exc:
         raise HTTPException(status_code=413, detail=str(exc))
 
-    # 签名对象是 sha256 的十六进制字符串，而不是包本身的字节 ——
-    # 见 agent/syncoj_agent/upgrade.py 的说明。两边必须选同一种，否则所有
-    # 真实升级都会失败，且只在生产环境暴露。
-    signature = _b64(ctx.signing_key.sign(sha256.encode("ascii")))
+    # 签名对象是"格式标签 + 版本号 + sha256 + 大小"这段文本，而不是包本身的字节 ——
+    # 见 services/signing.release_signing_message 与 agent/syncoj_agent/upgrade.py
+    # 的说明。三处（这里、Agent、安装器）必须逐字节一致，否则所有真实升级都会失败。
+    signature = _b64(ctx.signing_key.sign(release_signing_message(version, sha256, size)))
 
     with ctx.db.session() as session:
         existing = session.execute(
@@ -5408,7 +5672,7 @@ def build_release(
     if not version:
         raise HTTPException(status_code=400, detail="必须指定版本号")
     try:
-        parse_version(version)
+        validate_release_version(version)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="版本号不合法: %s" % exc)
 
@@ -5554,7 +5818,7 @@ def upload_release(
         raise HTTPException(status_code=400, detail="必须指定版本号")
 
     try:
-        parse_version(version)
+        validate_release_version(version)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="版本号不合法: %s" % exc)
 
@@ -5697,8 +5961,7 @@ def delete_release(
         version = row.version
         sha256 = row.sha256
         session.delete(row)
-        session.flush()
-        freed = _release_blob_if_unreferenced(session, ctx, sha256)
+    freed = _reclaim_blobs(ctx, [sha256])
 
     detail = "已删除版本 %s" % version
     if freed:

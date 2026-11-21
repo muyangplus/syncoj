@@ -152,7 +152,7 @@ MIGRATION_ADDED_COLUMNS = {
     "contest": {"default_roster_id"},
     "problem": {"file_patterns"},
     "player": set(),
-    "agent_status": set(),
+    #: ``agent_status`` 不在这里：它是迁移 017 删掉的整张表（见 test_017_…）。
     #: ``bootstrap_key_id``：发布记录记住"这个包附带的是哪把统一注册密钥"（迁移 006）。
     #: 老结构里没有它 —— 那一轮的发布记录本来就不带密钥，升上来一律是 NULL。
     "agent_release": {
@@ -183,7 +183,6 @@ MIGRATION_DROPPED_COLUMNS = {
     "contest": {"player_notice"},
     "problem": set(),
     "player": set(),
-    "agent_status": set(),
     "agent_release": set(),
 }
 
@@ -504,7 +503,8 @@ def test_legacy_rebuild_keeps_child_table_rows(legacy_db: Path) -> None:
     在事务里关（无效），子表行归零。
     """
     engine = make_engine(legacy_db)
-    migrations.migrate(engine)
+    # 停在 016：agent_status（看守用的子表）在 017 被删掉了
+    migrations.migrate(engine, target=16)
 
     assert rows(engine, "SELECT COUNT(*) FROM agent")[0][0] == 1
     status = rows(engine, "SELECT agent_id, file_count, disk_free FROM agent_status")
@@ -522,7 +522,8 @@ def test_legacy_upgrade_keeps_every_row(legacy_db: Path) -> None:
     ``ON DELETE CASCADE`` 一起被删掉。这条断言就是为了在那一刻变红。
     """
     engine = make_engine(legacy_db)
-    migrations.migrate(engine)
+    # 停在 016：agent_status（看守用的子表）在 017 被删掉了
+    migrations.migrate(engine, target=16)
 
     assert rows(engine, "SELECT COUNT(*) FROM agent")[0][0] == 1
     assert rows(engine, "SELECT COUNT(*) FROM player")[0][0] == 1
@@ -636,3 +637,121 @@ def test_fresh_and_upgraded_databases_have_the_same_shape(
 
     fresh.dispose()
     upgraded.dispose()
+
+
+def test_upgrading_an_existing_database_backs_it_up_first(legacy_db: Path) -> None:
+    """要动结构的老库先整库备份（迁移写错或断电时唯一能回去的东西）。"""
+    engine = make_engine(legacy_db)
+    before = rows(engine, "SELECT count(*) FROM sqlite_master")[0][0]
+
+    migrations.migrate(engine)
+
+    backups = sorted(legacy_db.parent.glob(legacy_db.name + ".bak-v000-*"))
+    assert len(backups) == 1, backups
+    copy = make_engine(backups[0])
+    assert rows(copy, "PRAGMA user_version")[0][0] == 0
+    assert rows(copy, "SELECT count(*) FROM sqlite_master")[0][0] == before
+
+    # 已经是最新的库再启动：不再备份
+    migrations.migrate(engine)
+    assert len(sorted(legacy_db.parent.glob(legacy_db.name + ".bak-*"))) == 1
+
+
+def test_fresh_database_is_not_backed_up(workdir: Path) -> None:
+    path = workdir / "fresh.db"
+    migrations.migrate(make_engine(path))
+    assert not list(workdir.glob("fresh.db.bak-*"))
+
+
+# --------------------------------------------------------------------------- #
+# 015：下发任务删掉存储的状态列、改记取消时刻
+# --------------------------------------------------------------------------- #
+
+
+def test_migration_015_moves_cancelled_status_to_cancelled_at(workdir: Path) -> None:
+    """老库的 ``status='cancelled'`` 回填成 ``cancelled_at``，删列重建不吃掉目标行。"""
+    engine = make_engine(workdir / "v14.db")
+    migrations.migrate(engine)
+    with engine.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO contest (id, slug, name, status, created_at) "
+            "VALUES (1, 'c', 'c', 'running', '2026-01-01 00:00:00')"
+        ))
+        conn.execute(text(
+            "INSERT INTO player (id, contest_id, player_no, name, created_at) "
+            "VALUES (1, 1, 'S001', 'n', '2026-01-01 00:00:00')"
+        ))
+        conn.execute(text(
+            "INSERT INTO asset (id, contest_id, sha256, size, filename, kind, created_at) "
+            "VALUES (1, 1, :sha, 1, 'a.txt', 'testdata', '2026-01-01 00:00:00')"
+        ), {"sha": "a" * 64})
+        # 退回"迁移 015 之前"的 deploy_task：有 status、没有 cancelled_at
+        conn.execute(text("DROP TABLE deploy_task"))
+        conn.execute(text(
+            "CREATE TABLE deploy_task ("
+            " id INTEGER NOT NULL, contest_id INTEGER NOT NULL, asset_id INTEGER NOT NULL,"
+            " target_kind VARCHAR(16) NOT NULL, target_desc VARCHAR(255),"
+            " dest_dir VARCHAR(512) NOT NULL, mode VARCHAR(16) NOT NULL,"
+            " status VARCHAR(16) NOT NULL, created_at DATETIME NOT NULL, PRIMARY KEY (id),"
+            " FOREIGN KEY(contest_id) REFERENCES contest (id) ON DELETE CASCADE,"
+            " FOREIGN KEY(asset_id) REFERENCES asset (id) ON DELETE CASCADE)"
+        ))
+        conn.execute(text(
+            "INSERT INTO deploy_task (id, contest_id, asset_id, target_kind, dest_dir, mode,"
+            " status, created_at) VALUES"
+            " (1, 1, 1, 'all', 'exam', 'overwrite', 'cancelled', '2026-01-02 00:00:00'),"
+            " (2, 1, 1, 'all', 'exam', 'overwrite', 'done', '2026-01-03 00:00:00')"
+        ))
+        conn.execute(text(
+            "INSERT INTO deploy_target (task_id, player_id, status, bytes_done, retry_count,"
+            " updated_at) VALUES (1, 1, 'cancelled', 0, 0, '2026-01-02'),"
+            " (2, 1, 'done', 1, 0, '2026-01-03')"
+        ))
+        conn.execute(text("PRAGMA user_version = 14"))
+
+    migrations.migrate(engine)
+
+    columns = {c["name"] for c in inspect(engine).get_columns("deploy_task")}
+    with engine.connect() as conn:
+        tasks = conn.execute(text(
+            "SELECT id, cancelled_at FROM deploy_task ORDER BY id"
+        )).fetchall()
+        targets = conn.execute(text(
+            "SELECT task_id, status FROM deploy_target ORDER BY task_id"
+        )).fetchall()
+    assert migrations.current_version(engine) == migrations.LATEST_VERSION
+    engine.dispose()
+
+    assert "status" not in columns and "cancelled_at" in columns
+    assert tasks[0][1] is not None and tasks[1][1] is None
+    assert [tuple(row) for row in targets] == [(1, "cancelled"), (2, "done")]
+
+
+def test_migration_016_adds_event_log_indexes(workdir: Path) -> None:
+    """老库补上级别 / 类别索引，名字与全新库（模型 ``index=True``）一致。"""
+    fresh = make_engine(workdir / "fresh.db")
+    migrations.migrate(fresh)
+    expected = {ix["name"] for ix in inspect(fresh).get_indexes("event_log")}
+    fresh.dispose()
+    assert {"ix_event_log_level", "ix_event_log_category"} <= expected
+
+    engine = make_engine(workdir / "v15.db")
+    migrations.migrate(engine)
+    with engine.begin() as conn:
+        conn.execute(text("DROP INDEX ix_event_log_level"))
+        conn.execute(text("DROP INDEX ix_event_log_category"))
+        conn.execute(text("PRAGMA user_version = 15"))
+    migrations.migrate(engine)
+    upgraded = {ix["name"] for ix in inspect(engine).get_indexes("event_log")}
+    engine.dispose()
+    assert upgraded == expected
+
+
+def test_017_删掉只写不读的_agent_status(legacy_db: Path) -> None:
+    engine = make_engine(legacy_db)
+    migrations.migrate(engine)
+
+    tables = {row[0] for row in rows(engine, "SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "agent_status" not in tables
+    assert rows(engine, "SELECT COUNT(*) FROM agent")[0][0] == 1, "删子表不能牵连父表"
+    engine.dispose()

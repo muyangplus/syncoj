@@ -75,9 +75,10 @@ const buildNotes = ref('')
 /**
  * 要不要把「统一注册密钥」一起塞进这个包。
  *
- * **默认关**：装机入口（`/api/v1/agent/install/*`）刻意不鉴权（空机器上没有任何
- * 凭据可用），所以附带密钥的包，任何能打开装机页的人都能下载到 —— 等于一张
- * 能注册进这台服务端的通行证。警示文案写死在模板里，别抄成"建议"。
+ * **默认关**：附带密钥的包等于一张能注册进这台服务端的通行证。装机入口
+ * （`/api/v1/agent/install/*`，不鉴权）**拒发**这种包（409 `install_bundle_has_key`），
+ * 它只能在这里登录后下载、做成离线包；而离线包拷出去就收不回来。
+ * 警示文案写死在模板里，别抄成"建议"。
  */
 const includeBootstrapKey = ref(false)
 /**
@@ -259,7 +260,7 @@ const build = useMutation(
         ElMessage.warning({
           message:
             `这个包附带了一把统一注册密钥（${release.bootstrap_key_label}）—— 它等于一张「能注册进这台服务端」的通行证，` +
-            '任何能打开装机页的人都能下载它。发完就吊销这一把，或者换一个不带密钥的版本铺开。',
+            '公开装机入口不发它，只能在这里下载做成离线包；离线包拷出去就收不回来，发完就吊销这一把。',
           duration: 10000,
           showClose: true,
         })
@@ -402,7 +403,7 @@ async function revokeKey(release: ReleaseOut): Promise<void> {
     await ElMessageBox.confirm(
       `吊销版本 ${release.version} 附带的统一注册密钥（${release.bootstrap_key_label ?? `#${release.bootstrap_key_id}`}）？\n\n` +
         '吊销之后**再用这个包装机就注册不上了** —— 这通常正是想要的效果：' +
-        '带密钥的包任何能打开装机页的人都下载得到，发完就该把这一把收掉。\n' +
+        '离线包拷出去就收不回来，发完就该把这一把收掉。\n' +
         '已经用别的办法注册好的机器不受影响（它们手里是各自的凭据，不是这把密钥）。\n' +
         '版本记录会留着，随时能回看"当年发的是哪个包、带的是哪把钥匙"。',
       '吊销统一注册密钥',
@@ -544,8 +545,8 @@ const editSave = useMutation(
       <!--
         「附带统一注册密钥」。
         文案是**说得清的后果**，不是"建议"式的软话：这个包一旦流出，等于一张
-        "能注册进这台服务端"的通行证 —— 因为装机入口刻意不鉴权（空机器上没有任何
-        凭据可用），任何能打开装机页的人都能把它下载走。
+        "能注册进这台服务端"的通行证。装机入口不鉴权，所以它拒发这种包；这种包只经
+        管理端下载、做成离线包，而离线包拷出去就收不回来。
       -->
       <div class="key-option">
         <el-checkbox v-model="includeBootstrapKey" :disabled="!canBuild">

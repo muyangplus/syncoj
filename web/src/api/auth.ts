@@ -2,15 +2,9 @@
 
 import { request } from './client'
 import { paths } from './endpoints'
-import type { AdminInfo, LoginResponse, SimpleAck } from './types'
+import type { AdminHealth, AdminInfo, LoginResponse, SimpleAck } from './types'
 
-/** `/admin/health` 的响应。字段不多，且都是概览卡片直接要用的。 */
-export interface AdminHealth {
-  ok: boolean
-  agents_total: number
-  agents_online: number
-  data_root: string
-}
+export type { AdminHealth }
 
 export const authApi = {
   login: (username: string, password: string) =>
@@ -24,10 +18,10 @@ export const authApi = {
   me: () => request<AdminInfo>(paths.me()),
 
   /**
-   * 管理端健康检查。
+   * 管理端健康检查（要登录）。
    *
-   * 用它而不是 `/healthz`：那个是不带鉴权的探活接口，只回答"进程还在不在"，
-   * 而这个还会回机器数量，概览页的状态卡片要的就是它。
+   * 用它而不是 `/healthz`：那个是匿名的探活接口，只回答"进程还在不在"；
+   * 这个还会回机器数量，概览页的状态卡片要的就是它。
    */
   health: () =>
     request<AdminHealth>(paths.health()),

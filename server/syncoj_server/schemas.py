@@ -17,7 +17,6 @@ __all__ = [
     "EnrollRequest",
     "EnrollResponse",
     "ScanEntry",
-    "PartialDownload",
     "TickStats",
     "TickRequest",
     "DeployJob",
@@ -75,7 +74,7 @@ def page_of(items: List[T], total: int, params: Any) -> "Page[T]":
 def slice_page(rows: List[T], params: Any) -> "Page[T]":
     """对有界集合用 Python 切片分页。
 
-    只在"天然就很小"的集合上用（场次、名单、题目、资产…）。
+    只在"天然就很小"、且要在 Python 里拼字段的集合上用（场次要算在线人数、题目…）。
     ``total`` 仍然是完整长度，所以前端看到的分页信息是真的。
     """
     return page_of(
@@ -104,6 +103,8 @@ class EnrollRequest(_Base):
     * ``machine_id`` —— 仅供人工辨认（列表里显示），不参与身份判定
     """
 
+    #: 协议版本（见 ``syncoj_server.protocol``）。缺省 0 = 没有这个字段的旧 Agent
+    protocol_version: int = Field(default=0, ge=0, le=10000)
     machine_id: str = Field(min_length=1, max_length=128)
     hostname: Optional[str] = Field(default=None, max_length=128)
     agent_version: Optional[str] = Field(default=None, max_length=32)
@@ -166,11 +167,29 @@ class ScanEntry(_Base):
     mtime: int = Field(ge=0)
 
 
-class PartialDownload(_Base):
-    """客户端本地未完成的下载，服务端据此回填 offset。"""
+class DeployProgress(_Base):
+    """一个下发目标在本机的进度（分片里已经有多少字节）。"""
 
-    asset_id: int
+    target_id: int
     bytes_done: int = Field(ge=0)
+
+
+class DeployDone(_Base):
+    """一个下发目标已经在本机落地，落地的是**哪一份内容**。
+
+    带 ``sha256`` 是为了让服务端只认"当前这一版"的回执：教师在线改了正文 /
+    改了 zip 密码之后，迟到的旧版回执不能把新内容标成已完成。
+    """
+
+    target_id: int
+    sha256: str = Field(min_length=64, max_length=64)
+
+
+class DeployFailed(_Base):
+    """一个下发目标本轮没下成，以及原因（给教师看的）。"""
+
+    target_id: int
+    reason: str = Field(default="", max_length=300)
 
 
 class TickStats(_Base):
@@ -188,7 +207,16 @@ class TickStats(_Base):
     scan_missing: List[str] = Field(default_factory=list)
 
 
+class ScanIdentity(_Base):
+    """这一轮的扫描根是按哪个身份展开的（Agent 的 ``{player_no}`` / ``{contest_slug}``）。"""
+
+    player_no: str = Field(default="", max_length=64)
+    contest_slug: str = Field(default="", max_length=128)
+
+
 class TickRequest(_Base):
+    #: 协议版本（见 ``syncoj_server.protocol``）。缺省 0 = 没有这个字段的旧 Agent
+    protocol_version: int = Field(default=0, ge=0, le=10000)
     agent_version: Optional[str] = Field(default=None, max_length=32)
     machine_id: str = Field(min_length=1, max_length=128)
     #: 主机名。每次 tick 都报 —— 待配对的机器要靠它在列表里被认出来，
@@ -196,16 +224,30 @@ class TickRequest(_Base):
     hostname: Optional[str] = Field(default=None, max_length=128)
     ts: int = Field(ge=0)
     scan_root: Optional[str] = Field(default=None, max_length=512)
-    scan: List[ScanEntry] = Field(default_factory=list)
+    #: 上限是兜底的形状约束（请求体大小另有闸门）：服务端的 max_files_per_scan
+    #: 默认 5000，超出部分本来就会被截断；这里挡的是"几十万条先被逐条校验一遍"。
+    scan: List[ScanEntry] = Field(default_factory=list, max_length=50000)
     #: 本次扫描是否完整覆盖了扫描根目录。
     #: 若 Agent 中途遇到 PermissionError 等错误导致扫描不完整，必须置 False，
     #: 服务端会因此**跳过删除判定** —— 否则会把"没扫到"误判成"被删了"。
-    scan_complete: bool = True
-    partials: List[PartialDownload] = Field(default_factory=list)
-    #: 本地已确认完整的下发资源。服务端据此把对应的 deploy_target 标为完成。
-    #: 刻意由 Agent 显式上报而不是服务端从 partials 推断 —— "分片不见了" 既可能
-    #: 是下完了，也可能是被清理了，推断会误判。
-    completed_assets: List[int] = Field(default_factory=list)
+    #:
+    #: **必填**：它曾经缺省为 True —— 漏写这个字段的报文被当成"完整扫描"，
+    #: 恰好是会误删的那一边。报文必须自己说清楚。
+    scan_complete: bool
+    #: 下发作业**按目标**（``target_id``）回报。曾经按 ``asset_id``：同一资产发到
+    #: 同一个人的两个目录时，一条回执把两个目标一起标完成（另一个其实没落地）。
+    #:
+    #: * ``deploy_progress``：本机分片里已有多少字节（管理端的进度条）；
+    #: * ``deploy_done``：已落地，连同落地内容的 sha256 —— 服务端只认与资产当前
+    #:   内容一致的回执；
+    #: * ``deploy_failed``：本轮没下成及原因 —— 连续失败若干次服务端判 FAILED，
+    #:   教师在管理端看得见、点得了重试。
+    #:
+    #: 刻意由 Agent 显式上报"完成"，而不是服务端从"没有进度了"去推断 ——
+    #: "分片不见了"既可能是下完了，也可能是被清理了。
+    deploy_progress: List[DeployProgress] = Field(default_factory=list, max_length=1000)
+    deploy_done: List[DeployDone] = Field(default_factory=list, max_length=1000)
+    deploy_failed: List[DeployFailed] = Field(default_factory=list, max_length=1000)
     #: 这台机器上**有没有可用的发布公钥**（``/etc/syncoj/release-key.pub.json``，
     #: 也就是升级信任锚）。
     #:
@@ -216,16 +258,25 @@ class TickRequest(_Base):
     #: 缺省 ``False`` 是有意的：老版本 Agent 不报这个字段，而"没报"与"没有"
     #: 在这里该得到同一个结论（当作验不了），不能乐观地假定它有。
     release_public_key: bool = False
+    #: 这一轮的扫描根按哪个身份展开。与服务端此刻解析出的身份不同 = 机器刚被
+    #: 改派 / 换了场次，这份扫描是**上一个人**的目录：服务端拒收本轮对账（不把
+    #: 它记进新身份的台账、不要求上传），响应里带上新身份，Agent 重算扫描根。
+    #: 缺省（老 Agent、测试夹具）按"一致"处理。
+    scanned_for: Optional[ScanIdentity] = None
     stats: TickStats = Field(default_factory=TickStats)
 
 
 class DeployJob(_Base):
+    #: 回执与进度都按它报（不是 asset_id —— 同一资产可以有多个目标）
+    target_id: int
     asset_id: int
     url: str
     sha256: str
     size: int
     dest: str
-    offset: int = 0
+    #: 曾经还有一个 ``offset``（服务端回填的续传位置）。续传位置以 Agent 本地分片
+    #: 为准，服务端那份没人用；更糟的是"本地分片满长"时服务端据它**跳过派发**，
+    #: 而 Agent 只在收到作业时才会完成最后的落盘 —— 任务永远卡在进行中。
     mode: str = "overwrite"
 
 
@@ -236,12 +287,10 @@ class UpgradeInfo(_Base):
     signature: str
     size: int = 0
     notes: Optional[str] = None
-    #: 随这个版本带下去的三条安装策略。与装机台账、包内 ``install_policy.json``
-    #: **是同一份真相**（都出自 ``services/install_policy.build_install_policy``）。
-    #: 机器升级时按它们切换配置与密钥 —— 升级与装机不该有两套规则。
-    bootstrap_key_policy: str = "keep"
-    config_policy: Dict[str, str] = Field(default_factory=dict)
-    upgrade_mode: str = "apply"
+    #: 曾经还带三条安装策略（bootstrap_key_policy / config_policy / upgrade_mode）。
+    #: Agent 从来不读它们 —— 升级时生效的是包内 ``install_policy.json``（与装机
+    #: 台账同出 ``services/install_policy.build_install_policy``）。删掉，免得有人
+    #: 以为改了这里就改了机器上的行为。
 
 
 class TickResponse(_Base):
@@ -249,7 +298,6 @@ class TickResponse(_Base):
     next_tick_seconds: int
     need_upload: List[str] = Field(default_factory=list)
     deploy_jobs: List[DeployJob] = Field(default_factory=list)
-    cancel_assets: List[int] = Field(default_factory=list)
     upgrade: Optional[UpgradeInfo] = None
     #: 教师请求过卸载、且这台机器报过有发布公钥时，这里是一次性卸载授权令牌；
     #: 其余时候是 ``null``。Agent 拿它去验签，验过才执行删除。
@@ -324,11 +372,11 @@ class ConfirmIn(_Base):
 
 
 class FileClearIn(ConfirmIn):
-    """清代码台账。
+    """清代码台账（硬删，见 ``docs/reference/api-conventions.md`` §5.3）。
 
-    ``purge=False``（默认）只打墓碑 —— 行还在、``?include_deleted=true`` 仍能
-    查到，导出里也仍然带着（见 ``docs/reference/api-conventions.md`` §5.2）。
-    ``purge=True`` 才连行一起删，只在"这些记录本来就是误传"时才该用。
+    ``purge=False``（默认）只删扫描对账标成"已消失"的行（``deleted_at`` 非空）。
+    ``purge=True`` 连还在的行一起删 —— 机器还在报的文件下一轮会重新收上来，
+    所以只在"归档完毕准备清场"或"这些记录本来就是误传"时才该用。
     """
 
     purge: bool = False
@@ -525,6 +573,15 @@ class ApplyRosterOut(_Base):
 # --------------------------------------------------------------------------- #
 # 机器配对（统一密钥注册）
 # --------------------------------------------------------------------------- #
+
+
+class AdminHealthOut(_Base):
+    """管理端探活：概览卡片直接要用的几个数。"""
+
+    ok: bool
+    agents_total: int
+    agents_online: int
+    data_root: str
 
 
 class PendingMachineOut(_Base):
@@ -985,12 +1042,16 @@ class DeployTaskOut(_Base):
     target_kind: str
     dest_dir: str
     mode: str
+    #: pending / done / failed / cancelled。读时从目标聚合，库里不存
     status: str
     created_at: str
     total: int = 0
     done: int = 0
     failed: int = 0
+    #: 还在下发的（pending + ready）
     pending: int = 0
+    #: 被取消时还没下完的。不计入 ``pending``：它们不会再被派发
+    cancelled: int = 0
     targets: List[DeployTargetOut] = Field(default_factory=list)
 
 
@@ -1042,6 +1103,26 @@ class ScoreMatrixOut(_Base):
     #: 尚未解析出成绩的单元格数 —— 界面应当把它显示成待办而不是"0 分"
     unparsed: int = 0
     complete: bool = True
+
+
+class PlayerProgressOut(_Base):
+    """一位选手的交题进度（概览页巡场用）。
+
+    只数**清单里登记过的题目**，口径与成绩矩阵一致：有评测记录算"已出成绩"，
+    没有记录但收到了这道题的代码算"待评测"，两样都没有算"未交"。
+    概览页每 5 秒刷一次，只要这几个数，不该为此拉整张成绩矩阵。
+    """
+
+    player_id: int
+    player_no: str
+    #: 有评测记录（含未解析、手工录入）的题数
+    submitted: int = 0
+    #: 交了代码、还没有评测记录的题数
+    pending: int = 0
+    #: 既没有代码也没有评测记录的题数
+    missing: int = 0
+    #: 清单里登记的题目数
+    total: int = 0
 
 
 class ManualScoreIn(_Base):
@@ -1193,9 +1274,9 @@ class ReleaseBuildIn(_Base):
     因为已经升级过的机器会因为"版本不高于当前"拒绝升级，而界面上一切正常。
 
     ``include_bootstrap_key`` **默认关**，因为打开它的后果是"这个包从此等于一张
-    能注册进这台服务端的通行证"。装机入口（``/api/v1/agent/install/*``）刻意不鉴权
-    —— 空机器上没有任何凭据可用 —— 于是**任何能打开装机页的人都能把这个包下载下来，
-    也就拿到了那把密钥**。只有"局域网里确定没有外人"时才该打开它，而且发完就该吊销。
+    能注册进这台服务端的通行证"。装机入口（``/api/v1/agent/install/*``）刻意不鉴权，
+    所以它**拒发**带密钥的包（409 ``install_bundle_has_key``）：这种包只经管理端登录
+    后下载、做成离线包或镜像。离线包拷出去就收不回来，发完就该吊销。
     """
 
     version: str = Field(min_length=1, max_length=64)

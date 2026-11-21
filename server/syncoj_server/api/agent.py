@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -56,7 +57,8 @@ from ..schemas import (
     UpgradeInfo,
     UploadResult,
 )
-from ..security import hash_token, new_pair_code, new_token
+from ..protocol import MIN_AGENT_PROTOCOL_VERSION, outdated_detail
+from ..security import hash_token, new_token
 from ..storage import BlobTooLarge, HashMismatch, materialize
 from ..services import (
     diagnostics,
@@ -68,8 +70,8 @@ from ..services import (
     scan_missing,
     uninstall,
 )
-from ..services.collect import reconcile_scan, record_events
-from ..services.deploy import collect_deploy_jobs
+from ..services.collect import CollectResult, reconcile_scan, record_events
+from ..services.deploy import apply_deploy_reports, collect_deploy_jobs
 from ..services.ratelimit import RateLimitExceeded
 from .deps import (
     AgentIdentity,
@@ -95,6 +97,83 @@ _RANGE_CHUNK = 256 * 1024
 MAX_NEED_UPLOAD = 500
 
 
+#: 状态类审计事件：**只在状态变化时**记一条（边沿触发）。曾经每轮都写库 ——
+#: 一个缺失的扫描根让 scan_incomplete 每 30 秒一条，一个上午上千条一模一样的
+#: 事件，那条审计就再也读不得了。值是"特征"怎么取：
+#:   None   —— 只看有没有（数量变化不算新状态）
+#:   "paths" —— 看被拒的是哪几条
+_EDGE_CATEGORIES = {"scan_incomplete": None, "scan_rejected": "paths"}
+
+
+def _edge_triggered(runtime, events):
+    """按注册表里这台机器上一轮的状态过滤掉"状态没变"的那几类事件。
+
+    返回 ``(要写的事件, 新状态)``。**新状态由调用方在提交之后再写回**：先写的话，
+    这一轮的事务一旦失败，事件没落库、状态却已经记成"报过了"，重试时就被滤掉，
+    这条事件永远丢了。
+    """
+    if runtime is None:
+        return events, None
+    state = dict(runtime.edge_state)
+    present = set()
+    kept = []
+    for event in events:
+        category = event[1]
+        if category not in _EDGE_CATEGORIES:
+            kept.append(event)
+            continue
+        present.add(category)
+        if _EDGE_CATEGORIES[category] == "paths":
+            items = (event[3] or {}).get("items") or []
+            signature = json.dumps(sorted(str(i.get("path")) for i in items), ensure_ascii=False)
+        else:
+            signature = "on"
+        if state.get(category) != signature:
+            state[category] = signature
+            kept.append(event)
+    for category in list(state):
+        if category in _EDGE_CATEGORIES and category not in present:
+            # 状态消失：清掉，下次再出现时重新记一条
+            del state[category]
+    return kept, state
+
+
+def _require_protocol(reported: int) -> None:
+    """协议太旧的 Agent 回 426 ``agent_outdated``（见 ``syncoj_server.protocol``）。"""
+    if reported < MIN_AGENT_PROTOCOL_VERSION:
+        raise ApiError(
+            426, "agent_outdated", outdated_detail(reported), {"protocol_version": reported}
+        )
+
+
+def _window_violation(contest: Optional[Contest], now) -> Optional[ApiError]:
+    """场次时间窗之外则返回那个要抛的 ``ApiError``，窗口内（或没设窗口）返回 ``None``。
+
+    判据是服务端时间；窗口左闭右开 ``[starts_at, ends_at)``。理由见
+    :func:`_reject_outside_window`。tick（只看在不在窗口里）与上传（抛出去）共用
+    这一份判断。
+    """
+    if contest is None:  # pragma: no cover - 外键约束下不会发生
+        return None
+    starts_at = contest.starts_at
+    ends_at = contest.ends_at
+    if ends_at is not None and now >= ends_at:
+        return ApiError(
+            409,
+            "contest_ended",
+            "本场考试已于 %s 结束，代码不再接收" % local_clock(ends_at),
+            {"reason": "ended", "starts_at": iso_utc(starts_at), "ends_at": iso_utc(ends_at)},
+        )
+    if starts_at is not None and now < starts_at:
+        return ApiError(
+            409,
+            "contest_not_started",
+            "本场考试还没开始（%s 开考），代码暂时不接收" % local_clock(starts_at),
+            {"reason": "not_started", "starts_at": iso_utc(starts_at), "ends_at": iso_utc(ends_at)},
+        )
+    return None
+
+
 def _reject_outside_window(ctx: AppContext, identity: AgentIdentity, now) -> None:
     """场次时间窗之外不收代码：还没开考、或者已经结束。
 
@@ -113,44 +192,22 @@ def _reject_outside_window(ctx: AppContext, identity: AgentIdentity, now) -> Non
     Agent 不必去解析上面那句中文（中文是给人看的）。
     """
     with ctx.db.session() as session:
-        contest = session.get(Contest, identity.contest_id)
-        if contest is None:  # pragma: no cover - 外键约束下不会发生
-            return
-        starts_at = contest.starts_at
-        ends_at = contest.ends_at
-
-        if ends_at is not None and now >= ends_at:
-            raise ApiError(
-                409,
-                "contest_ended",
-                "本场考试已于 %s 结束，代码不再接收" % local_clock(ends_at),
-                {
-                    "reason": "ended",
-                    "starts_at": iso_utc(starts_at),
-                    "ends_at": iso_utc(ends_at),
-                },
-            )
-        if starts_at is not None and now < starts_at:
-            raise ApiError(
-                409,
-                "contest_not_started",
-                "本场考试还没开始（%s 开考），代码暂时不接收" % local_clock(starts_at),
-                {
-                    "reason": "not_started",
-                    "starts_at": iso_utc(starts_at),
-                    "ends_at": iso_utc(ends_at),
-                },
-            )
+        violation = _window_violation(session.get(Contest, identity.contest_id), now)
+    if violation is not None:
+        raise violation
 
 
-def _agent_config(ctx: AppContext) -> Dict[str, Any]:
+def _agent_config(
+    ctx: AppContext, settings: Optional[runtime_settings.RuntimeSettings] = None
+) -> Dict[str, Any]:
     """下发给 Agent 的运行时策略。服务端是权威，客户端不得自行决定。
 
     ``scan_interval`` 与 ``tick_idle_seconds`` 同值：扫描发生在心跳里，两者在
     Agent 那边本来就是一回事（用户明确要求保持绑定）。心跳节奏是**运行参数**，
     改完下一轮心跳就生效，所以这里每次都现读。
     """
-    settings = _runtime_settings(ctx)
+    if settings is None:
+        settings = _runtime_settings(ctx)
     cfg = build_policy(
         max_file_size=ctx.settings.max_file_size,
         scan_interval=settings.tick_idle_seconds,
@@ -215,12 +272,16 @@ def enroll(
     注册出来的是三种状态之一（未配对 / 配好但没场次 / 能干活），
     Agent 必须按 `claimed` 与 `bound` 分开处理。
     """
+    _require_protocol(payload.protocol_version)
     rate_limit(ctx, request, payload)
 
     raw_token = new_token(ctx.settings.token_bytes)
-    raw_pair_code = new_pair_code(ctx.settings.pair_code_length)
 
     with ctx.db.session() as session:
+        # 与所有仍有效的码都不同（同码多台会让"按码绑定"绑错机器）
+        raw_pair_code = enrollment.unique_pair_code(
+            session, utcnow(), ctx.settings.pair_code_length
+        )
         try:
             outcome = enrollment.enroll_machine(
                 session,
@@ -316,8 +377,9 @@ def tick(
     identity: Principal = Depends(require_principal),
 ) -> TickResponse:
     """一次心跳。已认领的机器收发文件，未认领的机器只在这里"排队等叫号"。"""
+    _require_protocol(payload.protocol_version)
     if isinstance(identity, MachineIdentity):
-        return _tick_pending(payload, ctx, identity)
+        return _tick_pending(payload, ctx, identity, request.client.host if request.client else None)
 
     if payload.machine_id and payload.machine_id != identity.machine_id:
         # 凭据与声明的机器不符：可能是凭据被复制到了别的机器
@@ -336,33 +398,76 @@ def tick(
     #: _take_diagnostics_request），所以下面两个 tick 分支各取一次。
     diagnostics_request = False
 
+    # 扫描根是按别人的身份展开的（机器刚被改派 / 换了场次）：这份扫描是上一个人的
+    # 目录，**整份不对账** —— 记进来就是把 S001 的代码写进 S002 的台账、再要求上传。
+    # 响应照常带上新身份，Agent 收到后重算扫描根，下一轮再扫。
+    scanned_for = payload.scanned_for
+    foreign_scan = scanned_for is not None and (
+        scanned_for.player_no != identity.player_no
+        or scanned_for.contest_slug != identity.contest_slug
+    )
+
     with ctx.db.session() as session:
-        # 「严格按题目预设回收」：只有**这一场配了题目**时才拿模式去过滤，
-        # 一场都没配就照旧全收（理由见 services/collect.reconcile_scan 的 docstring）
-        rules = problem_rules.rules_for(session, identity.contest_id, ctx.settings)
-        collect = reconcile_scan(
-            session,
-            identity.player_id,
-            payload.scan,
-            ctx.settings,
-            scan_complete=payload.scan_complete,
-            rules=rules,
-        )
+        # 运行参数**这一轮只读一次**、就在这个会话里：节奏（next_tick_seconds）与
+        # 下发给 Agent 的策略（config）用同一份。曾经两处各开一个会话各读一次，
+        # 教师恰好在中间改了参数时，同一个响应里两个数对不上。
+        live = runtime_settings.load(session)
+        # 时间窗之外不对账：不改写台账、不要求上传、走空闲节奏。曾经这里照常对账，
+        # 只在上传端点 409 —— 于是开考前每台机器每 2 秒把全部文件整包传一遍再被
+        # 拒（multipart 在进入处理函数前已经整包收下），结束之后的修改还会改写
+        # 台账上的"最近一次扫描"。
+        outside_window = _window_violation(session.get(Contest, identity.contest_id), now)
+        if foreign_scan or outside_window is not None:
+            collect = CollectResult()
+        if foreign_scan:
+            collect.events.append((
+                "info",
+                "scan_identity_mismatch",
+                "本轮扫描按 %s/%s 展开，当前身份是 %s/%s：已拒收，等机器重算扫描目录" % (
+                    scanned_for.contest_slug or "-", scanned_for.player_no,
+                    identity.contest_slug, identity.player_no,
+                ),
+                {
+                    "scanned_for": {
+                        "player_no": scanned_for.player_no,
+                        "contest_slug": scanned_for.contest_slug,
+                    },
+                },
+            ))
+        elif outside_window is None:
+            # 「严格按题目预设回收」：只有**这一场配了题目**时才拿模式去过滤，
+            # 一场都没配就照旧全收（理由见 services/collect.reconcile_scan 的 docstring）
+            rules = problem_rules.rules_for(session, identity.contest_id, ctx.settings)
+            collect = reconcile_scan(
+                session,
+                identity.player_id,
+                payload.scan,
+                ctx.settings,
+                scan_complete=payload.scan_complete,
+                rules=rules,
+            )
+        runtime = ctx.registry.get(identity.agent_id)
+        events, edge_state = _edge_triggered(runtime, collect.events)
         record_events(
             session,
             player_id=identity.player_id,
             contest_id=identity.contest_id,
             agent_id=identity.agent_id,
-            events=collect.events,
+            events=events,
         )
 
-        partials = {p.asset_id: int(p.bytes_done) for p in payload.partials}
-        jobs = collect_deploy_jobs(
-            session, identity.player_id, identity.player_no, partials
+        # 先收回执、再派作业：本轮刚报完成的不该再出现在作业里。
+        # 任务状态不用跟着改：它是管理端读的时候从目标聚合出来的，库里不存。
+        apply_deploy_reports(
+            session,
+            identity.player_id,
+            payload.deploy_progress,
+            payload.deploy_done,
+            payload.deploy_failed,
+            now,
         )
-
-        if payload.completed_assets:
-            _mark_deployments_done(session, identity.player_id, payload.completed_assets)
+        session.flush()
+        jobs = collect_deploy_jobs(session, identity.player_id, identity.player_no)
 
         upgrade = _pending_upgrade(session, ctx)
 
@@ -372,24 +477,33 @@ def tick(
             if payload.agent_version:
                 agent.agent_version = payload.agent_version
             _note_release_public_key(agent, payload.release_public_key, now)
-            _note_scan_missing(
-                session,
-                agent,
-                payload.stats.scan_missing,
-                player_id=identity.player_id,
-                contest_id=identity.contest_id,
-                now=now,
-            )
-            _note_scan_skipped(
-                session,
-                agent,
-                collect,
-                player_id=identity.player_id,
-                contest_id=identity.contest_id,
-            )
+            if not foreign_scan:
+                # 缺失的扫描根、被题目预设挡掉的文件都是"上一个人的目录"的事实，
+                # 拒收的那一轮不拿它们改写这台机器的状态。（时间窗外照记缺失的根：
+                # 开考前"目录还没建"正是教师要看见的。）
+                _note_scan_missing(
+                    session,
+                    agent,
+                    payload.stats.scan_missing,
+                    player_id=identity.player_id,
+                    contest_id=identity.contest_id,
+                    now=now,
+                )
+            if not foreign_scan and outside_window is None:
+                # 只有真的对过账，"被题目预设挡掉几个"才有意义
+                _note_scan_skipped(
+                    session,
+                    agent,
+                    collect,
+                    player_id=identity.player_id,
+                    contest_id=identity.contest_id,
+                )
             uninstall_token = _pending_uninstall_token(ctx, agent, now)
             # 一次性标记在这里取走：本轮响应会带 true，库里同步清空
             diagnostics_request = _take_diagnostics_request(agent)
+
+    if runtime is not None and edge_state is not None:
+        runtime.edge_state = edge_state  # 提交之后才写回（见 _edge_triggered）
 
     ctx.registry.note_tick(
         identity.agent_id,
@@ -403,9 +517,8 @@ def tick(
         scan_skipped=collect.skipped_unmatched,
     )
 
-    # 自适应周期：有活干就收紧，没活干就放宽。两个值都是**运行参数**，现读 ——
-    # 教师改完下一轮就按新节奏走，不用重启服务端
-    live = _runtime_settings(ctx)
+    # 自适应周期：有活干就收紧，没活干就放宽。两个值都是**运行参数**（上面会话里
+    # 现读的那一份）—— 教师改完下一轮就按新节奏走，不用重启服务端
     active = bool(collect.need_upload or jobs or collect.deleted)
     next_tick = live.tick_active_seconds if active else live.tick_idle_seconds
 
@@ -414,11 +527,10 @@ def tick(
         next_tick_seconds=next_tick,
         need_upload=collect.need_upload[:MAX_NEED_UPLOAD],
         deploy_jobs=jobs,
-        cancel_assets=[],
         upgrade=upgrade,
         uninstall_token=uninstall_token,
         diagnostics_request=diagnostics_request,
-        config=_agent_config(ctx),
+        config=_agent_config(ctx, live),
         claimed=True,
         # 走到这一支就说明场次与选手都解析出来了 —— 这正是三态里的"能干活"那一档。
         # 漏掉它会让 Agent 自己都以为"还没轮到"，于是永远不去扫代码。
@@ -432,7 +544,10 @@ def tick(
 
 
 def _tick_pending(
-    payload: TickRequest, ctx: AppContext, identity: MachineIdentity
+    payload: TickRequest,
+    ctx: AppContext,
+    identity: MachineIdentity,
+    client_ip: Optional[str] = None,
 ) -> TickResponse:
     """还干不了活的机器的心跳。
 
@@ -468,7 +583,12 @@ def _tick_pending(
     #: 一次性诊断请求标记：与正常 tick 那条路同一个语义（取走即清）。待配对的
     #: 机器同样可能被教师点「诊断」—— 它的现场恰恰最有用。
     diagnostics_request = False
+    upgrade: Optional[UpgradeInfo] = None
     with ctx.db.session() as session:
+        live = runtime_settings.load(session)  # 这一轮只读一次（同正常路径）
+        # 还没配对的机器也要能升级：装机后迟迟没配对的那批，正是最需要"先换上
+        # 修好的版本再说"的（曾经只有配好的机器拿得到升级）
+        upgrade = _pending_upgrade(session, ctx)
         agent = session.get(Agent, identity.agent_id)
         if agent is not None:
             agent.last_seen_at = now
@@ -510,23 +630,32 @@ def _tick_pending(
 
                 if pair_code is None:
                     # 第一次（缓存没了）、过期了、或者刚被解绑 —— 发一个新的
-                    pair_code = new_pair_code(ctx.settings.pair_code_length)
+                    pair_code = enrollment.unique_pair_code(
+                        session, now, ctx.settings.pair_code_length
+                    )
                     enrollment.issue_pair_code(
                         agent, now, pair_code, ctx.settings.pair_code_ttl_seconds
                     )
                     ctx.pair_codes.put(agent.id, pair_code, agent.pair_code_expires_at)
 
+    # 这台机器现在解析不出"能干活的身份"（场次结束、选手被删、被解绑）：把它从在线
+    # 注册表里**拿掉**。曾经什么都不做，offline_after 秒后整间机房 50 条"离线"告警
+    # （机器明明都在线）；也不能照记心跳 —— 那会让它挂着旧的选手 / 场次一直显示在线。
+    # 重新能干活时，下一次带凭据的请求会按新身份把它放回来（deps.upsert_identity）。
+    ctx.registry.forget(identity.agent_id)
+
     return TickResponse(
         server_time=unix_seconds(now),
         # 它本来就没事可做，用空闲周期（运行参数，现读）
-        next_tick_seconds=_runtime_settings(ctx).tick_idle_seconds,
+        next_tick_seconds=live.tick_idle_seconds,
         claimed=identity.paired,
         pair_code=pair_code,
         bound=False,
         reason=identity.reason,
+        upgrade=upgrade,
         uninstall_token=uninstall_token,
         diagnostics_request=diagnostics_request,
-        config=_agent_config(ctx),
+        config=_agent_config(ctx, live),
     )
 
 
@@ -676,76 +805,13 @@ def _pending_uninstall_token(ctx: AppContext, agent: Agent, now) -> Optional[str
     )
 
 
-def _mark_deployments_done(
-    session, player_id: int, asset_ids: List[int]
-) -> None:
-    """把该选手的这些资源对应的下发目标标记为完成，并同步任务整体状态。"""
-    if not asset_ids:
-        return
-    targets = list(
-        session.execute(
-            select(DeployTarget)
-            .join(DeployTask, DeployTarget.task_id == DeployTask.id)
-            .where(
-                DeployTarget.player_id == player_id,
-                DeployTask.asset_id.in_(asset_ids[:200]),
-                DeployTarget.status.in_((DeployStatus.PENDING, DeployStatus.READY)),
-            )
-        ).scalars()
-    )
-    if not targets:
-        return
-
-    now = utcnow()
-    affected_tasks = set()
-    for target in targets:
-        target.status = DeployStatus.DONE
-        target.last_error = None
-        target.updated_at = now
-        affected_tasks.add(target.task_id)
-
-    session.flush()
-    for task_id in affected_tasks:
-        _refresh_task_status(session, task_id)
-
-
-def _refresh_task_status(session, task_id: int) -> None:
-    """按目标的实际状态重算任务状态。
-
-    不维护"任务状态"这个独立字段，而是每次从目标聚合 —— 两处独立维护的状态
-    迟早会不一致，典型症状是 Web 上进度条卡在 90% 永远不动。
-    """
-    task = session.get(DeployTask, task_id)
-    if task is None or task.status == DeployStatus.CANCELLED:
-        return
-
-    targets = list(
-        session.execute(
-            select(DeployTarget).where(DeployTarget.task_id == task_id)
-        ).scalars()
-    )
-    if not targets:
-        return
-
-    done = sum(1 for t in targets if t.status == DeployStatus.DONE)
-    failed = sum(1 for t in targets if t.status == DeployStatus.FAILED)
-    if done == len(targets):
-        task.status = DeployStatus.DONE
-    elif done + failed == len(targets):
-        task.status = DeployStatus.FAILED
-    else:
-        task.status = DeployStatus.PENDING
-
-
 def _pending_upgrade(session, ctx: AppContext) -> Optional[UpgradeInfo]:
     """当前是否有向 Agent 铺开的升级版本。
 
     三个条件同时满足才下发：配置了签名私钥、有已铺开的版本、该版本未被撤回。
     缺任何一个都返回 None —— 宁可不下发，也不下发一个 Agent 必然拒收的包。
 
-    随包带下去的三条安装策略与装机台账、包内 ``install_policy.json`` 逐字相同
-    （同一个 helper）：机器升级时按同一套规则切换配置与密钥，不该因为"这次是升级
-    而不是装机"就换一套。
+    安装策略不在这里：升级时生效的是包内 ``install_policy.json``。
     """
     if ctx.signing_key is None:
         return None
@@ -767,14 +833,6 @@ def _pending_upgrade(session, ctx: AppContext) -> Optional[UpgradeInfo]:
         signature=row.signature,
         size=int(row.size),
         notes=row.notes,
-        **install_policy.build_install_policy(
-            bootstrap_key_policy=row.bootstrap_key_policy,
-            config_policy=install_policy.load_config_policy(row.config_policy_json),
-            upgrade_mode=row.upgrade_mode,
-            # 与台账那一处同一个理由：老记录没有策略列，但"夹带过密钥"这件事
-            # 记在 bootstrap_key_id 上，不能用常量默认值把它盖掉
-            has_bundled_key=row.bootstrap_key_id is not None,
-        )
     )
 
 
@@ -828,6 +886,24 @@ def _installable_release(session) -> Optional[AgentRelease]:
     ).scalar_one_or_none()
 
 
+def _refuse_bundled_key(row: AgentRelease) -> None:
+    """夹带了注册密钥的包**不经公开装机入口发**。
+
+    装机入口不鉴权、公开端口可达：夹带密钥的包从这里发，等于把 ``bootstrap.key``
+    交给局域网里任何一个会 curl 的人 —— 拿着它就能注册任意多台"机器"。这种包只该
+    经管理端（登录后）下载、做成离线包或镜像；在线装机改用不带密钥的版本，
+    密钥在命令行上给（``bootstrap.sh --bootstrap-key``）。
+    """
+    if row.bootstrap_key_id is not None:
+        raise ApiError(
+            409,
+            "install_bundle_has_key",
+            "当前铺开的版本 %s 夹带了注册密钥，不能经公开装机入口下发。"
+            "请铺开一个不带密钥的版本用于在线装机（密钥在命令行上用 --bootstrap-key 给），"
+            "带密钥的包只经管理端下载、做成离线包。" % row.version,
+        )
+
+
 @router.get("/install.json", response_model=InstallLedgerOut)
 def install_ledger(ctx: AppContext = Depends(get_ctx)) -> InstallLedgerOut:
     """当前可装机版本的台账。**不鉴权。**
@@ -844,6 +920,7 @@ def install_ledger(ctx: AppContext = Depends(get_ctx)) -> InstallLedgerOut:
                 "这台服务端还没有铺开任何 Agent 版本。装机入口只发已铺开的版本 ——"
                 "在管理界面「Agent 发布」里选一个版本点「铺开」之后再来。",
             )
+        _refuse_bundled_key(row)
         return InstallLedgerOut(
             version=row.version,
             sha256=row.sha256,
@@ -880,6 +957,7 @@ def install_bundle(request: Request, ctx: AppContext = Depends(get_ctx)) -> Resp
                 "install_unavailable",
                 "这台服务端还没有铺开任何 Agent 版本。",
             )
+        _refuse_bundled_key(row)
         sha256 = row.sha256
         expected_size = int(row.size)
 
@@ -912,8 +990,12 @@ def install_installer(ctx: AppContext = Depends(get_ctx)) -> Response:
     )
 
 
+#: 能安全嵌进 shell 双引号字符串的 Host 头（主机名 / IPv4 / [IPv6] + 可选端口）
+_SAFE_HOST_RE = re.compile(r"^[A-Za-z0-9.\-]+(?::[0-9]{1,5})?$|^\[[0-9A-Fa-f:.]+\](?::[0-9]{1,5})?$")
+
+
 @router.get("/install/bootstrap.sh")
-def install_bootstrap(ctx: AppContext = Depends(get_ctx)) -> Response:
+def install_bootstrap(request: Request, ctx: AppContext = Depends(get_ctx)) -> Response:
     """自举脚本（``bootstrap.sh``）。**不鉴权。**
 
     给的是"**一条** curl 就能起头"的那条命令 —— 空机器上只有 shell，而教师不该
@@ -924,9 +1006,52 @@ def install_bootstrap(ctx: AppContext = Depends(get_ctx)) -> Response:
     """
     try:
         path = packaging.bootstrap_path()
+        installer = packaging.installer_path()
     except packaging.BuildError as exc:
         raise ApiError(404, "installer_unavailable", "%s发不出去：%s" % ("自举脚本", exc.detail))
-    return FileResponse(str(path), media_type="text/x-sh", filename="bootstrap.sh")
+    # 嵌进两样东西：**自己的地址**（就是 curl 用来下这个脚本的那个，脚本不必再
+    # 从机器上的 agent.ini 里猜）与**安装器的 sha256**（下载后对一遍再执行）。
+    # Host 头是请求方给的：只收形状安全的，否则不嵌（脚本退回要求 --server）——
+    # 它要被嵌进一段以 root 执行的 shell。
+    host = (request.headers.get("host") or "").strip()
+    server = "http://%s" % host if host and _SAFE_HOST_RE.match(host) else ""
+    script = path.read_text(encoding="utf-8")
+    script = script.replace('EMBEDDED_SERVER="__SYNCOJ_SERVER__"', 'EMBEDDED_SERVER="%s"' % server, 1)
+    script = script.replace(
+        'INSTALLER_SHA256="__SYNCOJ_INSTALLER_SHA256__"',
+        'INSTALLER_SHA256="%s"' % hashlib.sha256(installer.read_bytes()).hexdigest(),
+        1,
+    )
+    return Response(
+        content=script.encode("utf-8"),
+        media_type="text/x-sh",
+        headers={"Content-Disposition": 'attachment; filename="bootstrap.sh"'},
+    )
+
+def _precheck_upload(ctx: AppContext, identity: AgentIdentity, rel_path: str, claimed: str) -> None:
+    with ctx.db.session() as session:
+        row = session.execute(
+            select(SourceFile).where(
+                SourceFile.player_id == identity.player_id,
+                SourceFile.rel_path == rel_path,
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise ApiError(
+                409,
+                "upload_not_requested",
+                "这个文件当前不在待上传列表里：%s" % rel_path,
+                {"reason": "not_requested"},
+            )
+        expected = row.scanned_sha256 or row.sha256
+        if expected != claimed:
+            raise ApiError(
+                409,
+                "stale_upload",
+                "该内容已不是当前版本，已在下一轮 tick 中请求最新版本",
+                {"reason": "stale", "expected": expected},
+            )
+
 
 @router.post("/files", response_model=UploadResult)
 def upload_file(
@@ -955,6 +1080,10 @@ def upload_file(
     # 一个字节。放晚了（比如放到写台账那一步）虽然接口也返回 409，但磁盘上已经
     # 多了一份内容、而且会被后续的"内容寻址去重"当成合法版本。
     _reject_outside_window(ctx, identity, utcnow())
+    # 先按**声称的** sha256 对一遍台账，再往 blobs/ 里写：不在待上传列表里的、
+    # 过期的内容，一个字节都不该落盘（落了就是没有任何引用的孤儿 blob）。
+    # 写完之后在事务里还会按**实际**内容再判一次 —— 这里只是省掉白写。
+    _precheck_upload(ctx, identity, rel_path, sha256.lower())
 
     try:
         actual_sha, size = ctx.blobs.put_stream(
@@ -966,6 +1095,12 @@ def upload_file(
         raise HTTPException(status_code=400, detail=str(exc))
 
     now = utcnow()
+    contest_dir = Path(ctx.settings.source_root) / identity.contest_slug / identity.player_no
+    try:
+        dest = safe_join(contest_dir, rel_path, max_length=ctx.settings.max_relpath_length)
+    except PathValidationError as exc:
+        raise HTTPException(status_code=400, detail="落盘路径不合法: %s" % exc)
+
     with ctx.db.session() as session:
         row = session.execute(
             select(SourceFile).where(
@@ -975,29 +1110,50 @@ def upload_file(
         ).scalar_one_or_none()
 
         if row is None:
-            # 台账里还没有：Agent 比服务端先看到了这个文件。
-            # 这不危险（路径与内容都已校验），建一条即可。
-            row = SourceFile(
-                player_id=identity.player_id,
-                rel_path=rel_path,
-                sha256=actual_sha,
-                size=size,
-                mtime=0,
-                revision=0,
-                content_stored=False,
-                first_seen_at=now,
-                last_seen_at=now,
+            # 台账里没有 = tick 从没要过它（没被扫描上报过，或者不属于任何题目）。
+            # 选手账号读得到 token；不挡的话，它可以绕过对账与题目规则往 source/
+            # 里写任意路径。曾经这里直接建一条。
+            raise ApiError(
+                409,
+                "upload_not_requested",
+                "这个文件当前不在待上传列表里：%s" % rel_path,
+                {"reason": "not_requested"},
             )
-            session.add(row)
-        elif row.content_stored and row.sha256 != actual_sha:
+        if (
+            row.content_stored
+            and row.sha256 == actual_sha
+            and (row.scanned_sha256 or row.sha256) == actual_sha
+        ):
+            # 已经存好的同一份内容（比如上一次提交成功、响应却丢了，Agent 重试）：
+            # 幂等成功，不再落盘、不加版本号
+            return UploadResult(
+                path=rel_path, sha256=actual_sha, revision=row.revision, stored=True
+            )
+        # 只收**最近一次扫描到的**那一版。送来的不是它 = 迟到的旧内容（断网补传、
+        # 乱序重传）或者已经又改过了：409，下一轮 tick 会要真正的那一版。
+        # 判据曾经是"已存的 sha256 ≠ 送来的"，而 sha256 在上传前就被 tick 改写，
+        # 于是"那一轮没传上"的新内容永远不会再被要求（见 SourceFile.scanned_sha256）。
+        expected = row.scanned_sha256 or row.sha256
+        if expected != actual_sha:
             raise ApiError(
                 409,
                 "stale_upload",
                 "该内容已不是当前版本，已在下一轮 tick 中请求最新版本",
-                {"reason": "stale", "expected": row.sha256},
+                {"reason": "stale", "expected": expected},
             )
 
+        # **先物化、后改台账**（提交在 with 结束时）。反过来的话，台账先记成
+        # "已存下"、物化却失败（磁盘满、source/ 里同名路径是个目录），下一轮就不会
+        # 再要求上传 —— source/ 永远缺这个文件。现在物化失败台账不动，下一轮照常再要；
+        # 物化成功而提交失败时，下一轮也照常再要（重复上传同一份内容是幂等的）。
+        try:
+            materialize(ctx.blobs.path_for(actual_sha), dest)
+        except OSError as exc:
+            log.exception("物化到 source/ 失败: %s", rel_path)
+            raise HTTPException(status_code=500, detail="落盘失败: %s" % exc)
+
         row.sha256 = actual_sha
+        row.scanned_sha256 = actual_sha
         row.size = size
         row.revision += 1
         row.content_stored = True
@@ -1005,17 +1161,6 @@ def upload_file(
         row.last_seen_at = now
         session.flush()
         revision = row.revision
-
-    # 物化到评测器可读的目录：source/<场次>/<选手>/<相对路径>
-    contest_dir = Path(ctx.settings.source_root) / identity.contest_slug / identity.player_no
-    try:
-        dest = safe_join(contest_dir, rel_path, max_length=ctx.settings.max_relpath_length)
-        materialize(ctx.blobs.path_for(actual_sha), dest)
-    except PathValidationError as exc:
-        raise HTTPException(status_code=400, detail="落盘路径不合法: %s" % exc)
-    except OSError as exc:
-        log.exception("物化到 source/ 失败: %s", rel_path)
-        raise HTTPException(status_code=500, detail="落盘失败: %s" % exc)
 
     return UploadResult(path=rel_path, sha256=actual_sha, revision=revision, stored=True)
 
@@ -1045,6 +1190,9 @@ def download_asset(
             .where(
                 DeployTask.asset_id == asset_id,
                 DeployTarget.player_id == identity.player_id,
+                # 取消了的不再给：曾经只看"有没有这条目标"，取消之后照样能拖走
+                DeployTarget.status != DeployStatus.CANCELLED,
+                DeployTask.cancelled_at.is_(None),
             )
         ).first()
         if authorized is None:
@@ -1133,9 +1281,10 @@ def download_release(
     release_id: int,
     request: Request,
     ctx: AppContext = Depends(get_ctx),
-    identity: AgentIdentity = Depends(require_agent),
+    identity: Principal = Depends(require_principal),
 ) -> Response:
-    """下载 Agent 升级包。
+    """下载 Agent 升级包。**任意有效凭据都行**（未配对 / 无场次的机器也要能升级 ——
+    待配对的心跳会给它升级清单；曾经这里要求能干活的身份，清单给了却下不动）。
 
     只提供**已铺开且未撤回**的版本 —— 上传但未 rollout 的包对 Agent 不可见，
     这样"上传"和"铺开"的风险边界在服务端也是硬的，而不是只靠 Agent 自觉。

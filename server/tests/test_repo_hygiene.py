@@ -81,6 +81,18 @@ def files() -> List[Path]:
         pytest.skip("拿不到 git 文件清单: %s" % exc)
 
 
+def _label(path: Path) -> str:
+    """仓库内的文件给相对路径，仓库外（测试造的临时文件）给原样。
+
+    不用 ``Path.is_relative_to``：它是 Python 3.9+，而测试也要在目标机的 3.8 上跑
+    （CI 的 py38 那一路第一次跑就在这里炸了）。
+    """
+    try:
+        return str(path.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
 def find_bom_offenders(paths: List[Path]) -> List[str]:
     """挑出以 UTF-8 BOM 开头的文件。抽成函数是为了能被单独验证 —— 一个
     永远不会红的检查等于没有检查。"""
@@ -89,7 +101,7 @@ def find_bom_offenders(paths: List[Path]) -> List[str]:
         if path.suffix not in BOM_SENSITIVE_SUFFIXES or not path.is_file():
             continue
         if path.read_bytes()[:3] == b"\xef\xbb\xbf":
-            offenders.append(str(path.relative_to(REPO_ROOT)) if path.is_relative_to(REPO_ROOT) else str(path))
+            offenders.append(_label(path))
     return offenders
 
 
@@ -101,7 +113,7 @@ def find_cr_offenders(paths: List[Path]) -> List[str]:
             continue
         data = path.read_bytes()
         if b"\r" in data:
-            label = str(path.relative_to(REPO_ROOT)) if path.is_relative_to(REPO_ROOT) else str(path)
+            label = _label(path)
             offenders.append("%s（%d 处 CR）" % (label, data.count(b"\r")))
     return offenders
 
@@ -186,7 +198,7 @@ def find_missing_bom(paths: List[Path]) -> List[str]:
             continue
         if path.read_bytes()[:3] != b"\xef\xbb\xbf":
             offenders.append(
-                str(path.relative_to(REPO_ROOT)) if path.is_relative_to(REPO_ROOT) else str(path)
+                _label(path)
             )
     return offenders
 
@@ -371,6 +383,65 @@ def test_pin_check_actually_catches_a_missing_pin() -> None:
     assert effective_eol("web/src/api/index.ts", rules) == "crlf"
     assert effective_eol("server/syncoj_server/main.py", rules) == "lf"
     # 没有规则管它 → 没有生效的 eol，也算"没钉死"
-    assert effective_eol("docs/protocol.md", rules) is None
+    assert effective_eol("docs/reference/protocol.md", rules) is None
     # 后面的规则覆盖前面的
     assert effective_eol("web/x.py", [("*.py", ["eol=lf"]), ("web/**", ["eol=crlf"])]) == "crlf"
+
+
+# ---------------------------------------------------------------------------
+# 可执行位
+# ---------------------------------------------------------------------------
+#
+# 文档里的入口写的是 ``./scripts/check.sh``。可执行位只存在于 git 的索引里
+# （``100755``），在 Windows 上 checkout 不会体现、也不会被编辑器保留，所以
+# 那边提交的文件很容易落成 ``100644`` —— 于是 Linux / CI 上照文档敲命令直接
+# "Permission denied"。这里看的是**索引里的模式**，所以在哪个平台上跑结论都一样。
+
+#: 必须带可执行位的入口脚本（相对仓库根）。``bootstrap.sh`` 不在其列：它从来是
+#: ``curl ... | sh`` 管道执行，不靠文件模式。
+EXECUTABLE_ENTRYPOINTS = ("scripts/check.sh",)
+
+
+def _index_modes() -> "dict":
+    result = subprocess.run(
+        ["git", "ls-files", "-s", "--", *EXECUTABLE_ENTRYPOINTS],
+        cwd=str(REPO_ROOT), capture_output=True, text=True, check=True,
+    )
+    modes = {}
+    for line in result.stdout.splitlines():
+        meta, _tab, name = line.partition("\t")
+        modes[name] = meta.split()[0]
+    return modes
+
+
+def test_entry_scripts_are_executable_in_the_index() -> None:
+    try:
+        modes = _index_modes()
+    except (OSError, subprocess.CalledProcessError) as exc:  # pragma: no cover
+        pytest.skip("拿不到 git 索引: %s" % exc)
+    wrong = {name: mode for name, mode in modes.items() if mode != "100755"}
+    missing = [name for name in EXECUTABLE_ENTRYPOINTS if name not in modes]
+    assert not missing, "入口脚本没有被 git 跟踪：%r" % missing
+    assert not wrong, (
+        "这些入口脚本在 git 索引里没有可执行位，照文档 ./scripts/check.sh 会 Permission denied。"
+        "修法：git update-index --chmod=+x <文件>：%r" % wrong
+    )
+
+
+def test_check_entrypoints_only_delegate_to_check_py() -> None:
+    """``check.sh`` / ``check.ps1`` 只是挑 Python 的壳，步骤只写在 ``check.py`` 里。
+
+    两个壳曾经各写一遍全部步骤、靠约定同步，结果漂开了（一边设了
+    ``SYNCOJ_STATE_DIR``，同一套测试在两个入口下结果不同）。这里守住"壳里不再长出
+    步骤"：出现了直接调测试 / 构建的命令，就说明有人又把步骤写回壳里了。
+    """
+    shells = {
+        "scripts/check.sh": (REPO_ROOT / "scripts" / "check.sh").read_text(encoding="utf-8"),
+        "scripts/check.ps1": (REPO_ROOT / "scripts" / "check.ps1").read_text(encoding="utf-8-sig"),
+    }
+    step_markers = ("parallel_tests", "pytest", "npm ", "dump_openapi", "check_py38")
+    for name, text in shells.items():
+        assert "check.py" in text, "%s 没有转给 scripts/check.py" % name
+        code = [line for line in text.splitlines() if not line.lstrip().startswith("#")]
+        leaked = [m for m in step_markers if any(m in line for line in code)]
+        assert not leaked, "%s 里又写进了检查步骤 %r —— 步骤只放 scripts/check.py" % (name, leaked)

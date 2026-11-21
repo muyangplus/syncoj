@@ -518,3 +518,41 @@ def test_上传失败不影响心跳(monkeypatch, config: AgentConfig, capture_l
     assert delays == [7.0, 7.0]
     warnings = [r.getMessage() for r in records if r.levelno >= logging.WARNING]
     assert warnings == [], warnings
+
+
+def test_待配对路径也处理服务端给的升级(config: AgentConfig) -> None:
+    """未配对的机器也要能升级：``_pending_tick`` 提前返回，从前走不到升级那一段。"""
+    client = RecordingClient()
+    agent = make_agent(config, client)
+    agent._build_tick_payload = lambda *a, **k: ({}, [], [])  # type: ignore[assignment]
+    agent._flush_events = lambda: None  # type: ignore[assignment]
+    agent._adopt_identity = lambda data: SimpleNamespace(state=STATE_UNCLAIMED)  # type: ignore[assignment]
+    seen = []
+    agent._handle_upgrade = lambda info: seen.append(info)  # type: ignore[assignment]
+    client.tick_response = {
+        "claimed": False,
+        "bound": False,
+        "next_tick_seconds": 30,
+        "upgrade": {"version": "9.9.9"},
+    }
+
+    agent._pending_tick()
+
+    assert seen == [{"version": "9.9.9"}]
+
+
+def test_状态类事件只在变化时上报(config: AgentConfig) -> None:
+    """边沿触发：同一状态每轮都报会把审计刷成同一句话。"""
+    agent = make_agent(config, RecordingClient())
+    agent._pending_events = []
+
+    agent._emit_on_change("warning", "oversize_skipped", "a.in", "超限")
+    agent._emit_on_change("warning", "oversize_skipped", "a.in", "超限")
+    assert [e["category"] for e in agent._pending_events] == ["oversize_skipped"]
+
+    agent._emit_on_change("warning", "oversize_skipped", "a.in\nb.in", "超限")
+    assert len(agent._pending_events) == 2, "状态变了要再报"
+
+    agent._emit_on_change("warning", "oversize_skipped", None)
+    agent._emit_on_change("warning", "oversize_skipped", "a.in\nb.in", "超限")
+    assert len(agent._pending_events) == 3, "状态消失后再出现要再报"

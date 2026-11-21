@@ -40,6 +40,7 @@ from syncoj_agent.upgrade import (  # noqa: E402
     list_releases,
     note_boot,
     parse_version,
+    release_signing_message,
     prune_releases,
     read_release_fingerprint,
     rollback_release,
@@ -208,8 +209,8 @@ def test_manifest_rejects_bad_input(payload) -> None:
 def _make_signed_bundle(signing_key, workdir: Path, content: bytes = b"agent bundle"):
     """构造一个签名合法的发布包。
 
-    签名对象是 sha256 的**十六进制字符串**（不是原始文件字节）—— 见
-    ``verify_bundle`` 的说明。
+    签名对象是 ``release_signing_message``（标签 + 版本 + sha256 + 大小，不是原始
+    文件字节）—— 见 ``verify_bundle`` 的说明。
     """
     bundle = workdir / "bundle.tar.gz"
     make_tar(bundle, [("syncoj_agent/main.py", content, "file")])
@@ -222,7 +223,7 @@ def _make_signed_bundle(signing_key, workdir: Path, content: bytes = b"agent bun
         url="/x",
         sha256=digest,
         size=len(raw),
-        signature=_b64(signing_key.sign(digest.encode("ascii"))),
+        signature=_b64(signing_key.sign(release_signing_message("9.9.9", digest, len(raw)))),
     )
     return bundle, manifest
 
@@ -295,9 +296,19 @@ def test_signature_must_be_over_digest_not_raw_bytes(signing_key, workdir: Path)
     with pytest.raises(UpgradeError, match="签名"):
         verify_bundle(public, bundle, manifest)
 
-    # 换成对摘要签名就应当通过
+    # 只签摘要（旧格式）也不行：版本号不在签名里
     manifest.signature = _b64(signing_key.sign(digest.encode("ascii")))
+    with pytest.raises(UpgradeError, match="签名"):
+        verify_bundle(public, bundle, manifest)
+
+    # 签"标签 + 版本 + 摘要 + 大小"才通过
+    manifest.signature = _b64(signing_key.sign(release_signing_message("9.9.9", digest, len(raw))))
     verify_bundle(public, bundle, manifest)
+
+    # 同一个签名换个版本号就验不过（降级 / 冒充新版本）
+    manifest.version = "10.0.0"
+    with pytest.raises(UpgradeError, match="签名"):
+        verify_bundle(public, bundle, manifest)
 
 
 # --------------------------------------------------------------------------- #
@@ -510,8 +521,12 @@ def test_prune_keeps_recent_versions(workdir: Path) -> None:
     activate_release(install, "2.0.0")
     removed = prune_releases(install, keep=2)
 
-    assert removed == ["1.0.0", "1.1.0"]
-    assert list_releases(install) == ["1.2.0", "2.0.0"]
+    # ``keep`` 是"除受保护版本（正在运行的 2.0.0）之外再留几个最新的"，**不是**
+    # 总数上限（见 ``prune_releases`` 的 docstring）：留 1.1.0、1.2.0，外加 2.0.0。
+    # 这条曾按"总数 = keep"断言，语义改了之后它红着 —— 但挂着 requires_symlinks，
+    # 在没开开发者模式的 Windows 上被跳过，所以一直没人看见。
+    assert removed == ["1.0.0"]
+    assert list_releases(install) == ["1.1.0", "1.2.0", "2.0.0"]
 
 
 @requires_symlinks

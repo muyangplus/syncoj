@@ -558,8 +558,8 @@ const saveZipPassword = useMutation(
 // --------------------------------------------------------------------------- //
 
 /**
- * 删除资产是**软删除**（墓碑），所以用普通确认而不是打名字 —— 约定里的
- * "打一遍名字"是给结构性数据的硬删除用的。
+ * 删除资产用普通确认而不是打名字 —— 约定里的"打一遍名字"是给结构性数据用的。
+ * 注意它在服务端也是**硬删**，没有墓碑（ADR-0003 的 2026-11 修订）。
  *
  * 但后果必须写清楚：服务端会级联删掉引用它的下发任务与逐选手进度，
  * 而已经落到选手机器上的文件**不会撤回**（服务端管不到那边）。
@@ -975,7 +975,9 @@ function targetKindLabel(kind: string): string {
               :stroke-width="14"
             />
             <div class="cell-sub">
-              完成 {{ row.done }} · 失败 {{ row.failed }} · 待处理 {{ row.pending }} / 共 {{ row.total }}
+              完成 {{ row.done }} · 失败 {{ row.failed }} · 待处理 {{ row.pending }}<template
+                v-if="row.cancelled"
+              > · 已取消 {{ row.cancelled }}</template> / 共 {{ row.total }}
             </div>
           </template>
         </el-table-column>

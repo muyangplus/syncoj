@@ -1,6 +1,36 @@
 {
   "components": {
     "schemas": {
+      "AdminHealthOut": {
+        "additionalProperties": false,
+        "description": "管理端探活：概览卡片直接要用的几个数。",
+        "properties": {
+          "agents_online": {
+            "title": "Agents Online",
+            "type": "integer"
+          },
+          "agents_total": {
+            "title": "Agents Total",
+            "type": "integer"
+          },
+          "data_root": {
+            "title": "Data Root",
+            "type": "string"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok",
+          "agents_total",
+          "agents_online",
+          "data_root"
+        ],
+        "title": "AdminHealthOut",
+        "type": "object"
+      },
       "AdminInfo": {
         "additionalProperties": false,
         "properties": {
@@ -1291,6 +1321,49 @@
         "title": "DeployCreate",
         "type": "object"
       },
+      "DeployDone": {
+        "additionalProperties": false,
+        "description": "一个下发目标已经在本机落地，落地的是**哪一份内容**。\n\n带 ``sha256`` 是为了让服务端只认\"当前这一版\"的回执：教师在线改了正文 /\n改了 zip 密码之后，迟到的旧版回执不能把新内容标成已完成。",
+        "properties": {
+          "sha256": {
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Sha256",
+            "type": "string"
+          },
+          "target_id": {
+            "title": "Target Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "target_id",
+          "sha256"
+        ],
+        "title": "DeployDone",
+        "type": "object"
+      },
+      "DeployFailed": {
+        "additionalProperties": false,
+        "description": "一个下发目标本轮没下成，以及原因（给教师看的）。",
+        "properties": {
+          "reason": {
+            "default": "",
+            "maxLength": 300,
+            "title": "Reason",
+            "type": "string"
+          },
+          "target_id": {
+            "title": "Target Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "target_id"
+        ],
+        "title": "DeployFailed",
+        "type": "object"
+      },
       "DeployJob": {
         "additionalProperties": false,
         "properties": {
@@ -1307,11 +1380,6 @@
             "title": "Mode",
             "type": "string"
           },
-          "offset": {
-            "default": 0,
-            "title": "Offset",
-            "type": "integer"
-          },
           "sha256": {
             "title": "Sha256",
             "type": "string"
@@ -1320,12 +1388,17 @@
             "title": "Size",
             "type": "integer"
           },
+          "target_id": {
+            "title": "Target Id",
+            "type": "integer"
+          },
           "url": {
             "title": "Url",
             "type": "string"
           }
         },
         "required": [
+          "target_id",
           "asset_id",
           "url",
           "sha256",
@@ -1333,6 +1406,27 @@
           "dest"
         ],
         "title": "DeployJob",
+        "type": "object"
+      },
+      "DeployProgress": {
+        "additionalProperties": false,
+        "description": "一个下发目标在本机的进度（分片里已经有多少字节）。",
+        "properties": {
+          "bytes_done": {
+            "minimum": 0.0,
+            "title": "Bytes Done",
+            "type": "integer"
+          },
+          "target_id": {
+            "title": "Target Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "target_id",
+          "bytes_done"
+        ],
+        "title": "DeployProgress",
         "type": "object"
       },
       "DeployTargetOut": {
@@ -1385,6 +1479,11 @@
         "properties": {
           "asset_id": {
             "title": "Asset Id",
+            "type": "integer"
+          },
+          "cancelled": {
+            "default": 0,
+            "title": "Cancelled",
             "type": "integer"
           },
           "contest_id": {
@@ -1602,6 +1701,13 @@
               }
             ],
             "title": "Os Info"
+          },
+          "protocol_version": {
+            "default": 0,
+            "maximum": 10000.0,
+            "minimum": 0.0,
+            "title": "Protocol Version",
+            "type": "integer"
           }
         },
         "required": [
@@ -1764,7 +1870,7 @@
       },
       "FileClearIn": {
         "additionalProperties": false,
-        "description": "清代码台账。\n\n``purge=False``（默认）只打墓碑 —— 行还在、``?include_deleted=true`` 仍能\n查到，导出里也仍然带着（见 ``docs/reference/api-conventions.md`` §5.2）。\n``purge=True`` 才连行一起删，只在\"这些记录本来就是误传\"时才该用。",
+        "description": "清代码台账（硬删，见 ``docs/reference/api-conventions.md`` §5.3）。\n\n``purge=False``（默认）只删扫描对账标成\"已消失\"的行（``deleted_at`` 非空）。\n``purge=True`` 连还在的行一起删 —— 机器还在报的文件下一轮会重新收上来，\n所以只在\"归档完毕准备清场\"或\"这些记录本来就是误传\"时才该用。",
         "properties": {
           "confirm": {
             "maxLength": 200,
@@ -2456,6 +2562,34 @@
         "title": "Page[PlayerOut]",
         "type": "object"
       },
+      "Page_PlayerProgressOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PlayerProgressOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "default": 50,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "title": "Page[PlayerProgressOut]",
+        "type": "object"
+      },
       "Page_ProblemOut_": {
         "properties": {
           "items": {
@@ -2538,27 +2672,6 @@
           }
         },
         "title": "Page[SourceFileOut]",
-        "type": "object"
-      },
-      "PartialDownload": {
-        "additionalProperties": false,
-        "description": "客户端本地未完成的下载，服务端据此回填 offset。",
-        "properties": {
-          "asset_id": {
-            "title": "Asset Id",
-            "type": "integer"
-          },
-          "bytes_done": {
-            "minimum": 0.0,
-            "title": "Bytes Done",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "asset_id",
-          "bytes_done"
-        ],
-        "title": "PartialDownload",
         "type": "object"
       },
       "PendingMachineOut": {
@@ -3015,6 +3128,46 @@
         "title": "PlayerProfileOut",
         "type": "object"
       },
+      "PlayerProgressOut": {
+        "additionalProperties": false,
+        "description": "一位选手的交题进度（概览页巡场用）。\n\n只数**清单里登记过的题目**，口径与成绩矩阵一致：有评测记录算\"已出成绩\"，\n没有记录但收到了这道题的代码算\"待评测\"，两样都没有算\"未交\"。\n概览页每 5 秒刷一次，只要这几个数，不该为此拉整张成绩矩阵。",
+        "properties": {
+          "missing": {
+            "default": 0,
+            "title": "Missing",
+            "type": "integer"
+          },
+          "pending": {
+            "default": 0,
+            "title": "Pending",
+            "type": "integer"
+          },
+          "player_id": {
+            "title": "Player Id",
+            "type": "integer"
+          },
+          "player_no": {
+            "title": "Player No",
+            "type": "string"
+          },
+          "submitted": {
+            "default": 0,
+            "title": "Submitted",
+            "type": "integer"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "player_id",
+          "player_no"
+        ],
+        "title": "PlayerProgressOut",
+        "type": "object"
+      },
       "PlayerUpsert": {
         "additionalProperties": false,
         "properties": {
@@ -3315,7 +3468,7 @@
       },
       "ReleaseBuildIn": {
         "additionalProperties": false,
-        "description": "「发布当前版本」的请求体。\n\n``version`` **必填**：界面会预填源码里的 ``__version__``，但服务端不接受\n\"猜一个默认值\"。让发版这件事必须经过一次显式确认，是为了在\"改了代码忘了改\n版本号\"时撞上\"这个版本已经存在\"，而不是静默覆盖掉上一版 —— 后者更糟，\n因为已经升级过的机器会因为\"版本不高于当前\"拒绝升级，而界面上一切正常。\n\n``include_bootstrap_key`` **默认关**，因为打开它的后果是\"这个包从此等于一张\n能注册进这台服务端的通行证\"。装机入口（``/api/v1/agent/install/*``）刻意不鉴权\n—— 空机器上没有任何凭据可用 —— 于是**任何能打开装机页的人都能把这个包下载下来，\n也就拿到了那把密钥**。只有\"局域网里确定没有外人\"时才该打开它，而且发完就该吊销。",
+        "description": "「发布当前版本」的请求体。\n\n``version`` **必填**：界面会预填源码里的 ``__version__``，但服务端不接受\n\"猜一个默认值\"。让发版这件事必须经过一次显式确认，是为了在\"改了代码忘了改\n版本号\"时撞上\"这个版本已经存在\"，而不是静默覆盖掉上一版 —— 后者更糟，\n因为已经升级过的机器会因为\"版本不高于当前\"拒绝升级，而界面上一切正常。\n\n``include_bootstrap_key`` **默认关**，因为打开它的后果是\"这个包从此等于一张\n能注册进这台服务端的通行证\"。装机入口（``/api/v1/agent/install/*``）刻意不鉴权，\n所以它**拒发**带密钥的包（409 ``install_bundle_has_key``）：这种包只经管理端登录\n后下载、做成离线包或镜像。离线包拷出去就收不回来，发完就该吊销。",
         "properties": {
           "bootstrap_key_policy": {
             "anyOf": [
@@ -4002,6 +4155,26 @@
         "title": "ScanEntry",
         "type": "object"
       },
+      "ScanIdentity": {
+        "additionalProperties": false,
+        "description": "这一轮的扫描根是按哪个身份展开的（Agent 的 ``{player_no}`` / ``{contest_slug}``）。",
+        "properties": {
+          "contest_slug": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Contest Slug",
+            "type": "string"
+          },
+          "player_no": {
+            "default": "",
+            "maxLength": 64,
+            "title": "Player No",
+            "type": "string"
+          }
+        },
+        "title": "ScanIdentity",
+        "type": "object"
+      },
       "ScoreCellOut": {
         "additionalProperties": false,
         "properties": {
@@ -4299,11 +4472,28 @@
             ],
             "title": "Agent Version"
           },
-          "completed_assets": {
+          "deploy_done": {
             "items": {
-              "type": "integer"
+              "$ref": "#/components/schemas/DeployDone"
             },
-            "title": "Completed Assets",
+            "maxItems": 1000,
+            "title": "Deploy Done",
+            "type": "array"
+          },
+          "deploy_failed": {
+            "items": {
+              "$ref": "#/components/schemas/DeployFailed"
+            },
+            "maxItems": 1000,
+            "title": "Deploy Failed",
+            "type": "array"
+          },
+          "deploy_progress": {
+            "items": {
+              "$ref": "#/components/schemas/DeployProgress"
+            },
+            "maxItems": 1000,
+            "title": "Deploy Progress",
             "type": "array"
           },
           "hostname": {
@@ -4324,12 +4514,12 @@
             "title": "Machine Id",
             "type": "string"
           },
-          "partials": {
-            "items": {
-              "$ref": "#/components/schemas/PartialDownload"
-            },
-            "title": "Partials",
-            "type": "array"
+          "protocol_version": {
+            "default": 0,
+            "maximum": 10000.0,
+            "minimum": 0.0,
+            "title": "Protocol Version",
+            "type": "integer"
           },
           "release_public_key": {
             "default": false,
@@ -4340,11 +4530,11 @@
             "items": {
               "$ref": "#/components/schemas/ScanEntry"
             },
+            "maxItems": 50000,
             "title": "Scan",
             "type": "array"
           },
           "scan_complete": {
-            "default": true,
             "title": "Scan Complete",
             "type": "boolean"
           },
@@ -4360,6 +4550,16 @@
             ],
             "title": "Scan Root"
           },
+          "scanned_for": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScanIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "stats": {
             "$ref": "#/components/schemas/TickStats"
           },
@@ -4371,7 +4571,8 @@
         },
         "required": [
           "machine_id",
-          "ts"
+          "ts",
+          "scan_complete"
         ],
         "title": "TickRequest",
         "type": "object"
@@ -4383,13 +4584,6 @@
             "default": false,
             "title": "Bound",
             "type": "boolean"
-          },
-          "cancel_assets": {
-            "items": {
-              "type": "integer"
-            },
-            "title": "Cancel Assets",
-            "type": "array"
           },
           "claimed": {
             "default": true,
@@ -4549,18 +4743,6 @@
       "UpgradeInfo": {
         "additionalProperties": false,
         "properties": {
-          "bootstrap_key_policy": {
-            "default": "keep",
-            "title": "Bootstrap Key Policy",
-            "type": "string"
-          },
-          "config_policy": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "title": "Config Policy",
-            "type": "object"
-          },
           "notes": {
             "anyOf": [
               {
@@ -4584,11 +4766,6 @@
             "default": 0,
             "title": "Size",
             "type": "integer"
-          },
-          "upgrade_mode": {
-            "default": "apply",
-            "title": "Upgrade Mode",
-            "type": "string"
           },
           "url": {
             "title": "Url",
@@ -6353,7 +6530,7 @@
     },
     "/api/v1/admin/contests/{contest_id}/files/clear": {
       "post": {
-        "description": "清理代码台账。\n\n这是**软删除**（打墓碑）的批量版本：行先删掉，``blobs/`` 里的内容只在\n没有任何记录再引用它时才释放 —— 见 ``docs/reference/api-conventions.md`` §5.2。\n\n默认 ``purge=false``：只清掉**已经消失**的墓碑记录（选手删了文件之后留下的\n那些），这不会影响任何还在的东西 —— 也是这个操作最常见的用途。\n\n``purge=true`` 会连活的一起删，但**机器还在报的文件下一轮就会回来**，\n所以它只适合\"比赛结束后归档完毕、准备清场\"。界面上的按钮要写明这一点。\n\n确认内容是**场次 slug**。",
+        "description": "清理代码台账。\n\n这是**硬删除**：行直接删掉，``blobs/`` 里的内容只在没有任何记录再引用它时\n才一并删掉；``source/`` 里已落盘的文件不碰。被删的行找不回来，也不会出现在\n``?include_deleted=true`` 里 —— 见 ``docs/reference/api-conventions.md`` §5.2。\n（ADR-0003 v1 原定这里是软删留墓碑，从未实现；2026-11 修订改为承认硬删。）\n\n默认 ``purge=false``：只删扫描对账标成**已消失**的行（选手在机器上删掉的文件，\n``deleted_at`` 非空 —— 系统里唯一的墓碑），这不会影响任何还在的东西 ——\n也是这个操作最常见的用途。\n\n``purge=true`` 会连活的一起删，但**机器还在报的文件下一轮就会回来**，\n所以它只适合\"比赛结束后归档完毕、准备清场\"。界面上的按钮要写明这一点。\n\n确认内容是**场次 slug**。",
         "operationId": "clear_source_files_api_v1_admin_contests__contest_id__files_clear_post",
         "parameters": [
           {
@@ -7328,6 +7505,76 @@
         ]
       }
     },
+    "/api/v1/admin/contests/{contest_id}/scores/progress": {
+      "get": {
+        "description": "每位选手交了几道、待评测几道、没交几道（只数登记过的题目）。\n\n概览页要的只是这几个数。排序与分页和选手列表一致（按考号），\n所以概览页拿同一组 ``limit/offset`` 取到的正好是同一页人；\n代码文件与评测记录也只查这一页，不扫全场。",
+        "operationId": "score_progress_api_v1_admin_contests__contest_id__scores_progress_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "每页条数",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "每页条数",
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "起始位置",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "起始位置",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_PlayerProgressOut_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Score Progress",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/api/v1/admin/deploys/{task_id}": {
       "delete": {
         "description": "删掉一条下发记录。\n\n**不会撤回已经落地的文件** —— 客户端那边的文件不归服务端管。\n它做的是\"把这条任务从列表里去掉\"，包括还没完成的那些（等于放弃它）：\n删掉之后 Agent 下一轮 tick 不会再领到这个作业。\n\n还没完成的作业被删时要提醒一句：教师很可能以为\"删除 = 取消下发\"，\n而实际上那台机器上的半份文件会留在硬盘上（``.part`` 分片）。\n真要停止下发应该用「取消」，它会保留记录、只是不再派发。",
@@ -7768,15 +8015,14 @@
     },
     "/api/v1/admin/health": {
       "get": {
+        "description": "管理端探活（要登录）。\n\n曾经不鉴权：匿名就能拿到 ``data_root`` 的绝对路径，而且它恒回 200，于是匿名\n请求能借它的 Host 头改写\"对外地址\"（见 main._remember_public_url）。",
         "operationId": "health_api_v1_admin_health_get",
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Health Api V1 Admin Health Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/AdminHealthOut"
                 }
               }
             },
@@ -8059,7 +8305,7 @@
     },
     "/api/v1/admin/machines/pending/{agent_id}": {
       "delete": {
-        "description": "把一台待配对的机器从列表里去掉（认错机器、测试机、刷注册的垃圾）。\n\n作废它的凭据 —— 那台机器下次心跳会拿到 401，然后等下一次开机由注册单元\n重新注册。真正的垃圾机器应该先吊销统一密钥，否则它会一直回来。",
+        "description": "把一台待配对的机器从列表里去掉（认错机器、测试机、刷注册的垃圾）。\n\n作废它的凭据 —— 那台机器下次心跳会拿到 401，然后等下一次开机由注册单元\n重新注册。真正的垃圾机器应该先吊销统一密钥，否则它会一直回来。\n\n**硬删**，与 :func:`revoke_agent` 同理：曾经只打 ``revoked_at`` 标记，而\n``machine_uuid`` 有唯一约束、认回时又不看作废的行 —— 同一台机器再注册就撞约束\n500，\"它下次开机还会回来\"这句话不成立。",
         "operationId": "revoke_pending_machine_api_v1_admin_machines_pending__agent_id__delete",
         "parameters": [
           {
@@ -9527,7 +9773,7 @@
     },
     "/api/v1/agent/releases/{release_id}": {
       "get": {
-        "description": "下载 Agent 升级包。\n\n只提供**已铺开且未撤回**的版本 —— 上传但未 rollout 的包对 Agent 不可见，\n这样\"上传\"和\"铺开\"的风险边界在服务端也是硬的，而不是只靠 Agent 自觉。",
+        "description": "下载 Agent 升级包。**任意有效凭据都行**（未配对 / 无场次的机器也要能升级 ——\n待配对的心跳会给它升级清单；曾经这里要求能干活的身份，清单给了却下不动）。\n\n只提供**已铺开且未撤回**的版本 —— 上传但未 rollout 的包对 Agent 不可见，\n这样\"上传\"和\"铺开\"的风险边界在服务端也是硬的，而不是只靠 Agent 自觉。",
         "operationId": "download_release_api_v1_agent_releases__release_id__get",
         "parameters": [
           {

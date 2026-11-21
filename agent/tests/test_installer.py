@@ -34,14 +34,15 @@ requires_symlinks = pytest.mark.skipif(
 )
 
 
-@pytest.fixture(scope="module")
-def installer():
-    """把 install.py 当模块加载。它不是包的一部分，只能走 importlib。"""
-    spec = importlib.util.spec_from_file_location("syncoj_installer", PACKAGING / "install.py")
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+@pytest.fixture()
+def installer(installer_module):
+    """``install.py`` 模块本身。
+
+    统一走 conftest 的 ``installer_module``（会话内只此一份）：这里曾经自己再加载
+    一份，于是 conftest 打在那一份上的沙箱补丁（系统路径、``systemctl``）对这个
+    文件不生效 —— 以 root 跑时整机安装用例会写到宿主的 ``/etc/sudoers.d``。
+    """
+    return installer_module
 
 
 @pytest.fixture()
@@ -63,6 +64,10 @@ def make_bundle(path: Path, version: str = "1.2.3", extra: List[Tuple[str, str, 
     entries = [
         ("syncoj_agent/__init__.py", '__version__ = "%s"\n' % version, "file"),
         ("syncoj_agent/main.py", "print('hi')\n", "file"),
+        # 发布根上的启动器：安装器要求它存在（单元的 ExecStart 指向它）。这份夹具
+        # 曾经漏了它，而用到它的整机安装用例都挂着 ``requires_symlinks`` —— 在
+        # Windows 开发机上被跳过，于是"安装器加了这条要求"之后它们红了没人发现。
+        ("run_agent.py", "print('launcher')\n", "file"),
     ]
     entries.extend(extra or [])
     with tarfile.open(str(path), "w:gz") as archive:
@@ -96,7 +101,7 @@ def test_safe_extract_normal(installer, workdir: Path) -> None:
     dest = workdir / "out"
     tops = installer.safe_extract(bundle, dest)
 
-    assert tops == ["syncoj_agent"]
+    assert sorted(tops) == ["run_agent.py", "syncoj_agent"]
     assert (dest / "syncoj_agent" / "main.py").read_text(encoding="utf-8") == "print('hi')\n"
 
 
@@ -464,6 +469,7 @@ def test_render_config_with_insecure_tls(installer) -> None:
     assert "verify_tls = false" in text
 
 
+@pytest.mark.real_system_paths
 def test_render_unit_permissions_follow_contestant_user(installer) -> None:
     """systemd 的读写白名单必须跟着"Agent 以选手身份运行"这个前提走。
 
@@ -479,15 +485,18 @@ def test_render_unit_permissions_follow_contestant_user(installer) -> None:
         scan_roots="{desktop}/{player_no}, /srv/shared/code",
         run_user="student",
         python="/usr/bin/python3",
+        home="/home/student",
     )
 
-    # %h = User= 的家目录（覆盖选手桌面）；安装器自建的目录也开写权限。
+    # 运行账号的家目录（安装时解析成绝对路径，覆盖选手桌面）；安装器自建的目录也开写权限。
+    # 不用 %h：系统单元里它是 /root，不是 User= 的家目录。
     # **每一条都带 `-`**：路径不存在时 systemd 跳过它，而不是 226 起不来。
     # 后四条是给"管理端授权的远程卸载"用的（沙箱里要能删单元文件与辅助脚本），
     # 它们本身是 root:0755，运行账号在 DAC 上写不进去 —— 详见 _writable_paths。
     assert (
-        "ReadWritePaths=-%h -/opt/syncoj -/var/lib/syncoj "
-        "-/etc/syncoj -/etc/systemd/system -/etc/sudoers.d -/usr/local/lib/syncoj"
+        # 曾经还有配置 / 单元 / sudoers / 辅助脚本四条（只为 Agent 自己 sudo 卸载）；
+        # 卸载改由 root 管理单元执行之后不再需要。
+        "ReadWritePaths=-/home/student -/opt/syncoj -/var/lib/syncoj\n"
     ) in text
     # 模板路径与可选配置不该被塞进来 —— 它们可能不存在，正是 226 的来源
     assert "{desktop}" not in text
@@ -522,7 +531,8 @@ def test_render_unit_uses_current_symlink(installer) -> None:
     # 沙箱还在（换一条代表性加固断言）：NoNewPrivileges 是**刻意去掉**的 ——
     # 它会挡死 setuid 的 sudo，让管理端授权的远程卸载没法工作，见 render_unit 注释。
     assert "ProtectSystem=strict" in text
-    assert "NoNewPrivileges" not in text
+    # Agent 不再提权（卸载 / 升级切换交给 root 管理单元），NoNewPrivileges 恢复
+    assert "NoNewPrivileges=yes" in text
 
 
 # --------------------------------------------------------------------------- #
@@ -609,21 +619,22 @@ def test_bundle_contains_launcher(workdir: Path) -> None:
     assert "syncoj_agent/main.py" in names
 
 
+@pytest.mark.real_system_paths
 def test_render_unit_without_extra_paths(installer) -> None:
-    """没配额外路径时，白名单只剩 %h 与安装器自建的目录 —— 但 %h 必须在。
+    """没配额外路径时，白名单只剩家目录与安装器自建的目录 —— 但家目录必须在。
 
     少了它，ProtectSystem=strict 会把家目录也变成只读。
     """
     text = installer.render_unit(
         prefix=Path("/o"), config_path=Path("/c"), state_dir=Path("/s"),
         deploy_root="", scan_roots="", run_user="student", python="python3",
+        home="/home/student",
     )
     line = [x for x in text.splitlines() if x.startswith("ReadWritePaths=")][0]
     tokens = line.split("=", 1)[1].split()
-    assert tokens[0] == "-%h", line
-    for token in ("-/o", "-/s", "-/etc/systemd/system", "-/etc/sudoers.d",
-                  "-/usr/local/lib/syncoj"):
-        assert token in tokens, "%s 不在白名单里：%s" % (token, line)
+    assert tokens[0] == "-/home/student", line
+    assert "%h" not in text, "系统单元里 %h 是 /root，不是运行账号的家目录"
+    assert tokens == ["-/home/student", "-/o", "-/s"], line
     # `--config-dir /` 这类误配不许把整个文件系统放开
     assert "-/" not in tokens, line
 
@@ -706,9 +717,13 @@ def test_full_install_and_idempotency(installer, workdir: Path) -> None:
     assert (release / "syncoj_agent" / "main.py").is_file()
     assert installer.current_version(prefix) == "1.0.0"
     assert (config_dir / "agent.ini").is_file()
-    assert (workdir / "units" / "syncoj-agent.service").is_file()
+    # ``--skip-service`` = "不碰 systemd"：主单元不写（``install_unit`` 第一行就返回）。
+    # 这条曾断言主单元**存在** —— 与实现相反，而它挂着 ``requires_symlinks``，在
+    # Windows 开发机上一直被跳过，所以没人发现。
+    assert not (workdir / "units" / "syncoj-agent.service").exists()
     assert (config_dir / "bootstrap.key").is_file()
-    assert (workdir / "units" / "syncoj-agent-enroll.service").is_file()
+    # ``--skip-service`` 对注册单元一样生效（曾经不管它：已知不一致，已统一）
+    assert not (workdir / "units" / "syncoj-agent-enroll.service").exists()
 
     # 第二次执行：结果必须一致
     assert run_installer(installer, base) == 0
@@ -740,7 +755,9 @@ def test_second_install_without_the_key_keeps_the_enroll_unit(
         "--config-dir", str(config_dir),
         "--state-dir", str(workdir / "state"),
         "--unit-dir", str(units),
-        "--skip-user", "--skip-service", "--skip-python-check", "--quiet",
+        # 不带 --skip-service：它现在对注册单元也生效，而这条测的正是注册单元。
+        # 测试沙箱里没有 systemctl，单元只落盘、不会被启用。
+        "--skip-user", "--skip-python-check", "--quiet",
     ]
 
     assert run_installer(installer, common + ["--bootstrap-key", "SECRET"]) == 0

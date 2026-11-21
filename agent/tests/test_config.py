@@ -581,9 +581,16 @@ def test_builtin_default_config_passes_check(
 
     ``SYNCOJ_STATE_DIR`` 指向临时目录 —— 默认的 ``/var/lib/syncoj`` 在开发机上
     会落到盘根，测试不该在仓库外面拉屎。
+
+    家目录也给一个假的：默认扫描根是 ``{desktop}/{player_no}``，``--check`` 要求
+    它的父目录（桌面）存在。用真家目录时，结果取决于"跑测试的账号有没有桌面"——
+    root 跑的 CI 容器里是 ``/root/桌面``，不存在，于是这条在 Linux 上恒红。
     """
     from syncoj_agent.main import main
 
+    home = workdir / "home"
+    (home / "Desktop").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("SYNCOJ_STATE_DIR", str(workdir / "state"))
     assert main(["--check"]) == 0
 

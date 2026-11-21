@@ -536,7 +536,7 @@ def test_Markdown_扫描器抓得住真的夹带() -> None:
         "raise ApiError(404, 'install_unavailable', '只发**已铺开**的版本')\n"
         "raise ApiError(400, 'bad_request', '请先改 agent/syncoj_agent/__init__.py 里的 __version__')\n"
         "raise ApiError(400, 'bad_request', '这场已经被 __关掉__ 了')\n"
-        "raise HTTPException(400, '看 `docs/protocol.md`')\n"
+        "raise HTTPException(400, '看 `docs/reference/protocol.md`')\n"
         "raise SomethingElse(400, '**别人家的不算**')\n"
     )
 
@@ -549,7 +549,7 @@ def test_Markdown_扫描器抓得住真的夹带() -> None:
     assert found == [
         "只发**已铺开**的版本",
         "这场已经被 __关掉__ 了",
-        "看 `docs/protocol.md`",
+        "看 `docs/reference/protocol.md`",
     ]
 
 

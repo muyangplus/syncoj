@@ -43,7 +43,6 @@ __all__ = [
     "Roster",
     "BootstrapKey",
     "Agent",
-    "AgentStatus",
     "AgentDiagnostic",
     "SourceFile",
     "Asset",
@@ -454,28 +453,6 @@ class Agent(Base, TimestampMixin):
     )
 
 
-class AgentStatus(Base):
-    """在线状态的**落库快照**。
-
-    这是个派生表：实时真身在 ``registry.AgentRegistry`` 的内存 dict 里，
-    由后台任务每 ``flush_interval_seconds`` 秒合并成一个事务刷进来。
-    存在的意义是服务端重启后 Web 不会看到空白，以及支持历史回溯。
-    """
-
-    __tablename__ = "agent_status"
-
-    agent_id = Column(Integer, ForeignKey("agent.id", ondelete="CASCADE"), primary_key=True)
-    online = Column(Boolean, nullable=False, default=False)
-    last_tick_at = Column(DateTime, nullable=True)
-    last_seen_ip = Column(String(64), nullable=True)
-    agent_version = Column(String(32), nullable=True)
-    scan_root = Column(String(512), nullable=True)
-    file_count = Column(Integer, nullable=False, default=0)
-    disk_free = Column(BigInteger, nullable=True)
-    last_error = Column(Text, nullable=True)
-    updated_at = Column(DateTime, default=utcnow, nullable=False)
-
-
 class AgentDiagnostic(Base):
     """一台机器**最新一份**诊断包（Agent 定期/出错/被点名时回传的现场）。
 
@@ -517,8 +494,9 @@ class AgentDiagnostic(Base):
 class SourceFile(Base):
     """回收到的文件的最新版本。
 
-    ``revision`` 递增，用于丢弃"迟到的旧版本"：Agent 断网重传时可能把旧内容
-    送到，服务端比对 revision 后直接丢弃，避免覆盖更新的版本。
+    ``revision`` 在每次存下新内容时递增。"迟到的旧版本"（Agent 断网重传时可能把
+    旧内容送到）靠比对 ``scanned_sha256`` 丢弃：送来的不是最近一次扫描到的那一版，
+    就以 409 拒绝，避免覆盖更新的版本。
     """
 
     __tablename__ = "source_file"
@@ -526,13 +504,24 @@ class SourceFile(Base):
     id = Column(Integer, primary_key=True)
     player_id = Column(Integer, ForeignKey("player.id", ondelete="CASCADE"), nullable=False)
     rel_path = Column(String(1024), nullable=False)
+    #: **已存下的**那一版的内容指纹（``content_stored`` 为真时，blobs/ 与 source/ 里
+    #: 就是它）。下载、导出、blob 引用计数读的都是它。尚未存过任何一版时，它暂记
+    #: 最近一次扫描到的值（``content_stored`` 为假，没有读者会把它当成"已存"）。
     sha256 = Column(String(64), nullable=False)
+    #: **最近一次扫描**到的内容指纹。与 ``sha256`` 不同 = 选手改过、新内容还没传上来，
+    #: tick 会一直把它放进 ``need_upload`` 直到传上来为止。
+    #:
+    #: 为什么要单独一列：曾经 tick 在**上传之前**就把 ``sha256`` 改成新扫描值、却不
+    #: 复位 ``content_stored`` —— 那一轮只要没传上（断网、重启、截断、409），下一轮
+    #: 就判成"没变、已存"，再也不要求上传：``source/`` 停在旧版本，台账却显示新指纹。
+    #: 可空只为老库：迁移 013 用 ``sha256`` 回填；读的一侧把 NULL 当成 ``sha256``。
+    scanned_sha256 = Column(String(64), nullable=True)
     size = Column(BigInteger, nullable=False, default=0)
     mtime = Column(BigInteger, nullable=False, default=0)
     revision = Column(Integer, nullable=False, default=0)
     first_seen_at = Column(DateTime, default=utcnow, nullable=False)
     last_seen_at = Column(DateTime, default=utcnow, nullable=False)
-    # 服务端已收到内容（blobs 中有该 sha256）才置 True
+    # 服务端已收到内容（blobs 中有 sha256 那一版）才置 True
     content_stored = Column(Boolean, nullable=False, default=False)
     # 非 NULL 表示该文件已从扫描结果中消失（选手删除/改名）
     deleted_at = Column(DateTime, nullable=True)
@@ -566,6 +555,15 @@ class Asset(Base, TimestampMixin):
 
 
 class DeployTask(Base, TimestampMixin):
+    """一次下发。
+
+    **任务没有存储的状态列**：界面上的任务状态每次从目标聚合（见管理端
+    ``_derive_task_status``）。曾经有一列 ``status``，由回执路径重算、取消 / 重试 /
+    重排各自去改，取消接口又按它判断 —— 几处写法不一致时它就和目标对不上了
+    （迁移 015 删掉了它）。唯一需要单独记的是「教师取消过」这件事本身，
+    它不是目标能推导出来的，所以是 ``cancelled_at``。
+    """
+
     __tablename__ = "deploy_task"
 
     id = Column(Integer, primary_key=True)
@@ -577,7 +575,9 @@ class DeployTask(Base, TimestampMixin):
     dest_dir = Column(String(512), nullable=False)
     # "overwrite" | "skip_exist"
     mode = Column(String(16), nullable=False, default="overwrite")
-    status = Column(String(16), nullable=False, default=DeployStatus.PENDING)
+    #: 教师点「取消」的时刻；非空 = 已取消：不再派发、也不再给下载。
+    #: 「重试」把失败目标重新排队时清空它（重试就是重新开始下发）。
+    cancelled_at = Column(DateTime, nullable=True)
 
     asset = relationship("Asset")
     targets = relationship("DeployTarget", back_populates="task", cascade="all, delete-orphan")
@@ -590,9 +590,14 @@ class DeployTarget(Base):
     task_id = Column(Integer, ForeignKey("deploy_task.id", ondelete="CASCADE"), nullable=False)
     player_id = Column(Integer, ForeignKey("player.id", ondelete="CASCADE"), nullable=False)
     status = Column(String(16), nullable=False, default=DeployStatus.PENDING)
-    # 服务端记录已传字节数，用于重连后下发 offset 提示
+    #: 机器上报的本地进度（分片里已有多少字节），只供管理端显示。
     bytes_done = Column(BigInteger, nullable=False, default=0)
+    #: 教师在管理端手工"重试"过几次。
     retry_count = Column(Integer, nullable=False, default=0)
+    #: **连续**下载失败的次数（机器回报的）。到 ``deploy.MAX_CONSECUTIVE_FAILURES``
+    #: 判 FAILED，不再派发 —— 曾经下载失败从不回写，失败的目标永远显示"进行中"。
+    #: 成功、内容变更、手工重试都清零。可空只为老库（迁移 014），读作 0。
+    failure_count = Column(Integer, nullable=True, default=0)
     last_error = Column(Text, nullable=True)
     updated_at = Column(DateTime, default=utcnow, nullable=False)
 
@@ -650,8 +655,9 @@ class EventLog(Base):
 
     id = Column(Integer, primary_key=True)
     ts = Column(DateTime, default=utcnow, nullable=False)
-    level = Column(String(16), nullable=False, default="info")
-    category = Column(String(32), nullable=False)
+    #: 级别与类别都建索引：审计页按它们筛、清理按级别删（迁移 016）
+    level = Column(String(16), nullable=False, default="info", index=True)
+    category = Column(String(32), nullable=False, index=True)
     contest_id = Column(Integer, nullable=True)
     player_id = Column(Integer, nullable=True)
     agent_id = Column(Integer, nullable=True)

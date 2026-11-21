@@ -204,8 +204,9 @@ python3 /opt/syncoj/current/run_agent.py --config /etc/syncoj/agent.ini --pair-c
 
 - **不设 `ProtectHome`** —— 设成 `read-only` 会把家目录整个变只读，Agent 一个
   文件都写不出去
-- `ReadWritePaths=%h <状态目录>` —— `%h` 由 systemd 展开成 `User=` 的家目录，
-  正好覆盖桌面
+- `ReadWritePaths=-/home/<运行账号> <状态目录> …` —— 放开运行账号的家目录（桌面在里面）。
+  家目录在安装时解析成绝对路径；曾经写的是 `-%h`，而系统单元里 `%h` 是 `/root`，
+  见 [ADR-0007](decisions/ADR-0007-unit-path-whitelist.md) 的「现状（2026-11）」
 - `ProtectSystem=strict` 保留：`/usr`、`/etc`、`/boot` 等系统目录仍然全部只读
 - `agent.ini` 与状态目录里的文件都 **chown 给这个用户**（0600）。
   漏掉 chown 的表现是"装完起不来"或"一直重新注册"，而且报的是权限错误，
@@ -274,17 +275,61 @@ python3 build_bundle.py --verify-signature /etc/syncoj/release-key.pem
 gzip 头里默认嵌的时间戳与文件名、tar 成员里的 mtime 都已被压平 —— 否则
 "同一版本两次打包校验和不同"，签名的确定性和"这个包是不是那个包"的判断都会失效。
 
-## 卸载
+## 重装与卸载
+
+**重装 = 再跑一次安装器**，不用先卸载（见上面「幂等性」）：`agent.ini` 与状态目录里的
+凭据都留着，所以**配对关系不变**；机器上已有的统一注册密钥会被认出来，不必再传
+`--bootstrap-key`；版本变了才重启服务。
 
 ```bash
-sudo systemctl disable --now syncoj-agent
-sudo rm -f /etc/systemd/system/syncoj-agent.service
+curl -fsSL http://<服务端>/api/v1/agent/install/bootstrap.sh \
+  | sudo sh -s -- --server http://<服务端> --user <运行账号>
+```
+
+`--user` 照旧显式给：`sudo` 下默认取 `SUDO_USER`，在考试机上那往往是管理员账号，
+不是选手。想连 `agent.ini` 一起按新默认重建，加 `--force-config`（教师改过的扫描目录会丢）。
+
+**卸载**用 `install.py --uninstall`，命令与它删什么见文末「卸载 Agent」。安装器取不回来
+（服务端已经下线）时，手工删的清单与它一致：
+
+```bash
+sudo systemctl disable --now syncoj-agent syncoj-agent-enroll
+sudo rm -f /etc/systemd/system/syncoj-agent.service \
+           /etc/systemd/system/syncoj-agent-enroll.service
 sudo systemctl daemon-reload
-sudo rm -rf /opt/syncoj /etc/syncoj
+sudo systemctl disable --now syncoj-agent-admin.path
+sudo rm -f /etc/systemd/system/syncoj-agent-admin.path /etc/systemd/system/syncoj-agent-admin.service
+sudo rm -rf /usr/lib/syncoj                     # root 管理单元的代码（安装器本身的一份拷贝）
+sudo rm -f /etc/sudoers.d/syncoj-uninstall      # 老版本留下的 sudoers 白名单（新版本不再装）
+sudo rm -rf /usr/local/lib/syncoj               # 远程卸载脚本
+sudo rm -rf /opt/syncoj /etc/syncoj             # 程序；配置、统一注册密钥、升级信任锚
 # 状态目录里是凭据与日志，确认不需要留档后再删
 sudo rm -rf /var/lib/syncoj
-sudo userdel syncoj
 ```
+
+运行账号**不要删**：默认它就是选手的登录账号。安装器只删它自己用 `--user` 新建的系统
+账号（`--keep-user` 连这个也留下），手工卸载时也照此办理。
+
+### 全部重装 / 重做镜像（服务端升级到 2026-11 这一版时必做）
+
+阶段 1 的修复里有**破坏性的协议变更**：tick 上报新增 `scanned_for`，`scan_complete`
+改为必填，下发的进度与回执改按下发目标报（`deploy_progress` / `deploy_done` /
+`deploy_failed`，按 `target_id`，取代 `partials` / `completed_assets`）。服务端对报文
+是严格校验的，旧 Agent 每一次 tick 都会被 422 拒掉 —— **不收代码、不收下发，也收不到
+升级**；何况自更新在真机上本来就写不进 `/opt/syncoj`
+（[`design/08-milestones-and-open.md`](design/08-milestones-and-open.md) §10.5）。
+所以不能等它自己升上来：
+
+1. 服务端升级后，先在「Agent 发布」页构建并**铺开**新版本 —— `--from-server` 与自举脚本
+   只发已铺开的版本。
+2. **每一台**考试机按上面「重装」那条命令重跑一次安装器。配对与 `agent.ini` 都保留。
+3. **镜像里预置的东西一律重做**：
+   * 预先放进镜像的离线包（`install.py --bundle` 用的 tar.gz）是旧版本，重新打包或从
+     「Agent 发布」页下载新包，换掉再做镜像；
+   * 已经装好 Agent 再做成镜像 / 用还原卡固化的机器，每次开机都会还原回旧 Agent ——
+     在母机上重装之后**重新做镜像**（注意上面「建镜像时最容易犯的错」：做镜像前删掉
+     身份文件）。
+4. 装完在「机器配对」页看各机的 Agent 版本与最近心跳，确认没有掉队的。
 
 ## 排障
 
@@ -319,10 +364,11 @@ tail -f /var/lib/syncoj/agent.log      # Agent 自己的日志（自动轮转）
 * 装出来的机器不用再手工拷密钥就能注册 —— 第一次开机就会出现在「机器配对」页；
 * 版本历史里能看见这把密钥，**就地可以吊销**（吊销只影响还没注册的机器，已注册的不受影响）。
 
-默认**不勾**，而且要理解它的后果：装机入口（`/api/v1/agent/install/*`）是**刻意不鉴权**的
-（空机器上没有任何凭据可用），所以**附带密钥的包等于一张"能注册进这台服务端"的通行证** ——
-任何能打开装机页的人都能下载它。只在确认局域网里没有外人时用；发完就吊销那把密钥，或者换一个
-不带密钥的版本铺开。
+默认**不勾**，而且要理解它的后果：**附带密钥的包等于一张"能注册进这台服务端"的通行证**。
+装机入口（`/api/v1/agent/install/*`）**刻意不鉴权**（空机器上没有任何凭据可用），所以它
+**拒发**带密钥的包（409 `install_bundle_has_key`）：这种包只能在管理端登录后下载、做成离线包
+或镜像。要在线装机就铺开一个**不带**密钥的版本，密钥在命令行上给
+（`bootstrap.sh --bootstrap-key …`）。离线包拷出去就收不回来，发完就吊销那把密钥。
 
 ## 发布时的「高级选项」
 
@@ -353,9 +399,9 @@ curl -fsSL http://<服务端>/api/v1/agent/install/bootstrap.sh \
   | sudo sh -s -- --uninstall --yes
 ```
 
-它从机器上已有的 `/etc/syncoj/agent.ini` 里读服务端地址（所以不用再抄一遍；
-读不到才要求显式给 `--server`），把安装器抓到 `/tmp` 再跑 —— **离线包里刻意不含
-安装器**，装完之后机器上只剩 `run_agent.py`，所以想卸载的第一步永远是"先把安装器
+服务端地址就是发这个脚本的那台（服务端发脚本时把自己的地址与安装器的 sha256 嵌进去，
+所以不用再抄一遍；**不再**读机器上的 `agent.ini` —— 那份文件不可信），把安装器抓到
+`mktemp -d` 建的临时目录、对过指纹再跑 —— **离线包里刻意不含安装器**，装完之后机器上只剩 `run_agent.py`，所以想卸载的第一步永远是"先把安装器
 弄回来"。想先看要删什么就别加 `--yes`，加 `--dry-run`。
 
 手上有安装器文件时也可以直接跑：

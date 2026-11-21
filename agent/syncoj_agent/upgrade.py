@@ -32,6 +32,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import tarfile
 from dataclasses import dataclass
@@ -110,6 +111,41 @@ class UpgradeMode:
 # --------------------------------------------------------------------------- #
 
 
+#: 发布版本号的白名单形状：数字段 + 可选的 ``-rc1`` / ``+build.7`` 这类后缀。
+#:
+#: 版本号会被**直接拼进路径**（``state_dir/upgrade/<v>.tar.gz``、
+#: ``releases/<v>/``），而且拼下载落点那一次发生在**验签之前**；它本身又不在
+#: 签名覆盖范围内（签名只覆盖 sha256）。``parse_version`` 只看开头的数字段，
+#: ``"1/../../x"`` 照样解析成 ``(1,)`` —— 于是篡改过的 tick 响应可以把包写到
+#: 运行账号能写的任意位置。所以形状必须在**解析清单时**就卡死：不允许 ``/``、
+#: ``\``、``..``，也不允许以点开头。
+RELEASE_VERSION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)*(?:[-+][0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$")
+MAX_RELEASE_VERSION_LENGTH = 64
+
+
+def validate_release_version(text: Any) -> str:
+    """版本号能安全地当一个路径段用，且可比较；否则抛 :class:`UpgradeError`。"""
+    if not isinstance(text, str):
+        raise UpgradeError("版本号必须是字符串")
+    if len(text) > MAX_RELEASE_VERSION_LENGTH or not RELEASE_VERSION_RE.match(text):
+        raise UpgradeError("版本号形状不合法: %r" % text[:80])
+    parse_version(text)
+    return text
+
+
+RELEASE_SIGNATURE_TAG = "syncoj-release-v1"
+
+
+def release_signing_message(version: str, sha256: str, size: int) -> bytes:
+    """发布签名覆盖的那段文本：``syncoj-release-v1\n<版本>\n<sha256>\n<字节数>\n``。
+
+    曾经只签 sha256：版本号不在签名里，篡改的 tick 响应能把合法的旧包标成
+    "新版本"（降级）。服务端 ``services/signing`` 与安装器各有一份独立实现，
+    由服务端 ``test_signing`` 的对账用例守住一致。
+    """
+    return ("%s\n%s\n%s\n%d\n" % (RELEASE_SIGNATURE_TAG, version, sha256.lower(), int(size))).encode("ascii")
+
+
 def parse_version(text: str) -> Tuple[int, ...]:
     """把 ``"1.2.3"`` 解析成 ``(1, 2, 3)``。
 
@@ -164,6 +200,8 @@ class ReleaseManifest:
             signature = str(data.get("signature", ""))
         except KeyError as exc:
             raise UpgradeError("发布清单缺少字段: %s" % exc)
+        # 版本号随后会被拼进下载落点（验签之前），必须先过形状白名单
+        validate_release_version(version)
 
         if len(sha256) != 64 or any(c not in "0123456789abcdef" for c in sha256.lower()):
             raise UpgradeError("sha256 格式不合法")
@@ -213,11 +251,11 @@ def _sha256_file(path: Path) -> str:
 def verify_bundle(public_key: RSAPublicKey, bundle_path: Path, manifest: ReleaseManifest) -> None:
     """校验摘要与签名。不通过就抛 :class:`UpgradeError`。
 
-    **签名对象是 sha256 的十六进制字符串，而不是文件的原始字节。**
-    这样验证分两步且都不需要把包读进内存：
+    **签名对象是 :func:`release_signing_message`（标签 + 版本 + sha256 + 大小），
+    而不是文件的原始字节。** 这样验证分两步且都不需要把包读进内存：
 
     1. 流式计算 sha256 并与清单比对（256MB 的包也只占 1MB 缓冲区）
-    2. 对那 64 个 ASCII 字符验签
+    2. 对那一小段文本验签（版本号也在里面：换版本号就验不过）
 
     安全性与"对整个文件签名"等价：攻击者要伪造仍是找 sha256 碰撞，而
     PKCS#1 内部本来也是"先哈希再签名"。换来的是内存占用与文件大小解耦 ——
@@ -252,8 +290,12 @@ def verify_bundle(public_key: RSAPublicKey, bundle_path: Path, manifest: Release
     if not manifest.signature:
         raise UpgradeError("发布清单没有签名")
 
+    if size <= 0 or not manifest.size:
+        raise UpgradeError("发布清单没有声明大小（签名覆盖大小，缺了验不了）")
     if not verify_pkcs1v15_sha256(
-        public_key, manifest.sha256.encode("ascii"), manifest.signature_bytes()
+        public_key,
+        release_signing_message(manifest.version, manifest.sha256, manifest.size),
+        manifest.signature_bytes(),
     ):
         raise UpgradeError("发布包签名验证失败")
 
@@ -409,7 +451,7 @@ def _replace_version_dir(staging: Path, final: Path) -> None:
     老目录先 rename 成 ``.old-<pid>``（同在 releases/ 下，rename 是原子的），
     再把 staging rename 成版本目录，成功后才删老目录；第二步失败就把老目录搬
     回去。**这里不停服务**：正在跑的就是 Agent 自己，停自己不在它的权限面里；
-    真正的切换由后面的 ``activate_release`` + systemd ``Restart=always`` 完成。
+    真正的切换由后面的 ``activate_release`` + Agent 以 ``EXIT_RESTART`` 退出、由 systemd 拉起完成。
     替换本身是原子的，不存在"半新半旧"的目录被读到。
 
     注意：老内容在这里就被删掉了，所以同版本内容替换**没有**可回滚的上一份
@@ -450,14 +492,15 @@ def stage_release(install_root: Path, version: str, bundle_path: Path) -> Path:
     * 版本目录里记的指纹与这一份包相同 → 直接复用，不重解（幂等）；
     * 不同、或历史安装没有记录 → 换上新内容，别让"同版本重复暂存"把新内容吃掉。
     """
+    # 先校验、后建目录：版本号是要拼进路径的，形状不对就什么都不该落盘
+    try:
+        validate_release_version(version)
+    except UpgradeError as exc:
+        raise UpgradeError("版本号不合法，拒绝落盘: %s" % exc)
+
     install_root = Path(install_root)
     releases = install_root / RELEASES_DIR
     releases.mkdir(parents=True, exist_ok=True)
-
-    try:
-        parse_version(version)
-    except UpgradeError as exc:
-        raise UpgradeError("版本号不合法，拒绝落盘: %s" % exc)
 
     try:
         fingerprint = _sha256_file(Path(bundle_path))

@@ -194,7 +194,7 @@ const downloadFile = useMutation(async (row: SourceFileOut) => {
 // 删除与清空
 // --------------------------------------------------------------------------- //
 
-/** 单条删除是**软删除**（墓碑）：行还在，`含已删除` 勾上就能看到，导出也仍然包含。 */
+/** 单条删除在服务端是**硬删**：行没了，勾上`含已删除`也看不到（ADR-0003 的 2026-11 修订）。 */
 const removeFile = useMutation((row: SourceFileOut) => fileApi.remove(row.id), {
   onDone: () => list.reload(),
 })
@@ -203,7 +203,7 @@ async function askRemove(row: SourceFileOut): Promise<void> {
   try {
     await ElMessageBox.confirm(
       `把 ${row.player_no} 的 ${row.rel_path} 从台账里删掉？\n\n` +
-        '这是一条墓碑：勾上「含已删除」仍看得到；文件还在机器上，下一轮扫描会被重新收上来。',
+        '台账记录直接删掉，不留墓碑；文件还在机器上，下一轮扫描会被重新收上来。',
       '删除台账记录',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
     )
@@ -497,7 +497,7 @@ const scopeLabel = computed(() => {
     </el-dialog>
 
     <!--
-      清理台账 = 范围删除。代码是产物性数据，所以这里是软删除；但"连没消失的
+      清理台账 = 范围删除，服务端是硬删（不留墓碑）；"连没消失的
       一起删"是另一档风险（机器还在报的文件下一轮就会回来），要显式勾选。
       `confirm` 是场次标识，服务端会逐字校验。
     -->

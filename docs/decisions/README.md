@@ -16,7 +16,7 @@
 |---|---|
 | [ADR-0001](ADR-0001-tech-stack-and-dependencies.md) | 技术栈与依赖：Python 3.8 零依赖、轮询、INI、SQLite |
 | [ADR-0002](ADR-0002-communication-and-identity.md) | 通信与身份：token、`machine_uuid`、六位配对码、一人一机 |
-| [ADR-0003](ADR-0003-delete-semantics.md) | 删除语义：结构性数据硬删、产物性数据留墓碑 |
+| [ADR-0003](ADR-0003-delete-semantics.md) | 删除语义：结构性数据硬删 + 输名称确认；代码 / 资产也硬删（2026-11 修订） |
 | [ADR-0004](ADR-0004-ui-copy-and-notice.md) | 界面文案口径与考场公告为什么用 `NOTICE.md` |
 | [ADR-0005](ADR-0005-public-port.md) | 公开端口：默认 80、黑名单、回 404 |
 

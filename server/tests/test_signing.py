@@ -349,3 +349,74 @@ def test_verify_never_raises_on_bad_input(keypair: SigningKey) -> None:
     for bad in (b"", b"\x00" * length, b"\xff" * length, b"\xff" * (length + 10), None, 12345):
         assert verify_pkcs1v15_sha256(public, b"m", bad) is False  # type: ignore[arg-type]
     assert verify_pkcs1v15_sha256(public, None, b"\x00" * length) is False  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------- #
+# 版本号形状：服务端发布时的把关 ≡ Agent 收清单时的白名单
+# --------------------------------------------------------------------------- #
+
+from syncoj_agent.upgrade import UpgradeError  # noqa: E402
+from syncoj_agent.upgrade import validate_release_version as agent_validate  # noqa: E402
+from syncoj_server.services.signing import validate_release_version  # noqa: E402
+
+VERSION_SAMPLES = [
+    "0.1.0", "1.2.3-rc1", "1.2.3+build.7", "10", "2.0.0-beta.2",
+    "1/../../x", "1..2", "../1", "1.2/3", ".1", "1\\x", "", "1.2.3-", "a1",
+    "1.2.3 ", " 1.2.3", "1" * 65, "1.2.3-rc..1",
+]
+
+
+@pytest.mark.parametrize("version", VERSION_SAMPLES)
+def test_release_version_shape_matches_agent(version: str) -> None:
+    """两份独立实现必须同判：服务端放行的，Agent 也收；Agent 拒收的，服务端发不出去。
+
+    不一致的后果是"教师发布成功、所有机器静默拒收"——那种失败在管理端看不见。
+    """
+    try:
+        validate_release_version(version)
+        server_ok = True
+    except ValueError:
+        server_ok = False
+    try:
+        agent_validate(version)
+        agent_ok = True
+    except UpgradeError:
+        agent_ok = False
+    assert server_ok == agent_ok, "版本号 %r：服务端 %s、Agent %s" % (
+        version, server_ok, agent_ok,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 发布签名对象：服务端 ≡ Agent ≡ 安装器（三份独立实现，逐字节一致）
+# --------------------------------------------------------------------------- #
+
+
+def test_release_signing_message_matches_agent_and_installer() -> None:
+    import importlib.util
+    from pathlib import Path
+
+    from syncoj_agent.upgrade import release_signing_message as agent_message
+    from syncoj_server.services.signing import release_signing_message
+
+    installer_path = Path(__file__).resolve().parents[2] / "agent" / "packaging" / "install.py"
+    spec = importlib.util.spec_from_file_location("syncoj_install_for_parity", str(installer_path))
+    installer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(installer)  # type: ignore[union-attr]
+
+    digest = "ab" * 32
+    for version, size in [("0.1.0", 1), ("1.2.3-rc1", 123456), ("2.0.0+build.7", 99)]:
+        expected = release_signing_message(version, digest, size)
+        assert expected.startswith(b"syncoj-release-v1\n%s\n" % version.encode("ascii"))
+        assert agent_message(version, digest, size) == expected
+        assert installer.release_signing_message(version, digest, size) == expected
+        # 大写摘要按小写签
+        assert release_signing_message(version, digest.upper(), size) == expected
+
+
+def test_release_signing_message_rejects_bad_inputs() -> None:
+    from syncoj_server.services.signing import release_signing_message
+
+    for args in [("1/../x", "ab" * 32, 1), ("1.0", "zz" * 32, 1), ("1.0", "ab" * 32, 0)]:
+        with pytest.raises(ValueError):
+            release_signing_message(*args)

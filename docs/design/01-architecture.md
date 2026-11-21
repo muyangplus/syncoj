@@ -2,7 +2,7 @@
 
 ```
 ┌──────────── 教师 ────────────┐
-│  Vue3 SPA  ──HTTPS──> uvicorn│
+│  Vue3 SPA  ──HTTP───> uvicorn│
 │  （由服务端 StaticFiles 托管，│
 │    不额外引入 Caddy/nginx）   │
 └──────────────┬───────────────┘

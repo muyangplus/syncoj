@@ -101,12 +101,13 @@ def agent_row(client: TestClient, machine_uuid: str):
 def tick_payload(**kwargs) -> Dict:
     """一次最小可用的 tick 请求体。"""
     payload = {
+        "protocol_version": 2,
         "agent_version": "0.1.0",
         "machine_id": "machine-x",
         "ts": 1767225600,
         "scan_root": "/home/student/code",
         "scan": [],
-        "partials": [],
+        "scan_complete": True,
         "stats": {"disk_free": 10 ** 10, "last_error": None, "queue": 0},
     }
     payload.update(kwargs)
@@ -154,7 +155,7 @@ def test_revoked_key_is_rejected(client: TestClient, admin_headers: dict) -> Non
 
     response = client.post(
         "/api/v1/agent/enroll",
-        json={"bootstrap_key": issued["key"], "machine_id": "m-1"},
+        json={"protocol_version": 2, "bootstrap_key": issued["key"], "machine_id": "m-1"},
     )
     assert response.status_code == 403, response.text
     body = response.json()
@@ -174,7 +175,7 @@ def test_expired_key_is_rejected(client: TestClient, admin_headers: dict) -> Non
 
     response = client.post(
         "/api/v1/agent/enroll",
-        json={"bootstrap_key": issued["key"], "machine_id": "m-1"},
+        json={"protocol_version": 2, "bootstrap_key": issued["key"], "machine_id": "m-1"},
     )
     assert response.status_code == 403, response.text
     assert response.json()["code"] == "bootstrap_key_expired"
@@ -183,7 +184,7 @@ def test_expired_key_is_rejected(client: TestClient, admin_headers: dict) -> Non
 def test_unknown_key_is_rejected(client: TestClient, admin_headers: dict) -> None:
     response = client.post(
         "/api/v1/agent/enroll",
-        json={"bootstrap_key": "AAAA-BBBB-CCCC-DDDD", "machine_id": "m-1"},
+        json={"protocol_version": 2, "bootstrap_key": "AAAA-BBBB-CCCC-DDDD", "machine_id": "m-1"},
     )
     assert response.status_code == 404, response.text
     assert response.json()["code"] == "bootstrap_key_invalid"
@@ -191,7 +192,7 @@ def test_unknown_key_is_rejected(client: TestClient, admin_headers: dict) -> Non
 
 def test_enroll_needs_the_key(client: TestClient) -> None:
     """没给密钥是 422（请求不合法），不是 404（密钥不存在）—— 排错方向不同。"""
-    response = client.post("/api/v1/agent/enroll", json={"machine_id": "m-1"})
+    response = client.post("/api/v1/agent/enroll", json={"protocol_version": 2, "machine_id": "m-1"})
     assert response.status_code == 422, response.text
     assert response.json()["code"] == "validation_error"
 
@@ -435,7 +436,9 @@ def test_revoked_machine_credential_stops_working(
         headers=agent_headers(enrolled["token"]),
     )
     assert response.status_code == 401, response.text
-    assert response.json()["code"] == "machine_revoked"
+    # 移除改为硬删之后，这枚 token 在库里已经不存在 —— 码是 unauthorized；Agent 对
+    # 任何 401 的处理都一样（清掉本地凭据、等注册单元重新注册）
+    assert response.json()["code"] in ("unauthorized", "machine_revoked")
 
 
 def test_clear_pending_machines_requires_the_whole_word(

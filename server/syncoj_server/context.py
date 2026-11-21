@@ -41,6 +41,9 @@ class AppContext:
     #: 全局注册限速 —— 挡住"从很多 IP 一起刷"。考场内网 IP 数量有限，
     #: 全局上限才是真正的兜底
     enroll_global_limiter: RateLimiter = field(default_factory=lambda: RateLimiter(limit=0))
+    #: 管理端登录、选手页手填查找：按 IP、每分钟计
+    login_limiter: RateLimiter = field(default_factory=lambda: RateLimiter(limit=0))
+    player_lookup_limiter: RateLimiter = field(default_factory=lambda: RateLimiter(limit=0))
     #: 未配对机器的配对码明文。**只在内存里** —— 协议要求每一轮 tick 都带上
     #: 当前有效的码，而库里只存哈希（见 ``services/paircodes.py``）
     pair_codes: PairCodeCache = field(default_factory=PairCodeCache)
@@ -70,6 +73,10 @@ class AppContext:
             blobs=BlobStore(settings.blob_root),
             enroll_limiter=RateLimiter(limit=settings.enroll_per_ip_per_second),
             enroll_global_limiter=RateLimiter(limit=settings.enroll_global_per_second),
+            login_limiter=RateLimiter(limit=settings.login_per_ip_per_minute, window=60.0),
+            player_lookup_limiter=RateLimiter(
+                limit=settings.player_lookup_per_ip_per_minute, window=60.0
+            ),
         )
         context.load_signing_key()
         return context

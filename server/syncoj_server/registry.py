@@ -3,12 +3,12 @@
 为什么状态放内存而不是每次 tick 写库
 ------------------------------------
 50 台机器 × 每 20s 一次 tick = 2.5 次写/秒。听起来不多，但若每个 tick 都开事务，
-SQLite 的单写锁会在 Web 查询与 Agent 上报之间来回争抢，且每次都要
-``UPDATE agent_status SET ...`` 做一次 B 树定位。改成"内存持有 + 定时批量落库"
-之后，写频率降到 **每 5 秒一个事务**，彻底退出争抢区。
+SQLite 的单写锁会在 Web 查询与 Agent 上报之间来回争抢。在线状态是"此刻的
+事实"，放内存就够了。
 
-内存 dict 是**权威读源**，``agent_status`` 表只是它的持久化快照（用于服务端重启
-后 Web 不空白，以及历史回溯）。因此 Web 查询走内存，不查库。
+内存 dict 是**唯一读源**，Web 查询走内存，不查库。曾经还每 5 秒把它刷进
+``agent_status`` 表当"持久化快照"，但从来没有代码读那张表 —— 2026-11 连表一起
+删了（迁移 017）。服务端重启后在线列表由各机器的下一次 tick 重新填上。
 
 线程安全
 --------
@@ -58,8 +58,10 @@ class AgentRuntime:
     #: 最近一次心跳里被题目预设挡掉的文件数（0 = 没有被挡掉的）。
     scan_skipped: int = 0
 
-    #: 需要被批量落库
-    dirty: bool = True
+    #: 边沿触发的审计事件：类别 → 上一轮的"特征"（见 api/agent._edge_triggered）。
+    #: 只在内存里：服务端重启后同一状态会再记一次，可以接受。
+    edge_state: Dict[str, str] = field(default_factory=dict)
+
     #: 供 Web 展示的累计 tick 次数
     tick_count: int = 0
 
@@ -133,6 +135,11 @@ class AgentRegistry:
                     contest_slug=contest_slug,
                 )
                 self._agents[agent_id] = runtime
+            # 身份随**这一次**的解析结果走：机器被改派、或者换了场次，player_id /
+            # contest_id 曾经停在第一次的值上 —— 按场次过滤的在线列表里，它还挂在
+            # 上一场下面，新场次里却一直显示"没有机器"。
+            runtime.player_id = player_id
+            runtime.contest_id = contest_id
             runtime.player_no = player_no
             runtime.player_name = player_name
             runtime.contest_slug = contest_slug
@@ -181,7 +188,6 @@ class AgentRegistry:
             if scan_skipped is not None:
                 # 同上：它是"本轮"的数字，不是累计值
                 runtime.scan_skipped = int(scan_skipped)
-            runtime.dirty = True
             if was_offline:
                 log.info("agent %s (%s) 恢复在线", agent_id, runtime.player_no)
             return runtime
@@ -192,7 +198,6 @@ class AgentRegistry:
             if runtime is None or not runtime.online:
                 return None
             runtime.online = False
-            runtime.dirty = True
             log.info("agent %s (%s) 判定离线：%s", agent_id, runtime.player_no, reason)
             return runtime
 
@@ -245,17 +250,9 @@ class AgentRegistry:
                 last = runtime.last_tick_at
                 if last is None or last < deadline:
                     runtime.online = False
-                    runtime.dirty = True
                     flipped.append(runtime)
         for runtime in flipped:
             log.info("agent %s (%s) 判定离线（超过 %ds 无 tick）",
                      runtime.agent_id, runtime.player_no, threshold)
         return flipped
 
-    def take_dirty(self) -> List[AgentRuntime]:
-        """取走所有待落库的运行时对象并清除 dirty 标记。"""
-        with self._lock:
-            dirty = [a for a in self._agents.values() if a.dirty]
-            for runtime in dirty:
-                runtime.dirty = False
-            return dirty

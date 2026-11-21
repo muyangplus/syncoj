@@ -97,7 +97,7 @@ async function load(attempt: Attempt): Promise<void> {
     if (isAbort(error)) return
     const machine = error instanceof ApiError && MATCH_FAILURE_STATUS.has(error.status)
     failure.value = {
-      // 服务端的 `detail` 已经是一句能直接给选手看的中文（`docs/api-conventions.md` §3）
+      // 服务端的 `detail` 已经是一句能直接给选手看的中文（`docs/reference/api-conventions.md` §3）
       message: describeError(error),
       machine,
       auto: attempt.auto,

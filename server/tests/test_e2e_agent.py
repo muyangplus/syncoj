@@ -396,7 +396,7 @@ def test_agent_downloads_deployed_asset(
         assert landed.is_file(), "下发文件应当落到 deploy_root/exam/ 下"
         assert landed.read_bytes() == data, "落盘内容必须与上传内容逐字节一致"
 
-        # 第二轮：回报 completed_assets
+        # 第二轮：回报 deploy_done（按下发目标、带落地内容的 sha256）
         agent.cycle()
     finally:
         agent.client.close()
@@ -415,8 +415,8 @@ def test_agent_resumes_interrupted_download(
 ) -> None:
     """断点续传的真实路径：磁盘上先放半个分片，Agent 应当只下剩余部分。
 
-    这里验证的是"分片在 de活目录里被发现 → offset 上报 → 服务端回填"这条
-    完整链路，而不是 download_asset 的内部逻辑（那个已有单元测试覆盖）。
+    分片按内容 sha256 放在 ``deploy_root/.syncoj-parts/`` 下；真 Agent 收到作业后
+    应当只请求剩余部分（Range 从 40000 起），续完的内容与完整内容一致。
     """
     from syncoj_agent.download import part_path_for
     from syncoj_agent.main import Agent
@@ -443,7 +443,9 @@ def test_agent_resumes_interrupted_download(
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     already = 40000
-    part_path_for(dest, asset["id"]).write_bytes(data[:already])
+    part = part_path_for(config.deploy_root, asset["sha256"])
+    part.parent.mkdir(parents=True, exist_ok=True)
+    part.write_bytes(data[:already])
 
     try:
         agent.cycle()
@@ -451,7 +453,7 @@ def test_agent_resumes_interrupted_download(
         agent.client.close()
 
     assert dest.read_bytes() == data, "续传结果必须与完整内容一致"
-    assert not part_path_for(dest, asset["id"]).exists(), "完成后不该留下分片"
+    assert not part.exists(), "完成后不该留下分片"
 
 
 def test_agent_skips_already_deployed_file(

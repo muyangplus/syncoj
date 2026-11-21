@@ -32,6 +32,7 @@ from . import __version__
 from . import diagnostics
 from . import discovery
 from .client import (
+    PROTOCOL_VERSION,
     AgentClient,
     AgentError,
     AuthError,
@@ -51,10 +52,10 @@ from .config import (
     ConfigError,
     expand_placeholders,
 )
-from .download import download_asset, find_partial_sizes, sweep_stale_parts
+from .download import download_asset, part_size, sweep_stale_parts
 from .policy import DEFAULT_POLICY, merge_policy
 from .rsa import RSAPublicKey, SignatureError
-from .scan import ScanPolicy, scan_directory
+from .scan import ScanOutcome, ScanPolicy, scan_directory
 from .state import (
     STATE_READY,
     STATE_UNCLAIMED,
@@ -102,6 +103,15 @@ log = logging.getLogger("syncoj.agent")
 
 #: 出错后的退避上限。网络长时间不通时不要疯狂重连
 MAX_BACKOFF = 300.0
+
+#: "为切换版本而退出"的进程退出码（BSD ``EX_TEMPFAIL``）。
+#:
+#: 曾经这里是 ``exit 0``，而服务单元是 ``Restart=on-failure`` —— 正常退出不会被
+#: 重新拉起：铺开一个版本后，所有机器激活、退出，然后**一直停着**直到重启机器。
+#: 自动回滚之后也一样。非 0 退出码让**已经装好的**单元（不带下面两行）照样把
+#: 新版本拉起来；新单元再用 ``SuccessExitStatus=`` 把它记成"正常"（不显示
+#: failed）、用 ``RestartForceExitStatus=`` 保证重启。见 ``install.py:render_unit``。
+EXIT_RESTART = 75
 #: 事件积压上限，防止长时间离线导致内存里堆一堆事件
 MAX_PENDING_EVENTS = 200
 
@@ -116,19 +126,23 @@ REDISCOVER_AFTER_FAILURES = 3
 #: 不用"启动成功"作为判据 —— 起得来但一 tick 就崩的版本同样必须回滚。
 HEALTHY_CYCLES_BEFORE_TRUST = 3
 
-#: 自卸载脚本的固定路径。**在 current 软链之外**：sudo 的 NOPASSWD 白名单按
-#: 字面路径匹配、不解析符号链接（见 install.py 的同名常量与注释）。
-SELF_UNINSTALL_PATH = "/usr/local/lib/syncoj/self_uninstall.sh"
+#: root 管理单元的交接目录（状态目录下）与请求 / 回执文件名，与 install.py 同名常量
+#: 一致。Agent 以选手账号、NoNewPrivileges 运行，写不进 /opt/syncoj、也不能提权：
+#: 切换已验签的升级、按授权卸载，都是把请求放到这里，由 root 管理单元
+#: （install.py --admin-handoff）自己再验一遍后执行。曾经是 `sudo -n
+#: self_uninstall.sh` —— systemd 245 上隐式的 NoNewPrivileges 让它必然失败。
+HANDOFF_DIRNAME = "handoff"
+HANDOFF_REQUEST = "request.json"
+HANDOFF_RESULT = "result.json"
+MAX_HANDOFF_RESULT_BYTES = 64 * 1024
 
 #: 一次性卸载令牌的长度上限（服务端签出来的只有几百字节）。
 MAX_UNINSTALL_TOKEN_BYTES = 8 * 1024
 
-#: 卸载执行失败后的重试间隔（秒）。**绝不每个 tick 都去撞 sudo**：失败可能是
-#: sudoers 没装好、令牌过期、脚本缺失，连着撞只会把日志刷爆、也烧 CPU。
-UNINSTALL_RETRY_SECONDS = 3600.0
-
-#: 等自卸载脚本跑完的上限（秒）。它要删目录、要调 systemctl，但不会太久。
-UNINSTALL_TIMEOUT_SECONDS = 120.0
+#: 转交卸载授权之后多久内不再重写请求（秒）。令牌在每轮心跳里原样再来，不必每轮
+#: 重写；但要**短于令牌有效期（15 分钟）**：曾经是 3600 秒，第一次没成，下一次
+#: 再试时令牌早就过期了。
+UNINSTALL_RETRY_SECONDS = 300.0
 
 #: 注册单元的单元名（root 身份跑一次注册的那个）。Agent **永远不自己注册** ——
 #: 它以选手身份运行，读不到 root 只读的统一密钥；撞上去只会 PermissionError →
@@ -178,6 +192,11 @@ DIAGNOSTICS_WARN_AFTER_FAILURES = 3
 #: 重启，本来就该花更久，拿"单轮 120 秒"去掐它是误伤。
 WATCHDOG_MIN_SECONDS = 120.0
 
+#: 一轮里下载最多花多久。到点保留分片、下一轮接着续（不算失败）。下载在整轮看门狗
+#: **之外**计时：曾经下载跑在 120 秒的整轮看门狗里，50 台同时拉几百 MB 的测试数据时
+#: 每轮只有 120 秒的数据有效，超时后还要把剩下的响应体读完再扔掉。
+DOWNLOAD_ROUND_SECONDS = 300.0
+
 
 class RoundTimeout(Exception):
     """看门狗掐掉了一轮 —— **中止这一轮**，不是退出进程。
@@ -219,27 +238,6 @@ def disarm_watchdog() -> None:
     if not watchdog_supported():
         return
     signal.setitimer(signal.ITIMER_REAL, 0)
-
-
-def _run_uninstall_command(argv, stdin_bytes):
-    """真正执行 ``sudo -n <self_uninstall.sh>``：令牌**只走 stdin**。
-
-    返回 ``(returncode, stderr 摘要)``。做成模块级函数是为了让测试注入替身 ——
-    单元测试里不该真去碰 sudo 与 systemd。
-    """
-    try:
-        completed = subprocess.run(
-            argv,
-            input=stdin_bytes,
-            capture_output=True,
-            timeout=UNINSTALL_TIMEOUT_SECONDS,
-        )
-    except subprocess.TimeoutExpired:
-        return 124, "自卸载脚本超时（%d 秒）" % UNINSTALL_TIMEOUT_SECONDS
-    except OSError as exc:
-        return 127, "无法执行自卸载脚本: %s" % exc
-    stderr = (completed.stderr or b"").decode("utf-8", "replace").strip()
-    return completed.returncode, stderr
 
 
 def join_report_path(prefix: str, rel_path: str) -> str:
@@ -310,16 +308,26 @@ def _scan_missing_for_payload(raw) -> List[str]:
     return items[:SCAN_MISSING_MAX]
 
 
+def _writable(install_root: Path) -> bool:
+    """运行账号能不能自己往安装根里放新版本（开发机 / 测试里能，真机上不能）。"""
+    target = Path(install_root) / "releases"
+    if not target.exists():
+        target = Path(install_root)
+    return os.access(str(target), os.W_OK)
+
+
 def build_tick_payload(
     machine_id: str,
     agent_version: str,
     scan_root: str,
     results,
-    partials: List[dict],
     stats: Dict[str, object],
-    completed_assets: Optional[List[int]] = None,
+    deploy_progress: Optional[List[dict]] = None,
+    deploy_done: Optional[List[dict]] = None,
+    deploy_failed: Optional[List[dict]] = None,
     scan_complete: bool = True,
     release_public_key: bool = False,
+    scanned_for: Optional[Dict[str, str]] = None,
 ):
     """构造 tick 请求体。
 
@@ -362,6 +370,8 @@ def build_tick_payload(
     }
 
     payload = {
+        # 协议版本：服务端对太旧的回 426 agent_outdated（见 client.PROTOCOL_VERSION）
+        "protocol_version": PROTOCOL_VERSION,
         "agent_version": agent_version,
         "machine_id": machine_id,
         "ts": int(time.time()),
@@ -369,16 +379,23 @@ def build_tick_payload(
         "scan": entries,
         # 扫描不完整时服务端会跳过删除判定，避免把漏扫误判成删除
         "scan_complete": complete,
-        "partials": list(partials),
-        # 本地已确认完整的下发资源。服务端据此把下发目标标为完成 ——
-        # 由 Agent 显式上报，而不是让服务端从"partials 里没有它"去推断
-        "completed_assets": list(completed_assets or []),
+        # 下发回报**按目标**（target_id）：进度、已落地（带落地内容的 sha256 ——
+        # 服务端只认与资产当前内容一致的）、失败（带原因）。完成由 Agent 显式上报，
+        # 而不是让服务端从"没有进度了"去推断。
+        "deploy_progress": list(deploy_progress or []),
+        "deploy_done": list(deploy_done or []),
+        "deploy_failed": list(deploy_failed or []),
         # 本机有没有可用的发布公钥（升级信任锚）。服务端据此决定"能不能下发
         # 远程卸载授权"：没有公钥的机器一定验不了签，发了也是白发。
         # 只报"在不在"，不含任何密钥内容。
         "release_public_key": bool(release_public_key),
         "stats": final_stats,
     }
+    if scanned_for is not None:
+        # 这一轮的扫描根是按**哪个身份**展开的（{player_no} / {contest_slug}）。
+        # 机器被改派后，服务端解析出的身份已经换了，而这份扫描还是上一个人的目录：
+        # 服务端据此拒收这一轮的对账，不把上一个人的代码记进新身份的台账。
+        payload["scanned_for"] = dict(scanned_for)
     return payload, oversize, errors
 
 
@@ -409,10 +426,22 @@ class Agent:
         self._backoff = 0.0
         self._pending_events: List[dict] = []
         #: 已确认完整、待上报给服务端的下发资源
-        self._completed_assets: List[int] = []
+        #: 待下一轮 tick 回报的下发结果（tick 成功后清空）
+        self._deploy_done: List[dict] = []
+        self._deploy_failed: Dict[int, str] = {}
+        #: 上一轮服务端派下来的作业：进度就按它们去分片目录里看，不再遍历整个桌面
+        self._deploy_jobs: List[dict] = []
+        #: 每个目标最近一次失败的原因：只在原因变化时发审计事件（否则每轮一条）
+        self._deploy_fail_reason: Dict[int, str] = {}
+        #: 边沿触发的事件：类别 → 上一次上报时的特征（见 _emit_on_change）
+        self._edge_state: Dict[str, str] = {}
         self._credential: Optional[Credential] = None
         #: 收到"激活新版本"后置位，主循环据此退出让 systemd 重启
         self._restart_requested = False
+        #: 本进程内已经**处理完**（失败、或 stage 模式下已暂存）的发布
+        #: ``(version, sha256)``。同一份清单不再每轮重下（50 台 × 每 30 秒一次几十
+        #: MB 的下载 + 一条事件）；换了版本或内容、或者进程重启之后才会再处理一次。
+        self._handled_release: Optional[Tuple[str, str]] = None
         #: 连续成功周期计数，用于确认新版本可用后清掉回滚状态
         self._healthy_cycles = 0
         self._public_key = self._load_release_public_key()
@@ -423,6 +452,9 @@ class Agent:
         #: 扫描根与上报前缀。注册拿到准考证号之后才能确定，见 _resolve_roots()
         self._roots: List[Tuple[str, Path]] = []
         self._roots_ready = False
+        #: 当前扫描根是按哪个身份 ``(player_no, contest_slug)`` 展开的。tick 回来的
+        #: 身份与它不同 = 机器被改派 / 换了场次，扫描根必须重算（见 cycle）。
+        self._roots_identity: Optional[Tuple[str, str]] = None
         #: 服务端可见路径 -> 本地绝对路径。每轮扫描后重建
         self._local_paths: Dict[str, Path] = {}
         #: 上一轮结束时机器处于哪一态。**状态变化**时才报审计事件 ——
@@ -436,7 +468,6 @@ class Agent:
         self._last_error: Optional[str] = None
         #: 执行卸载命令的 runner：``(argv, stdin_bytes) -> (returncode, stderr)``。
         #: 默认真的跑 `sudo -n`；测试里换成假的，不碰 sudo 与 systemd。
-        self._run_uninstall = _run_uninstall_command
         #: "还没注册凭据、在等注册单元"这条日志只说一次（别的每轮轮询不刷屏）
         self._registration_logged = False
         #: 上一轮"用不了的扫描根"（路径 -> 原因）。日志只在状态变化时说一次 ——
@@ -565,6 +596,7 @@ class Agent:
         if self._roots_ready:
             return
         self._roots = self._resolve_roots(player_no, contest_slug)
+        self._roots_identity = (player_no, contest_slug)
         self._roots_ready = True
         log.info(
             "扫描目录: %s",
@@ -863,6 +895,44 @@ class Agent:
             self._emit("info", "pairing_wait", message)
         return state
 
+    def _identity_changed(self, tick: Dict[str, object]) -> bool:
+        """服务端解析出的身份与扫描根所用的身份不同 → 重置扫描根，跳过本轮余下的事。
+
+        曾经 READY→READY 时根本不接新身份：机器被改派（S001 → S002）或者两场之间
+        不重启，``_ensure_roots`` 的缓存让它一直扫 ``桌面/S001``、却以 S002 的身份
+        上传 —— S001 的代码进了 S002 的 ``source/``，S002 自己的一份也收不上来。
+
+        这一轮的上传与下载都跳过：服务端算 ``need_upload`` 用的是上一个人的扫描
+        （它也会因 ``scanned_for`` 对不上而拒收对账，见服务端 tick）。下一轮按新身份
+        重新展开扫描根、重新扫。
+        """
+        player_no = str(tick.get("player_no") or "")
+        contest_slug = str(tick.get("contest_slug") or "")
+        if not player_no or self._roots_identity is None:
+            return False
+        if (player_no, contest_slug) == self._roots_identity:
+            return False
+        old_player, old_contest = self._roots_identity
+        log.warning(
+            "身份已变化（%s/%s → %s/%s），重新计算扫描目录",
+            old_contest or "-", old_player, contest_slug or "-", player_no,
+        )
+        self._emit(
+            "info", "identity_changed",
+            "身份变化：%s/%s → %s/%s，扫描目录已重算" % (
+                old_contest or "-", old_player, contest_slug or "-", player_no,
+            ),
+        )
+        self._adopt_identity(tick)
+        self._roots_ready = False
+        self._roots = []
+        self._roots_identity = None
+        self._local_paths = {}
+        # 哈希缓存按扫描根下的相对路径记：换了根，同名同大小同 mtime 的文件会拿到
+        # 上一个人那份的指纹
+        self.cache.prune_to(set())
+        return True
+
     def _adopt_identity(self, data: Dict[str, object]) -> Credential:
         """从 tick 响应里接住当前状态以及随之而来的身份。
 
@@ -926,6 +996,7 @@ class Agent:
         self.client.set_token(None)
         self._roots_ready = False
         self._roots = []
+        self._roots_identity = None
         # 把状态记忆也清掉：重新注册之后可能直接就是另一态，
         # 不清的话"未配对 -> 未配对"这种变化会被当成没变化，审计事件就不报了
         self._last_state = None
@@ -951,15 +1022,34 @@ class Agent:
         local_paths: Dict[str, Path] = {}
         skipped = 0
 
+        cache_keys: set = set()
+        budget = max_files
         for name, root in self._roots:
             if self._root_problem(root) is not None:
                 skipped += 1
                 continue
-            outcome = scan_directory(root, scan_policy, self.cache, max_files=max_files)
+            if budget <= 0:
+                # max_files 是**整台机器**的上限，不是每个根各一份（服务端按总数截断，
+                # 多根时按根计会让总数超过服务端的上限，被截掉的文件又被判成删除）
+                outcome = ScanOutcome(root=root.as_posix(), complete=False, truncated=True)
+                outcome.errors.append("文件数已达上限 %d，此目录未扫描" % max_files)
+                results.append((name, outcome))
+                continue
+            outcome = scan_directory(
+                root, scan_policy, self.cache, max_files=budget,
+                # 命名空间用根的绝对路径：前缀可以为空（scan_prefix=none）
+                cache_namespace=str(root),
+            )
+            budget -= len(outcome.entries)
             results.append((name, outcome))
+            cache_keys |= outcome.cache_keys
             for entry in outcome.entries:
-                local_paths[join_report_path(name, entry.path)] = root / entry.path
+                local_paths[join_report_path(name, entry.path)] = (
+                    entry.local if entry.local is not None else root / entry.path
+                )
 
+        # 整轮扫完只 prune 一次：逐根 prune 会把别的根的条目清掉，每轮全量重算
+        self.cache.prune_to(cache_keys)
         return results, local_paths, skipped
 
     def _build_tick_payload(self, results, local_paths, scan_complete: bool = True):
@@ -970,10 +1060,6 @@ class Agent:
             results=results,
             # 未完成下载的偏移量从磁盘实况收集，不依赖上一轮作业列表 ——
             # Agent 重启后照样能续上
-            partials=[
-                {"asset_id": asset_id, "bytes_done": bytes_done}
-                for asset_id, bytes_done in find_partial_sizes(self.config.deploy_root).items()
-            ],
             stats={
                 "disk_free": _disk_free(self.config.state_dir),
                 "queue": len(self._pending_events),
@@ -987,10 +1073,19 @@ class Agent:
             # 上一轮下载完成的结果在这里回报。差一轮无所谓 —— 而且服务端在收到
             # 回报前会继续下发该作业，Agent 会走 "内容已一致" 的跳过分支并再次
             # 上报，这恰好让"回报丢失"能自愈。
-            completed_assets=self._completed_assets,
+            deploy_progress=self._deploy_progress(),
+            deploy_done=self._deploy_done,
+            deploy_failed=[
+                {"target_id": target_id, "reason": reason[:300]}
+                for target_id, reason in self._deploy_failed.items()
+            ],
             scan_complete=scan_complete,
             # 服务端据此决定"能不能发远程卸载授权"：没有信任锚的机器一定验不了签
             release_public_key=self._has_release_public_key(),
+            scanned_for=(
+                {"player_no": self._roots_identity[0], "contest_slug": self._roots_identity[1]}
+                if self._roots_identity is not None else None
+            ),
         )
 
     # ---------------------------------------------------------------- #
@@ -1048,46 +1143,93 @@ class Agent:
     # 下载
     # ---------------------------------------------------------------- #
 
+    def _deploy_progress(self) -> List[dict]:
+        """上一轮派下来的作业在本机分片里各有多少字节（只看分片目录，不遍历桌面）。"""
+        progress = []
+        for job in self._deploy_jobs:
+            try:
+                target_id = int(job.get("target_id") or 0)
+                sha = str(job.get("sha256") or "")
+            except (TypeError, ValueError):
+                continue
+            if not target_id or len(sha) != 64:
+                continue
+            have = part_size(self.config.deploy_root, sha)
+            if have:
+                progress.append({"target_id": target_id, "bytes_done": have})
+        return progress
+
     def _download(self, jobs: List[dict]) -> Tuple[int, int]:
+        """执行下发作业，结果攒到下一轮 tick 回报。
+
+        有自己的截止时间（:data:`DOWNLOAD_ROUND_SECONDS`），并且在整轮看门狗之外：
+        到点就停、分片留着下一轮续。磁盘满时剩下的作业不再尝试（它们也会失败）。
+        """
         ok = 0
         failed = 0
-        for job in jobs:
-            if self._stop:
-                break
-            try:
-                outcome = download_asset(
-                    self.client, job, self.config.deploy_root, on_progress=None
-                )
-            except Exception as exc:  # pragma: no cover - download_asset 已兜底
-                failed += 1
-                log.exception("下发作业执行异常: %s", exc)
-                continue
+        deadline = time.monotonic() + DOWNLOAD_ROUND_SECONDS
+        with self._watchdog_paused():
+            for job in jobs:
+                if self._stop:
+                    break
+                if time.monotonic() > deadline:
+                    break
+                try:
+                    outcome = download_asset(
+                        self.client, job, self.config.deploy_root,
+                        on_progress=None, deadline=deadline,
+                    )
+                except Exception as exc:  # pragma: no cover - download_asset 已兜底
+                    failed += 1
+                    log.exception("下发作业执行异常: %s", exc)
+                    continue
 
-            if outcome.status == "ok":
-                ok += 1
-                self._note_completed(outcome.asset_id)
-                log.info(
-                    "下发完成 %s（%d 字节）",
-                    outcome.dest, outcome.bytes_written,
-                )
-                # 只有**确实写进去**才碰目录 mtime（跳过/失败都不碰）：
-                # 目的是让文件管理器立刻显示出新文件，而不是替它做轮询
-                self._nudge_after_write(outcome.dest)
-            elif outcome.status == "skipped":
-                ok += 1
-                # 内容已一致也算完成 —— Agent 重启后正是靠这条路径把"其实早就
-                # 下好了"的事实补报给服务端，避免任务永远停在"进行中"
-                self._note_completed(outcome.asset_id)
-                log.debug("下发跳过 %s（内容已一致）", outcome.dest)
-            else:
-                failed += 1
-                log.warning("下发失败 %s：%s", outcome.dest, outcome.error)
-                self._emit(
-                    "warning", "deploy_failed",
-                    "下发 %s 失败：%s" % (outcome.dest, outcome.error),
-                    {"asset_id": outcome.asset_id, "dest": outcome.dest},
-                )
+                if outcome.status in ("ok", "skipped"):
+                    ok += 1
+                    # 内容已一致（skipped）也算完成 —— Agent 重启后正是靠这条路径
+                    # 把"其实早就下好了"的事实补报给服务端
+                    self._note_deploy_done(outcome)
+                    if outcome.status == "ok":
+                        log.info("下发完成 %s（%d 字节）", outcome.dest, outcome.bytes_written)
+                        # 只有**确实写进去**才碰目录 mtime（跳过/失败都不碰）
+                        self._nudge_after_write(outcome.dest)
+                    else:
+                        log.debug("下发跳过 %s（内容已一致）", outcome.dest)
+                elif outcome.status == "partial":
+                    log.info("下发 %s 本轮时间用完，分片保留，下一轮续传", outcome.dest)
+                    break
+                else:
+                    failed += 1
+                    self._note_deploy_failed(outcome)
+                    if outcome.disk_full:
+                        log.warning("磁盘已满，本轮剩下的下发作业不再尝试")
+                        break
         return ok, failed
+
+    def _note_deploy_done(self, outcome) -> None:
+        if not outcome.target_id:
+            return
+        self._deploy_failed.pop(outcome.target_id, None)
+        self._deploy_fail_reason.pop(outcome.target_id, None)
+        receipt = {"target_id": outcome.target_id, "sha256": outcome.sha256}
+        if receipt not in self._deploy_done:
+            self._deploy_done.append(receipt)
+
+    def _note_deploy_failed(self, outcome) -> None:
+        reason = outcome.error or "下载失败"
+        log.warning("下发失败 %s：%s", outcome.dest, reason)
+        if not outcome.target_id:
+            return
+        self._deploy_failed[outcome.target_id] = reason
+        if self._deploy_fail_reason.get(outcome.target_id) != reason:
+            # 只在原因变化时进审计：失败本身已经由 tick 回报写进服务端的目标上了
+            self._deploy_fail_reason[outcome.target_id] = reason
+            self._emit(
+                "warning", "deploy_failed",
+                "下发 %s 失败：%s" % (outcome.dest, reason),
+                {"target_id": outcome.target_id, "asset_id": outcome.asset_id,
+                 "dest": outcome.dest},
+            )
 
     # ---------------------------------------------------------------- #
     # 桌面刷新（best-effort）
@@ -1128,11 +1270,6 @@ class Agent:
     # ---------------------------------------------------------------- #
     # 事件
     # ---------------------------------------------------------------- #
-    def _note_completed(self, asset_id: int) -> None:
-        """记录一个已确认完整的下发资源，等待下一轮 tick 上报。"""
-        if asset_id and asset_id not in self._completed_assets:
-            self._completed_assets.append(asset_id)
-
     # ---------------------------------------------------------------- #
     # 自更新
     # ---------------------------------------------------------------- #
@@ -1171,11 +1308,12 @@ class Agent:
         return True
 
     def _handle_uninstall_token(self, token: str) -> bool:
-        """收到一次性卸载授权：交给自卸载脚本，成功就退出。返回是否已执行卸载。
+        """收到一次性卸载授权：交给 root 管理单元。返回是否已执行卸载（恒为 False ——
+        真正的卸载由 root 那边做，它会停掉本服务）。
 
-        **令牌只走 stdin**：不进 argv（ps 能看到）、不写文件、不进日志、不进
-        ``last_error``。失败要退避 —— 失败原因多半是 sudoers/令牌/脚本的问题，
-        每轮都撞一次 sudo 只会把日志刷爆。
+        令牌写进交接目录（0700、属运行账号）的请求文件，**不进 argv、不进日志、不进
+        ``last_error``**。它绑本机 machine_uuid、15 分钟过期、由发布私钥签名，root 那边
+        自己验过才卸。写进去之后退避一段：令牌在下一轮心跳里还会原样再来，不必每轮重写。
         """
         now = time.monotonic()
         if now < self._uninstall_blocked_until:
@@ -1184,38 +1322,69 @@ class Agent:
                 self._uninstall_blocked_until - now,
             )
             return False
+        self._uninstall_blocked_until = now + UNINSTALL_RETRY_SECONDS
 
-        payload = token.encode("utf-8")
-        if len(payload) > MAX_UNINSTALL_TOKEN_BYTES:
-            # 连长度都不对，不用去撞 sudo；但仍要退避，否则每轮都会走到这里
-            log.warning("卸载授权令牌过长（%d 字节），拒绝执行", len(payload))
-            self._uninstall_blocked_until = now + UNINSTALL_RETRY_SECONDS
+        if len(token.encode("utf-8")) > MAX_UNINSTALL_TOKEN_BYTES:
+            log.warning("卸载授权令牌过长，拒绝转交")
             self._last_error = "按管理端授权卸载失败：令牌过长"
             self._emit("error", "uninstall_failed", self._last_error)
             return False
 
-        argv = ["sudo", "-n", SELF_UNINSTALL_PATH]
         try:
-            returncode, stderr = self._run_uninstall(argv, payload)
-        except Exception as exc:  # pragma: no cover - 注入的 runner 不该抛
-            returncode, stderr = 127, "执行卸载脚本失败: %s" % exc
-
-        if returncode == 0:
-            # 单元是 Restart=on-failure，exit 0 不会被再拉起来。
-            log.warning("已按管理端授权卸载，本机 Agent 将退出")
-            self._last_error = None
-            self._stop = True
-            return True
-
-        summary = self._redact(" ".join((stderr or "").split()), token)[:200]
-        if not summary:
-            summary = "退出码 %d" % returncode
-        message = "按管理端授权卸载失败：%s" % summary
-        log.error("%s（%.0f 秒后再试）", message, UNINSTALL_RETRY_SECONDS)
-        self._uninstall_blocked_until = now + UNINSTALL_RETRY_SECONDS
-        self._last_error = message
-        self._emit("error", "uninstall_failed", message)
+            self._write_handoff({"kind": "uninstall", "token": token})
+        except OSError as exc:
+            message = "按管理端授权卸载失败：写不进交接目录（%s）" % self._redact(str(exc), token)
+            log.error(message)
+            self._last_error = message[:300]
+            self._emit("error", "uninstall_failed", self._last_error)
+            return False
+        log.warning("已把卸载授权交给 root 管理单元，等它验签后卸载")
+        self._emit("warning", "uninstall_handoff", "已把卸载授权交给 root 管理单元")
         return False
+
+    def _write_handoff(self, request: dict) -> None:
+        """原子地写一份交接请求（临时名 + rename）。失败抛 OSError。"""
+        directory = Path(self.config.state_dir) / HANDOFF_DIRNAME
+        directory.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(str(directory), 0o700)
+        except OSError:
+            pass
+        tmp = directory / (".request-%d.tmp" % os.getpid())
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, json.dumps(request, ensure_ascii=False).encode("utf-8"))
+        finally:
+            os.close(fd)
+        os.replace(str(tmp), str(directory / HANDOFF_REQUEST))
+
+    def _collect_handoff_result(self) -> None:
+        """root 管理单元留下的回执：读一次、上报、删掉。"""
+        path = Path(self.config.state_dir) / HANDOFF_DIRNAME / HANDOFF_RESULT
+        try:
+            if not path.is_file() or path.stat().st_size > MAX_HANDOFF_RESULT_BYTES:
+                return
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        finally:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        if not isinstance(data, dict):
+            return
+        kind = str(data.get("kind") or "?")
+        ok = bool(data.get("ok"))
+        message = str(data.get("message") or "")[:300]
+        if ok:
+            self._emit("info", "%s_applied" % kind if kind == "upgrade" else "%s_accepted" % kind,
+                       "root 管理单元：%s" % message)
+            return
+        self._last_error = "root 管理单元处理%s失败：%s" % ({"upgrade": "升级", "uninstall": "卸载"}.get(kind, kind), message)
+        self._emit("error" if kind == "uninstall" else "warning",
+                   "%s_failed" % ("uninstall" if kind == "uninstall" else "upgrade"),
+                   self._last_error)
 
     @staticmethod
     def _redact(text: str, secret: str) -> str:
@@ -1266,16 +1435,26 @@ class Agent:
 
         public_key = self._public_key
         if public_key is None:
-            self._emit(
-                "warning", "upgrade_no_key",
+            self._emit_on_change(
+                "warning", "upgrade_no_key", version,
                 "upgrade.mode=%s 但缺少可用的发布公钥，拒绝升级 %s" % (mode, version),
             )
             return
+        self._emit_on_change("warning", "upgrade_no_key", None)
 
         try:
             manifest = ReleaseManifest.from_dict(info)
         except UpgradeError as exc:
-            self._emit("warning", "upgrade_bad_manifest", "发布清单不合法：%s" % exc)
+            self._emit_on_change(
+                "warning", "upgrade_bad_manifest", "%s|%s" % (version, exc),
+                "发布清单不合法：%s" % exc,
+            )
+            return
+        self._emit_on_change("warning", "upgrade_bad_manifest", None)
+
+        attempt_key = (manifest.version, manifest.sha256)
+        if self._handled_release == attempt_key:
+            log.debug("发布 %s 本进程内已处理过，不再重复下载", manifest.version)
             return
 
         install_root = self.config.install_root
@@ -1328,8 +1507,35 @@ class Agent:
             size = self.client.download_to_file(manifest.url, bundle, MAX_BUNDLE_BYTES)
             log.info("已下载发布包 %s（%d 字节），开始校验", manifest.version, size)
             verify_bundle(public_key, bundle, manifest)
+            if not _writable(install_root):
+                # 真机上的常态：/opt/syncoj 属 root，运行账号写不进去。验过签的包留在
+                # 状态目录里，切换交给 root 管理单元（它自己再验一遍）。
+                self._handled_release = attempt_key
+                if mode != UpgradeMode.APPLY:
+                    self._emit(
+                        "info", "upgrade_staged",
+                        "版本 %s 已下载并通过签名校验，等待激活（当前 mode=%s）"
+                        % (manifest.version, mode),
+                    )
+                    return
+                self._write_handoff({
+                    "kind": "upgrade",
+                    "version": manifest.version,
+                    "sha256": manifest.sha256,
+                    "size": manifest.size,
+                    "signature": manifest.signature,
+                })
+                self._emit(
+                    "info", "upgrade_handoff",
+                    "版本 %s 已下载并通过签名校验，交给 root 管理单元切换" % manifest.version,
+                )
+                return
             stage_release(install_root, manifest.version, bundle)
-        except (UpgradeError, AgentError) as exc:
+        except (UpgradeError, AgentError, OSError) as exc:
+            # OSError 也在内：最常见的是运行账号写不进安装根（/opt/syncoj 属 root）。
+            # 它曾经穿出 cycle()，被 run_forever 的兜底接住 —— 这一轮的事件不落、
+            # 哈希缓存不存、退避一路涨到 300 秒，而且每轮都这样。
+            self._handled_release = attempt_key
             log.error("升级包处理失败: %s", exc)
             self._emit("warning", "upgrade_failed", "升级 %s 失败：%s" % (version, exc))
             # 升级失败是典型的"必须留现场"：下一轮就把诊断包补上（受 60 秒
@@ -1339,6 +1545,7 @@ class Agent:
 
         log.info("版本 %s 已暂存到 %s", manifest.version, install_root)
         if mode != UpgradeMode.APPLY:
+            self._handled_release = attempt_key
             self._emit(
                 "info", "upgrade_staged",
                 "版本 %s 已下载并通过签名校验，等待激活（当前 mode=stage）" % manifest.version,
@@ -1377,7 +1584,8 @@ class Agent:
                 ),
             )
             activate_release(install_root, manifest.version)
-        except UpgradeError as exc:
+        except (UpgradeError, OSError) as exc:
+            self._handled_release = attempt_key
             log.error("激活版本 %s 失败: %s", manifest.version, exc)
             self._emit("error", "upgrade_activate_failed", "激活失败：%s" % exc)
             self.request_diagnostics("error")
@@ -1392,8 +1600,8 @@ class Agent:
             "warning", "upgrade_activated",
             "已升级到 %s 并重启（原版本 %s）" % (manifest.version, previous or "无"),
         )
-        # 由 systemd 的 Restart=always 拉起新版本 —— 不需要我们自己调 systemctl，
-        # 那会要求额外的 polkit 授权，平白扩大 Agent 的权限面
+        # 以 EXIT_RESTART 退出、由 systemd 拉起新版本 —— 不需要我们自己调
+        # systemctl，那会要求额外的 polkit 授权，平白扩大 Agent 的权限面
         self._restart_requested = True
 
     # ---------------------------------------------------------------- #
@@ -1508,6 +1716,24 @@ class Agent:
             }
         )
 
+    def _emit_on_change(
+        self, level: str, category: str, signature: Optional[str], message: str = "",
+        meta: Optional[dict] = None,
+    ) -> None:
+        """状态类事件**只在状态变化时**上报（边沿触发）。
+
+        ``signature`` 是这一轮的状态特征；``None`` 表示状态消失（清掉，下次出现时
+        重新报）。曾经每轮都报：一个超限文件每 30 秒一条 oversize_skipped，一个缺
+        公钥的升级每轮一条 upgrade_no_key —— 审计里全是同一句话。
+        """
+        if signature is None:
+            self._edge_state.pop(category, None)
+            return
+        if self._edge_state.get(category) == signature:
+            return
+        self._edge_state[category] = signature
+        self._emit(level, category, message, meta)
+
     def _pending_tick(self) -> Tuple[str, float]:
         """还没法干活的一轮：只心跳，不扫描。返回 ``(轮末状态, 等待秒数)``。
 
@@ -1543,6 +1769,13 @@ class Agent:
             # 一段（那一段在扫描之后），所以在这里单独接一次。
             log.info("服务端要求回传一份诊断包（manual）")
             self.request_diagnostics("manual")
+
+        upgrade = tick.get("upgrade")
+        if upgrade:
+            # 未配对的机器也升级：装好后迟迟没配对的那批正需要先换上修好的版本。
+            # 激活成功会置 _restart_requested，主循环下一圈以 EXIT_RESTART 退出。
+            with self._watchdog_paused():
+                self._handle_upgrade(upgrade)
 
         self._flush_events()
 
@@ -1582,6 +1815,7 @@ class Agent:
 
     def cycle(self) -> float:
         """执行一轮，返回下次执行前的等待秒数。"""
+        self._collect_handoff_result()
         credential = self._ensure_credential()
         if credential is None:
             # 还没注册：**等 root 的注册单元**，不退出、不联网、不刷日志。
@@ -1621,18 +1855,18 @@ class Agent:
             scan_complete=(skipped_roots == 0),
         )
 
-        if oversize:
-            self._emit(
-                "warning", "oversize_skipped",
-                "有 %d 个文件超过大小上限，未回收" % len(oversize),
-                {"paths": oversize[:20]},
-            )
-        if errors:
-            self._emit(
-                "warning", "scan_error",
-                "扫描过程中出现 %d 个错误" % len(errors),
-                {"errors": errors[:10]},
-            )
+        self._emit_on_change(
+            "warning", "oversize_skipped",
+            "\n".join(sorted(oversize)) if oversize else None,
+            "有 %d 个文件超过大小上限，未回收" % len(oversize),
+            {"paths": oversize[:20]},
+        )
+        self._emit_on_change(
+            "warning", "scan_error",
+            "\n".join(sorted(errors)) if errors else None,
+            "扫描过程中出现 %d 个错误" % len(errors),
+            {"errors": errors[:10]},
+        )
 
         # 未完成下载的偏移量已在 _build_tick_payload 里从磁盘实况收集，
         # 不依赖上一轮的作业列表 —— Agent 重启后照样能续传。
@@ -1645,9 +1879,10 @@ class Agent:
             self._mark_unbound(exc.code or "pairing_required")
             return self._clamp_wait(None)
 
-        # tick 成功 = 本轮携带的完成项已被服务端接收，可以清空。
-        # 必须在 tick 之后、下载之前清 —— 下载新产生的完成项属于下一轮。
-        del self._completed_assets[:]
+        # tick 成功 = 本轮携带的下发回报已被服务端接收，可以清空。
+        # 必须在 tick 之后、下载之前清 —— 下载新产生的回报属于下一轮。
+        del self._deploy_done[:]
+        self._deploy_failed.clear()
 
         # 诊断包需要的几个计数：tick 成功一轮、服务端给的下一轮间隔、最近一次错误
         self._diag_tick_count += 1
@@ -1667,6 +1902,9 @@ class Agent:
             self._adopt_identity(tick)
             return self._clamp_wait(tick.get("next_tick_seconds"))
 
+        if self._identity_changed(tick):
+            return self._clamp_wait(tick.get("next_tick_seconds"))
+
         remote_config = tick.get("config")
         if isinstance(remote_config, dict):
             self.policy = merge_policy(remote_config)
@@ -1681,6 +1919,7 @@ class Agent:
 
         jobs = tick.get("deploy_jobs") or []
         need_upload = tick.get("need_upload") or []
+        self._deploy_jobs = [job for job in jobs if isinstance(job, dict)]
 
         if jobs:
             self._download(jobs)
@@ -1786,8 +2025,9 @@ class Agent:
         # 反复起不来，应当立刻回滚退出，而不是先联网折腾一圈
         try:
             if self._guard_boot():
+                # 已回滚到上一版本：同样要让 systemd 把（回滚后的）版本拉起来
                 self.client.close()
-                return 0
+                return EXIT_RESTART
         except Exception:
             log.exception("启动守卫执行失败，继续正常运行")
 
@@ -1799,9 +2039,11 @@ class Agent:
         if not watchdog_supported():
             log.debug("这个平台没有 SIGALRM/setitimer，整轮看门狗不可用（不影响功能）")
 
+        exit_code = 0
         while not self._stop:
             if self._restart_requested:
-                log.info("为应用新版本而退出，systemd 将以新版本重新拉起")
+                log.info("为应用新版本而退出（退出码 %d），systemd 将以新版本重新拉起", EXIT_RESTART)
+                exit_code = EXIT_RESTART
                 break
             # **整轮看门狗**：每轮开始上闹钟、结束撤掉（finally）。任何一次阻塞
             # 调用都不能让心跳停摆超过 watchdog_seconds —— 现场那次卡在一次 socket
@@ -1887,7 +2129,7 @@ class Agent:
 
         log.info("Agent 已停止")
         self.client.close()
-        return 0
+        return exit_code
 
     def _try_rediscover(self) -> None:
         """连不上服务端时，去局域网里问一次：它是不是换地址了？

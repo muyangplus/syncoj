@@ -30,7 +30,7 @@ from typing import Dict, List, Optional, Tuple
 
 from . import __version__
 from . import diagnostics
-from . import discovery
+from . import announce, discovery
 from .client import (
     PROTOCOL_VERSION,
     AgentClient,
@@ -452,6 +452,9 @@ class Agent:
         #: 连续成功周期计数，用于确认新版本可用后清掉回滚状态
         self._healthy_cycles = 0
         self._reported_healthy = False
+        #: 服务端主动通告（§11）：监听线程放候选、主循环核实
+        self._announce_slot: Optional[announce.CandidateSlot] = None
+        self._announce_listener: Optional[announce.AnnounceListener] = None
         self._public_key = self._load_release_public_key()
         #: 连续多少轮连不上服务端。攒够了才去局域网里问一次地址 ——
         #: 服务端重启一下、网线抖一下都会连不上，而那些情况下地址并没有变，
@@ -2108,6 +2111,8 @@ class Agent:
         if not watchdog_supported():
             log.debug("这个平台没有 SIGALRM/setitimer，整轮看门狗不可用（不影响功能）")
 
+        self._start_announce_listener()
+
         exit_code = 0
         while not self._stop:
             if self._restart_requested:
@@ -2120,6 +2125,7 @@ class Agent:
             self._watchdog_active = arm_watchdog(self.watchdog_seconds)
             round_ok = False
             try:
+                self._consider_announcement()
                 delay = self.cycle()
                 self._backoff = 0.0
                 round_ok = True
@@ -2196,6 +2202,8 @@ class Agent:
 
             self._sleep(delay)
 
+        if self._announce_listener is not None:
+            self._announce_listener.stop()
         log.info("Agent 已停止")
         self.client.close()
         return exit_code
@@ -2232,27 +2240,58 @@ class Agent:
             log.warning("局域网发现的地址与配置一致（%s）：问题不在地址上", outcome.url)
             return
 
+        self._switch_server(outcome.url, "局域网发现")
+
+    def _switch_server(self, new_url: str, how: str) -> None:
+        """改用新的服务端地址（只在本进程内生效，不写回 ``agent.ini``）。"""
+        current = (self.config.server_url or "").rstrip("/")
         log.warning(
-            "服务端换地址了：%s → %s（本次运行内生效；agent.ini 里仍是旧值）",
+            "服务端换地址了：%s → %s（%s；本次运行内生效，agent.ini 里仍是旧值）",
             current or "（空）",
-            outcome.url,
+            new_url,
+            how,
         )
         self._emit(
             "warning",
             "server_address_changed",
-            "服务端地址变了，已自动改用 %s（原 %s）" % (outcome.url, current or "（空）"),
-            {"from": current, "to": outcome.url},
+            "服务端地址变了，已自动改用 %s（原 %s，经%s）" % (new_url, current or "（空）", how),
+            {"from": current, "to": new_url, "via": how},
         )
         try:
-            self.client.repoint(outcome.url)
+            self.client.repoint(new_url)
         except AgentError as exc:
             log.error("改用新地址失败，继续用原地址：%s", exc)
             return
-        self.config.server_url = outcome.url
+        self.config.server_url = new_url
         # 地址换了，之前那份凭据对应的服务端可能不是同一台 —— 不清凭据，
         # 但要让下一轮重新走一遍身份解析（服务端会自己判断这台机器是谁）。
         self._roots_ready = False
         self._backoff = 0.0
+
+    def _start_announce_listener(self) -> None:
+        """开始听服务端的主动通告（§11）。没有发布公钥就不听：验不了挑战应答。"""
+        if self._public_key is None:
+            return
+        self._announce_slot = announce.CandidateSlot(getattr(self._public_key, "key_id", "") or "")
+        self._announce_listener = announce.AnnounceListener(self._announce_slot)
+        self._announce_listener.start()
+
+    def _consider_announcement(self) -> None:
+        """听到过通告就核实一下：挑战应答验过签、且地址确实变了才切换。"""
+        if self._announce_slot is None or self._public_key is None:
+            return
+        candidate = self._announce_slot.take()
+        if not candidate:
+            return
+        current = (self.config.server_url or "").rstrip("/")
+        if candidate == current:
+            return
+        verified = announce.verify_announced(
+            candidate, self._public_key, ssl_context=getattr(self.client, "_ssl_context", None)
+        )
+        if verified is None or verified == current:
+            return
+        self._switch_server(verified, "服务端通告")
 
     def _sleep(self, seconds: float) -> None:
         """可被停止信号打断的休眠。

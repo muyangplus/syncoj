@@ -81,6 +81,8 @@ export const paths = {
   /** 清空待配对列表。范围是"全部"，所以体里带 `all`。 */
   machinesPendingClear: () => `${ADMIN}/machines/pending/clear`,
   machinesCloneAlerts: () => `${ADMIN}/machines/clone-alerts`,
+  /** 服务端主动通告：GET 读现状，POST 立即喊一次（「召集机器」）。 */
+  machinesAnnounce: () => `${ADMIN}/machines/announce`,
   machinesBindByCode: () => `${ADMIN}/machines/bind-by-code`,
   machineBind: (agentId: number) => `${ADMIN}/machines/${agentId}/bind`,
   agent: (agentId: number) => `${ADMIN}/agents/${agentId}`,

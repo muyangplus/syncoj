@@ -1225,6 +1225,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/machines/announce": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Announce Status
+         * @description 服务端主动通告（§11）的现状：最近一次喊的是哪个地址、喊不出去的原因。
+         */
+        get: operations["announce_status_api_v1_admin_machines_announce_get"];
+        put?: never;
+        /**
+         * Announce Now
+         * @description 「召集机器」：立即在局域网里喊一次。
+         *
+         *     机器听到后到通告里的地址上做挑战应答、验过签才切换（见 ``/agent/whoami``）。
+         *     后台任务每秒看一次这个请求，所以返回的状态可能还是上一次的；界面过一两秒再读。
+         */
+        post: operations["announce_now_api_v1_admin_machines_announce_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/machines/bind-by-code": {
         parameters: {
             query?: never;
@@ -2045,6 +2072,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/agent/whoami": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Whoami
+         * @description 挑战应答（§11）：证明"此刻在这个地址上的，握着发布私钥"。
+         *
+         *     机器听到服务端的通告之后先来这里问一句（**不带凭据**），验过签才把服务端地址
+         *     切过去。通告本身不签名、挡不住重放；这一步让切换的前提变成"这里真的是那台服务端"。
+         *
+         *     签的是服务端**自己认定的**对外地址（§7.3 的三条来源），机器切换到签名里的地址 ——
+         *     有人把请求转给真服务端，拿到的签名也只会把机器指回真服务端。不鉴权、每次一个 RSA
+         *     签名，所以按来源 IP 限速。
+         */
+        get: operations["whoami_api_v1_agent_whoami_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/meta": {
         parameters: {
             query?: never;
@@ -2205,6 +2259,24 @@ export interface components {
              * @default 0
              */
             tick_count: number;
+        };
+        /**
+         * AnnounceStatusOut
+         * @description 服务端主动通告的现状（管理端「召集机器」用）。
+         */
+        AnnounceStatusOut: {
+            /** Boot Id */
+            boot_id: string;
+            /** Enabled */
+            enabled: boolean;
+            /** Last Error */
+            last_error?: string | null;
+            /** Last Sent At */
+            last_sent_at?: string | null;
+            /** Last Url */
+            last_url?: string | null;
+            /** Port */
+            port: number;
         };
         /**
          * ApplyRosterIn
@@ -4455,6 +4527,28 @@ export interface components {
             /** Error Type */
             type: string;
         };
+        /**
+         * WhoAmIOut
+         * @description 挑战应答（§11）：用发布私钥签 ``syncoj-announce-v1
+         *     <nonce>
+         *     <url>``。
+         *
+         *         ``url`` 是**服务端自己认定的**对外地址（§7.3 的三条来源），不是请求里的 Host：
+         *         机器切换到的是签名里的这个地址。
+         */
+        WhoAmIOut: {
+            /**
+             * Key Id
+             * @default
+             */
+            key_id: string;
+            /** Nonce */
+            nonce: string;
+            /** Sig */
+            sig: string;
+            /** Url */
+            url: string;
+        };
     };
     responses: never;
     parameters: never;
@@ -6380,6 +6474,46 @@ export interface operations {
             };
         };
     };
+    announce_status_api_v1_admin_machines_announce_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AnnounceStatusOut"];
+                };
+            };
+        };
+    };
+    announce_now_api_v1_admin_machines_announce_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AnnounceStatusOut"];
+                };
+            };
+        };
+    };
     bind_machine_by_code_api_v1_admin_machines_bind_by_code_post: {
         parameters: {
             query?: never;
@@ -7637,6 +7771,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TickResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    whoami_api_v1_agent_whoami_get: {
+        parameters: {
+            query: {
+                nonce: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WhoAmIOut"];
                 };
             };
             /** @description Validation Error */

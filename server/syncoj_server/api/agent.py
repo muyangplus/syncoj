@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import logging
@@ -19,7 +20,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -53,6 +54,7 @@ from ..schemas import (
     EnrollResponse,
     SimpleAck,
     TickRequest,
+    WhoAmIOut,
     TickResponse,
     UpgradeInfo,
     UploadResult,
@@ -61,7 +63,9 @@ from ..protocol import MIN_AGENT_PROTOCOL_VERSION, outdated_detail
 from ..security import hash_token, new_token
 from ..storage import BlobTooLarge, HashMismatch, materialize
 from ..services import (
+    announce,
     diagnostics,
+    discovery,
     enrollment,
     install_policy,
     packaging,
@@ -992,6 +996,40 @@ def install_installer(ctx: AppContext = Depends(get_ctx)) -> Response:
 
 #: 能安全嵌进 shell 双引号字符串的 Host 头（主机名 / IPv4 / [IPv6] + 可选端口）
 _SAFE_HOST_RE = re.compile(r"^[A-Za-z0-9.\-]+(?::[0-9]{1,5})?$|^\[[0-9A-Fa-f:.]+\](?::[0-9]{1,5})?$")
+
+
+@router.get("/whoami", response_model=WhoAmIOut)
+def whoami(
+    request: Request,
+    nonce: str = Query(..., min_length=32, max_length=32, pattern="^[0-9a-f]{32}$"),
+    ctx: AppContext = Depends(get_ctx),
+) -> WhoAmIOut:
+    """挑战应答（§11）：证明"此刻在这个地址上的，握着发布私钥"。
+
+    机器听到服务端的通告之后先来这里问一句（**不带凭据**），验过签才把服务端地址
+    切过去。通告本身不签名、挡不住重放；这一步让切换的前提变成"这里真的是那台服务端"。
+
+    签的是服务端**自己认定的**对外地址（§7.3 的三条来源），机器切换到签名里的地址 ——
+    有人把请求转给真服务端，拿到的签名也只会把机器指回真服务端。不鉴权、每次一个 RSA
+    签名，所以按来源 IP 限速。
+    """
+    client_ip = request.client.host if request.client else "unknown"
+    try:
+        ctx.whoami_limiter.check(client_ip, time.monotonic())
+    except RateLimitExceeded as exc:
+        raise ApiError(429, "rate_limited", exc.detail, headers={"Retry-After": str(exc.retry_after)})
+    if ctx.signing_key is None:
+        raise ApiError(503, "no_signing_key", "这台服务端没有发布签名私钥，无法证明自己的身份")
+    url = discovery.describe_advertised_url(ctx, None if client_ip == "unknown" else client_ip)
+    if url is None:
+        raise ApiError(503, "no_public_url", "这台服务端还不知道自己的对外地址")
+    signature = ctx.signing_key.sign(announce.challenge_text(nonce, url).encode("utf-8"))
+    return WhoAmIOut(
+        url=url,
+        nonce=nonce,
+        key_id=getattr(ctx.signing_key, "key_id", "") or "",
+        sig=base64.urlsafe_b64encode(signature).decode("ascii").rstrip("="),
+    )
 
 
 @router.get("/install/bootstrap.sh")

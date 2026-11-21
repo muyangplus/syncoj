@@ -26,6 +26,8 @@ __all__ = [
     "UploadResult",
     "AgentEvent",
     "SimpleAck",
+    "WhoAmIOut",
+    "AnnounceStatusOut",
     "DiagnosticsOut",
     "Page",
 ]
@@ -350,6 +352,32 @@ class AgentEvent(_Base):
     category: str = Field(max_length=32)
     message: str = Field(max_length=2000)
     meta: Optional[Dict[str, Any]] = None
+
+
+class WhoAmIOut(_Base):
+    """挑战应答（§11）：用发布私钥签 ``syncoj-announce-v1\n<nonce>\n<url>``。
+
+    ``url`` 是**服务端自己认定的**对外地址（§7.3 的三条来源），不是请求里的 Host：
+    机器切换到的是签名里的这个地址。
+    """
+
+    url: str
+    nonce: str
+    key_id: str = ""
+    sig: str
+
+
+class AnnounceStatusOut(_Base):
+    """服务端主动通告的现状（管理端「召集机器」用）。"""
+
+    enabled: bool
+    port: int
+    boot_id: str
+    #: 最近一次成功通告的时间（UTC ISO）与地址；还没喊过是 None
+    last_sent_at: Optional[str] = None
+    last_url: Optional[str] = None
+    #: 喊不出去的原因（没有私钥、不知道自己的地址……）；正常时 None
+    last_error: Optional[str] = None
 
 
 class SimpleAck(_Base):

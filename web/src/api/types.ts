@@ -37,6 +37,7 @@ export type ApplyRosterIn = S['ApplyRosterIn']
 export type ApplyRosterOut = S['ApplyRosterOut']
 
 export type PendingMachineOut = S['PendingMachineOut']
+export type AnnounceStatusOut = S['AnnounceStatusOut']
 /** 按机器配对。`pair_code` 可省，但给了就必须对得上。 */
 export type BindMachineIn = S['BindMachineIn']
 /** 按配对码配对。六位数字，只在绑定的那一刻有效。 */

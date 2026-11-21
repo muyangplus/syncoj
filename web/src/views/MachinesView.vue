@@ -207,6 +207,25 @@ const clearPending = useMutation(() => machineApi.clearPending(GLOBAL_CONFIRM), 
 
 const clearPendingOpen = ref(false)
 
+// 「召集机器」：服务端立即在局域网里喊一次自己的地址（§11）
+const announcing = ref(false)
+
+async function announceNow(): Promise<void> {
+  announcing.value = true
+  try {
+    await machineApi.announce()
+    // 后台任务每秒处理一次请求：稍等再读现状
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    const status = await machineApi.announceStatus()
+    if (status.last_error) ElMessage.warning(`没有喊出去：${status.last_error}`)
+    else ElMessage.success(`已在局域网通告 ${status.last_url ?? ''}`)
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  } finally {
+    announcing.value = false
+  }
+}
+
 function askClearPending(): void {
   if (!pending.total.value) {
     ElMessage.info('待配对列表本来就是空的')
@@ -350,6 +369,7 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
       </el-button>
       <!-- 手里有码、但列表里找不到那台机器时的入口（次要路径，所以是普通按钮） -->
       <el-button size="small" @click="byCodeOpen = true">按码配对</el-button>
+      <el-button size="small" :loading="announcing" @click="announceNow">召集机器</el-button>
       <el-button size="small" @click="openRuntime">运行参数</el-button>
       <el-button size="small" @click="settingsOpen = true">装机设置</el-button>
     </template>

@@ -273,6 +273,8 @@ def settings(workdir: Path, isolated_key_dir: Path) -> Settings:
     # 而测试进程里同时活着的 app 不止一个，于是"端口被占"的警告会刷满日志，
     # 真正测发现的那几条反而淹在里面。要测它的用 test_discovery.py 自己开。
     config.discovery_enabled = False
+    # 主动通告同理：每个进 lifespan 的测试都往局域网里广播没有意义，测它的自己开
+    config.announce_enabled = False
     return config
 
 

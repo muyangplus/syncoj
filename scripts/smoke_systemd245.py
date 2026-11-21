@@ -15,7 +15,8 @@
    跑几轮后经交接报告，root 清掉回滚状态；
 5. 再铺开一个**一启动就崩**的版本 → 单元的 ``ExecStartPre=-+`` 启动守卫（root）数够次数后
    切回上一版，服务恢复；
-6. 服务端授权卸载（机器未配对）→ root 管理单元验令牌后卸干净，运行账号与家目录不动。
+6. 服务端换端口重启并关掉局域网发现 → 机器只能靠主动通告（§11）+ 挑战应答转过去；
+7. 服务端授权卸载（机器未配对）→ root 管理单元验令牌后卸干净，运行账号与家目录不动。
 
 本脚本只用标准库，跑在宿主上。
 """
@@ -197,11 +198,17 @@ def smoke(work: Path) -> None:
 
     log("初始化服务端（数据与密钥都在临时目录里）")
     run(["syncoj-server", "--data-root", str(data), "init", "--admin-password", ADMIN_PASSWORD])
-    server = subprocess.Popen(
-        ["syncoj-server", "--data-root", str(data), "serve", "--host", "127.0.0.1",
-         "--port", str(port), "--public-url", server_url, "--quiet-access"],
-        stdout=open(str(work / "server.log"), "w"), stderr=subprocess.STDOUT,
-    )
+
+    def start_server(port: int, url: str, extra_env: Optional[dict] = None) -> subprocess.Popen:
+        env = dict(os.environ)
+        env.update(extra_env or {})
+        return subprocess.Popen(
+            ["syncoj-server", "--data-root", str(data), "serve", "--host", "127.0.0.1",
+             "--port", str(port), "--public-url", url, "--quiet-access"],
+            stdout=open(str(work / "server.log"), "a"), stderr=subprocess.STDOUT, env=env,
+        )
+
+    server = start_server(port, server_url)
     try:
         wait_for("服务端起来", lambda: _http_ok(server_url + "/api/v1/meta"), timeout=60)
         admin = Admin(server_url + "/api/v1/admin")
@@ -267,6 +274,23 @@ def smoke(work: Path) -> None:
         time.sleep(20)
         expect(sh("readlink /opt/syncoj/current").strip().endswith(next_version),
                "回滚之后没有再切回坏版本（不循环）")
+
+        log("服务端换端口重启（关掉局域网发现），等机器听到通告转过来")
+        server.terminate()
+        server.wait(timeout=30)
+        server_url = "http://127.0.0.1:%d" % free_port()
+        server = start_server(int(server_url.rsplit(":", 1)[1]), server_url, {"SYNCOJ_DISCOVERY": "0"})
+        wait_for("新服务端起来", lambda: _http_ok(server_url + "/api/v1/meta"), timeout=60)
+        admin = Admin(server_url + "/api/v1/admin")
+        wait_for(
+            "机器经服务端通告转到 %s" % server_url,
+            lambda: ("→ %s（服务端通告" % server_url) in sh("cat /var/lib/syncoj/agent.log", check=False),
+            timeout=120,
+        )
+        expect(True, "机器听到通告、挑战应答验签后转到新地址（发现已关，只能靠通告）")
+        wait_for("机器在新地址上心跳",
+                 lambda: (admin.pending_by_uuid(machine_uuid) or {}).get("seconds_since_seen", 99) < 15,
+                 timeout=90)
 
         log("授权卸载（机器未配对）")
         admin.uninstall(int(machine["id"]), machine["hostname"])

@@ -11,6 +11,7 @@ import { clearCollection, listPage, removeItem } from './crud'
 import type { ListParams } from './crud'
 import { GLOBAL_CONFIRM, paths } from './endpoints'
 import type {
+  AnnounceStatusOut,
   BindResultOut,
   CloneAlertOut,
   DiagnosticsOut,
@@ -66,6 +67,15 @@ export const machineApi = {
 
   /** 某台机器**最新一份**诊断包。没收到过会抛 `code=diagnostics_not_found`。 */
   diagnostics: (agentId: number) => request<DiagnosticsOut>(paths.agentDiagnostics(agentId)),
+
+  /** 服务端主动通告的现状：最近一次喊的地址、喊不出去的原因。 */
+  announceStatus: () => request<AnnounceStatusOut>(paths.machinesAnnounce()),
+
+  /**
+   * 「召集机器」：立即在局域网里喊一次服务端地址。机器听到后到那个地址上做挑战应答、
+   * 验过签才切换。后台每秒处理一次请求，所以返回的现状可能还是上一次的。
+   */
+  announce: () => request<AnnounceStatusOut>(paths.machinesAnnounce(), { method: 'POST' }),
 
   /** 要一份诊断：机器下一次心跳回传。机器不在线就一直等，没收到就再点一次。 */
   requestDiagnostics: (agentId: number) =>

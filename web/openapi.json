@@ -255,6 +255,64 @@
         "title": "AgentRuntimeOut",
         "type": "object"
       },
+      "AnnounceStatusOut": {
+        "additionalProperties": false,
+        "description": "服务端主动通告的现状（管理端「召集机器」用）。",
+        "properties": {
+          "boot_id": {
+            "title": "Boot Id",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "last_sent_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Sent At"
+          },
+          "last_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Url"
+          },
+          "port": {
+            "title": "Port",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "enabled",
+          "port",
+          "boot_id"
+        ],
+        "title": "AnnounceStatusOut",
+        "type": "object"
+      },
       "ApplyRosterIn": {
         "additionalProperties": false,
         "description": "把名单应用到场次。\n\n``prune`` 默认 **False**，而且**永远不动已经有代码或成绩的选手** ——\n名单调整是常事，把参赛者的提交一起删掉是不可逆的事故。",
@@ -4907,6 +4965,36 @@
         ],
         "title": "ValidationError",
         "type": "object"
+      },
+      "WhoAmIOut": {
+        "additionalProperties": false,
+        "description": "挑战应答（§11）：用发布私钥签 ``syncoj-announce-v1\n<nonce>\n<url>``。\n\n    ``url`` 是**服务端自己认定的**对外地址（§7.3 的三条来源），不是请求里的 Host：\n    机器切换到的是签名里的这个地址。\n    ",
+        "properties": {
+          "key_id": {
+            "default": "",
+            "title": "Key Id",
+            "type": "string"
+          },
+          "nonce": {
+            "title": "Nonce",
+            "type": "string"
+          },
+          "sig": {
+            "title": "Sig",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "nonce",
+          "sig"
+        ],
+        "title": "WhoAmIOut",
+        "type": "object"
       }
     }
   },
@@ -8097,6 +8185,48 @@
         ]
       }
     },
+    "/api/v1/admin/machines/announce": {
+      "get": {
+        "description": "服务端主动通告（§11）的现状：最近一次喊的是哪个地址、喊不出去的原因。",
+        "operationId": "announce_status_api_v1_admin_machines_announce_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnnounceStatusOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Announce Status",
+        "tags": [
+          "admin"
+        ]
+      },
+      "post": {
+        "description": "「召集机器」：立即在局域网里喊一次。\n\n机器听到后到通告里的地址上做挑战应答、验过签才切换（见 ``/agent/whoami``）。\n后台任务每秒看一次这个请求，所以返回的状态可能还是上一次的；界面过一两秒再读。",
+        "operationId": "announce_now_api_v1_admin_machines_announce_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnnounceStatusOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Announce Now",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/api/v1/admin/machines/bind-by-code": {
       "post": {
         "description": "按配对码配对：机器上显示什么，教师就输什么。\n\n这是主路径。配对码六位数字、限时、用一次即作废 —— 它**只在绑定时用**，\n配对之后认机器靠 machine_uuid。",
@@ -9849,6 +9979,52 @@
           }
         },
         "summary": "Tick",
+        "tags": [
+          "agent"
+        ]
+      }
+    },
+    "/api/v1/agent/whoami": {
+      "get": {
+        "description": "挑战应答（§11）：证明\"此刻在这个地址上的，握着发布私钥\"。\n\n机器听到服务端的通告之后先来这里问一句（**不带凭据**），验过签才把服务端地址\n切过去。通告本身不签名、挡不住重放；这一步让切换的前提变成\"这里真的是那台服务端\"。\n\n签的是服务端**自己认定的**对外地址（§7.3 的三条来源），机器切换到签名里的地址 ——\n有人把请求转给真服务端，拿到的签名也只会把机器指回真服务端。不鉴权、每次一个 RSA\n签名，所以按来源 IP 限速。",
+        "operationId": "whoami_api_v1_agent_whoami_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "nonce",
+            "required": true,
+            "schema": {
+              "maxLength": 32,
+              "minLength": 32,
+              "pattern": "^[0-9a-f]{32}$",
+              "title": "Nonce",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhoAmIOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Whoami",
         "tags": [
           "agent"
         ]

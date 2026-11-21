@@ -29,6 +29,7 @@ from .config import Settings, default_settings
 from .context import AppContext
 from .paths import PathValidationError
 from .services import discovery
+from .services.announce import run_announcer
 from .services.discovery import run_discovery_responder
 from .tasks.flush import run_maintenance_loop
 from .tasks.judge import run_judge_scan_loop
@@ -51,6 +52,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             asyncio.ensure_future(run_maintenance_loop(ctx)),
             asyncio.ensure_future(run_judge_scan_loop(ctx)),
             asyncio.ensure_future(run_discovery_responder(ctx)),
+            asyncio.ensure_future(run_announcer(ctx)),
         ]
         try:
             yield

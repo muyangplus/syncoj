@@ -123,6 +123,8 @@ ERROR_CODES = {
     "conflict": "与当前状态冲突",
     "validation_error": "请求内容不合法",
     "rate_limited": "操作太频繁，请稍后再试",
+    "no_signing_key": "这台服务端没有发布签名私钥",
+    "no_public_url": "这台服务端还不知道自己的对外地址",
     "payload_too_large": "内容太大了",
     "internal_error": "服务端出错了，请看服务端日志",
     "unavailable": "服务暂时不可用",

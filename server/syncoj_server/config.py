@@ -225,6 +225,18 @@ class Settings:
     #: 不限速的话它就成了别人手里的放大器。
     discovery_replies_per_second: int = 5
 
+    #: 服务端主动通告（§11）：周期性地在局域网里喊"我在这儿"，机器听到后
+    #: 到那个地址上做挑战应答再切换。关掉它不影响别的功能（机器仍会自己问）。
+    announce_enabled: bool = field(
+        default_factory=lambda: _env_bool("SYNCOJ_ANNOUNCE", True)
+    )
+    #: 通告发往的 UDP 端口（机器在听）。与发现端口一样**固定**，改就要整间机房一起改。
+    announce_port: int = field(
+        default_factory=lambda: _env_int("SYNCOJ_ANNOUNCE_PORT", 45872)
+    )
+    #: 挑战应答端点（不鉴权、要做一次 RSA 签名）按来源 IP 每秒最多几次
+    whoami_per_ip_per_second: int = 5
+
     #: 探测报文的最小长度。**应答不得大于探测** —— 否则这个端口可以被用来放大
     #: 流量（小请求、大应答）。RSA-2048 的签名 base64 就有 344 字符，所以探测
     #: 那边带了填充；这条是那道约束的服务端一侧。

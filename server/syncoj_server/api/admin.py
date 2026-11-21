@@ -69,6 +69,7 @@ from ..models import (
 from ..paths import PathValidationError, safe_join, slugify, validate_relpath
 from ..schemas import (
     AdminHealthOut,
+    AnnounceStatusOut,
     GLOBAL_CONFIRM,
     AdminInfo,
     AgentRuntimeOut,
@@ -981,6 +982,45 @@ def apply_roster_to_contest(
 # 机器绑的是**名单里的某个人**，不是某场比赛的选手 —— 所以配对是永久的，
 # 同一个学生换一场比赛不用重新配。教师在这里做的事只有一件：
 # 把"机器上显示的那串 6 位数字"对应到名单里的一个人。
+
+
+def _announce_status(ctx: AppContext) -> AnnounceStatusOut:
+    announcer = ctx.announcer
+    sent = announcer.last_sent_at
+    return AnnounceStatusOut(
+        enabled=bool(ctx.settings.announce_enabled and ctx.signing_key is not None),
+        port=ctx.settings.announce_port,
+        boot_id=announcer.boot_id,
+        last_sent_at=(
+            datetime.fromtimestamp(sent, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if sent else None
+        ),
+        last_url=announcer.last_url,
+        last_error=announcer.last_error,
+    )
+
+
+@router.get("/machines/announce", response_model=AnnounceStatusOut)
+def announce_status(
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> AnnounceStatusOut:
+    """服务端主动通告（§11）的现状：最近一次喊的是哪个地址、喊不出去的原因。"""
+    return _announce_status(ctx)
+
+
+@router.post("/machines/announce", response_model=AnnounceStatusOut)
+def announce_now(
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> AnnounceStatusOut:
+    """「召集机器」：立即在局域网里喊一次。
+
+    机器听到后到通告里的地址上做挑战应答、验过签才切换（见 ``/agent/whoami``）。
+    后台任务每秒看一次这个请求，所以返回的状态可能还是上一次的；界面过一两秒再读。
+    """
+    ctx.announcer.request_now()
+    return _announce_status(ctx)
 
 
 @router.get("/machines/pending", response_model=Page[PendingMachineOut])

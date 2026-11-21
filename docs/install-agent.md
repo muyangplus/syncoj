@@ -204,8 +204,9 @@ python3 /opt/syncoj/current/run_agent.py --config /etc/syncoj/agent.ini --pair-c
 
 - **不设 `ProtectHome`** —— 设成 `read-only` 会把家目录整个变只读，Agent 一个
   文件都写不出去
-- `ReadWritePaths=%h <状态目录>` —— `%h` 由 systemd 展开成 `User=` 的家目录，
-  正好覆盖桌面
+- `ReadWritePaths=-%h <状态目录> …` —— 本意是放开运行账号的家目录（桌面在里面）。
+  **但现状不对**：系统单元里 `%h` 展开成 `/root`、不随 `User=` 变，家目录其实没放开，
+  见 [ADR-0007](decisions/ADR-0007-unit-path-whitelist.md) 的「现状（2026-11）」
 - `ProtectSystem=strict` 保留：`/usr`、`/etc`、`/boot` 等系统目录仍然全部只读
 - `agent.ini` 与状态目录里的文件都 **chown 给这个用户**（0600）。
   漏掉 chown 的表现是"装完起不来"或"一直重新注册"，而且报的是权限错误，

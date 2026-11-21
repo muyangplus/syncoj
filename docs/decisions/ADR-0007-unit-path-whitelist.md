@@ -1,6 +1,7 @@
 # ADR-0007：单元里的 `ReadWritePaths` 每条都要带 `-`
 
-**状态**：已锁定（v1，真机故障后补上）
+**状态**：已锁定（v1，真机故障后补上）。"每条带 `-`"仍然成立；但文中把 `%h` 当成
+运行账号家目录是**错的**，见文末「现状（2026-11）」。
 
 ## 背景
 
@@ -17,6 +18,7 @@
 
 同一类事情的第二个来源：`deploy_root` / `scan.roots` 是**可选配置**，
 真机上可能不存在，而默认值都在 `%h` 之下（已经被覆盖了）。
+（**更正**：在系统单元里 `%h` 不是运行账号的家目录，这句前提不成立，见文末。）
 
 ## 决定
 
@@ -27,6 +29,7 @@
 - 只列真正必需的四加三条：
   * 前三条是服务自己要写的地方：家目录（`%h`）、安装根（`/opt/syncoj`）、
     状态目录（`/var/lib/syncoj`）；
+    （**更正**：`-%h` 在系统单元里展开成 `-/root`，并没有放开运行账号的家目录。）
   * 后四条只服务于"以 root 执行远程卸载"
     （`/etc/syncoj`、`/etc/systemd/system`、`/etc/sudoers.d`、`/usr/local/lib/syncoj`，
     见 [ADR-0012](ADR-0012-remote-uninstall-authorization.md)）。
@@ -52,3 +55,23 @@
   226，但会丢掉整套加固 —— 而这些加固是"以选手身份运行的常驻进程"唯一的边界。
 * **用 `%h` 覆盖一切，不列具体目录**。`%h` 只管家目录；`/opt/syncoj` 与
   `/var/lib/syncoj` 不在它下面，服务连自己的状态目录都写不了。
+
+## 现状（2026-11）：`%h` 在系统单元里是 `/root`
+
+`syncoj-agent.service` 装在 `/etc/systemd/system/`，由**系统**实例（PID 1）管理。
+systemd 的说明书（`systemd.unit(5)`，"Specifiers"）对 `%h` 的定义是：**运行服务管理器
+的那个用户**的家目录，系统实例里就是 `/root`，并且明确**不受 `[Service]` 里 `User=`
+影响**。所以 `install.py:_writable_paths` 生成的 `ReadWritePaths=-%h …` 在每台机器上
+都等于 `-/root`：
+
+* 对运行账号来说这是一条**无效项** —— `/root` 本来就是 root 的 0700 目录，放开挂载层面的
+  写权限它也写不进去；
+* 本意要放开的**运行账号家目录并不在白名单里**。而 `ProtectSystem=strict` 把除
+  `/dev`、`/proc`、`/sys` 之外的整个文件系统挂成只读（不设 `ProtectHome` 不改变这一点），
+  按说明书推断，Agent 往桌面写配对码文件、往 `{desktop}` 下落下发文件都会 `EROFS`。
+
+上面"默认值都在 `%h` 之下（已经被覆盖）"的推理因此不成立。这一条**没有经过实机验证**
+（systemd 245 实机冒烟是 [`08-milestones-and-open.md`](../design/08-milestones-and-open.md)
+§10.5 阶段 2 的待办），也**不是文档能修的**：单元要改成安装时按运行账号解析出的绝对家
+目录（仍然带 `-`），`agent/tests/test_installer.py`、`test_installer_unit_paths.py` 里
+断言 `-%h` 的用例要一起改。"每条都带 `-`"这个决定本身不受影响。

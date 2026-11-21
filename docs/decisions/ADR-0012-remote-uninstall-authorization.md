@@ -1,6 +1,7 @@
 # ADR-0012：远程卸载的授权模型
 
-**状态**：已锁定（v1）
+**状态**：已锁定（v1）。授权模型（签名令牌）仍然成立；**机器侧的 sudo 执行链在 systemd 245
+上大概率不通**，见文末「现状（2026-11）」。计划在 root 管理单元落地时重写本篇。
 
 ## 背景
 
@@ -37,7 +38,7 @@
 3. 令牌**只走 stdin**：不进 argv（`ps` 里看得见）、不写文件、不进日志。
    验签实现**独立、零依赖、不 import `syncoj_agent`** —— 脚本执行时那个包可能正在被删。
 4. 删除顺序：`systemctl disable`（**不用 `--now`**：脚本自己就跑在那个单元的 cgroup
-   里）→ 删单元文件与 `*.wants/` 软链 → 删 prefix/config/state → 删 sudoers 与 helper
+   里；现状是 best-effort —— 沙箱挡掉了 AF_UNIX，多半连不上 D-Bus，靠下一步直接删）→ 删单元文件与 `*.wants/` 软链 → 删 prefix/config/state → 删 sudoers 与 helper
    → 逐项打印、**幂等**。**绝不动**选手桌面、家目录、运行账号、`/tmp`。
 5. 成功后 Agent **exit 0**，所以主单元必须是 `Restart=on-failure`
    （见 [ADR-0008](ADR-0008-systemd-unit-hardening.md)）。
@@ -77,3 +78,25 @@
   的分支，而两处该做的下一步**是同一件事**：走到机器前面跑那条命令。
 * **删除时连选手桌面一起清**。那里面有学生的代码；卸载 Agent 不该碰它。
   脚本结尾逐条说明删了什么、没删什么。
+
+## 现状（2026-11）
+
+令牌的签发、绑定与验签都按上文实现（`server/syncoj_server/services/uninstall.py`，
+`TOKEN_TTL_SECONDS = 900`）。**断在机器侧第 1 步之前**：
+
+* Agent 执行的是 `sudo -n /usr/local/lib/syncoj/self_uninstall.sh`（`main.py`
+  `_handle_uninstall_token`）。上文假设"单元里不写 `NoNewPrivileges=yes`，sudo 就能提权"，
+  但同一单元里的 `RestrictAddressFamilies=` / `RestrictNamespaces=` / `PrivateDevices=` 等
+  在非 root 的 `User=` 下会让 systemd **隐式打开 `NoNewPrivileges`**（见
+  [ADR-0008](ADR-0008-systemd-unit-hardening.md) 的「现状」）。setuid 位因此失效，sudo
+  报 `effective uid is not 0` 一类错误，脚本根本跑不起来。
+* 机器侧的表现：记一条 `uninstall_failed`、`last_error` 写明原因，**一小时后**
+  （`UNINSTALL_RETRY_SECONDS = 3600`）再试 —— 令牌那时早已过期（15 分钟）。
+  教师在界面上看到的是"已记下这台机器的卸载请求……届时自己清干净"，机器什么都没删。
+* 这是按 systemd 说明书推断的结论，**没有在 NOI Linux 2.0 实机上验证过**。在验证或
+  重写之前，可靠的卸载办法只有站到机器前面跑装机页那条
+  `bootstrap.sh … --uninstall --yes`（[`../install-agent.md`](../install-agent.md)「卸载 Agent」）。
+
+重写方向在 [`08-milestones-and-open.md`](../design/08-milestones-and-open.md) §10.5 阶段 2：
+root 管理单元（`syncoj-agent-admin`）用 timer 自己向服务端拉卸载指令，不再经过 sudo；
+届时删掉 sudoers 白名单、`/usr/local/lib/syncoj` 与为它放开的四条 `ReadWritePaths`。

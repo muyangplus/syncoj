@@ -216,6 +216,11 @@ sha256 前 12 位、以及操作人。`EventLog` 没有管理员外键（它记�
 
 ### 7.4 远程卸载：管理端点一下，机器自己清干净
 
+> **现状**：下面的 sudo 执行链在 systemd 245 上大概率不通 —— 单元里其他加固项会让 systemd
+> 隐式打开 `NoNewPrivileges`，sudo 提不了权。在实机验证或重写之前，可靠的卸载办法是
+> 站到机器前面跑装机页的 `--uninstall` 命令。详见
+> [ADR-0012](../decisions/ADR-0012-remote-uninstall-authorization.md) 的「现状（2026-11）」。
+
 **起点是权限**：Agent 以选手账号运行（../design/00-decisions.md §0），而卸载要删的 `/opt/syncoj`、`/etc/syncoj`
 （里面有统一注册密钥）、systemd 单元全是 root 的。所以"按钮 → Agent 自己删"这条链
 缺一件东西 —— root 权限，而给谁、怎么给，决定了这套东西安不安全。
@@ -270,10 +275,11 @@ root 删除的凭据留在 `syncoj.db` 里，而备份、误传、随手拷走�
 运行账号在 DAC 上写不进去，唯一能用上它们的是"令牌验过签的那个 root 脚本"。
 同时也正因为如此，**不选另外两条路**：`nsenter` 进 PID 1 的 mount namespace 是往
 沙箱里开一条逃逸通道、还依赖 util-linux 的在场；`PathExists=` 触发的独立 root 单元
-则要求令牌**落一次盘**。另外脚本**不调用 `systemctl`**：单元里的
-`RestrictAddressFamilies=AF_INET AF_INET6` 挡掉了 AF_UNIX，systemd 的 D-Bus 本来就
+则要求令牌**落一次盘**。另外脚本**不依赖 `systemctl`**（只 best-effort 地调一次
+`disable` / `daemon-reload`，失败不管）：单元里的
+`RestrictAddressFamilies=AF_INET AF_INET6` 挡掉了 AF_UNIX，systemd 的 D-Bus 多半
 连不上，而"禁用"的效果本来就是去掉那个软链，直接删更省事也少一个失败点。
 
 **审计里不写令牌。** 那枚令牌能在那台机器上换一次 root 删除，抄进事件表等于把一把
-一次性钥匙写进一份到处被导出、被翻看的日志里 —— 与"审计不写 zip 密码"（../design/05-api-and-frontend.md §5.4）
+一次性钥匙写进一份到处被导出、被翻看的日志里 —— 与"审计不写 zip 密码"（../design/05-api-and-frontend.md §5.5）
 是同一条纪律。

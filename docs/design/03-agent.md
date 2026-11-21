@@ -149,14 +149,20 @@ ReadWritePaths=-/var/lib/syncoj
   `sudo -n <自卸载脚本>` 必然失败（`effective uid is not 0`），管理端授权的远程卸载
   整条链就是死的。服务以普通账号运行，而**那个账号本人在这台机器上同样能执行任何
   setuid 程序**，所以这一条对"防选手"没有增量价值。其余加固一条都没少。
+  **现状**：其余加固里的 `RestrictAddressFamilies=` 等在非 root 服务上会让 systemd 隐式
+  打开 `NoNewPrivileges`，这条例外的目的实际落空，见
+  [ADR-0008](../decisions/ADR-0008-systemd-unit-hardening.md) 的「现状（2026-11）」。
 * **`ReadWritePaths=` 里每一条都带 `-`**：路径不存在时 systemd 跳过它，而不是让单元
   在设沙箱时报 `226/NAMESPACE` 起不来。实例：单元里写了一条 `/home/student/code`，
-  而那台机器没有这个目录。前三条是服务自己要写的地方（家目录、安装根、状态目录）；
+  而那台机器没有这个目录。前三条是服务自己要写的地方（家目录、安装根、状态目录）——
+  **现状**：系统单元里 `%h` 是 `/root`、不随 `User=` 变，家目录这一条实际没生效，见
+  [ADR-0007](../decisions/ADR-0007-unit-path-whitelist.md) 的「现状（2026-11）」；
   后四条只服务于"以 root 执行远程卸载"（../design/07-ops-and-install.md §7.4）：
   它们是 root:0755/0644，运行账号在 DAC 上写不进去，所以**放开 mount 层面的写权限
   不构成提权**，唯一用得上的是验过令牌的那个 root 脚本。
 * **刻意不列 `deploy_root` / `scan.roots` 的具体值**：它们是可选配置、真机上可能
-  不存在，而默认值都在 `%h` 之下（已经被覆盖）。多列一条就多一个 226 的机会。
+  不存在，而默认值都在 `%h` 之下（本意是已经被覆盖 —— 同上，现状并没有）。多列一条就多一个
+  226 的机会。
 * **注册单元刻意不用 `Restart=`**：oneshot 的重启策略在各版本 systemd 上行为不一致；
   "试几次"由 ExecStart 里的 shell 循环自己数，并把手工恢复的命令打进日志。
 

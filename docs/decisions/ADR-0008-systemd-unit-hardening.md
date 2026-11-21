@@ -1,6 +1,7 @@
 # ADR-0008：systemd 单元加固的四处刻意例外
 
-**状态**：已锁定（v1，真机踩坑后补上）
+**状态**：已锁定（v1，真机踩坑后补上）。"不要 `NoNewPrivileges=yes`"那一条的目的**实际没有
+达到**，见文末「现状（2026-11）」。
 
 ## 背景
 
@@ -56,3 +57,20 @@
 * **`PrivateTmp` / 其他加固一并再加码**。它们已经在单元里；再加码要注意别碰到
   "Agent 要往桌面上写配对码"这件事（例如 `ProtectHome=read-only` 会让家目录整个
   变只读，Agent 一个文件都写不出去）。
+
+## 现状（2026-11）
+
+对照 `agent/packaging/install.py:render_unit` 与 `agent/syncoj_agent/main.py`：
+
+| 项 | 与上文一致吗 |
+|---|---|
+| `Restart=on-failure`、`RestartSec=5`、`StartLimit*` 在 `[Unit]` | 一致 |
+| 不写 `Group=` | 一致 |
+| 切换版本退出码 75：`main.EXIT_RESTART = 75`，单元里 `SuccessExitStatus=75` + `RestartForceExitStatus=75`，测试对账两边同值 | 一致。但这只解决"退出之后能被拉起"：运行账号写不进 `/opt/syncoj`，真机上自更新会在写 `releases/` 时失败、上报一次 `upgrade_*` 事件后照旧跑旧版本（[`08-milestones-and-open.md`](../design/08-milestones-and-open.md) §10.5 阶段 2） |
+| 注册单元不写 `Restart=`，`ExecStart` 里 shell 循环 | 一致（注册单元自己写了 `NoNewPrivileges=yes`，它以 root 跑、不需要 sudo） |
+| **不要 `NoNewPrivileges=yes`** | **字面一致、目的落空**。单元里确实没写这一行，但同一单元里的 `RestrictAddressFamilies=`、`RestrictNamespaces=`、`RestrictRealtime=`、`RestrictSUIDSGID=`、`LockPersonality=`、`PrivateDevices=`、`ProtectKernelModules=` 都要装 seccomp 过滤；服务以非 root 的 `User=` 运行（没有 `CAP_SYS_ADMIN`）时，systemd 会为它们**隐式打开 `NoNewPrivileges`**（`systemd.exec(5)` 的 `NoNewPrivileges=` 一节）。于是 setuid 的 sudo 照样提不了权，远程卸载在 systemd 245 上大概率仍然失败 —— 见 [ADR-0012](ADR-0012-remote-uninstall-authorization.md) 的「现状」 |
+
+最后一条是按说明书推断，**没有在 NOI Linux 2.0 实机上验证**（实机冒烟是 §10.5 阶段 2
+的待办）。出路不在单元加固上做减法（去掉那一串加固换一条 sudo 不值），而是 §10.5 阶段 2
+的 root 管理单元：卸载由 root 单元自己向服务端拉指令执行，Agent 本体随之恢复显式的
+`NoNewPrivileges=yes` 与 `Restart=always`，本文的第一、三两条例外届时一起撤掉。

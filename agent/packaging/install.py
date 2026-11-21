@@ -1042,7 +1042,7 @@ class Installer:
         self.report.section("检查环境")
 
         # 运行账号：不显式给时 = "跑安装的那个人"。**以 root 跑 Agent 是拒绝的** ——
-        # 它会往选手桌面写 root 拥有的文件（学生改不了也删不掉）、`%h` 不再等于
+        # 它会往选手桌面写 root 拥有的文件（学生改不了也删不掉）、家目录不再是
         # 选手桌面、还白白多一个提权面。所以这里不静默接受，要求显式指定；
         # 显式 `--user root` 仍然允许（单用户机器上有人这么用），但要警告。
         # dry-run 什么都没做，所以只警告不报错。
@@ -3447,12 +3447,23 @@ public_key = {public_key}
     )
 
 
+def home_of(user: str) -> str:
+    """运行账号的家目录（安装时解析成绝对路径）。查不到就按惯例 ``/home/<账号>``。"""
+    try:
+        import pwd
+
+        return pwd.getpwnam(user).pw_dir or "/home/%s" % user
+    except (ImportError, KeyError):
+        return "/home/%s" % user
+
+
 def _writable_paths(
     prefix: Path,
     state_dir: Path,
     config_dir: Path,
     unit_dir: Path,
     helper_dir: Path,
+    home: str,
 ) -> List[str]:
     """``ReadWritePaths=`` 该开哪些目录 —— 只列**确实有理由写**的，且一律带 ``-``。
 
@@ -3464,9 +3475,11 @@ def _writable_paths(
 
     七条，各有各的理由：
 
-    * ``%h`` —— systemd 展开成 ``User=`` 的家目录。Agent 以那个账号运行，桌面、
+    * 运行账号的家目录（**安装时解析出的绝对路径**）—— Agent 以那个账号运行，桌面、
       配对码文件、下发落点都在它下面；不放开写权限，``ProtectSystem=strict``
-      会把家目录也变成只读，表现是"服务起来了但什么都不传"。
+      会把家目录也变成只读，表现是"服务起来了但什么都不传"。曾经写的是 ``-%h``：
+      在**系统**单元里 ``%h`` 是服务管理器自己（root）的家目录 ``/root``，不是
+      ``User=`` 的 —— 等于没放开选手桌面（ADR-0007「现状」）。
     * 安装根目录 —— 自更新要往 ``releases/`` 里写。
     * 状态目录 —— 日志、凭据、哈希缓存。
     * 配置目录 / 单元目录 / ``/etc/sudoers.d`` / 辅助脚本目录 —— 这四条**只**
@@ -3496,11 +3509,11 @@ def _writable_paths(
       （落盘就多一份可被复制/残留的授权凭证）。方向反了。
 
     刻意**不**列 ``deploy_root`` / ``scan.roots`` 的具体值：它们是可选配置、
-    真机上可能不存在，而默认值都在 ``%h`` 之下（已经覆盖），多列一条就多一个
+    真机上可能不存在，而默认值都在家目录之下（已经覆盖），多列一条就多一个
     226 的机会。
     """
     writable = [
-        "-%h",
+        "-%s" % home,
         "-%s" % _posix(prefix),
         "-%s" % _posix(state_dir),
         # ---- 只为远程卸载开的四条（见上面"为什么不算提权"）----
@@ -3914,6 +3927,7 @@ def render_unit(
     python: str,
     unit_dir: Optional[Path] = None,
     helper_dir: Optional[Path] = None,
+    home: Optional[str] = None,
 ) -> str:
     """生成 systemd 单元。
 
@@ -3935,7 +3949,7 @@ def render_unit(
     配置，真机上可能根本不存在，而 ``ReadWritePaths=`` 里只要有一条不存在的
     路径，systemd 就会在设沙箱时报 ``226/NAMESPACE``、服务永远起不来。真机上
     踩过一次：单元里有 ``/home/student/code``，而现场那台机器的选手目录不在
-    那里。默认值 ``{desktop}`` / ``{desktop}/{player_no}`` 都在 ``%h`` 之下，
+    那里。默认值 ``{desktop}`` / ``{desktop}/{player_no}`` 都在运行账号家目录之下，
     本来就被覆盖；写进来只会多一条可能踩雷的指令。参数保留只是为了调用方签名
     稳定（单元内容不再依赖它们）。
 
@@ -3948,7 +3962,8 @@ def render_unit(
     if helper_dir is None:
         helper_dir = HELPER_DIR
     writable = _writable_paths(
-        prefix, state_dir, config_path.parent, Path(unit_dir), Path(helper_dir)
+        prefix, state_dir, config_path.parent, Path(unit_dir), Path(helper_dir),
+        home or home_of(run_user),
     )
 
     lines = [

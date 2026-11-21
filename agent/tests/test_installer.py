@@ -485,14 +485,16 @@ def test_render_unit_permissions_follow_contestant_user(installer) -> None:
         scan_roots="{desktop}/{player_no}, /srv/shared/code",
         run_user="student",
         python="/usr/bin/python3",
+        home="/home/student",
     )
 
-    # %h = User= 的家目录（覆盖选手桌面）；安装器自建的目录也开写权限。
+    # 运行账号的家目录（安装时解析成绝对路径，覆盖选手桌面）；安装器自建的目录也开写权限。
+    # 不用 %h：系统单元里它是 /root，不是 User= 的家目录。
     # **每一条都带 `-`**：路径不存在时 systemd 跳过它，而不是 226 起不来。
     # 后四条是给"管理端授权的远程卸载"用的（沙箱里要能删单元文件与辅助脚本），
     # 它们本身是 root:0755，运行账号在 DAC 上写不进去 —— 详见 _writable_paths。
     assert (
-        "ReadWritePaths=-%h -/opt/syncoj -/var/lib/syncoj "
+        "ReadWritePaths=-/home/student -/opt/syncoj -/var/lib/syncoj "
         "-/etc/syncoj -/etc/systemd/system -/etc/sudoers.d -/usr/local/lib/syncoj"
     ) in text
     # 模板路径与可选配置不该被塞进来 —— 它们可能不存在，正是 226 的来源
@@ -617,17 +619,19 @@ def test_bundle_contains_launcher(workdir: Path) -> None:
 
 @pytest.mark.real_system_paths
 def test_render_unit_without_extra_paths(installer) -> None:
-    """没配额外路径时，白名单只剩 %h 与安装器自建的目录 —— 但 %h 必须在。
+    """没配额外路径时，白名单只剩家目录与安装器自建的目录 —— 但家目录必须在。
 
     少了它，ProtectSystem=strict 会把家目录也变成只读。
     """
     text = installer.render_unit(
         prefix=Path("/o"), config_path=Path("/c"), state_dir=Path("/s"),
         deploy_root="", scan_roots="", run_user="student", python="python3",
+        home="/home/student",
     )
     line = [x for x in text.splitlines() if x.startswith("ReadWritePaths=")][0]
     tokens = line.split("=", 1)[1].split()
-    assert tokens[0] == "-%h", line
+    assert tokens[0] == "-/home/student", line
+    assert "%h" not in text, "系统单元里 %h 是 /root，不是运行账号的家目录"
     for token in ("-/o", "-/s", "-/etc/systemd/system", "-/etc/sudoers.d",
                   "-/usr/local/lib/syncoj"):
         assert token in tokens, "%s 不在白名单里：%s" % (token, line)

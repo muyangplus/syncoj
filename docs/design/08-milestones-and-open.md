@@ -193,12 +193,11 @@ person 表）；选手页手填保留但降级（这两条已落地）。
   `install_bundle_has_key`，这种包只经管理端下载。
 * ~~**`bootstrap.sh`** 加固~~ ✅ 已完成：服务端嵌入自身地址（形状安全的 Host）与**安装器**
   sha256，`mktemp -d`，不读 `agent.ini`，`--dry-run` 透传。
-* **协议版本**：tick / enroll 带 `protocol_version`，旧 Agent 回 426 `agent_outdated`；
-  服务端迁移前自动备份库。（✅ 已完成：「全部重装 / 重做镜像」手册，见
-  `docs/install-agent.md`「重装与卸载」。）
-* **单元里的家目录**：`ReadWritePaths=-%h` 在系统单元里是 `-/root`，运行账号的家目录（桌面）
-  没有放开，`ProtectSystem=strict` 下按说明书推断是只读的（ADR-0007「现状」）。改成安装时
-  解析出的绝对家目录（带 `-`），连同断言 `-%h` 的安装器测试；放进下面的实机冒烟里验证。
+* ✅「全部重装 / 重做镜像」手册，见 `docs/install-agent.md`「重装与卸载」。
+* ~~**单元里的家目录**：`ReadWritePaths=-%h` 在系统单元里是 `-/root`~~ ✅ 已改为安装时解析出的
+  绝对家目录（带 `-`），测试同步；仍放进下面的实机冒烟里验证。
+* ~~**协议版本**、迁移前自动备份库~~ ✅ 已完成：`protocol_version`（当前 2）+ 426
+  `agent_outdated`；迁移已有数据的库之前整库备份。
 * **systemd 245 实机冒烟**（Ubuntu 20.04 / NOI Linux 2.0 虚拟机）：安装、升级、回滚、卸载、
   加固项。托管 CI runner 的 systemd 版本不对，证明不了这些。
 

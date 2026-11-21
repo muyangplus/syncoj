@@ -75,3 +75,7 @@ systemd 的说明书（`systemd.unit(5)`，"Specifiers"）对 `%h` 的定义是�
 §10.5 阶段 2 的待办），也**不是文档能修的**：单元要改成安装时按运行账号解析出的绝对家
 目录（仍然带 `-`），`agent/tests/test_installer.py`、`test_installer_unit_paths.py` 里
 断言 `-%h` 的用例要一起改。"每条都带 `-`"这个决定本身不受影响。
+
+**已改（2026-11）**：`install.py:_writable_paths` 现在写安装时按运行账号解析出的绝对家目录
+（`pwd.getpwnam(<账号>).pw_dir`，查不到按 `/home/<账号>`），例如 `-/home/noi`；单元里不再
+出现 `%h`，测试一并改了。仍待 systemd 245 实机冒烟确认。

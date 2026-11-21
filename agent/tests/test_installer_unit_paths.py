@@ -14,7 +14,7 @@
 
 所以口径是：**只写安装器确认存在、且确实有理由写的目录，每一条都带 ``-``**
 （systemd 对不存在的路径会跳过，而不是让整个服务起不来）；选手的代码/桌面目录
-来自可选配置、可能不存在 —— 一律不写进单元，``%h`` 已经覆盖了家目录下的一切。
+来自可选配置、可能不存在 —— 一律不写进单元，运行账号的家目录（安装时解析成绝对路径）已经覆盖了家目录下的一切。
 """
 
 from __future__ import annotations
@@ -56,6 +56,7 @@ def unit_of(installer_module, **overrides) -> str:
         python="/usr/bin/python3",
         unit_dir=Path("/etc/systemd/system"),
         helper_dir=Path("/usr/local/lib/syncoj"),
+        home="/home/noi",
     )
     args.update(overrides)
     return installer_module.render_unit(**args)
@@ -101,7 +102,7 @@ def test_白名单只有带减号的_家目录与安装器自建目录(installer
     text = unit_of(installer_module)
     lines = [line for line in text.splitlines() if line.startswith("ReadWritePaths=")]
     assert lines == [
-        "ReadWritePaths=-%h -/opt/syncoj -/var/lib/syncoj "
+        "ReadWritePaths=-/home/noi -/opt/syncoj -/var/lib/syncoj "
         "-/etc/syncoj -/etc/systemd/system -/etc/sudoers.d -/usr/local/lib/syncoj"
     ], lines
     # 单元里不能出现字面量 `~`（systemd 不展开它）
@@ -252,3 +253,16 @@ def test_provision_那个_oneshot_单元不带_Restart(installer_module) -> None
     text = enroll_unit_of(installer_module)
     assert "Type=oneshot" in text
     assert "Restart" not in text
+
+
+def test_没给家目录时按账号解析成绝对路径(installer_module) -> None:
+    """不给 home 时由安装器按 pwd 解析（查不到按 /home/<账号>），单元里绝不出现 %h。"""
+    args = dict(
+        prefix=Path("/opt/syncoj"), config_path=Path("/etc/syncoj/agent.ini"),
+        state_dir=Path("/var/lib/syncoj"), deploy_root="", scan_roots="",
+        run_user="no-such-user-xyz", python="/usr/bin/python3",
+        unit_dir=Path("/etc/systemd/system"), helper_dir=Path("/usr/local/lib/syncoj"),
+    )
+    text = installer_module.render_unit(**args)
+    assert "ReadWritePaths=-/home/no-such-user-xyz " in text
+    assert "%h" not in text

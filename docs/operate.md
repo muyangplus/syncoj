@@ -2,196 +2,278 @@
 
 ## 部署
 
-装机入口（离线包 / 在线自举 / 上传安装包等）见 [`install-agent.md`](install-agent.md)
-的「一键安装（四种入口，共用同一份逻辑）」。服务端发布 Agent 版本的流程见本文
-「发一个 Agent 版本」。
+```bash
+python -m venv .venv && .venv/bin/pip install -e "server[dev]"
+.venv/bin/syncoj-server init                    # 建库 + 管理员 + .key/ 下的密钥
+.venv/bin/syncoj-server serve --host 0.0.0.0    # 管理端 :8000，公开端口 :80
+```
 
-`install.py` 不接受「每选手注册码」：那条链路已经删除，只有统一密钥一条路。
+| `serve` 参数 | 默认 | 说明 |
+|---|---|---|
+| `--host` | `127.0.0.1` | 监听地址 |
+| `--port` | `8000` | 管理端端口 |
+| `--public-url` | 空 | 对考试机的地址，同 `SYNCOJ_PUBLIC_URL` |
+| `--log-level` | `info` | `critical` / `error` / `warning` / `info` / `debug` / `trace` |
+| `--quiet-access` | 关 | 关闭访问日志 |
+
+全局参数：`--data-root`（默认 `runtime/server`）、`--verbose`。`syncoj-server info` 打印配置与统计。
+
+| 环境变量 | 默认 | 说明 |
+|---|---|---|
+| `SYNCOJ_DATA_ROOT` | `runtime/server` | 数据目录 |
+| `SYNCOJ_KEY_DIR` | 源码仓库内为 `.key/` | 密钥目录 |
+| `SYNCOJ_RELEASE_KEY` | `<密钥目录>/release-key.pem`（存在才用） | 发布签名私钥，优先于密钥目录 |
+| `SYNCOJ_PUBLIC_URL` | 空 | 对考试机的地址 |
+| `SYNCOJ_PUBLIC_PORT` | `80` | 公开端口；`0` 关闭 → 见 [`quickstart.md`](quickstart.md)「两个端口」 |
+| `SYNCOJ_WEB_DIST` | 自动探测 `web/dist` | 前端产物目录；不存在则只提供 API |
+| `SYNCOJ_DISCOVERY` | `true` | 应答局域网发现探测 |
+| `SYNCOJ_DISCOVERY_PORT` | `45871` | 发现 UDP 端口 |
+| `SYNCOJ_DISCOVERY_MIN_PROBE` | `640` | 探测报文最小字节数 |
+| `SYNCOJ_ANNOUNCE` | `true` | 服务端主动通告 |
+| `SYNCOJ_ANNOUNCE_PORT` | `45872` | 通告 UDP 端口 |
+| `SYNCOJ_DEFAULT_FILE_PATTERN` | 内置 | 题目未配代码路径时的默认 glob |
+
+⚠️ 改 `SYNCOJ_DISCOVERY_PORT` / `SYNCOJ_ANNOUNCE_PORT` 需整间机房 Agent 同步修改。
+
+Agent 装机 → 见 [`install-agent.md`](install-agent.md)。
 
 ## 密钥从哪来：`.key/`
 
-为了试一次升级，原本要走一遍"手工 genkey → 手工指私钥 → 手工把公钥拷进包"；
-`syncoj-server init` 会把两把密钥都建好：
-
 ```
-.key/                         ← 默认密钥目录（整个目录不进版本库，两道 gitignore 挡着）
+.key/                         ← 不进版本库（目录内 .gitignore + 根 .gitignore）
 ├── release-key.pem           发布签名私钥  0600
-├── release-key.pub.json      对应公钥（打包 Agent 时自动内嵌）
-└── bootstrap.key             统一注册密钥  0600（哈希同时写进库，开箱即可装机）
+├── release-key.pub.json      对应公钥（打包 Agent 时内嵌）
+└── bootstrap.key             统一注册密钥  0600（哈希同时写进库）
 ```
 
 | 环节 | 行为 |
 |---|---|
-| `syncoj-server init` | 缺哪把建哪把；**已有的绝不覆盖、绝不轮换**，并把建了什么/找到了什么打出来 |
-| 服务端用私钥 | `.key/release-key.pem` 在就用它；`SYNCOJ_RELEASE_KEY` 覆盖一切 |
-| `build_bundle.py` | 默认取 `.key/release-key.pub.json`（存在才用）打进包；显式 `--public-key` 给错路径会**报错退出**，不会静默打出个不能升级的包 |
-| `install.py` | 统一密钥的优先级：`--bootstrap-key`（明文）> `--bootstrap-key-file` > `.key/bootstrap.key`（存在才用）> 没有。包里的公钥会落到装机器上的配置目录，`agent.ini` 指向那份副本 |
+| `syncoj-server init` | 缺哪把建哪把；已有的不覆盖、不轮换；输出建了 / 找到了什么 |
+| 服务端取私钥 | `SYNCOJ_RELEASE_KEY` > `.key/release-key.pem`；都没有则不提供升级 |
+| `build_bundle.py` | 默认打入 `.key/release-key.pub.json`（存在才用）；`--public-key` 路径错误时报错退出 |
+| `install.py` | 统一密钥：`--bootstrap-key` > `--bootstrap-key-file` > `.key/bootstrap.key`（存在才用）> 无；包内公钥落到机器配置目录，`agent.ini` 指向该副本 |
+| `syncoj-server db reset` | 只删库，不动 `.key/`；之后 `init` 补登记密钥哈希，已吊销的不恢复 |
 
-三条默认值**都是"有则生效、无则保持原样"**：没有私钥就照旧不提供任何升级，
-没有公钥就打出和以前一样的包，没有 `.key/` 目录就什么都不发生。生产部署请用
-`SYNCOJ_KEY_DIR` / `SYNCOJ_RELEASE_KEY` 指到只有服务端账号读得到的目录。
+生产部署：用 `SYNCOJ_KEY_DIR` / `SYNCOJ_RELEASE_KEY` 指向仅服务端账号可读的目录。
 
-> ℹ️ `db reset` 只删库、不碰 `.key/`，所以"密钥文件还在、库里的哈希没了"是会出现的
-> 一态。`init` 会把它**补登记**回去；但**已经被吊销的密钥不会被复活** —— 吊销是
-> 有意动作，不该被一次 init 撤销。
+⚠️ 持有 `.key/release-key.pem` 即可签出考试机接受的升级包 → 见 [`design/07-ops-and-install.md`](design/07-ops-and-install.md)。
 
-> ⚠️ 私钥放在仓库相对路径上是一个明确的取舍：任何拿到这份 checkout 的人都能签出
-> 考试机会接受的升级包。`.key/` 由目录自带的 `.gitignore` 与根 `.gitignore`
-> **两道**挡着，私钥的安全不依赖单个可被删掉的文件。
+手工生成发布密钥对：
+
+```bash
+syncoj-server genkey --out /etc/syncoj/release-key.pem   # 公钥默认同目录 .pub.json；--bits 默认 2048；--force 覆盖
+```
 
 ## 机器怎么知道服务端在哪
 
-**装 50 台机器不用输地址。** 地址有两个入口，主次分明：
-
-| 层 | 什么时候用 | 凭什么可信 |
+| 方式 | 触发 | 校验 |
 |---|---|---|
-| **包内嵌地址**（主路径） | 包是这台服务端自己打的 | `build_bundle.py --server-url` 把它写进包内 `server.json`，装机时一个字不用输 |
-| **UDP 广播发现**（兜底） | 包是别处打的、或者服务端换了 IP（DHCP 很常见） | 应答用**发布签名私钥**签「随机数 + 地址」，机器用包里内嵌的公钥验签 |
+| 包内嵌地址 | `build_bundle.py --server-url` 写入包内 `server.json`；界面「发布当前版本」自动写入 | — |
+| 服务端主动通告 | 服务端 UDP `45872` 广播：启动后 10 分钟内每 30 秒一次，之后每 5 分钟一次；管理端「机器配对」→「召集机器」立即发一次 | Agent 到通告地址做挑战应答（`/api/v1/agent/whoami`），验签后切换 |
+| UDP 发现（兜底） | Agent 向 UDP `45871` 广播探测 | 应答用发布私钥签名，Agent 用包内公钥验签；无公钥不发现 |
+
+→ 见 [`design/07-ops-and-install.md §7.3`](design/07-ops-and-install.md)、[`design/09-server-announce.md`](design/09-server-announce.md)、[ADR-0015](decisions/ADR-0015-server-announce.md)。
 
 ```bash
-# 打包时把地址一起带上（界面上的「发布当前版本」会自动做这件事）
+# 打包时内嵌地址
 python3 agent/packaging/build_bundle.py --server-url http://10.0.0.5:8000
 
-# 装机：什么都不用传；要覆盖就显式给
-sudo python3 install.py --bundle ./x.tar.gz --sha256 <校验和>              # 用包里的
+# 装机
+sudo python3 install.py --bundle ./x.tar.gz --sha256 <校验和>              # 用包内地址
 sudo python3 install.py --bundle ./x.tar.gz --server http://1.2.3.4:8000  # 覆盖
-sudo python3 install.py --bundle ./x.tar.gz --no-discover                 # 不许广播
+sudo python3 install.py --bundle ./x.tar.gz --no-discover                 # 禁止发现
 ```
 
-**发现必须验签。** 机器"找到服务端"之后第一件事是把统一注册密钥发过去；应答不验签
-时，局域网内任何应答者都能取到这把能注册整间机房的密钥。密钥是 50 台机器共享的，
-拿它做 HMAC 也挡不住。没有发布公钥就**不发现**（与"没有密钥就不升级"同一个默认）。
+### 对外地址
 
-**服务端怎么知道自己的地址：** 优先 `SYNCOJ_PUBLIC_URL` / `serve --public-url`；
-没配就从**请求来源反推本机地址**（内核算的，客户端伪造不了）；再退到"教师浏览器
-用过的那个非回环 `Host`"。三条都没有就**什么都不做**（不内嵌、不发现），不退回
-`127.0.0.1`（那样 50 台机器会各自连自己，现场只看到"注册不上"）。三条来源的排序
-理由见 [`design/07-ops-and-install.md §7.3`](design/07-ops-and-install.md)。
+| 优先级 | 来源 |
+|---|---|
+| 1 | `SYNCOJ_PUBLIC_URL` / `serve --public-url` |
+| 2 | 请求来源反推的本机地址 |
+| 3 | 管理界面访问过的非回环 `Host` |
+| — | 都没有：不内嵌、不应答发现，不退回 `127.0.0.1` |
 
-**它会把自己的答案直接打出来。** 启动时要么 `对外地址: http://…（显式配置）`，
-要么如实说 `对外地址: 还没有`（那一刻确实没有线索）；**第一次从局域网打开管理界面**
-时补一行：
+查看当前值：
 
-```
-对外地址: http://10.0.0.5:8000（来源：管理界面访问地址（Host 头，只记成功的请求））
-```
+- 启动日志：`对外地址: http://…（显式配置）` 或 `对外地址: 还没有`；首次从局域网打开管理界面时补打 `对外地址: http://10.0.0.5:8000（来源：…）`。
+- `GET /healthz` 的 `public_url`（无则 `null`）。
 
-来源那一句决定了这个地址有多可信（显式配置 > 请求来源反推 > 教师浏览器用过的那条），
-也决定要不要现在就用 `SYNCOJ_PUBLIC_URL` 固定下来。想随时查：`GET /healthz` 里的
-`public_url` 就是当前答案（没有时是 `null`，**不会**退回 `127.0.0.1`）。
+来源不是显式配置时，用 `SYNCOJ_PUBLIC_URL` 固定。
 
-> UDP `45871` 是个无状态反射点，所以立了一条硬约束：**应答不得大于探测**。探测靠
-> `pad` 凑到 640 字节，更短的探测服务端不理、地址太长时宁可**不应答** —— 不然伪造
-> 来源地址就能借它放大流量。
+### 通告收不到
+
+| 现象 | 处理 |
+|---|---|
+| 机器开 ufw / 交换机隔离广播 | 通告无效，依赖 Agent 主动发现；或装机时 `--discover-address <服务端>` 单播 |
+| 不需要通告 | `SYNCOJ_ANNOUNCE=false` |
+
+发现应答不大于探测：探测短于 640 字节不应答，地址过长时不应答。
 
 ## 发一个 Agent 版本
 
-服务端**跑在源码仓库里**时（`.key/` 就是这么找到的），不必先手工打包：管理界面
-「Agent 发布」页上直接「发布当前版本」—— 服务端从本机 `agent/` 源码构建、用私钥
-签好、进版本历史。
+服务端在源码仓库中运行时：
+
+1. 「Agent 发布」→「发布当前版本」（从本机 `agent/` 构建并签名）。
+2. 「铺开」。未铺开的版本机器不可见，装机入口也不发。
+
+命令行等价：
 
 ```bash
-# 界面上等价的那条命令；产物与界面构建的逐字节相同（可复现打包）
 python3 agent/packaging/build_bundle.py --out dist/syncoj-agent-0.1.0.tar.gz
 ```
 
-三个必须知道的边界：
+| 拒绝情况 | 现象 | 处理 |
+|---|---|---|
+| 提交的版本号 ≠ `agent/syncoj_agent/__init__.py` 的 `__version__` | 409，报出两个版本号 | 改版本号 |
+| 缺私钥或公钥 | 拒绝构建 | 补 `.key/` 或设 `SYNCOJ_RELEASE_KEY` |
+| 服务端无 `agent/` 源码（pip 安装的实例） | 该栏不可用 | 走「上传安装包」 |
 
-- **构建 ≠ 铺开。** 构建出来的是草稿，机器看不到它，要再点「铺开」。
-- **版本号必须显式提交、且必须与 `agent/syncoj_agent/__init__.py` 里的 `__version__`
-  一致。** 不一致时给 409 并同时报出两个版本号。这是为了挡住"改了代码忘了改版本号
-  就静默覆盖上一版"——那种情况的现场表现是"发成功了但已升级的机器拒绝升级"。
-- **缺私钥或缺公钥都会被拒绝**，不是降级打一个未签名/无信任锚的包。后者更糟：
-  界面上一切正常，而所有机器静默不升级。服务端所在机器没有 `agent/` 源码时
-  （例如 pip 装出来的生产实例），这一栏会说明原因，仍可走「上传安装包」那条路。
+附带密钥与「高级选项」→ 见 [`install-agent.md`](install-agent.md)「发版时附带统一注册密钥（可选）」。
+
+## 发布 SyncOJ（GitHub Release）
+
+1. 四处版本号改成同一个值：`server/pyproject.toml`、两个 `__init__.py`、`web/package.json`。
+2. 检查：
+
+   ```bash
+   python scripts/release.py versions
+   ./scripts/check.sh
+   ```
+
+3. 推标签：
+
+   ```bash
+   git tag v<版本号> && git push origin v<版本号>
+   ```
+
+`.github/workflows/release.yml` 依次：`release.py versions --tag` 对账 → 复用 `check.yml` 全量检查（含 systemd 245 冒烟）→ `release.py build` → `gh release create`。版本号带 `a` / `b` / `rc` / `dev` 发为预发布。
+
+| 产物 | 内容 |
+|---|---|
+| `syncoj-<版本>.tar.gz` | 源码 + 预构建 `web/dist`，解开后 `pip install -e server` |
+| `syncoj-agent-<版本>.tar.gz` | Agent 离线包，不带公钥、不带服务端地址 |
+| `install.py`、`bootstrap.sh` | 独立安装器 |
+| `SHA256SUMS` | 校验和 |
+
+本地构建：`python scripts/release.py build --out dist [--tag v<版本号>]`。Release 里的 Agent 包需上传到本服务端签名铺开后机器才会升级 → 见 [`design/07-ops-and-install.md`](design/07-ops-and-install.md)「发布（CD）」。
+
+## systemd 245 冒烟
+
+```bash
+python scripts/smoke_systemd245.py          # 需要 docker 与已安装的服务端（pip install -e server）
+python scripts/smoke_systemd245.py --keep   # 失败后保留容器与临时目录
+```
+
+覆盖：umask 0 安装、日志与配对码、注册单元不跟随符号链接、升级切换、启动守卫回滚、主动通告切换、授权卸载。CI 同样运行。
+
+## 自带评测
+
+1. 「题目」→「评测设置」：评测方式选「自带评测」，填时限 / 内存 / IO 方式 / 编译参数，上传数据包。
+2. 「成绩」→「自带评测」→「添加评测机」，复制令牌（只显示一次）写入文件。
+3. 评测机上以专用账号运行：
+
+   ```bash
+   pip install -e server
+   syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
+   ```
+
+4. 「成绩」→「自带评测」→ 排任务 / 重测，查看进度与失败原因。
+
+| `syncoj-judge` 参数 | 默认 | 说明 |
+|---|---|---|
+| `--server` | 必填 | 服务端管理端口地址 |
+| `--token-file` | 必填 | 评测机令牌文件 |
+| `--backend` | `isolate` | `isolate`（需先装 isolate）/ `rlimit`（不隔离网络与文件系统，仅开发自测） |
+| `--run-as` | — | `rlimit` 以 root 运行时必需：选手程序用此账号跑 |
+| `--box-id` | `0` | isolate box 编号，同机多个 worker 各不相同 |
+| `--isolate` | `isolate` | isolate 可执行文件路径 |
+| `--cgroups` | 关 | isolate 用 cgroup 统计内存 |
+| `--cache-dir` | `~/.cache/syncoj-judge` | 数据包缓存目录 |
+| `--poll` | `5` 秒 | 无任务时轮询间隔 |
+| `--once` | 关 | 评一个任务后退出 |
+| `--verbose` / `-v` | 关 | 调试日志 |
+
+⚠️ 考试进行中评测的是未完成的代码。数据包格式、结果格式、接口 → 见 [`reference/judge-result.md`](reference/judge-result.md) 第 6 节、[`design/10-builtin-judge.md`](design/10-builtin-judge.md)。
 
 ## 命令行等价流程
 
-命令行等价流程（批量部署时更顺手）：
-
 ```bash
 # 场次与选手
-syncoj-server contest create --name "2025 校内模拟赛"
+syncoj-server contest create --name "2025 校内模拟赛"     # 可选 --slug / --status draft|running|frozen|closed（默认 running）/ --note
 syncoj-server contest import-players --contest 2025 --file roster.csv
 syncoj-server contest list
 
-# 统一注册密钥（整间机房一份；明文只显示这一次）
+# 统一注册密钥（明文只显示一次）
 syncoj-server bootstrap-key issue --label "2025 机房镜像" --expires-days 30 \
-    --out /srv/syncoj/bootstrap.key      # 同时写成 root 只读的一份
+    --out /srv/syncoj/bootstrap.key      # 同时写成 root 只读文件
 syncoj-server bootstrap-key list
-syncoj-server bootstrap-key pending      # 还没配对的机器（含配对码剩余时间）
+syncoj-server bootstrap-key pending      # 未配对的机器（含配对码剩余时间）
 syncoj-server bootstrap-key revoke --id 1
 
-# 开发阶段库结构还在动，需要重来时
+# 删库重建（⚠️ 删除全部数据；不带 --yes 只打印计划）
 syncoj-server db reset --yes [--keep-admin]
 ```
 
-名单 CSV 的列顺序是 `选手编号,姓名,座位,分组`（只有编号必填），
-逗号或制表符分隔都认，表头与 `#` 注释行会被自动跳过。
-
-测试规模：**服务端 812 项通过**（另 2 项按环境跳过）、**Agent 509 项通过**
-（另 16 项按环境跳过）。含端到端集成测试（真实 Agent 代码通过真实 HTTP 打到真实
-服务端）、**openssl 交叉验证**（手写密码学代码唯一可信的证据是独立实现能互相
-验通，而且要求 openssl 1.1.1 与 3.0 两种默认输出格式都能读）。
+名单 CSV：列顺序 `选手编号,姓名,座位,分组`，仅编号必填；逗号或制表符分隔；自动跳过表头与 `#` 注释行。
 
 ## 心跳停了怎么排查
 
-先分清三种"停"：① 真的不再心跳；② 在心跳但被服务端拒了；③ 服务端**故意**让它安静
-（场次结束）。三者的证据在不同的地方，按下面顺序走最省时间。
+### 第一步：服务端
 
-### 第一步：在服务端查
+1. 机器列表 / 总览：看「上次心跳」「距上次心跳」。离线阈值默认 **90 秒**，在「运行参数」修改。
+2. 事件页筛 `agent_`：`agent_revoke`（凭据作废）、`agent_unbind`（解除配对）、`agent_uninstall`（请求卸载）；`contest_auto_closed`（场次到点自动结束）。
+3. 服务端日志搜机器名或 `machine_id`：
 
-* **机器列表/总览**里那一行的「上次心跳」与「距上次心跳」——超过离线阈值（管理端
-  「运行参数」，默认 **90 秒**）才显示离线；
-* **事件页**筛 `agent_`：`agent_revoke`（凭据被作废）、`agent_unbind`（被解除配对）、
-  `agent_uninstall`（被请求卸载）、`contest_auto_closed`（到点自动结束场次）；
-* 服务端日志里搜机器名或 `machine_id`，看有没有：
-
-| 响应 | 含义 | 心跳还在吗 |
+| 响应 | 含义 | 心跳 |
 |---|---|---|
-| `401` | 凭据失效（被作废/换库）——Agent 会清掉本地凭据回到"等注册" | 就此停止 |
-| `403 pairing_required` / `contest_player_missing` | 机器还没绑人，或这个场次里没有这个人 | 还在，只是没归属 |
-| `409 contest_ended` | 场次时间窗结束 | **设计如此**：安静下来，不再上传 |
-| `404` | `agent.ini` 里的地址指错了 | 停止（连错服务端） |
+| `401` | 凭据失效（作废 / 换库），Agent 清本地凭据回到等待注册 | 停止 |
+| `403 pairing_required` / `contest_player_missing` | 未绑人，或场次里没有此人 | 继续 |
+| `409 contest_ended` | 场次时间窗结束 | 正常安静，不再上传 |
+| `404` | `agent.ini` 地址指错 | 停止 |
 
-### 第二步：到那台机器上跑这一段
+### 第二步：机器
 
 ```bash
 systemctl status syncoj-agent --no-pager -l | head -20
 systemctl status syncoj-agent-enroll.service --no-pager -l | head -20
 journalctl -u syncoj-agent -n 50 --no-pager
 journalctl -u syncoj-agent-enroll.service -n 50 --no-pager
-sudo tail -n 100 /var/lib/syncoj/agent.log        # 两个单元共用这一个日志
-sudo ls -l /etc/syncoj/ /var/lib/syncoj/          # 凭据、密钥、配置的属主
+sudo tail -n 100 /var/lib/syncoj/agent.log
+sudo ls -l /etc/syncoj/ /var/lib/syncoj/
 df -h /; systemctl show syncoj-agent -p NRestarts -p ExecMainStatus -p User
 ```
 
-判据表（右列都是在实机上出现过的现象）：
-
-| 现场看到 | 原因 | 修法 |
+| 现象 | 原因 | 处理 |
 |---|---|---|
-| `226/NAMESPACE`，服务反复起不来 | 单元里 `ReadWritePaths=` 写了不存在的目录 | 升级到每条路径都带 `-` 的版本 |
-| `统一密钥文件 … 读不出来` + 服务 exit 1 | 老版本 Agent 自己去读 root 只读的密钥 | 升级：新版**服务不注册、只等待**，注册由 `syncoj-agent-enroll.service` 做 |
-| `Start request repeated too quickly` | 上面的失败把 systemd 的重启额度用完了 | 先修真正的原因，再 `systemctl reset-failed syncoj-agent && systemctl start syncoj-agent` |
-| 注册单元 `HTTP 403 bootstrap_key_revoked` | 机器上那把统一密钥服务端不认（吊销过/换了库） | 服务端重签发一把 → **覆盖** `/etc/syncoj/bootstrap.key`（0600、属主 root）→ 重跑注册单元 |
-| 注册单元 `Permission denied: '/etc/syncoj/agent.ini'` | 旧安装留下的配置属主不是当前运行账号 | 重跑安装器（它会顺手改属主），再清一次限流状态 |
-| 服务在跑、日志安静、服务端一个 tick 都没有 | 没有凭据，它正在**等注册**（设计如此） | `systemctl status syncoj-agent-enroll` 看注册那一步 |
-| 服务停在 `activating (auto-restart)` | 起不来、或起来就崩 | `journalctl -u syncoj-agent -n 50` |
-| 机器时间偏得厉害 | 配对码/令牌时效判断错乱 | 校时（考场机器建议开 NTP） |
+| `226/NAMESPACE`，服务反复起不来 | `ReadWritePaths=` 含不存在的目录 | 升级到每条路径带 `-` 的版本 |
+| `统一密钥文件 … 读不出来` + exit 1 | 旧版 Agent 自己读 root 只读密钥 | 升级；新版由 `syncoj-agent-enroll.service` 注册 |
+| `Start request repeated too quickly` | systemd 重启额度用完 | 修根因后 `systemctl reset-failed syncoj-agent && systemctl start syncoj-agent` |
+| 注册单元 `HTTP 403 bootstrap_key_revoked` | 服务端不认机器上的密钥 | 重新签发 → 覆盖 `/etc/syncoj/bootstrap.key`（0600、属主 root）→ 重跑注册单元 |
+| 注册单元 `Permission denied: '/etc/syncoj/agent.ini'` | 配置属主不是运行账号 | 重跑安装器，再清限流状态 |
+| 服务在跑、日志安静、服务端无 tick | 无凭据，等待注册 | `systemctl status syncoj-agent-enroll` |
+| `activating (auto-restart)` | 起不来或起来就崩 | `journalctl -u syncoj-agent -n 50` |
+| 机器时间偏差大 | 配对码 / 令牌时效判断错误 | 校时（开 NTP） |
+| 服务端换了 IP | 机器仍连旧地址 | 「机器配对」→「召集机器」 |
 
-**最省事的一条命令**（前台跑一轮，直接看它说什么）：
+前台跑一轮：
 
 ```bash
 sudo -u <运行账号> /usr/bin/python3 -E -s /opt/syncoj/current/run_agent.py \
     --config /etc/syncoj/agent.ini --verbose --once
 ```
 
-想只验配置对不对，把 `--verbose --once` 换成 `--check`（它会打印**具体哪个键**有问题）。
+只校验配置（打印出错的键）：
 
-### 第三步：不是故障的三种安静
+```bash
+sudo -u <运行账号> /usr/bin/python3 -E -s /opt/syncoj/current/run_agent.py \
+    --config /etc/syncoj/agent.ini --check
+```
 
-* **场次时间窗结束**：Agent 主动安静（409 `contest_ended`），是设计行为，不是故障；
-* **离线阈值**：默认 90 秒没有心跳才显示离线，这个值在管理端「运行参数」里改；
-* **正在升级**：铺开一版之后它会下载 → 验签 → 切目录 → 重启，`agent.log` 里是
-  `upgrade_*` 事件；新版本起不来时启动守卫会自动回滚（回滚点被 `prune` 保护着）；
-* **大文件下发中**：有活时服务端把节奏收到 2 秒，此时列表上是"在线"。
+### 第三步：非故障的安静
+
+| 情况 | 表现 |
+|---|---|
+| 场次时间窗结束 | 409 `contest_ended`，Agent 停止上传 |
+| 未超离线阈值 | 90 秒内无心跳仍显示在线 |
+| 正在升级 | `agent.log` 出现 `upgrade_*`：下载 → 验签 → 切目录 → 重启；新版起不来时启动守卫自动回滚 |
+| 大文件下发中 | tick 间隔收紧到 2 秒，列表显示在线 |

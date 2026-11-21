@@ -1749,6 +1749,9 @@ def delete_player(
             )
         ).scalar_one()
 
+        hashes = list(session.execute(
+            select(SourceFile.sha256).where(SourceFile.player_id == player_id).distinct()
+        ).scalars())
         session.delete(player)
         session.add(
             EventLog(
@@ -1760,6 +1763,8 @@ def delete_player(
             )
         )
 
+    # 代码台账随选手级联删掉了；内容曾经不回收，永远留在 blobs/ 里
+    _reclaim_blobs(ctx, hashes)
     detail = "已删除选手 %s（代码 %d 条，成绩 %d 条）" % (player_no, files, runs)
     if bound_machines:
         detail += "。他的 %d 台机器没有动 —— 那些机器绑的是人，不是这场比赛的记录" % (
@@ -2480,7 +2485,8 @@ def delete_source_file(
         player_no = player.player_no if player else "?"
         session.delete(row)
         session.flush()
-        freed = _release_blob_if_unreferenced(session, ctx, sha256)
+        candidates = _unreferenced(session, [sha256])
+    freed = _reclaim_blobs(ctx, candidates)
 
     detail = "已删除 %s 的台账记录 %s" % (player_no, rel_path)
     if was_live:
@@ -2490,38 +2496,53 @@ def delete_source_file(
     return SimpleAck(ok=True, detail=detail)
 
 
-def _release_blob_if_unreferenced(session, ctx: AppContext, sha256: str) -> bool:
-    """没有任何记录再引用这份内容时，把它从存储里删掉。
+#: 内容寻址存储的全部消费者：回收上来的代码、下发的资产、发布的 Agent 包。
+#: **只有这一份清单**（第一版按用途各写了一份同名函数，后定义的静默覆盖了先定义的）。
+#: 以后再加消费者，改这一处。
+_BLOB_REFERENCES = (
+    (SourceFile, SourceFile.sha256),
+    (Asset, Asset.sha256),
+    (AgentRelease, AgentRelease.sha256),
+)
 
-    内容寻址存储是**三处共用**的：回收上来的代码、下发的资产、发布的 Agent 包。
-    所以"还有没有人用"必须一次查全 —— 只查一处会在跨用途共享时报错删掉
-    别人还在用的内容，而表现是"某个早就归档的文件突然取不到内容"，
-    不报错、只是 404，事后极难对上原因。
 
-    **这个函数只能有一个定义。** 第一版按用途各写了一份，
-    于是同名的那个把先定义的静默覆盖掉了 —— 而 Python 不会为此发任何警告。
-    现在收成一个：以后再加内容消费者，改这一处。
+def _unreferenced(session, hashes) -> List[str]:
+    """在**当前事务**里（删除已 flush）看哪些内容已经没人引用 —— 只用来算回执里的数字。
+
+    真正删文件在提交之后（:func:`_reclaim_blobs`）：曾经在事务里就 unlink，提交一旦
+    失败，行回来了、内容却没了，表现是"某个早就归档的文件突然取不到内容"。
     """
-    references = (
-        (SourceFile, SourceFile.sha256),
-        (Asset, Asset.sha256),
-        (AgentRelease, AgentRelease.sha256),
-    )
-    for model, column in references:
-        left = session.execute(
-            select(func.count(model.id)).where(column == sha256)
-        ).scalar_one() or 0
-        if left:
-            return False
+    left = []
+    for sha in sorted(set(h for h in hashes if h)):
+        if not any(
+            session.execute(select(func.count(model.id)).where(column == sha)).scalar_one()
+            for model, column in _BLOB_REFERENCES
+        ):
+            left.append(sha)
+    return left
 
-    try:
-        ctx.blobs.path_for(sha256).unlink()
-        return True
-    except FileNotFoundError:
-        return False
-    except OSError as exc:  # pragma: no cover
-        log.warning("删除 blob %s 失败：%s", sha256, exc)
-        return False
+
+def _reclaim_blobs(ctx: AppContext, hashes) -> int:
+    """**提交之后**回收没人引用的内容：新开一个会话再查一遍引用，确实没人用才删。
+
+    再查一遍是为了窄化"提交与删除之间有人刚好上传了同一份内容"的窗口（上传先写
+    blob、后写台账）。返回实际删掉的份数。
+    """
+    candidates = sorted(set(h for h in hashes if h))
+    if not candidates:
+        return 0
+    with ctx.db.session() as session:
+        unused = _unreferenced(session, candidates)
+    freed = 0
+    for sha in unused:
+        try:
+            ctx.blobs.path_for(sha).unlink()
+            freed += 1
+        except FileNotFoundError:
+            pass
+        except OSError as exc:  # pragma: no cover
+            log.warning("删除 blob %s 失败：%s", sha, exc)
+    return freed
 
 
 @router.post("/contests/{contest_id}/files/clear", response_model=SimpleAck)
@@ -2569,7 +2590,8 @@ def clear_source_files(
         )
         removed = _bulk_delete(session, SourceFile, *conditions)
 
-        freed = sum(1 for sha in hashes if _release_blob_if_unreferenced(session, ctx, sha))
+        candidates = _unreferenced(session, hashes)
+        freed = len(candidates)
 
         session.add(
             EventLog(
@@ -2581,6 +2603,7 @@ def clear_source_files(
             )
         )
 
+    _reclaim_blobs(ctx, candidates)
     detail = "已清理 %d 条台账记录，释放 %d 份内容" % (removed, freed)
     if purge:
         detail += "。机器还在报的文件会在下一轮重新出现"
@@ -2924,6 +2947,13 @@ def delete_contest(
         }
         slug = contest.slug
         name = contest.name
+        hashes = list(session.execute(
+            select(SourceFile.sha256).where(
+                SourceFile.player_id.in_(select(Player.id).where(Player.contest_id == contest_id))
+            ).distinct()
+        ).scalars()) + list(session.execute(
+            select(Asset.sha256).where(Asset.contest_id == contest_id)
+        ).scalars())
         session.delete(contest)
         session.add(
             EventLog(
@@ -2938,6 +2968,8 @@ def delete_contest(
             )
         )
 
+    # 代码与资产随场次级联删掉了；内容曾经不回收，永远留在 blobs/ 里
+    _reclaim_blobs(ctx, hashes)
     # 内存里的在线状态也要跟着清，否则顶栏会继续显示一台已经不存在的场次的机器
     for runtime in list(ctx.registry.all(contest_id)):
         ctx.registry.forget(runtime.agent_id)
@@ -4164,10 +4196,13 @@ def delete_asset(
         if asset is None:
             return SimpleAck(ok=True, detail="资产不存在")
         filename = asset.filename
+        sha256 = asset.sha256
         tasks = session.execute(
             select(func.count(DeployTask.id)).where(DeployTask.asset_id == asset_id)
         ).scalar_one()
         session.delete(asset)
+    # 曾经不回收：删掉的资产内容永远留在 blobs/ 里
+    _reclaim_blobs(ctx, [sha256])
 
     return SimpleAck(
         ok=True,
@@ -5925,8 +5960,7 @@ def delete_release(
         version = row.version
         sha256 = row.sha256
         session.delete(row)
-        session.flush()
-        freed = _release_blob_if_unreferenced(session, ctx, sha256)
+    freed = _reclaim_blobs(ctx, [sha256])
 
     detail = "已删除版本 %s" % version
     if freed:

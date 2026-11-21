@@ -140,11 +140,14 @@ python3 agent/packaging/build_bundle.py --out dist/syncoj-agent-0.1.0.tar.gz
    ./scripts/check.sh
    ```
 
-3. 推标签：
+3. 触发发布，二选一：
+   - 推标签：
 
-   ```bash
-   git tag v<版本号> && git push origin v<版本号>
-   ```
+     ```bash
+     git tag v<版本号> && git push origin v<版本号>
+     ```
+
+   - GitHub → Actions →「release」→ Run workflow，`version` 填 `<版本号>`（不带 `v`）。在 `main` 当前提交上检查、构建，最后打标签并发布；标签已存在则失败。
 
 `.github/workflows/release.yml` 依次：`release.py versions --tag` 对账 → 复用 `check.yml` 全量检查（含 systemd 245 冒烟）→ `release.py build` → `gh release create`。版本号带 `a` / `b` / `rc` / `dev` 发为预发布。
 

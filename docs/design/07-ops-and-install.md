@@ -133,7 +133,7 @@ Agent 以选手账号运行（../design/00-decisions.md §0），而卸载要删
 
 ### 7.5 发布（CD）：打标签即发版
 
-`.github/workflows/release.yml`：推 `v<版本号>` 标签触发。
+`.github/workflows/release.yml`：推 `v<版本号>` 标签触发；或在 Actions 页手动运行（填版本号），在 `main` 当前提交上跑完下面四步后由工作流打标签（标签已存在则拒绝）。
 
 1. **版本号对账**（`scripts/release.py versions --tag`）：`server/pyproject.toml`、两个 `__init__.py`、`web/package.json` 四处一致，标签恰为 `v<版本号>`；带 `a/b/rc/dev` 的发成预发布。日常 `check.py` 也跑"四处一致"。
 2. **全量检查**：以 `workflow_call` 复用 `check.yml`（py38 / 最新 Python + 前端 / root / systemd 245 冒烟），任一路不过不发。

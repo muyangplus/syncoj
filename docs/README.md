@@ -166,7 +166,7 @@ python server/tools/dump_openapi.py && (cd web && npm run gen:types)
 | 公开端口：默认 80，仅装机页与选手页 | ✅ |
 | 选手页公告：取自下发的 `NOTICE.md` | ✅ |
 | 考试时间窗：窗口外拒收，到点自动置「已结束」 | ✅ |
-| 发布：推 `v<版本号>` 标签生成 GitHub Release | ✅ |
+| 发布：推 `v<版本号>` 标签或在 Actions 手动运行，生成 GitHub Release | ✅ |
 
 ## 快速开始（开发）
 

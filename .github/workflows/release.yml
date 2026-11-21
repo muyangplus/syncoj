@@ -2,7 +2,10 @@
 #
 #   1. 改四处版本号（server/pyproject.toml、server/syncoj_server/__init__.py、
 #      agent/syncoj_agent/__init__.py、web/package.json），提交并合进 main
-#   2. git tag v0.2.0 && git push origin v0.2.0
+#   2. 二选一：
+#      a. git tag v0.2.0 && git push origin v0.2.0
+#      b. Actions →「release」→ Run workflow，填版本号 0.2.0：在 main 当前提交上检查、构建，
+#         最后由工作流自己打 v0.2.0 标签并发布（标签已存在则拒绝）
 #
 # 标签与代码里的版本号对不上、任何一路检查不过，都不会发布。版本号带 a/b/rc/dev 的
 # 发成预发布（pre-release）。产物与构建方式见 scripts/release.py 的文档字符串。
@@ -15,6 +18,12 @@ name: release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号（不带 v，如 0.1.0），必须与代码里四处版本号一致"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -26,6 +35,8 @@ concurrency:
 env:
   PYTHONIOENCODING: utf-8
   PYTHONUTF8: "1"
+  # 推标签触发时就是那个标签；手动触发时由输入的版本号拼出来
+  TAG: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
 
 jobs:
   versions:
@@ -40,7 +51,14 @@ jobs:
         with:
           python-version: "3.x"
       - id: check
-        run: python scripts/release.py versions --tag "$GITHUB_REF_NAME" --github-output "$GITHUB_OUTPUT"
+        run: python scripts/release.py versions --tag "$TAG" --github-output "$GITHUB_OUTPUT"
+      - name: 手动发布：标签不能已存在
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+            echo "标签 $TAG 已存在：换一个版本号，或删掉旧标签再来" >&2
+            exit 1
+          fi
 
   checks:
     name: 全量检查
@@ -66,7 +84,7 @@ jobs:
           npm ci --prefix web
           npm run build --prefix web
       - name: 打包
-        run: python scripts/release.py build --out dist --tag "$GITHUB_REF_NAME"
+        run: python scripts/release.py build --out dist --tag "$TAG"
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ needs.versions.outputs.version }}
@@ -110,6 +128,12 @@ jobs:
           NOTES
           flags=()
           if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); fi
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --verify-tag --title "SyncOJ ${VERSION}" \
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            # 手动发布：在构建所用的那个提交上打标签（gh 建 release 时一并建标签）
+            flags+=(--target "$GITHUB_SHA")
+          else
+            flags+=(--verify-tag)
+          fi
+          gh release create "$TAG" dist/* \
+            --title "SyncOJ ${VERSION}" \
             --notes-file notes.md --generate-notes "${flags[@]}"

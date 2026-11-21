@@ -36,3 +36,23 @@ def test_场次结束后的心跳仍然记为在线(client, enrolled, app) -> No
     runtime = app.state.ctx.registry.get(enrolled["agent_id"])
     assert runtime.tick_count == before + 1, "待配对 / 无场次的心跳没有记进注册表"
     assert runtime.online
+
+
+def test_扫描不完整只在状态变化时记一条(client, enrolled, app) -> None:
+    from syncoj_server.models import EventLog
+
+    def count() -> int:
+        with app.state.ctx.db.session() as session:
+            return len(session.execute(
+                select(EventLog).where(EventLog.category == "scan_incomplete")
+            ).scalars().all())
+
+    for _ in range(3):
+        do_tick(client, enrolled["token"], [], machine_id=enrolled["machine_id"],
+                scan_complete=False)
+    assert count() == 1, "同一状态每轮都记会把审计刷成同一句话"
+
+    do_tick(client, enrolled["token"], [], machine_id=enrolled["machine_id"])
+    do_tick(client, enrolled["token"], [], machine_id=enrolled["machine_id"],
+            scan_complete=False)
+    assert count() == 2, "状态消失后再出现要再记"

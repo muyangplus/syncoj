@@ -442,6 +442,8 @@ class Agent:
         self._deploy_jobs: List[dict] = []
         #: 每个目标最近一次失败的原因：只在原因变化时发审计事件（否则每轮一条）
         self._deploy_fail_reason: Dict[int, str] = {}
+        #: 边沿触发的事件：类别 → 上一次上报时的特征（见 _emit_on_change）
+        self._edge_state: Dict[str, str] = {}
         self._credential: Optional[Credential] = None
         #: 收到"激活新版本"后置位，主循环据此退出让 systemd 重启
         self._restart_requested = False
@@ -1411,17 +1413,22 @@ class Agent:
 
         public_key = self._public_key
         if public_key is None:
-            self._emit(
-                "warning", "upgrade_no_key",
+            self._emit_on_change(
+                "warning", "upgrade_no_key", version,
                 "upgrade.mode=%s 但缺少可用的发布公钥，拒绝升级 %s" % (mode, version),
             )
             return
+        self._emit_on_change("warning", "upgrade_no_key", None)
 
         try:
             manifest = ReleaseManifest.from_dict(info)
         except UpgradeError as exc:
-            self._emit("warning", "upgrade_bad_manifest", "发布清单不合法：%s" % exc)
+            self._emit_on_change(
+                "warning", "upgrade_bad_manifest", "%s|%s" % (version, exc),
+                "发布清单不合法：%s" % exc,
+            )
             return
+        self._emit_on_change("warning", "upgrade_bad_manifest", None)
 
         attempt_key = (manifest.version, manifest.sha256)
         if self._handled_release == attempt_key:
@@ -1664,6 +1671,24 @@ class Agent:
             }
         )
 
+    def _emit_on_change(
+        self, level: str, category: str, signature: Optional[str], message: str = "",
+        meta: Optional[dict] = None,
+    ) -> None:
+        """状态类事件**只在状态变化时**上报（边沿触发）。
+
+        ``signature`` 是这一轮的状态特征；``None`` 表示状态消失（清掉，下次出现时
+        重新报）。曾经每轮都报：一个超限文件每 30 秒一条 oversize_skipped，一个缺
+        公钥的升级每轮一条 upgrade_no_key —— 审计里全是同一句话。
+        """
+        if signature is None:
+            self._edge_state.pop(category, None)
+            return
+        if self._edge_state.get(category) == signature:
+            return
+        self._edge_state[category] = signature
+        self._emit(level, category, message, meta)
+
     def _pending_tick(self) -> Tuple[str, float]:
         """还没法干活的一轮：只心跳，不扫描。返回 ``(轮末状态, 等待秒数)``。
 
@@ -1784,18 +1809,18 @@ class Agent:
             scan_complete=(skipped_roots == 0),
         )
 
-        if oversize:
-            self._emit(
-                "warning", "oversize_skipped",
-                "有 %d 个文件超过大小上限，未回收" % len(oversize),
-                {"paths": oversize[:20]},
-            )
-        if errors:
-            self._emit(
-                "warning", "scan_error",
-                "扫描过程中出现 %d 个错误" % len(errors),
-                {"errors": errors[:10]},
-            )
+        self._emit_on_change(
+            "warning", "oversize_skipped",
+            "\n".join(sorted(oversize)) if oversize else None,
+            "有 %d 个文件超过大小上限，未回收" % len(oversize),
+            {"paths": oversize[:20]},
+        )
+        self._emit_on_change(
+            "warning", "scan_error",
+            "\n".join(sorted(errors)) if errors else None,
+            "扫描过程中出现 %d 个错误" % len(errors),
+            {"errors": errors[:10]},
+        )
 
         # 未完成下载的偏移量已在 _build_tick_payload 里从磁盘实况收集，
         # 不依赖上一轮的作业列表 —— Agent 重启后照样能续传。

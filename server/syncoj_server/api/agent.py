@@ -97,6 +97,42 @@ _RANGE_CHUNK = 256 * 1024
 MAX_NEED_UPLOAD = 500
 
 
+#: 状态类审计事件：**只在状态变化时**记一条（边沿触发）。曾经每轮都写库 ——
+#: 一个缺失的扫描根让 scan_incomplete 每 30 秒一条，一个上午上千条一模一样的
+#: 事件，那条审计就再也读不得了。值是"特征"怎么取：
+#:   None   —— 只看有没有（数量变化不算新状态）
+#:   "paths" —— 看被拒的是哪几条
+_EDGE_CATEGORIES = {"scan_incomplete": None, "scan_rejected": "paths"}
+
+
+def _edge_triggered(runtime, events):
+    """按注册表里这台机器上一轮的状态过滤掉"状态没变"的那几类事件。"""
+    if runtime is None:
+        return events
+    state = runtime.edge_state
+    present = set()
+    kept = []
+    for event in events:
+        category = event[1]
+        if category not in _EDGE_CATEGORIES:
+            kept.append(event)
+            continue
+        present.add(category)
+        if _EDGE_CATEGORIES[category] == "paths":
+            items = (event[3] or {}).get("items") or []
+            signature = json.dumps(sorted(str(i.get("path")) for i in items), ensure_ascii=False)
+        else:
+            signature = "on"
+        if state.get(category) != signature:
+            state[category] = signature
+            kept.append(event)
+    for category in list(state):
+        if category in _EDGE_CATEGORIES and category not in present:
+            # 状态消失：清掉，下次再出现时重新记一条
+            del state[category]
+    return kept
+
+
 def _require_protocol(reported: int) -> None:
     """协议太旧的 Agent 回 426 ``agent_outdated``（见 ``syncoj_server.protocol``）。"""
     if reported < MIN_AGENT_PROTOCOL_VERSION:
@@ -403,7 +439,7 @@ def tick(
             player_id=identity.player_id,
             contest_id=identity.contest_id,
             agent_id=identity.agent_id,
-            events=collect.events,
+            events=_edge_triggered(ctx.registry.get(identity.agent_id), collect.events),
         )
 
         # 先收回执、再派作业：本轮刚报完成的不该再出现在作业里

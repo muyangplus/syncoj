@@ -539,3 +539,20 @@ def test_待配对路径也处理服务端给的升级(config: AgentConfig) -> N
     agent._pending_tick()
 
     assert seen == [{"version": "9.9.9"}]
+
+
+def test_状态类事件只在变化时上报(config: AgentConfig) -> None:
+    """边沿触发：同一状态每轮都报会把审计刷成同一句话。"""
+    agent = make_agent(config, RecordingClient())
+    agent._pending_events = []
+
+    agent._emit_on_change("warning", "oversize_skipped", "a.in", "超限")
+    agent._emit_on_change("warning", "oversize_skipped", "a.in", "超限")
+    assert [e["category"] for e in agent._pending_events] == ["oversize_skipped"]
+
+    agent._emit_on_change("warning", "oversize_skipped", "a.in\nb.in", "超限")
+    assert len(agent._pending_events) == 2, "状态变了要再报"
+
+    agent._emit_on_change("warning", "oversize_skipped", None)
+    agent._emit_on_change("warning", "oversize_skipped", "a.in\nb.in", "超限")
+    assert len(agent._pending_events) == 3, "状态消失后再出现要再报"

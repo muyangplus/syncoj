@@ -58,6 +58,10 @@ class AgentRuntime:
     #: 最近一次心跳里被题目预设挡掉的文件数（0 = 没有被挡掉的）。
     scan_skipped: int = 0
 
+    #: 边沿触发的审计事件：类别 → 上一轮的"特征"（见 api/agent._edge_triggered）。
+    #: 只在内存里：服务端重启后同一状态会再记一次，可以接受。
+    edge_state: Dict[str, str] = field(default_factory=dict)
+
     #: 需要被批量落库
     dirty: bool = True
     #: 供 Web 展示的累计 tick 次数

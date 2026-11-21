@@ -79,7 +79,7 @@ SERVICE_NAME = "syncoj-agent"
 CONFIG_FILENAME = "agent.ini"
 UNIT_FILENAME = SERVICE_NAME + ".service"
 #: root 管理单元：Agent（选手账号、无特权）把升级 / 卸载请求放进状态目录的
-#: 交接目录，path 单元触发这个 root oneshot 去处理（ADR-0012 的 2026-11 重写）。
+#: 交接目录，path 单元触发这个 root oneshot 去处理（ADR-0012）。
 ADMIN_UNIT_FILENAME = SERVICE_NAME + "-admin.service"
 ADMIN_PATH_UNIT_FILENAME = SERVICE_NAME + "-admin.path"
 #: 管理单元执行的代码放这里：安装器把**自己**拷过去，升级**不替换**它
@@ -4041,7 +4041,7 @@ def _writable_paths(
       配对码文件、下发落点都在它下面；不放开写权限，``ProtectSystem=strict``
       会把家目录也变成只读，表现是"服务起来了但什么都不传"。曾经写的是 ``-%h``：
       在**系统**单元里 ``%h`` 是服务管理器自己（root）的家目录 ``/root``，不是
-      ``User=`` 的 —— 等于没放开选手桌面（ADR-0007「现状」）。
+      ``User=`` 的 —— 等于没放开选手桌面（ADR-0007）。
     * 安装根目录 —— 自更新要往 ``releases/`` 里写。
     * 状态目录 —— 日志、凭据、哈希缓存。
     * 配置目录 / 单元目录 / ``/etc/sudoers.d`` / 辅助脚本目录 —— 这四条**只**

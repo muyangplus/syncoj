@@ -79,4 +79,4 @@ systemd 的说明书（`systemd.unit(5)`，"Specifiers"）对 `%h` 的定义是�
 
 **已改（2026-11）**：`install.py:_writable_paths` 现在写安装时按运行账号解析出的绝对家目录
 （`pwd.getpwnam(<账号>).pw_dir`，查不到按 `/home/<账号>`），例如 `-/home/noi`；单元里不再
-出现 `%h`，测试一并改了。仍待 systemd 245 实机冒烟确认。
+出现 `%h`，测试一并改了。systemd 245 容器冒烟（`scripts/smoke_systemd245.py`，CI 每次跑）已验证：家目录可写、桌面配对码由服务写出。

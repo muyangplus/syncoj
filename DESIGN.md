@@ -25,6 +25,8 @@
 | §6 安全 | [`docs/design/06-security.md`](docs/design/06-security.md) |
 | §7 运维与装机 | [`docs/design/07-ops-and-install.md`](docs/design/07-ops-and-install.md) |
 | §8 里程碑 / §9 待补信息 / §10 待办 | [`docs/design/08-milestones-and-open.md`](docs/design/08-milestones-and-open.md) |
+| §11 服务端主动通告（提案） | [`docs/design/09-server-announce.md`](docs/design/09-server-announce.md) |
+| §12 自带沙箱评测（提案） | [`docs/design/10-builtin-judge.md`](docs/design/10-builtin-judge.md) |
 
 ## 小节（代码与注释里真的有引用的那些）
 

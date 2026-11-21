@@ -48,6 +48,8 @@
 | [`design/06-security.md`](design/06-security.md) | 安全面清单、签名算法选型、信任边界现状（明文 HTTP、自举链、发布私钥）（原 §6） |
 | [`design/07-ops-and-install.md`](design/07-ops-and-install.md) | 运维与装机：`.key/`、发布、安装策略三档、服务端发现、远程卸载（原 §7） |
 | [`design/08-milestones-and-open.md`](design/08-milestones-and-open.md) | 里程碑、待补信息、待办与被明确否决的想法（原 §8 / §9 / §10） |
+| [`design/09-server-announce.md`](design/09-server-announce.md) | 提案（未实现）：服务端主动通告地址、Agent 听到后挑战应答再切换（§11） |
+| [`design/10-builtin-judge.md`](design/10-builtin-judge.md) | 提案（未实现）：自带沙箱评测，结果写进 `judge_result/`、独立 worker、可插拔沙箱（§12） |
 
 ### 决策记录（ADR）
 

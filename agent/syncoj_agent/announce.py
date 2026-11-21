@@ -116,12 +116,14 @@ class AnnounceListener(threading.Thread):
         super().__init__(name="syncoj-announce", daemon=True)
         self.slot = slot
         self.port = port
-        self._stop = threading.Event()
+        # 不能叫 _stop：Python 3.8 的 Thread 自己有一个 _stop() 方法，join() / is_alive()
+        # 会调它，被一个 Event 盖掉就是 TypeError（只在 3.8 上炸，CI 的 py38 那一路抓到的）
+        self._halt = threading.Event()
         self.bound = threading.Event()
         self.sock: Optional[socket.socket] = None
 
     def stop(self) -> None:
-        self._stop.set()
+        self._halt.set()
 
     def run(self) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -136,7 +138,7 @@ class AnnounceListener(threading.Thread):
         self.sock = sock
         self.bound.set()
         try:
-            while not self._stop.is_set():
+            while not self._halt.is_set():
                 try:
                     raw, _peer = sock.recvfrom(MAX_ANNOUNCE_BYTES + 1)
                 except socket.timeout:

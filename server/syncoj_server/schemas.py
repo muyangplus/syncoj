@@ -74,7 +74,7 @@ def page_of(items: List[T], total: int, params: Any) -> "Page[T]":
 def slice_page(rows: List[T], params: Any) -> "Page[T]":
     """对有界集合用 Python 切片分页。
 
-    只在"天然就很小"的集合上用（场次、名单、题目、资产…）。
+    只在"天然就很小"、且要在 Python 里拼字段的集合上用（场次要算在线人数、题目…）。
     ``total`` 仍然是完整长度，所以前端看到的分页信息是真的。
     """
     return page_of(

@@ -583,16 +583,18 @@ def list_rosters(
     admin: AdminIdentity = Depends(require_admin),
 ) -> Page[RosterOut]:
     with ctx.db.session() as session:
-        counts = dict(
+        # 分页在 SQL 里做，条目数只数这一页的名单（名单名唯一，按名排序就是全序）
+        total = _count(session, Roster)
+        rows = list(
             session.execute(
-                select(RosterEntry.roster_id, func.count(RosterEntry.id)).group_by(
-                    RosterEntry.roster_id
-                )
-            ).all()
+                select(Roster).order_by(Roster.name).limit(page.limit).offset(page.offset)
+            ).scalars()
         )
-        rows = list(session.execute(select(Roster).order_by(Roster.name)).scalars())
-        return slice_page(
-            [_roster_out(row, counts.get(row.id, 0)) for row in rows], page
+        counts = _counts_by(
+            session, RosterEntry.roster_id, RosterEntry.id, [row.id for row in rows]
+        )
+        return page_of(
+            [_roster_out(row, counts.get(row.id, 0)) for row in rows], total, page
         )
 
 
@@ -1376,10 +1378,16 @@ def list_bootstrap_keys(
     admin: AdminIdentity = Depends(require_admin),
 ) -> Page[BootstrapKeyOut]:
     with ctx.db.session() as session:
+        total = _count(session, BootstrapKey)
         rows = list(
-            session.execute(select(BootstrapKey).order_by(BootstrapKey.id)).scalars()
+            session.execute(
+                select(BootstrapKey)
+                .order_by(BootstrapKey.id)
+                .limit(page.limit)
+                .offset(page.offset)
+            ).scalars()
         )
-        return slice_page([_bootstrap_key_out(row) for row in rows], page)
+        return page_of([_bootstrap_key_out(row) for row in rows], total, page)
 
 
 @router.post("/bootstrap-keys", response_model=BootstrapKeyIssuedOut)
@@ -1573,6 +1581,10 @@ def list_players(
                 .offset(page.offset)
             ).scalars()
         )
+        # 两项统计都只算**这一页**的选手：曾经按全库分组再取用，
+        # 机器、代码文件一多，翻一页选手列表就要扫一遍整张表。
+        page_nos = [player.player_no for player in players]
+        page_ids = [player.id for player in players]
         # 机器数是**跨场次**的：机器绑的是人（名单条目），不是这场比赛的选手记录。
         # 所以按准考证号去数，而不是按 player_id —— 同一个人在别的场次绑的机器
         # 也该算"他有机器"，否则每一场的列表都会显示成"未注册"。
@@ -1581,16 +1593,16 @@ def list_players(
             for player_no, count in session.execute(
                 select(RosterEntry.player_no, func.count(Agent.id))
                 .join(Agent, Agent.roster_entry_id == RosterEntry.id)
-                .where(Agent.revoked_at.is_(None))
+                .where(Agent.revoked_at.is_(None), RosterEntry.player_no.in_(page_nos))
                 .group_by(RosterEntry.player_no)
             ).all()
-        }
-        file_counts = dict(
-            session.execute(
-                select(SourceFile.player_id, func.count(SourceFile.id))
-                .where(SourceFile.deleted_at.is_(None))
-                .group_by(SourceFile.player_id)
-            ).all()
+        } if page_nos else {}
+        file_counts = _counts_by(
+            session,
+            SourceFile.player_id,
+            SourceFile.id,
+            page_ids,
+            SourceFile.deleted_at.is_(None),
         )
 
     # 在线状态走内存注册表，不查库
@@ -2948,6 +2960,22 @@ def _count(session, model, *conditions) -> int:
     )
 
 
+def _counts_by(session, key_col, id_col, keys: List[Any], *conditions) -> Dict[Any, int]:
+    """``{key: 行数}``，只数 ``keys`` 里这几个（列表页的"这一页"）。
+
+    列表接口的统计列一律这样算：先在 SQL 里切出一页，再对这一页的主键做一次
+    ``GROUP BY``。对全表分组再在 Python 里挑，翻一页就要扫一遍整张表。
+    """
+    if not keys:
+        return {}
+    rows = session.execute(
+        select(key_col, func.count(id_col))
+        .where(key_col.in_(keys), *conditions)
+        .group_by(key_col)
+    ).all()
+    return {key: int(count) for key, count in rows}
+
+
 @router.get("/health", response_model=AdminHealthOut)
 def health(
     ctx: AppContext = Depends(get_ctx),
@@ -3434,14 +3462,19 @@ def list_assets(
     admin: AdminIdentity = Depends(require_admin),
 ) -> Page[AssetOut]:
     with ctx.db.session() as session:
+        total = _count(session, Asset, Asset.contest_id == contest_id)
         rows = list(
             session.execute(
-                select(Asset).where(Asset.contest_id == contest_id).order_by(Asset.id.desc())
+                select(Asset)
+                .where(Asset.contest_id == contest_id)
+                .order_by(Asset.id.desc())
+                .limit(page.limit)
+                .offset(page.offset)
             ).scalars()
         )
-        pending = _pending_target_counts(session, contest_id)
-        return slice_page(
-            [_asset_out(row, pending.get(row.id, 0)) for row in rows], page
+        pending = _pending_target_counts(session, [row.id for row in rows])
+        return page_of(
+            [_asset_out(row, pending.get(row.id, 0)) for row in rows], total, page
         )
 
 
@@ -3461,17 +3494,19 @@ def _asset_out(asset: Asset, pending_targets: int = 0) -> AssetOut:
     )
 
 
-def _pending_target_counts(session, contest_id: int) -> Dict[int, int]:
-    """每个资产还有几个选手没下载完。
+def _pending_target_counts(session, asset_ids: List[int]) -> Dict[int, int]:
+    """这一页的每个资产还有几个选手没下载完。
 
     一次分组查询，而不是逐行去数 —— 资产列表一屏几十行，
-    N+1 会把一次列表请求变成几十次查询。
+    N+1 会把一次列表请求变成几十次查询。只数传进来的这几个资产，不扫全场。
     """
+    if not asset_ids:
+        return {}
     rows = session.execute(
         select(DeployTask.asset_id, func.count(DeployTarget.id))
         .join(DeployTarget, DeployTarget.task_id == DeployTask.id)
         .where(
-            DeployTask.contest_id == contest_id,
+            DeployTask.asset_id.in_(asset_ids),
             DeployTarget.status.in_(ACTIVE_DEPLOY_STATUSES),
         )
         .group_by(DeployTask.asset_id)
@@ -4222,7 +4257,7 @@ def create_deploy(
                 % (asset.filename, len(players), dest_dir or "<根目录>"),
             )
         )
-        return _deploy_task_out(session, task, asset, include_targets=False)
+        return _one_deploy_task_out(session, task, include_targets=False)
 
 
 def _resolve_target_players(session, contest_id: int, payload: DeployCreate):
@@ -4274,18 +4309,42 @@ def list_deploys(
     admin: AdminIdentity = Depends(require_admin),
 ) -> Page[DeployTaskOut]:
     with ctx.db.session() as session:
+        # 一页任务固定三条查询（任务 / 资产 / 按状态分组计数），外加要明细时的一条；
+        # 曾经是逐任务各查一次资产、一次全部目标 —— 任务一多就是几百条查询。
+        total = _count(session, DeployTask, DeployTask.contest_id == contest_id)
         tasks = list(
             session.execute(
                 select(DeployTask)
                 .where(DeployTask.contest_id == contest_id)
                 .order_by(DeployTask.id.desc())
+                .limit(page.limit)
+                .offset(page.offset)
             ).scalars()
         )
-        out = []
-        for task in tasks:
-            asset = session.get(Asset, task.asset_id)
-            out.append(_deploy_task_out(session, task, asset, include_targets=include_targets))
-        return slice_page(out, page)
+        task_ids = [task.id for task in tasks]
+        asset_ids = sorted({task.asset_id for task in tasks})
+        assets = (
+            {
+                asset.id: asset
+                for asset in session.execute(
+                    select(Asset).where(Asset.id.in_(asset_ids))
+                ).scalars()
+            }
+            if asset_ids
+            else {}
+        )
+        counts = _deploy_status_counts(session, task_ids)
+        targets = _deploy_targets_out(session, task_ids) if include_targets else {}
+        out = [
+            _deploy_task_out(
+                task,
+                assets.get(task.asset_id),
+                counts.get(task.id, {}),
+                targets.get(task.id, []),
+            )
+            for task in tasks
+        ]
+        return page_of(out, total, page)
 
 
 @router.get("/deploys/{task_id}", response_model=DeployTaskOut)
@@ -4298,8 +4357,7 @@ def get_deploy(
         task = session.get(DeployTask, task_id)
         if task is None:
             raise HTTPException(status_code=404, detail="下发任务不存在")
-        asset = session.get(Asset, task.asset_id)
-        return _deploy_task_out(session, task, asset, include_targets=True)
+        return _one_deploy_task_out(session, task, include_targets=True)
 
 
 @router.post("/deploys/{task_id}/cancel", response_model=SimpleAck)
@@ -4370,31 +4428,57 @@ def retry_deploy(
     return SimpleAck(ok=True, detail="已重置 %d 个失败目标" % affected)
 
 
-def _deploy_task_out(session, task: DeployTask, asset, include_targets: bool) -> DeployTaskOut:
-    rows = list(
-        session.execute(
-            select(DeployTarget, Player.player_no)
-            .join(Player, DeployTarget.player_id == Player.id)
-            .where(DeployTarget.task_id == task.id)
-            .order_by(Player.player_no)
-        )
-    )
-    counts: Dict[str, int] = {}
-    targets: List[DeployTargetOut] = []
-    for target, player_no in rows:
-        counts[target.status] = counts.get(target.status, 0) + 1
-        if include_targets:
-            targets.append(
-                DeployTargetOut(
-                    player_id=target.player_id,
-                    player_no=player_no,
-                    status=target.status,
-                    bytes_done=int(target.bytes_done),
-                    retry_count=int(target.retry_count),
-                    last_error=target.last_error,
-                )
-            )
+def _deploy_status_counts(session, task_ids: List[int]) -> Dict[int, Dict[str, int]]:
+    """``{task_id: {目标状态: 台数}}`` —— 一条 ``GROUP BY`` 算完一页任务。"""
+    result: Dict[int, Dict[str, int]] = {}
+    if not task_ids:
+        return result
+    for task_id, status_, count in session.execute(
+        select(DeployTarget.task_id, DeployTarget.status, func.count(DeployTarget.id))
+        .where(DeployTarget.task_id.in_(task_ids))
+        .group_by(DeployTarget.task_id, DeployTarget.status)
+    ).all():
+        result.setdefault(int(task_id), {})[status_] = int(count)
+    return result
 
+
+def _deploy_targets_out(session, task_ids: List[int]) -> Dict[int, List[DeployTargetOut]]:
+    """``{task_id: 逐选手进度}``，每个任务内按考号排序。一条查询取完一页任务。"""
+    result: Dict[int, List[DeployTargetOut]] = {}
+    if not task_ids:
+        return result
+    for target, player_no in session.execute(
+        select(DeployTarget, Player.player_no)
+        .join(Player, DeployTarget.player_id == Player.id)
+        .where(DeployTarget.task_id.in_(task_ids))
+        .order_by(DeployTarget.task_id, Player.player_no)
+    ):
+        result.setdefault(int(target.task_id), []).append(
+            DeployTargetOut(
+                player_id=target.player_id,
+                player_no=player_no,
+                status=target.status,
+                bytes_done=int(target.bytes_done),
+                retry_count=int(target.retry_count),
+                last_error=target.last_error,
+            )
+        )
+    return result
+
+
+def _one_deploy_task_out(session, task: DeployTask, include_targets: bool) -> DeployTaskOut:
+    """单个任务的出参（建任务、看详情）。与列表走同一套计数与明细查询。"""
+    counts = _deploy_status_counts(session, [task.id]).get(task.id, {})
+    targets = _deploy_targets_out(session, [task.id]).get(task.id, []) if include_targets else []
+    return _deploy_task_out(task, session.get(Asset, task.asset_id), counts, targets)
+
+
+def _deploy_task_out(
+    task: DeployTask,
+    asset: Optional[Asset],
+    counts: Dict[str, int],
+    targets: List[DeployTargetOut],
+) -> DeployTaskOut:
     return DeployTaskOut(
         id=task.id,
         contest_id=task.contest_id,
@@ -4407,7 +4491,7 @@ def _deploy_task_out(session, task: DeployTask, asset, include_targets: bool) ->
         mode=task.mode,
         status=_derive_task_status(task, counts),
         created_at=_iso(task.created_at) or "",
-        total=len(rows),
+        total=sum(counts.values()),
         done=counts.get(DeployStatus.DONE, 0),
         failed=counts.get(DeployStatus.FAILED, 0),
         pending=(

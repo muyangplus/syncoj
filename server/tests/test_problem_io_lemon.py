@@ -500,3 +500,9 @@ def test_export_sub_folder_check_follows_file_patterns(patterns, sub_folder: boo
         (task,) = json.loads(zf.read("contest/contest.cdf"))["tasks"]
     assert task["subFolderCheck"] is sub_folder
     assert ("lemon_layout_mismatch" in codes(outcome.notices[1])) is warned
+
+
+def test_codeforces_style_io_names(tmp_path: Path) -> None:
+    bundle = parse_one(tmp_path, lemon_task("cf", 2, inputFileName="input.txt", outputFileName="output.txt"))
+    assert bundle.errors == []
+    assert (bundle.io_mode, bundle.input_file, bundle.output_file) == ("file", "input.txt", "output.txt")

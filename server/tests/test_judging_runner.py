@@ -144,6 +144,16 @@ def test_文件IO用自定义文件名(tmp_path) -> None:
 
 
 @needs_gcc
+def test_文件IO可以用input_txt与output_txt(tmp_path) -> None:
+    code = AB.replace("int main(){", "int main(){freopen(\"input.txt\",\"r\",stdin);freopen(\"output.txt\",\"w\",stdout);")
+    names = {"io_mode": "file", "input_file": "input.txt", "output_file": "output.txt"}
+    assert judge(tmp_path, code, ab_data(tmp_path), **names).status == "AC"
+    checker = ("#include <cstdio>\nint main(int c,char**v){FILE*o=fopen(v[2],\"r\"),*a=fopen(v[3],\"r\");"
+               "long long x,y;fscanf(o,\"%lld\",&x);fscanf(a,\"%lld\",&y);return x==y?0:1;}")
+    assert judge(tmp_path, code, ab_data(tmp_path, {"checker.cpp": checker}), **names).status == "AC"
+
+
+@needs_gcc
 def test_程序不能跨测试点留东西(tmp_path) -> None:
     sneaky = ("#include <cstdio>\nint main(){FILE*f=fopen(\"mark\",\"r\");if(f){puts(\"0\");return 0;}"
               "fopen(\"mark\",\"w\");long long a,b;scanf(\"%lld%lld\",&a,&b);printf(\"%lld\\n\",a+b);}")

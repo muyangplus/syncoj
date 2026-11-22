@@ -57,11 +57,12 @@ def _validate_flags(raw: Optional[str]) -> Optional[str]:
 
 #: 文件 IO 文件名：字母数字开头，只含字母数字 . _ -（不能带目录）
 _IO_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-#: 沙箱工作目录里 runner 自己要用的文件名（见 judging/runner.py），选手的输入/输出不能占用
+#: 沙箱工作目录里 runner 自己要用的文件名（见 judging/runner.py），选手的输入/输出不能占用。
+#: input.txt / output.txt 只在标准 IO 时由 runner 使用，文件 IO 时可以当文件名
 _RESERVED_IO_NAMES = frozenset({
     "prog", "main.c", "main.cpp", "compile.out", "compile.err",
     "chk", "checker.err", "chk.out", "chk.err",
-    "in.txt", "out.txt", "ans.txt", "input.txt", "output.txt",
+    "in.txt", "out.txt", "ans.txt",
 })
 
 

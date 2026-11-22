@@ -781,7 +781,7 @@ def test_io_file_names_round_trip(client: TestClient, contest: dict, admin_heade
 @pytest.mark.parametrize("field", ["input_file", "output_file"])
 @pytest.mark.parametrize(
     "name",
-    ["prog", "main.cpp", "chk", "in.txt", "ans.txt", "input.txt", "chk.err",
+    ["prog", "main.cpp", "chk", "in.txt", "ans.txt", "out.txt", "chk.err",
      "../x.in", "a/b.in", ".hidden", "..", "a b.in", "题.in", "-x.in", "x" * 65],
 )
 def test_io_file_name_is_validated(
@@ -791,6 +791,15 @@ def test_io_file_name_is_validated(
     response = put_judge(client, problem, admin_headers, **{field: name})
     assert response.status_code in (400, 422), (name, response.text)
     assert list_problems(client, contest, admin_headers)[0][field] is None
+
+
+def test_io_file_name_may_be_input_txt(client: TestClient, contest: dict, admin_headers: dict) -> None:
+    """input.txt / output.txt 只在标准 IO 时由评测机使用，文件 IO 可以用（Codeforces 风格）。"""
+    problem = add_problems(client, contest, admin_headers, [{"ident": "ab"}]).json()["problems"][0]
+    response = put_judge(client, problem, admin_headers, io_mode="file", input_file="input.txt",
+                         output_file="output.txt")
+    assert response.status_code == 200, response.text
+    assert (response.json()["input_file"], response.json()["output_file"]) == ("input.txt", "output.txt")
 
 
 def test_io_input_and_output_must_differ(client: TestClient, contest: dict, admin_headers: dict) -> None:

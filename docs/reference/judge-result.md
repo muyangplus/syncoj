@@ -248,7 +248,7 @@ curl -H "Authorization: Bearer <管理员令牌>" \
 | `time_limit_ms` | 100–60000 | 1000 |
 | `memory_limit_mb` | 16–4096 | 256 |
 | `io_mode` | `stdio` / `file`（读输入文件、写输出文件） | `stdio` |
-| `input_file` / `output_file` | 文件 IO 的文件名，≤64 字符：字母或数字开头，只含字母、数字、`.` `_` `-`；不能用评测机自己的文件名（`prog`、`main.cpp`、`chk`、`input.txt` 等）；两者生效名不能相同；空 = `<题目>.in` / `<题目>.out`。`PUT` 整体覆盖，不传即回到默认名 | 空 |
+| `input_file` / `output_file` | 文件 IO 的文件名，≤64 字符：字母或数字开头，只含字母、数字、`.` `_` `-`；不能用评测机自己的文件名（`prog`、`main.cpp`、`chk`、`in.txt` 等）；两者生效名不能相同；空 = `<题目>.in` / `<题目>.out`。`PUT` 整体覆盖，不传即回到默认名 | 空 |
 | `compile_flags` | ≤200 字符；只收 `-std=` / `-O` / `-D` / `-W` / `-f…`（不含 `-fplugin`）/ `-g` / `-static` / `-m…` | 空 |
 
 数据包：`POST /api/v1/admin/problems/{id}/testdata` 上传，`DELETE` 同路径删除。

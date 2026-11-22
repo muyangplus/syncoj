@@ -262,3 +262,45 @@ def test_checker报告自身失败不能当成选手错(tmp_path) -> None:
     data = ab_data(tmp_path, {"checker.cpp": "int main(){return 3;}"})
     with pytest.raises(sandbox.SandboxError, match="退出码 3"):
         judge(tmp_path, AB, data)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX 符号链接")
+def test_工作目录里的符号链接不会被跟着写(tmp_path) -> None:
+    """选手程序把 prog / out.txt 换成指向别处的链接：评测机放文件、读输出都不能跟过去。"""
+    box = factory(tmp_path)()
+    try:
+        victim = tmp_path / "victim"
+        victim.write_bytes(b"keep")
+        os.symlink(str(victim), str(box.workdir / "prog"))
+        box.put("prog", b"new", 0o755)
+        assert victim.read_bytes() == b"keep"
+        assert not (box.workdir / "prog").is_symlink() and (box.workdir / "prog").read_bytes() == b"new"
+        os.symlink(str(victim), str(box.workdir / "out.txt"))
+        assert runner._read(box, "out.txt") is None
+        os.mkfifo(str(box.workdir / "fifo"))
+        assert runner._read(box, "fifo") is None  # 不会卡住
+    finally:
+        box.close()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc")
+def test_逃出进程组的子进程按账号与启动时刻清掉(tmp_path) -> None:
+    import subprocess
+    import time as _time
+
+    old = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    young = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    try:
+        # 伪造 /proc：只放这两个进程，启动时刻一早一晚
+        for proc, start in ((old, 100), (young, 1000)):
+            entry = tmp_path / str(proc.pid)
+            entry.mkdir()
+            (entry / "stat").write_text("%d (sleep) S %s %d\n" % (proc.pid, " ".join(["0"] * 18), start))
+        assert sandbox.kill_processes_since(os.getuid(), 500, proc_root=str(tmp_path)) == 1
+        young.wait(timeout=5)
+        _time.sleep(0.1)
+        assert old.poll() is None
+    finally:
+        for proc in (old, young):
+            proc.kill()
+            proc.wait()

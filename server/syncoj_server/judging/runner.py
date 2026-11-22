@@ -18,6 +18,8 @@ NOI 惯例：
 from __future__ import annotations
 
 import sys
+import os
+import stat
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -165,13 +167,16 @@ def _truncate(data: bytes) -> str:
 
 
 def _read(box: sb.Sandbox, name: str, limit: int = MAX_OUTPUT_COMPARE) -> Optional[bytes]:
-    path = box.workdir / name
+    # 不跟随符号链接，且只读普通文件：选手程序可能把输出文件换成指向别处的链接或 FIFO
     try:
-        if path.is_symlink() or not path.is_file() or path.stat().st_size > limit:
-            return None
-        return path.read_bytes()
+        fd = sb.open_existing(box.workdir / name)
     except OSError:
         return None
+    with os.fdopen(fd, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            return None
+        return handle.read(limit + 1)[:limit]
 
 
 def judge(

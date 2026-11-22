@@ -6,7 +6,9 @@
 
 * 通告**不签名**，只是一条线索：``{"syncoj", "v", "kind": "announce", "url", "key_id", "boot_id"}``；
 * 机器听到后到通告里的地址上做**挑战应答**：``GET <url>/api/v1/agent/whoami?nonce=<机器现生成>``，
-  服务端用发布私钥签 ``syncoj-announce-v1\\n<nonce>\\n<url>``，验过才切换（见 ``api/agent.py``）。
+  服务端用发布私钥签 ``syncoj-announce-v1\\n<nonce>\\n<url>``，验过才切换（见 ``api/agent.py``）；
+  请求带 ``v=2`` 时签 ``syncoj-announce-v2\\n<nonce>\\n<url>\\n<server_uuid>``，机器只切到
+  它记住的那个实例 ID。
 
 通告本身被伪造、被重放，都只会让机器多发一次 HTTP 请求。
 
@@ -38,6 +40,8 @@ log = logging.getLogger(__name__)
 #: 挑战应答签名对象的版本前缀：与发现（``syncoj-discovery-v1``）、发布签名都不同，
 #: 一个场景的签名搬不到另一个场景里用。
 ANNOUNCE_SIGNATURE_PREFIX = "syncoj-announce-v1"
+#: v2 带上服务端实例 ID（``server_uuid``）：机器只切到它记住的那一台
+ANNOUNCE_SIGNATURE_PREFIX_V2 = "syncoj-announce-v2"
 
 #: 通告端口。与发现端口分开：发现端口是服务端在听，这个端口是**机器**在听。
 DEFAULT_ANNOUNCE_PORT = 45872
@@ -54,6 +58,11 @@ MAX_ANNOUNCE_BYTES = 512
 def challenge_text(nonce: str, url: str) -> str:
     """挑战应答要签的那段文本。**两边必须逐字节一致**。"""
     return "%s\n%s\n%s" % (ANNOUNCE_SIGNATURE_PREFIX, nonce, url)
+
+
+def challenge_text_v2(nonce: str, url: str, server_uuid: str) -> str:
+    """v2：连服务端实例 ID 一起签（请求带 ``v=2`` 时）。前缀不同，与 v1 签名互不可搬。"""
+    return "%s\n%s\n%s\n%s" % (ANNOUNCE_SIGNATURE_PREFIX_V2, nonce, url, server_uuid)
 
 
 def build_announcement(url: str, key_id: str, boot_id: str) -> Optional[bytes]:

@@ -326,6 +326,9 @@ class TickResponse(_Base):
     #: 解析出来的身份，Agent 拿到就存进凭据，之后才能扫代码
     player_no: Optional[str] = None
     contest_slug: Optional[str] = None
+    #: 服务端实例 ID（``<data_root>/server-id``，跨重启不变）。Agent 记住它，之后
+    #: 局域网发现 / 主动通告只切到同一个 ID 的服务端（§7.3）。老 Agent 忽略
+    server_uuid: Optional[str] = None
 
 
 class UploadResult(_Base):
@@ -355,7 +358,7 @@ class AgentEvent(_Base):
 
 
 class WhoAmIOut(_Base):
-    """挑战应答（§11）：用发布私钥签 ``syncoj-announce-v1\n<nonce>\n<url>``。
+    """挑战应答（§11）：用发布私钥签 ``syncoj-announce-v1\n<nonce>\n<url>``（v2 见下）。
 
     ``url`` 是**服务端自己认定的**对外地址（§7.3 的三条来源），不是请求里的 Host：
     机器切换到的是签名里的这个地址。
@@ -365,6 +368,9 @@ class WhoAmIOut(_Base):
     nonce: str
     key_id: str = ""
     sig: str
+    #: 请求带 ``v=2`` 且服务端有实例 ID 时才有：此时签名对象是
+    #: ``syncoj-announce-v2\n<nonce>\n<url>\n<server_uuid>``
+    server_uuid: Optional[str] = None
 
 
 class AnnounceStatusOut(_Base):

@@ -39,6 +39,14 @@
 
     syncoj-discovery-v1\\n<nonce>\\n<url>
 
+探测里带了 ``machine_uuid``（新 Agent，同时带它记住的 ``server_uuid``）时回 v2：
+应答多 ``server_uuid``（本服务端实例 ID）与 ``known``（库里有没有这台机器），签名
+对象换成::
+
+    syncoj-discovery-v2\\n<nonce>\\n<url>\\n<server_uuid>\\n<machine_uuid>\\n<1|0>
+
+记着实例 ID 的机器只切到同一个 ID、且 ``known=1`` 的服务端。老探测照旧回 v1。
+
 版本前缀的作用是**跨协议隔离**：将来若有另一处也用这把私钥签东西，两边的签名
 对象不会长得一样，一个签名就不能被搬到另一个场景里用。随机数是防重放的：
 机器每次探测现生成，应答里带不回那个数就不认。
@@ -58,6 +66,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 import secrets
 import socket
 import time
@@ -72,6 +81,7 @@ __all__ = [
     "MIN_PROBE_BYTES",
     "PROTOCOL_VERSION",
     "canonical_text",
+    "canonical_text_v2",
     "build_probe",
     "build_reply",
     "describe_advertised_url",
@@ -89,6 +99,8 @@ PROTOCOL_VERSION = 1
 
 #: 规范化签名串的前缀（跨协议隔离，见模块说明）。
 SIGNATURE_PREFIX = "syncoj-discovery-v1"
+#: 带实例 ID 的应答（探测里有 ``machine_uuid`` 时）用这个前缀，与 v1 签名互不可搬。
+SIGNATURE_PREFIX_V2 = "syncoj-discovery-v2"
 
 #: 探测报文的默认长度，也是服务端接受的最小长度。
 #:
@@ -107,10 +119,39 @@ MAX_DATAGRAM_BYTES = 2048
 #: 所以有一条测试盯着它们相等。
 DEFAULT_DISCOVERY_PORT = 45871
 
+#: 带 ``machine_uuid`` 的探测凑到的长度。v2 应答比 v1 多出实例 ID 与 ``known``
+#: （约 60 字节），探测相应加长，"应答不得大于探测"仍留着给地址的余量。
+#: 服务端接受的最小长度不变（仍是 ``MIN_PROBE_BYTES``）。
+V2_PROBE_BYTES = 768
+
+#: 探测里 ``machine_uuid`` 的形状（与 Agent ``state._sanitize`` 的字符集一致，长度按库列）
+_MACHINE_UUID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
 
 def canonical_text(nonce: str, url: str) -> str:
     """要被签名的那段文本。**两边必须逐字节一致**，所以它只有这一处定义。"""
     return "%s\n%s\n%s" % (SIGNATURE_PREFIX, nonce, url)
+
+
+def canonical_text_v2(
+    nonce: str, url: str, server_uuid: str, machine_uuid: str, known: bool
+) -> str:
+    """v2 签名对象：再加服务端实例 ID、探测里的机器 UUID、以及"认不认得它"。
+
+    机器 UUID 也签进去：否则中间人可以把探测里的 ``machine_uuid`` 换成一台已注册
+    机器的，骗到一个 ``known=1`` 的签名。
+    """
+    return "%s\n%s\n%s\n%s\n%s\n%s" % (
+        SIGNATURE_PREFIX_V2, nonce, url, server_uuid, machine_uuid, "1" if known else "0",
+    )
+
+
+def probe_machine_uuid(probe: Dict[str, object]) -> str:
+    """探测里的 ``machine_uuid``；没有或形状不对就空串（按 v1 应答）。"""
+    value = probe.get("machine_uuid")
+    if isinstance(value, str) and _MACHINE_UUID_RE.match(value):
+        return value
+    return ""
 
 
 def _b64(raw: bytes) -> str:
@@ -121,7 +162,9 @@ def _b64(raw: bytes) -> str:
 def build_probe(
     nonce: Optional[str] = None,
     machine_id: str = "",
-    min_bytes: int = MIN_PROBE_BYTES,
+    min_bytes: Optional[int] = None,
+    machine_uuid: str = "",
+    server_uuid: str = "",
 ) -> bytes:
     """造一个探测报文。**带填充**，让它不短于服务端要求的最小长度。
 
@@ -129,12 +172,17 @@ def build_probe(
     """
     if nonce is None:
         nonce = secrets.token_hex(16)
+    if min_bytes is None:
+        min_bytes = V2_PROBE_BYTES if machine_uuid else MIN_PROBE_BYTES
     payload = {
         "syncoj": MAGIC,
         "v": PROTOCOL_VERSION,
         "nonce": nonce,
         "machine_id": machine_id,
     }
+    if machine_uuid:
+        payload["machine_uuid"] = machine_uuid
+        payload["server_uuid"] = server_uuid
     raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     if len(raw) >= min_bytes:
         return raw
@@ -173,12 +221,28 @@ def parse_probe(raw: bytes) -> Optional[Dict[str, object]]:
     return payload
 
 
-def build_reply(nonce: str, url: str, signer, max_bytes: int) -> Optional[bytes]:
+def build_reply(
+    nonce: str,
+    url: str,
+    signer,
+    max_bytes: int,
+    *,
+    server_uuid: str = "",
+    machine_uuid: str = "",
+    known: bool = False,
+) -> Optional[bytes]:
     """造应答。**超长就返回 ``None``**（宁可不答，也不要当放大器）。
 
     ``signer`` 是 :class:`ReplySigner`（鸭子类型即可：要有一个 ``sign(bytes)``）。
+    ``server_uuid`` 与 ``machine_uuid`` 都有时回 v2（多 ``server_uuid`` / ``known``
+    两个字段，签名对象见 :func:`canonical_text_v2`）；否则回 v1。
     """
-    signature = _b64(signer.sign(canonical_text(nonce, url).encode("utf-8")))
+    v2 = bool(server_uuid and machine_uuid)
+    if v2:
+        text = canonical_text_v2(nonce, url, server_uuid, machine_uuid, known)
+    else:
+        text = canonical_text(nonce, url)
+    signature = _b64(signer.sign(text.encode("utf-8")))
     payload = {
         "syncoj": MAGIC,
         "v": PROTOCOL_VERSION,
@@ -187,6 +251,9 @@ def build_reply(nonce: str, url: str, signer, max_bytes: int) -> Optional[bytes]
         "key_id": getattr(signer, "key_id", None) or "",
         "sig": signature,
     }
+    if v2:
+        payload["server_uuid"] = server_uuid
+        payload["known"] = bool(known)
     raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     if len(raw) > max_bytes:
         # 地址特别长（比如带 IPv6 或一长串域名）时可能超；这种情况下不答，
@@ -380,10 +447,51 @@ def _answer_one(ctx, sock, signer, seen, raw: bytes, peer) -> None:
         log.debug("无法确定对外地址，忽略来自 %s 的探测", peer_ip)
         return
 
-    reply = build_reply(str(probe["nonce"]), url, signer, max_bytes=len(raw))
+    machine_uuid = probe_machine_uuid(probe)
+    server_uuid = getattr(ctx, "server_uuid", "") or ""
+    remembered = probe.get("server_uuid")
+    if machine_uuid and isinstance(remembered, str) and remembered and server_uuid and remembered != server_uuid:
+        # 照样应答（签名里带着自己的 ID，机器自己会拒）—— 这里只留一条线索
+        log.debug("探测来自记着别的服务端（%s）的机器 %s", remembered[:32], peer_ip)
+    known = _machine_known(ctx, machine_uuid) if machine_uuid and server_uuid else False
+    reply = build_reply(
+        str(probe["nonce"]),
+        url,
+        signer,
+        max_bytes=len(raw),
+        server_uuid=server_uuid,
+        machine_uuid=machine_uuid,
+        known=known,
+    )
     if reply is None:
         return
     try:
         sock.sendto(reply, peer)
     except OSError as exc:  # pragma: no cover
         log.debug("发现应答发送失败：%s", exc)
+
+
+def _machine_known(ctx, machine_uuid: str) -> bool:
+    """库里有没有这台机器（按 ``machine_uuid``，未吊销）。查不了就当不认得。
+
+    "不认得"的后果是机器不切过来 —— 宁可让一台机器继续找，也不要把它引到一台
+    没有它的台账的服务端上（那里它只会重新注册、换一个配对码）。
+    """
+    db = getattr(ctx, "db", None)
+    if db is None:
+        return False
+    try:
+        from sqlalchemy import select
+
+        from ..models import Agent
+
+        with db.session() as session:
+            found = session.execute(
+                select(Agent.id).where(
+                    Agent.machine_uuid == machine_uuid, Agent.revoked_at.is_(None)
+                ).limit(1)
+            ).first()
+        return found is not None
+    except Exception as exc:  # pragma: no cover - 库坏了之类
+        log.warning("发现应答查机器失败，按不认得回：%s", exc)
+        return False

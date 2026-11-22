@@ -66,6 +66,27 @@ def test_挑战应答签的是服务端自己认定的地址(client: TestClient,
     assert not _verify(keyed, announce.challenge_text("f" * 32, body["url"]), body["sig"])
 
 
+@requires_openssl
+def test_挑战应答_v2_签名里带实例ID(client: TestClient, keyed, app) -> None:
+    response = client.get("/api/v1/agent/whoami", params={"nonce": NONCE, "v": 2})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    server_uuid = app.state.ctx.server_uuid
+    assert server_uuid and body["server_uuid"] == server_uuid
+    text = announce.challenge_text_v2(NONCE, body["url"], server_uuid)
+    assert text.startswith("syncoj-announce-v2\n")
+    assert _verify(keyed, text, body["sig"])
+    assert not _verify(keyed, announce.challenge_text_v2(NONCE, body["url"], "f" * 32), body["sig"])
+    assert not _verify(keyed, announce.challenge_text(NONCE, body["url"]), body["sig"]), "v2 签名不能当 v1 用"
+
+
+@requires_openssl
+def test_挑战应答_老机器不带v_仍是v1(client: TestClient, keyed) -> None:
+    body = client.get("/api/v1/agent/whoami", params={"nonce": NONCE}).json()
+    assert body.get("server_uuid") is None
+    assert _verify(keyed, announce.challenge_text(NONCE, body["url"]), body["sig"])
+
+
 def test_挑战应答_随机数形状不对就拒(client: TestClient) -> None:
     assert client.get("/api/v1/agent/whoami", params={"nonce": "short"}).status_code == 422
     assert client.get("/api/v1/agent/whoami", params={"nonce": "G" * 32}).status_code == 422

@@ -544,6 +544,7 @@ def tick(
         # 没必要 —— 那会多一次限速、多一条审计，还多一个可能失败的网络往返。
         player_no=identity.player_no,
         contest_slug=identity.contest_slug,
+        server_uuid=ctx.server_uuid or None,
     )
 
 
@@ -660,6 +661,7 @@ def _tick_pending(
         uninstall_token=uninstall_token,
         diagnostics_request=diagnostics_request,
         config=_agent_config(ctx, live),
+        server_uuid=ctx.server_uuid or None,
     )
 
 
@@ -982,6 +984,7 @@ _SAFE_HOST_RE = re.compile(r"^[A-Za-z0-9.\-]+(?::[0-9]{1,5})?$|^\[[0-9A-Fa-f:.]+
 def whoami(
     request: Request,
     nonce: str = Query(..., min_length=32, max_length=32, pattern="^[0-9a-f]{32}$"),
+    v: int = Query(1),
     ctx: AppContext = Depends(get_ctx),
 ) -> WhoAmIOut:
     """挑战应答（§11）：证明"此刻在这个地址上的，握着发布私钥"。
@@ -1003,12 +1006,20 @@ def whoami(
     url = discovery.describe_advertised_url(ctx, None if client_ip == "unknown" else client_ip)
     if url is None:
         raise ApiError(503, "no_public_url", "这台服务端还不知道自己的对外地址")
-    signature = ctx.signing_key.sign(announce.challenge_text(nonce, url).encode("utf-8"))
+    # v=2（新 Agent）且有实例 ID：签名连 server_uuid 一起签，机器只切到它记住的那台。
+    # 老 Agent 不带 v，仍拿 v1 签名
+    server_uuid = ctx.server_uuid if v >= 2 else ""
+    if server_uuid:
+        text = announce.challenge_text_v2(nonce, url, server_uuid)
+    else:
+        text = announce.challenge_text(nonce, url)
+    signature = ctx.signing_key.sign(text.encode("utf-8"))
     return WhoAmIOut(
         url=url,
         nonce=nonce,
         key_id=getattr(ctx.signing_key, "key_id", "") or "",
         sig=base64.urlsafe_b64encode(signature).decode("ascii").rstrip("="),
+        server_uuid=server_uuid or None,
     )
 
 

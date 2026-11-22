@@ -637,3 +637,18 @@ def test_export_compile_flags_round_trip(tmp_path: Path, flags, dropped, back) -
     result, _ = _parse(tmp_path, data)
     (bundle,) = result.problems
     assert bundle.compile_flags == back
+
+
+def test_limits_defaulted_names_only_the_missing_value(tmp_path: Path) -> None:
+    bundle, _, _ = _one(tmp_path, hoj_problem_json(timeLimit=3000, memoryLimit=None))
+    (item,) = [n for n in bundle.warnings if n.code == "limits_defaulted"]
+    assert (bundle.time_limit_ms, bundle.memory_limit_mb) == (3000, 256)
+    assert item.message == "内存未知，已设为 256 MB"
+
+
+def test_every_uneven_group_is_named(tmp_path: Path) -> None:
+    doc = hoj_problem_json(count=4, judgeCaseMode="subtask_lowest")
+    doc["samples"] = _samples([10, 20, 30, 40], groups=[1, 1, 2, 2])
+    bundle, _, _ = _one(tmp_path, doc)
+    (item,) = [n for n in bundle.warnings if n.code == "subtask_scores_uneven"]
+    assert item.message == "子任务 1、2 内分值不一致，取最小值 10、30"

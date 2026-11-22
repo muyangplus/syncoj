@@ -774,3 +774,22 @@ def test_export_warns_about_total_time_limit() -> None:
     assert notices == {1: ["hydro_total_time"]}
     _, notices = export([problem("ok", data, time_limit_ms=2400)], [data])
     assert notices == {1: []}
+
+
+def test_every_uneven_subtask_is_named(tmp_path: Path) -> None:
+    config = ("subtasks:\n"
+              "  - {score: 30, type: max, cases: [{input: 1.in, output: 1.out, score: 10},"
+              " {input: 2.in, output: 2.out, score: 20}]}\n"
+              "  - {score: 70, type: max, cases: [{input: 3.in, output: 3.out, score: 30},"
+              " {input: 4.in, output: 4.out, score: 40}]}\n")
+    bundle, _ = one(tmp_path, hydro_pkg(config, "1", "2", "3", "4"))
+    (item,) = [n for n in bundle.warnings if n.code == "subtask_scores_uneven"]
+    assert item.message == "子任务 1、2 内分值不一致，取最小值 10、30"
+
+
+def test_root_level_package_is_named_after_the_upload(tmp_path: Path) -> None:
+    with problem_io.parse_archive(stage(tmp_path, make_syzoj_zip()), "auto", "syzoj-pkg.zip") as parsed:
+        (bundle,) = parsed.result.problems
+    assert (bundle.key, bundle.source_name, bundle.ident) == (".", "syzoj-pkg", "syzoj-pkg")
+    item = [n for n in bundle.warnings if n.code == "limits_defaulted"][0]
+    assert item.message == "时限/内存未知，已设为 1000 ms / 256 MB"

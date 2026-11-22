@@ -54,7 +54,7 @@ from .bundle import (
 )
 from .checkers import TESTLIB_NAME, checker_language_ok, real_checker
 from .exporting import OpenBlob, open_testdata
-from .notices import ProblemIoError, notice
+from .notices import ProblemIoError, limits_defaulted, notice, scores_uneven
 
 __all__ = ["LABEL", "parse", "export", "parse_time_ms", "parse_memory_mb", "valid_pid"]
 
@@ -497,6 +497,7 @@ def _normalize(
     fill = _get_score(max(100 - sum(scores), 0), sum(1 for s in scores if not s))
     out = _Normalized()
     used: set = set()
+    uneven: List[Tuple[Any, int]] = []
 
     def case_name(raw: _RawCase) -> str:
         base = str(raw.input or "case").replace("\\", "/").rsplit("/", 1)[-1]
@@ -544,12 +545,13 @@ def _normalize(
                 bundle.warn(notice(warning))
             lowest = min(case.score for case in made)
             if any(case.score != score for case in made):
-                bundle.warn(notice("subtask_scores_uneven", group=sub.id if sub.id is not None else number,
-                                   score=lowest))
+                uneven.append((sub.id if sub.id is not None else number, lowest))
             for case in made:
                 case.score = 0
             out.subtasks.append(BundleSubtask(score=lowest, cases=[case.name for case in made]))
         out.cases.extend(made)
+    if uneven:
+        bundle.warn(scores_uneven(uneven))
     return out
 
 
@@ -677,7 +679,7 @@ def _syzoj_config(bundle: ProblemBundle, problem: _Problem, config: Dict[str, An
     normalized = _normalize(bundle, problem, subtasks, DEFAULT_TIME_LIMIT_MS, "%dm" % DEFAULT_MEMORY_LIMIT_MB,
                             {"min": None, "mul": "mul_as_bundle"})
     bundle.time_limit_ms, bundle.memory_limit_mb = DEFAULT_TIME_LIMIT_MS, DEFAULT_MEMORY_LIMIT_MB
-    bundle.warn(notice("limits_defaulted"))
+    bundle.warn(limits_defaulted(True, True))
     bundle.cases, bundle.subtasks = normalized.cases, normalized.subtasks
 
 

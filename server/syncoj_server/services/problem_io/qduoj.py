@@ -34,7 +34,7 @@ from .bundle import (
     ImportResult,
     ProblemBundle,
 )
-from .notices import ProblemIoError, notice, register
+from .notices import ProblemIoError, limits_defaulted, notice, register
 
 __all__ = ["LABEL", "parse"]
 
@@ -85,7 +85,7 @@ def _limits(doc: Dict[str, Any], bundle: ProblemBundle) -> None:
     time_limit = _number(doc.get("time_limit"))
     memory_limit = _number(doc.get("memory_limit"))
     if time_limit is None or memory_limit is None:
-        bundle.warn(notice("limits_defaulted"))
+        bundle.warn(limits_defaulted(time_limit is None, memory_limit is None))
     bundle.time_limit_ms = int(time_limit) if time_limit is not None else DEFAULT_TIME_LIMIT_MS
     bundle.memory_limit_mb = int(math.ceil(memory_limit)) if memory_limit is not None else DEFAULT_MEMORY_LIMIT_MB
 

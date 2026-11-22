@@ -10,9 +10,9 @@ from __future__ import annotations
 
 from typing import Dict, Mapping, Optional
 
-from .bundle import Notice
+from .bundle import DEFAULT_MEMORY_LIMIT_MB, DEFAULT_TIME_LIMIT_MS, Notice
 
-__all__ = ["MESSAGES", "ProblemIoError", "notice", "register"]
+__all__ = ["MESSAGES", "ProblemIoError", "notice", "register", "limits_defaulted", "scores_uneven"]
 
 MESSAGES: Dict[str, str] = {
     # ---- 整包级错误（ProblemIoError） ----
@@ -75,7 +75,7 @@ MESSAGES: Dict[str, str] = {
     "statement_dropped": "题面、标签等未导入",
     "dependency_dropped": "子任务依赖已丢弃，得分可能偏高",
     "limits_collapsed": "各测试点时限/内存不同，已统一为 {time} ms / {memory} MB",
-    "limits_defaulted": "时限/内存未知，已设为 1000 ms / 256 MB",
+    "limits_defaulted": "{what}未知，已设为 {value}",
     "mixed_io": "输入与输出方式不一致，按文件 IO 导入",
     "strict_compare_relaxed": "原为严格逐行比较，现忽略行末空白",
     "diff_compare_relaxed": "原为 diff 比较，现忽略行末空白",
@@ -113,6 +113,27 @@ def notice(code: str, message: Optional[str] = None, **params: object) -> Notice
         raise KeyError("未登记的提示代码：%s" % code)
     text = message if message is not None else MESSAGES[code].format_map(_Missing(params))
     return Notice(code=code, message=text)
+
+
+def limits_defaulted(time_missing: bool, memory_missing: bool) -> Notice:
+    """``limits_defaulted``：只写真正缺了、被设成默认值的那一项（或两项）。"""
+    what, value = [], []
+    if time_missing:
+        what.append("时限")
+        value.append("%d ms" % DEFAULT_TIME_LIMIT_MS)
+    if memory_missing:
+        what.append("内存")
+        value.append("%d MB" % DEFAULT_MEMORY_LIMIT_MB)
+    return notice("limits_defaulted", what="/".join(what), value=" / ".join(value))
+
+
+def scores_uneven(groups: "list") -> Notice:
+    """``subtask_scores_uneven``：``groups`` 是 [(组号, 取的最小值)]，全部列进一条提示。"""
+    return notice(
+        "subtask_scores_uneven",
+        group="、".join(str(group) for group, _ in groups),
+        score="、".join(str(score) for _, score in groups),
+    )
 
 
 def register(messages: Mapping[str, str]) -> None:

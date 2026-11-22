@@ -101,11 +101,23 @@ def parse_archive(path: Union[str, Path], fmt: str = "auto", filename: str = "")
         format_id, view = detect(archive, fmt)
         result = FORMATS[format_id].parse(view)
         result.format = format_id
+        _fallback_source_names(result, filename)
         finalize(result)
     except Exception:
         archive.close()
         raise
     return ParsedImport(result=result, archive=archive)
+
+
+def _fallback_source_names(result: ImportResult, filename: str) -> None:
+    """来源里没有名字的题（如根目录就是一道题、又没有 problem.yaml 的 Hydro / SYZOJ 包）用上传
+    文件的主名，不把内部 key（"."）露给界面。"""
+    stem = Path(filename).stem if filename else ""
+    if not stem or result.format == "syncoj":
+        return
+    for bundle in result.problems:
+        if not bundle.source_name:
+            bundle.source_name = stem
 
 
 def _clamp(value: Optional[int], bounds: "tuple") -> Optional[int]:

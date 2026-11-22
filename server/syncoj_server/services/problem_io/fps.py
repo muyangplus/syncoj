@@ -43,7 +43,7 @@ from .bundle import (
     ImportResult,
     ProblemBundle,
 )
-from .notices import ProblemIoError, notice, register
+from .notices import ProblemIoError, limits_defaulted, notice, register
 
 __all__ = ["LABEL", "parse", "MAX_XML_BYTES"]
 
@@ -206,7 +206,7 @@ def _limits(item: ElementTree.Element, bundle: ProblemBundle) -> None:
     time_value = _number(_text(time_el))
     memory_value = _number(_text(memory_el))
     if time_value is None or memory_value is None:
-        bundle.warn(notice("limits_defaulted"))
+        bundle.warn(limits_defaulted(time_value is None, memory_value is None))
     if time_value is None:
         bundle.time_limit_ms = DEFAULT_TIME_LIMIT_MS
     else:

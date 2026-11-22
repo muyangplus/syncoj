@@ -35,7 +35,7 @@ from .bundle import (
 from .checkers import TESTLIB_NAME, uses_testlib
 from .exporting import OpenBlob, open_testdata
 from .idents import ident_from_io
-from .notices import ProblemIoError, notice, register
+from .notices import ProblemIoError, limits_defaulted, notice, register, scores_uneven
 
 __all__ = ["LABEL", "EXPORT_LANGUAGES", "parse", "export"]
 
@@ -224,6 +224,7 @@ def _scoring(
             members[group] = []
         members[group].append(case)
     if case_mode == "subtask_lowest":
+        uneven: List[Tuple[int, int]] = []
         for group in order:
             items = members[group]
             if len(items) == 1:
@@ -231,10 +232,12 @@ def _scoring(
             scores = [case.score for case in items]
             low = min(scores)
             if len(set(scores)) > 1:
-                bundle.warn(notice("subtask_scores_uneven", group=group, score=low))
+                uneven.append((group, low))
             for case in items:
                 case.score = 0
             bundle.subtasks.append(BundleSubtask(score=low, cases=[case.name for case in items]))
+        if uneven:
+            bundle.warn(scores_uneven(uneven))
         return
     split = False
     for group in order:
@@ -323,10 +326,12 @@ def _parse_one(view: ArchiveView, folder: str, doc: Any) -> ProblemBundle:
 
     time_limit = _int(problem.get("timeLimit"))
     memory_limit = _int(problem.get("memoryLimit"))
-    if time_limit is None or memory_limit is None or time_limit <= 0 or memory_limit <= 0:
-        bundle.warn(notice("limits_defaulted"))
-        time_limit = time_limit if time_limit and time_limit > 0 else DEFAULT_TIME_LIMIT_MS
-        memory_limit = memory_limit if memory_limit and memory_limit > 0 else DEFAULT_MEMORY_LIMIT_MB
+    time_missing = time_limit is None or time_limit <= 0
+    memory_missing = memory_limit is None or memory_limit <= 0
+    if time_missing or memory_missing:
+        bundle.warn(limits_defaulted(time_missing, memory_missing))
+        time_limit = DEFAULT_TIME_LIMIT_MS if time_missing else time_limit
+        memory_limit = DEFAULT_MEMORY_LIMIT_MB if memory_missing else memory_limit
     bundle.time_limit_ms, bundle.memory_limit_mb = time_limit, memory_limit
     stack = _int(problem.get("stackLimit"))
     if stack is not None and stack != memory_limit:

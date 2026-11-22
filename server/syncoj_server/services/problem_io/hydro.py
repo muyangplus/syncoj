@@ -68,6 +68,8 @@ SYZOJ_NAME = "data.yml"
 
 #: Hydro 默认评测机的测试点上限（``testcases_max``）
 HYDRO_CASE_LIMIT = 100
+#: Hydro 默认评测机的全部测试点时限之和上限（``total_time_limit``，60 s）
+HYDRO_TOTAL_TIME_MS = 60000
 
 #: 名字里不带点的 checker 是 Hydro 内置的 testlib checker；这几个与默认比较等价或更严
 _APPROX_CHECKERS = frozenset({"wcmp", "ncmp", "lcmp", "fcmp", "hcmp"})
@@ -846,7 +848,9 @@ def _export_one(problem: ExportProblem, open_blob: OpenBlob, zf: Any) -> List[No
             if extra:
                 config["judge_extra_files"] = extra
         subtasks = []
-        for number, (score, cases) in enumerate(_units(testdata), 1):
+        units = _units(testdata)
+        zero_units = sum(1 for score, _ in units if not score)
+        for number, (score, cases) in enumerate(units, 1):
             subtasks.append({
                 "id": number,
                 "score": int(score),
@@ -857,10 +861,16 @@ def _export_one(problem: ExportProblem, open_blob: OpenBlob, zf: Any) -> List[No
         total = testdata.total_score
         count = len(testdata.cases)
     zf.writestr(prefix + "config.yaml", yaml_lite.dump(config))
-    if total != 100:
+    if total < 100 and zero_units:
+        # Hydro 把 score 为 0 的子任务当成"没写分"，平分 100 - 已写分之和
+        warnings.append(notice("hydro_zero_score_filled", count=zero_units, score=100 - total))
+    elif total != 100:
         warnings.append(notice("hydro_total_not_100", total=total))
     if count > HYDRO_CASE_LIMIT:
         warnings.append(notice("hydro_case_limit", count=count))
+    total_ms = count * problem.effective_time_limit_ms
+    if total_ms > HYDRO_TOTAL_TIME_MS:
+        warnings.append(notice("hydro_total_time", seconds="%g" % (total_ms / 1000.0)))
     return warnings
 
 

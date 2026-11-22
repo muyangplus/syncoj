@@ -554,7 +554,7 @@ def test_export_file_io_and_warnings() -> None:
         1: ["hydro_total_not_100"],
         2: ["pid_omitted", "hydro_total_not_100"],
         3: ["pid_omitted", "io_names_lost", "flags_dropped", "hydro_total_not_100"],
-        4: ["hydro_case_limit"],
+        4: ["hydro_case_limit", "hydro_total_time"],
     }
     with zipfile.ZipFile(io.BytesIO(body)) as zf:  # type: ignore[arg-type]
         configs = {p.ident: yaml_lite.load(zf.read("%s/testdata/config.yaml" % p.ident)) for p in problems}
@@ -753,3 +753,23 @@ def test_reused_case_name_does_not_clash_with_real_file(tmp_path: Path) -> None:
     assert bundle.errors == [] and built is not None
     names = [case.name for case in bundle.cases]
     assert len(set(n.lower() for n in names)) == 3 and names[:2] == ["a", "a-2"]
+
+
+def test_export_warns_when_zero_score_units_get_filled(tmp_path: Path) -> None:
+    """满分不到 100 时，Hydro 会把 0 分的单元当成没写分、补上剩余分：导出要说清这个后果。"""
+    data = make_testdata_zip(count=3, scores=[0, 30, 30])
+    body, notices = export([problem("zero", data)], [data])
+    assert notices == {1: ["hydro_zero_score_filled"]}
+    result, built = load(tmp_path, body)  # type: ignore[arg-type]
+    (bundle,) = result.problems
+    assert {c.name: c.score for c in bundle.cases}["1"] == 40  # 正是警告里说的后果
+    full = make_testdata_zip(count=3, scores=[0, 50, 50])
+    assert export([problem("full", full)], [full])[1] == {1: []}  # 满分 100 时 0 分点仍是 0 分
+
+
+def test_export_warns_about_total_time_limit() -> None:
+    data = make_testdata_zip(count=25)
+    _, notices = export([problem("slow", data, time_limit_ms=3000)], [data])
+    assert notices == {1: ["hydro_total_time"]}
+    _, notices = export([problem("ok", data, time_limit_ms=2400)], [data])
+    assert notices == {1: []}

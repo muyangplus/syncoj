@@ -95,8 +95,10 @@ MESSAGES: Dict[str, str] = {
     "checker_extra_headers": "{files} 未导出",
     "io_names_lost": "文件名 {input} / {output} 未导出，按 {ident}.in / {ident}.out",
     "pid_omitted": "pid {ident} 未导出",
-    "hydro_total_not_100": "满分 {total}，Hydro 按 100 计",
+    "hydro_total_not_100": "满分 {total}，Hydro 不换算成 100",
+    "hydro_zero_score_filled": "{count} 组 0 分测试点在 Hydro 中共得 {score} 分，满分变为 100",
     "hydro_case_limit": "测试点 {count} 个，Hydro 默认评测机会拒绝",
+    "hydro_total_time": "测试点时限合计 {seconds} s，超过 60 s，Hydro 默认评测机会拒绝",
 }
 
 

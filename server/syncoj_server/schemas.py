@@ -1020,6 +1020,7 @@ class JudgeTaskDetailOut(JudgeTaskOut):
     judged_at: Optional[str] = None
     cases: List[JudgeCaseOut] = Field(default_factory=list)
     subtasks: List[JudgeSubtaskOut] = Field(default_factory=list)
+    precheck_warnings: List[JudgePrecheckFindingOut] = Field(default_factory=list)
     truncated: bool = False
 
 
@@ -1626,6 +1627,15 @@ class JudgeSubtaskOut(_Base):
     cases: List[str] = Field(default_factory=list)
 
 
+class JudgePrecheckFindingOut(_Base):
+    """源码预检的一条预警（规则 code 见 ``judging/precheck.py``）。"""
+
+    code: str
+    line: int = 0
+    message: str = ""
+    excerpt: str = ""
+
+
 class JudgeRunDetailOut(JudgeRunOut):
     """一条评测记录连同结果文件里的测试点明细。"""
 
@@ -1639,6 +1649,8 @@ class JudgeRunDetailOut(JudgeRunOut):
     judged_source: Optional[str] = None
     cases: List[JudgeCaseOut] = Field(default_factory=list)
     subtasks: List[JudgeSubtaskOut] = Field(default_factory=list)
+    #: 自带评测的源码预检预警；旧评测机或外部评测器的结果没有
+    precheck_warnings: List[JudgePrecheckFindingOut] = Field(default_factory=list)
     truncated: bool = False
     #: 自带评测写的结果：出自哪个评测任务（§12.9）
     task_id: Optional[int] = None

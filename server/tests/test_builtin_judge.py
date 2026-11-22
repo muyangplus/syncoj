@@ -170,6 +170,36 @@ def test_端到端_评完进成绩矩阵(client, admin_headers, contest, problem
     assert detail["language"] == "cpp" and detail["judged_source"] == "ab/ab.cpp"
 
 
+def test_数据包里的预检配置上传时校验(client, admin_headers, problem) -> None:
+    files = {"1.in": "1 2\n", "1.ans": "3\n", "config.json": json.dumps({"precheck": {"disabled": ["nope"]}})}
+    bad = upload(client, admin_headers, problem, zip_bytes(files))
+    assert bad.status_code == 400 and "precheck" in bad.json()["detail"]
+    files["config.json"] = json.dumps({"precheck": {"mode": "warn", "disabled": ["file_access"]}})
+    assert upload(client, admin_headers, problem, zip_bytes(files)).status_code == 200
+
+
+def test_端到端_源码预检拦截记CE_预警进详情(client, admin_headers, contest, problem, enrolled, worker_token,
+                                tmp_path) -> None:
+    code = b"#pragma GCC optimize(2)\nint a ??( 1 ??);\nint main(){}\n"
+    submit(client, enrolled, {"ab/ab.cpp": code})
+    set_builtin(client, admin_headers, problem)
+    upload(client, admin_headers, problem)
+    client.post("/api/v1/admin/contests/%d/judge/builtin" % contest["id"], json={"force": True}, headers=admin_headers)
+
+    def no_sandbox():
+        raise AssertionError("拦截后不该再编译")
+
+    judge = worker.Worker(ClientTransport(client, worker_token), no_sandbox, tmp_path / "cache")
+    assert judge.run_once() is True
+
+    cell = scores(client, admin_headers, contest)[("S001", "ab")]
+    assert (cell["score"], cell["status"]) == (0, "CE")
+    detail = client.get("/api/v1/admin/contests/%d/judge/runs/%d" % (contest["id"], cell["run_id"]),
+                        headers=admin_headers).json()
+    assert detail["compile_message"].startswith("源码检查未通过：禁止使用 #pragma（第 1 行）")
+    assert [(item["code"], item["line"]) for item in detail["precheck_warnings"]] == [("trigraph_digraph", 2)]
+
+
 def test_结果文件里的测试点明细可查(client, admin_headers, contest, player) -> None:
     root = Path(client.app.state.ctx.settings.judge_result_root) / contest["slug"] / player["player_no"] / "ab"
     root.mkdir(parents=True)
@@ -182,6 +212,8 @@ def test_结果文件里的测试点明细可查(client, admin_headers, contest,
             "坏项",
         ],
         "subtasks": [{"index": 1, "score": 0, "max_score": 100, "cases": ["1", "2"]}],
+        "precheck_warnings": [{"code": "file_dynamic", "line": 3, "message": "freopen 的文件名不是字面量",
+                               "excerpt": "freopen(s, \"r\", stdin);"}, "坏项", {"line": 1}],
     }), encoding="utf-8")
 
     cell = scores(client, admin_headers, contest)[(player["player_no"], "ab")]
@@ -191,6 +223,7 @@ def test_结果文件里的测试点明细可查(client, admin_headers, contest,
     assert [(case["name"], case["status"]) for case in detail["cases"]] == [("1", "AC"), ("2", "WA")]
     assert detail["cases"][1]["message"] == "第 1 行不同"
     assert detail["subtasks"][0]["cases"] == ["1", "2"] and detail["isolated"] is False
+    assert [(item["code"], item["line"]) for item in detail["precheck_warnings"]] == [("file_dynamic", 3)]
 
     other = client.get("/api/v1/admin/contests/%d/judge/runs/%d" % (contest["id"] + 999, cell["run_id"]),
                        headers=admin_headers)

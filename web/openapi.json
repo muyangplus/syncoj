@@ -3009,6 +3009,36 @@
         "title": "JudgeLeaseOut",
         "type": "object"
       },
+      "JudgePrecheckFindingOut": {
+        "additionalProperties": false,
+        "description": "源码预检的一条预警（规则 code 见 ``judging/precheck.py``）。",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "excerpt": {
+            "default": "",
+            "title": "Excerpt",
+            "type": "string"
+          },
+          "line": {
+            "default": 0,
+            "title": "Line",
+            "type": "integer"
+          },
+          "message": {
+            "default": "",
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "title": "JudgePrecheckFindingOut",
+        "type": "object"
+      },
       "JudgeProblemConfigOut": {
         "additionalProperties": false,
         "properties": {
@@ -3253,6 +3283,13 @@
           "player_no": {
             "title": "Player No",
             "type": "string"
+          },
+          "precheck_warnings": {
+            "items": {
+              "$ref": "#/components/schemas/JudgePrecheckFindingOut"
+            },
+            "title": "Precheck Warnings",
+            "type": "array"
           },
           "problem": {
             "title": "Problem",
@@ -3655,6 +3692,13 @@
           "player_no": {
             "title": "Player No",
             "type": "string"
+          },
+          "precheck_warnings": {
+            "items": {
+              "$ref": "#/components/schemas/JudgePrecheckFindingOut"
+            },
+            "title": "Precheck Warnings",
+            "type": "array"
           },
           "problem": {
             "title": "Problem",

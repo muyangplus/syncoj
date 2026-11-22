@@ -1,20 +1,15 @@
 # SyncOJ 技术方案
 
-正文已经按受众拆到 [`docs/design/`](docs/design/) 下。**这份文件只剩一张映射表**：
-代码与注释里有几十处 `DESIGN.md §5.4`、`§7.4` 这类引用（`git grep -n "§"` 可看现状），
-逐个改成新路径收益是零、改错风险大。
-**章节编号一律没有动** —— 所以 `DESIGN.md §X.Y` 与 `docs/design/<文件> §X.Y`
-指的是同一节，只是正文换了地方。
+本文件只有「§ 编号 → 设计文档」映射表；正文在 [`docs/design/`](docs/design/)。
 
-| 说法 | 现在指哪儿 |
+| 写法 | 指向 |
 |---|---|
-| `DESIGN.md §X` | 下表中 X 那一行指到的那份设计文档，编号不变 |
-| 本文件 | **只有映射表**；正文不在里面 |
-| 改动要先读什么 | 先读那一节对应的 ADR（[`docs/decisions/`](docs/decisions/)） |
+| `DESIGN.md §X.Y` | 下表 §X.Y 所在的设计文档，编号与 `docs/design/<文件> §X.Y` 相同 |
+| 改某一节之前 | 先读对应 ADR（[`docs/decisions/`](docs/decisions/)） |
 
 ## 顶层章节
 
-| § | 新位置 |
+| § | 文件 |
 |---|---|
 | §0 已锁定决策 | [`docs/design/00-decisions.md`](docs/design/00-decisions.md) |
 | §1 架构总览 | [`docs/design/01-architecture.md`](docs/design/01-architecture.md) |
@@ -28,9 +23,9 @@
 | §11 服务端主动通告 | [`docs/design/09-server-announce.md`](docs/design/09-server-announce.md) |
 | §12 自带沙箱评测 | [`docs/design/10-builtin-judge.md`](docs/design/10-builtin-judge.md) |
 
-## 小节（代码与注释里真的有引用的那些）
+## 小节（代码与注释中有引用的）
 
-| § | 新位置 |
+| § | 文件 |
 |---|---|
 | §3.1 为什么砍掉所有第三方依赖 | [`docs/design/03-agent.md`](docs/design/03-agent.md) |
 | §3.2 主循环 | [`docs/design/03-agent.md`](docs/design/03-agent.md) |
@@ -47,9 +42,5 @@
 | §7.3 机器怎么知道服务端在哪 / §7.4 远程卸载 / §7.5 发布（CD） | [`docs/design/07-ops-and-install.md`](docs/design/07-ops-and-install.md) |
 | §10.5 重构遗留 | [`docs/design/08-milestones-and-open.md`](docs/design/08-milestones-and-open.md) |
 
-**"为什么这么定"在 ADR 里**（[`docs/decisions/`](docs/decisions/)）：`design/` 记
-现在是什么样，ADR 记当初否掉了什么、代价是什么。§0 那张表里每一行都指向对应的 ADR。
-
-上手、装机、运维三份操作说明不在 `design/` 下，是给人照着做的步骤，不是设计依据：
-[`docs/quickstart.md`](docs/quickstart.md)、[`docs/install-agent.md`](docs/install-agent.md)、
-[`docs/operate.md`](docs/operate.md)。文档总入口是 [`docs/README.md`](docs/README.md)。
+`design/` 记现状，ADR 记否决的方案与代价；§0 每行指向对应 ADR。
+操作步骤：[`docs/quickstart.md`](docs/quickstart.md)、[`docs/install-agent.md`](docs/install-agent.md)、[`docs/operate.md`](docs/operate.md)。文档总入口：[`docs/README.md`](docs/README.md)。

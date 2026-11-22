@@ -87,7 +87,7 @@ syncoj-server genkey --out /etc/syncoj/release-key.pem   # 公钥默认同目录
 | 方式 | 触发 | 校验 |
 |---|---|---|
 | 包内嵌地址 | `build_bundle.py --server-url` 写入包内 `server.json`；界面「发布当前版本」自动写入 | — |
-| 服务端主动通告 | 服务端 UDP `45872` 广播：启动后 10 分钟内每 30 秒一次，之后每 5 分钟一次；管理端「机器配对」→「召集机器」立即发一次 | Agent 到通告地址做挑战应答（`/api/v1/agent/whoami`），验签后切换 |
+| 服务端主动通告 | 服务端 UDP `45872` 广播：启动后 10 分钟内每 30 秒一次，之后每 5 分钟一次；「机器配对」→「召集机器」或顶栏「快捷操作」→「召集机器」立即发一次 | Agent 到通告地址做挑战应答（`/api/v1/agent/whoami`），验签后切换 |
 | UDP 发现（兜底） | Agent 向 UDP `45871` 广播探测 | 应答用发布私钥签名，Agent 用包内公钥验签；无公钥不发现 |
 
 → 见 [`design/07-ops-and-install.md §7.3`](design/07-ops-and-install.md)、[`design/09-server-announce.md`](design/09-server-announce.md)、[ADR-0015](decisions/ADR-0015-server-announce.md)。
@@ -131,8 +131,8 @@ sudo python3 install.py --bundle ./x.tar.gz --no-discover                 # 禁�
 
 服务端在源码仓库中运行时：
 
-1. 「Agent 发布」→「发布当前版本」（从本机 `agent/` 构建并签名）。
-2. 「铺开」。未铺开的版本机器不可见，装机入口也不发。
+1. 「Agent 发布」→「发布当前版本」卡片 → 核对版本号 → 构建。预期：版本列表新增一行，状态为未铺开。
+2. 该行「铺开」。未铺开的版本机器不可见，装机入口也不发。预期：下一轮心跳后「机器配对」的「Agent 版本」列陆续变为新版本（`upgrade.mode=apply`）。
 
 命令行等价：
 
@@ -144,7 +144,7 @@ python3 agent/packaging/build_bundle.py --out dist/syncoj-agent-0.1.0.tar.gz
 |---|---|---|
 | 提交的版本号 ≠ `agent/syncoj_agent/__init__.py` 的 `__version__` | 409，报出两个版本号 | 改版本号 |
 | 缺私钥或公钥 | 拒绝构建 | 补 `.key/` 或设 `SYNCOJ_RELEASE_KEY` |
-| 服务端无 `agent/` 源码（pip 安装的实例） | 该栏不可用 | 走「上传安装包」 |
+| 服务端无 `agent/` 源码（pip 安装的实例） | 「发布当前版本」不可用 | 用「上传新版本」上传离线包 |
 
 附带密钥与「高级选项」→ 见 [`install-agent.md`](install-agent.md)「发版时附带统一注册密钥（可选）」。
 
@@ -189,16 +189,19 @@ python scripts/smoke_systemd245.py --keep   # 失败后保留容器与临时目�
 
 ## 自带评测
 
-1. 「题目」→「评测设置」：评测方式选「自带评测」，填时限 / 内存 / IO 方式 / 编译参数，上传数据包。
-2. 「成绩」→「自带评测」→「添加评测机」，复制令牌（只显示一次）写入文件。
-3. 评测机上以专用账号运行：
+1. 「场次管理」→ 该行「题目」→ 登记题目（已登记则跳过）。
+2. 「评测」→「题目」卡片 → 该题「设置」：评测方式选「自带评测」，填时限（ms）/ 内存（MB）/ 输入输出 / 编译参数，上传数据包。预期：数据包上传时即校验，结构不对直接报错。
+3. 「评测」→「评测机」卡片 →「添加评测机」→ 输入名称 →「签发令牌」，复制令牌（只显示一次）写入文件。
+4. 评测机上以专用账号运行：
 
    ```bash
    pip install -e server
    syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
    ```
 
-4. 「成绩」→「自带评测」→ 排任务 / 重测，查看进度与失败原因。
+   预期：「评测机」卡片中该评测机状态为在线。
+5. 「评测」→「任务」卡片 → 选「全部自带评测题目」或某题 →「评测 / 重测」（或顶栏「快捷操作」→「评测全部题目」）。场次未结束时服务端回 409 `contest_in_progress`，界面弹「仍要评测？」，确认后带 `force` 排队。预期：进度条显示排队 / 评测中 / 完成 / 失败计数；失败行列出考号、题目、失败原因与「重测本题」。
+6. 「成绩」：矩阵出现分数；点格子看测试点明细。
 
 | `syncoj-judge` 参数 | 默认 | 说明 |
 |---|---|---|
@@ -241,8 +244,8 @@ syncoj-server db reset --yes [--keep-admin]
 
 ### 第一步：服务端
 
-1. 机器列表 / 总览：看「上次心跳」「距上次心跳」。离线阈值默认 **90 秒**，在「运行参数」修改。
-2. 事件页筛 `agent_`：`agent_revoke`（凭据作废）、`agent_unbind`（解除配对）、`agent_uninstall`（请求卸载）；`contest_auto_closed`（场次到点自动结束）。
+1. 「选手状态」或「机器配对」：看「最后心跳」列。离线阈值默认 **90 秒**，在「机器配对」→「运行参数」修改。
+2. 「审计日志」筛 `agent_`：`agent_revoke`（凭据作废）、`agent_unbind`（解除配对）、`agent_uninstall`（请求卸载）；`contest_auto_closed`（场次到点自动结束）。
 3. 服务端日志搜机器名或 `machine_id`：
 
 | 响应 | 含义 | 心跳 |
@@ -274,7 +277,7 @@ df -h /; systemctl show syncoj-agent -p NRestarts -p ExecMainStatus -p User
 | 服务在跑、日志安静、服务端无 tick | 无凭据，等待注册 | `systemctl status syncoj-agent-enroll` |
 | `activating (auto-restart)` | 起不来或起来就崩 | `journalctl -u syncoj-agent -n 50` |
 | 机器时间偏差大 | 配对码 / 令牌时效判断错误 | 校时（开 NTP） |
-| 服务端换了 IP | 机器仍连旧地址 | 「机器配对」→「召集机器」 |
+| 服务端换了 IP | 机器仍连旧地址 | 「机器配对」→「召集机器」（或顶栏「快捷操作」→「召集机器」） |
 
 前台跑一轮：
 

@@ -8,6 +8,7 @@
 ├── blobs/<sha[:2]>/<sha>          # 内容寻址，天然去重
 ├── source/<contest_slug>/<player_no>/<problem>/main.cpp    # 评测器直接读
 ├── judge_result/<contest_slug>/<player_no>/<problem>/      # 结果扫描源
+├── server-id                      # 服务端实例 ID（§7.3），首次启动生成，0600
 └── logs/
 ```
 

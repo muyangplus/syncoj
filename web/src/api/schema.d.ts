@@ -5699,6 +5699,8 @@ export interface components {
             reason?: string | null;
             /** Server Time */
             server_time: number;
+            /** Server Uuid */
+            server_uuid?: string | null;
             /** Uninstall Token */
             uninstall_token?: string | null;
             upgrade?: components["schemas"]["UpgradeInfo"] | null;
@@ -5808,7 +5810,7 @@ export interface components {
          * WhoAmIOut
          * @description 挑战应答（§11）：用发布私钥签 ``syncoj-announce-v1
          *     <nonce>
-         *     <url>``。
+         *     <url>``（v2 见下）。
          *
          *         ``url`` 是**服务端自己认定的**对外地址（§7.3 的三条来源），不是请求里的 Host：
          *         机器切换到的是签名里的这个地址。
@@ -5821,6 +5823,8 @@ export interface components {
             key_id: string;
             /** Nonce */
             nonce: string;
+            /** Server Uuid */
+            server_uuid?: string | null;
             /** Sig */
             sig: string;
             /** Url */
@@ -9748,6 +9752,7 @@ export interface operations {
         parameters: {
             query: {
                 nonce: string;
+                v?: number;
             };
             header?: never;
             path?: never;

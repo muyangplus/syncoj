@@ -65,7 +65,7 @@ Agent 的分支（先看状态码，再看 `code`）：
 | `409` | 静默丢弃 |
 | `413` | 跳过该文件 |
 | `426` / `agent_outdated` | 记日志，按协议错误退避；不重新注册 |
-| `5xx` | 指数退避（5 秒起，上限 300 秒） |
+| `5xx` / 连不上（连接失败、超时） | 不退避：按 `scan.interval`（默认 30 秒）加 ≤3 秒抖动重试；每连续 3 轮做一次局域网发现（第 9 节），不封顶 |
 | 其他 | 记日志，退避后下一轮 |
 
 - 只有 `401` 清凭据重新注册；`403` 只更新状态。
@@ -87,7 +87,7 @@ Agent 的分支（先看状态码，再看 `code`）：
 | 422 | `validation_error` | 报文缺字段 / 超长 / 多字段 | 记日志 |
 | 426 | `agent_outdated` | `/enroll` / `/tick` 的 `protocol_version` 低于最低要求（缺省按 0）；优先于 422 判定；`details.protocol_version` = 上报值 | 只能重装 |
 | 429 | `rate_limited` | 限速，带 `Retry-After` | 按 `Retry-After` 退避 |
-| 5xx | `internal_error` / `unavailable` | 服务端故障 | 指数退避 |
+| 5xx | `internal_error` / `unavailable` | 服务端故障 | 按默认间隔重试（同连不上） |
 
 ---
 
@@ -329,7 +329,8 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
   "pair_code": null,
   "reason": null,
   "player_no": "S001",
-  "contest_slug": "mock-1"
+  "contest_slug": "mock-1",
+  "server_uuid": "3f0c…（32 位十六进制）"
 }
 ```
 
@@ -345,6 +346,7 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
 | `config` | object | 见第 7 节 |
 | `claimed` / `bound` / `pair_code` / `reason` | | 三态，见第 1 节 |
 | `player_no` / `contest_slug` | string \| null | 当前身份 |
+| `server_uuid` | string \| null | 服务端实例 ID（`<data_root>/server-id`，跨重启不变）；老服务端不带 |
 
 `deploy_jobs[]`：
 
@@ -367,6 +369,7 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
 - 下发作业按 `target_id` 派发；作业不带续传偏移，续传位置只看本地分片 `deploy_root/.syncoj-parts/<sha256>.part`。
 - 收到 `deploy_done` 之前每轮都派发，即使进度已满长；已取消的目标不派发、不可下载。
 - `diagnostics_request=true` 只出现一次，服务端返回时即清标记，不重发。
+- `server_uuid`：Agent 每次 tick 成功后与 `<state_dir>/server_uuid` 比较，不同即覆盖（未配对 / 无场次的 tick 同样带）。它只用于失联后的发现与通告核实（第 9、9.1 节），不参与鉴权。
 - `uninstall_token` 在多轮心跳里原样重发；教师再次请求换新令牌。
 - `dest` 中的 `{player_no}` 已由服务端展开。通用资料：`"题面.zip"`；按题附件：`"<准考证号>/<题目名>/<文件名>"`。
 - 下发资产一律按文件落地，不解压；密码以普通资产（如 `password.txt`）下发。
@@ -578,6 +581,7 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
 | `/etc/syncoj/machine_uuid` | 权威机器 UUID；读不到时退回 `<state_dir>/machine_uuid` |
 | `<state_dir>/credential.json` | token 与身份 |
 | `<state_dir>/hash_cache.json` | 哈希缓存 |
+| `<state_dir>/server_uuid` | 上次 tick 成功的服务端实例 ID，`0600`；缺失 = 发现与通告只验签 |
 | `<state_dir>/agent.log` | 日志（`log.file` 留空时） |
 | `<deploy_root>/.syncoj-parts/<sha256>.part` | 未完成的下载分片 |
 
@@ -626,18 +630,30 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
 ```
 机器 ──UDP 广播──▶ 255.255.255.255:45871（及各接口的子网广播地址）
                   {"syncoj":"syncoj","v":1,"nonce":"<32 位十六进制>",
-                   "machine_id":"...","pad":"<填充，凑到 640 字节>"}
+                   "machine_id":"...","machine_uuid":"...","server_uuid":"<记住的，可空>",
+                   "pad":"<填充，凑到 768 字节>"}
 
 服务端 ──UDP 单播──▶ 来源地址
                   {"syncoj":"syncoj","v":1,"nonce":"<原样带回>",
-                   "url":"http://10.0.0.5:8000","key_id":"...","sig":"<base64url>"}
+                   "url":"http://10.0.0.5:8000","key_id":"...",
+                   "server_uuid":"<本服务端实例 ID>","known":true,"sig":"<base64url>"}
 ```
 
 签名对象（规范化文本，非 JSON）：
 
 ```
-syncoj-discovery-v1\n<nonce>\n<url>
+syncoj-discovery-v2\n<nonce>\n<url>\n<server_uuid>\n<machine_uuid>\n<1|0>
 ```
+
+`known`：库里有该 `machine_uuid` 且未吊销的机器为 `true`（签名里是 `1`）。
+
+兼容（外层 `v` 仍为 1）：
+
+| 探测 | 服务端 | 应答 |
+|---|---|---|
+| 不带 `machine_uuid`（安装器、旧 Agent），凑到 640 字节 | 任意 | v1：无 `server_uuid` / `known`，签 `syncoj-discovery-v1\n<nonce>\n<url>` |
+| 带 `machine_uuid` | 旧服务端，或读不到实例 ID | v1 |
+| 带 `machine_uuid` | 新服务端 | v2（上例） |
 
 ### 规则
 
@@ -649,13 +665,15 @@ syncoj-discovery-v1\n<nonce>\n<url>
 | 探测 < 640 字节不应答；应答不得大于探测，地址过长时不应答 | 防反射放大 |
 | 按来源 IP 限速（默认 5 次/秒） | 防刷 |
 | 多个验签通过的地址 → 视为歧义，不选择 | 防连错考场 |
+| 机器记着 `server_uuid` 时：只认 v2 且 `server_uuid` 相同的应答；`known=false` 不切换（记日志）；其余应答不计入歧义 | 防切到共用发布私钥的另一台服务端 |
+| 机器没记 `server_uuid`：v1 / v2 都只验签 | 兼容老状态 |
 
 - 服务端端口：`SYNCOJ_DISCOVERY_PORT`（默认 45871）；最小探测长度：`SYNCOJ_DISCOVERY_MIN_PROBE`（默认 640）。
 
 ### 机器侧使用时机
 
 - 装机（`install.py`）：`--server` > 包内 `server.json` > 发现 > 默认值 `127.0.0.1`（打印警告）。
-- 运行时：连续 3 轮网络失败（约 5 + 10 + 20 秒）后发现一次；新地址只在本进程内生效，不写回 `agent.ini`。
+- 运行时：连不上时每连续 3 轮发现一次（默认间隔下约 90 秒一次），一直持续到连上为止，成功一轮计数清零；新地址只在本进程内生效，不写回 `agent.ini`。
 
 ## 9.1 服务端主动通告（UDP 广播 + 挑战应答）
 
@@ -669,15 +687,19 @@ syncoj-discovery-v1\n<nonce>\n<url>
 通告不签名。机器经 HTTP 核实（不带凭据）：
 
 ```
-GET <url>/api/v1/agent/whoami?nonce=<32 位十六进制，机器现生成>
-→ 200 {"url":"<服务端认定的对外地址>","nonce":"<原样>","key_id":"...","sig":"<base64url>"}
-签名对象：syncoj-announce-v1\n<nonce>\n<url>
+GET <url>/api/v1/agent/whoami?nonce=<32 位十六进制，机器现生成>&v=2
+→ 200 {"url":"<服务端认定的对外地址>","nonce":"<原样>","key_id":"...",
+       "server_uuid":"<本服务端实例 ID>","sig":"<base64url>"}
+签名对象：syncoj-announce-v2\n<nonce>\n<url>\n<server_uuid>
 ```
+
+不带 `v`（旧 Agent）或服务端读不到实例 ID 时：响应无 `server_uuid`，签 `syncoj-announce-v1\n<nonce>\n<url>`。
 
 | 规则 |
 |---|
 | 切换前必须完成挑战应答 |
 | 机器切换到签名里的 `url`，不是通告里的 |
+| 机器记着 `server_uuid` 时只接受 `server_uuid` 相同的 v2 应答；没记着时 v1 / v2 都只验签 |
 | `key_id` 不是本机信任锚 → 丢弃通告 |
 | 同一 `boot_id` 只处理一次；每分钟最多处理一次 |
 | `whoami` 按来源 IP 限速（默认 5 次/秒，超出 `429`）；无私钥 → `503 no_signing_key`；不知道对外地址 → `503 no_public_url` |
@@ -697,6 +719,7 @@ GET <url>/api/v1/agent/whoami?nonce=<32 位十六进制，机器现生成>
 ├── blobs/<sha[:2]>/<sha>                              # 内容寻址
 ├── source/<contest_slug>/<player_no>/<前缀>/<路径>     # 评测器读取
 ├── judge_result/<contest_slug>/<player_no>/<题目>/     # 成绩回写扫描源
+├── server-id                                          # 服务端实例 ID，0600
 └── logs/
 ```
 

@@ -6745,6 +6745,17 @@
             "title": "Server Time",
             "type": "integer"
           },
+          "server_uuid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Server Uuid"
+          },
           "uninstall_token": {
             "anyOf": [
               {
@@ -7068,7 +7079,7 @@
       },
       "WhoAmIOut": {
         "additionalProperties": false,
-        "description": "挑战应答（§11）：用发布私钥签 ``syncoj-announce-v1\n<nonce>\n<url>``。\n\n    ``url`` 是**服务端自己认定的**对外地址（§7.3 的三条来源），不是请求里的 Host：\n    机器切换到的是签名里的这个地址。\n    ",
+        "description": "挑战应答（§11）：用发布私钥签 ``syncoj-announce-v1\n<nonce>\n<url>``（v2 见下）。\n\n    ``url`` 是**服务端自己认定的**对外地址（§7.3 的三条来源），不是请求里的 Host：\n    机器切换到的是签名里的这个地址。\n    ",
         "properties": {
           "key_id": {
             "default": "",
@@ -7078,6 +7089,17 @@
           "nonce": {
             "title": "Nonce",
             "type": "string"
+          },
+          "server_uuid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Server Uuid"
           },
           "sig": {
             "title": "Sig",
@@ -13318,6 +13340,16 @@
               "pattern": "^[0-9a-f]{32}$",
               "title": "Nonce",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "v",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "title": "V",
+              "type": "integer"
             }
           }
         ],

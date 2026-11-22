@@ -6,8 +6,9 @@
    本机信任锚的丢掉（隔壁考场）、同一个 ``boot_id`` 只处理一次、每分钟最多认真处理一次。
    它只往一个"候选地址"槽里放东西，什么都不连。
 2. 主循环每轮开头看一眼槽：有候选就到那个地址上做**挑战应答**
-   （``GET /api/v1/agent/whoami?nonce=…``，**不带凭据**），用发布公钥验签，切换到**签名里**
-   的地址。
+   （``GET /api/v1/agent/whoami?nonce=…&v=2``，**不带凭据**），用发布公钥验签，切换到**签名里**
+   的地址。v2 应答的签名里还有服务端实例 ID（``server_uuid``）：本机记着 ID 时只切到同一个 ID
+   的服务端（共用一把发布私钥的隔壁考场也签得出 v1）。
 
 为什么不直接信通告：通告是服务端单方面发的，没有机器给的随机数，签了也挡不住重放
 （录下一条真通告，等那个 IP 换了主人再放）。挑战应答让"那里此刻真的握着私钥"成为
@@ -30,13 +31,14 @@ import urllib.parse
 import urllib.request
 from typing import Optional, Tuple
 
-from .discovery import MAGIC, PROTOCOL_VERSION, _decode_signature
+from .discovery import MAGIC, PROTOCOL_VERSION, SERVER_UUID_RE, _decode_signature
 from .rsa import RSAPublicKey, verify_pkcs1v15_sha256
 
 log = logging.getLogger(__name__)
 
 DEFAULT_ANNOUNCE_PORT = 45872
 ANNOUNCE_SIGNATURE_PREFIX = "syncoj-announce-v1"
+ANNOUNCE_SIGNATURE_PREFIX_V2 = "syncoj-announce-v2"
 MAX_ANNOUNCE_BYTES = 512
 MAX_URL_LENGTH = 256
 #: 两次"认真处理"之间至少隔多久（挡住有人在本机 / 局域网里刷伪造通告）
@@ -47,6 +49,11 @@ MAX_CHALLENGE_REPLY_BYTES = 8192
 
 def challenge_text(nonce: str, url: str) -> str:
     return "%s\n%s\n%s" % (ANNOUNCE_SIGNATURE_PREFIX, nonce, url)
+
+
+def challenge_text_v2(nonce: str, url: str, server_uuid: str) -> str:
+    """与服务端 ``services/announce.challenge_text_v2`` 逐字节一致。"""
+    return "%s\n%s\n%s\n%s" % (ANNOUNCE_SIGNATURE_PREFIX_V2, nonce, url, server_uuid)
 
 
 def parse_announcement(raw: bytes) -> Optional[Tuple[str, str, str]]:
@@ -159,13 +166,17 @@ def verify_announced(
     *,
     ssl_context: Optional[ssl.SSLContext] = None,
     timeout: float = CHALLENGE_TIMEOUT_SECONDS,
+    server_uuid: str = "",
 ) -> Optional[str]:
     """到 ``url`` 上做挑战应答。验过签就返回**签名里**的地址，否则 ``None``。
 
-    请求**不带凭据**：还没证明对面是谁之前，不把令牌交出去。
+    请求**不带凭据**：还没证明对面是谁之前，不把令牌交出去。``server_uuid``（本机记住
+    的服务端实例 ID）非空时，只接受签名里实例 ID 相同的 v2 应答。
     """
     nonce = secrets.token_hex(16)
-    target = "%s/api/v1/agent/whoami?%s" % (url.rstrip("/"), urllib.parse.urlencode({"nonce": nonce}))
+    target = "%s/api/v1/agent/whoami?%s" % (
+        url.rstrip("/"), urllib.parse.urlencode({"nonce": nonce, "v": "2"})
+    )
     request = urllib.request.Request(target, headers={"Accept": "application/json"})
     try:
         opener = urllib.request.build_opener(
@@ -193,7 +204,20 @@ def verify_announced(
     signature = _decode_signature(str(payload.get("sig") or ""))
     if signature is None:
         return None
-    if not verify_pkcs1v15_sha256(public_key, challenge_text(nonce, signed_url).encode("utf-8"), signature):
+    signed_uuid = payload.get("server_uuid")
+    if signed_uuid is not None:
+        if not isinstance(signed_uuid, str) or not SERVER_UUID_RE.match(signed_uuid):
+            return None
+        text = challenge_text_v2(nonce, signed_url, signed_uuid)
+    else:
+        text = challenge_text(nonce, signed_url)
+    if not verify_pkcs1v15_sha256(public_key, text.encode("utf-8"), signature):
         log.warning("通告里的地址 %s 签不出本机信任的签名，不切换", url)
+        return None
+    if server_uuid and signed_uuid != server_uuid:
+        log.warning(
+            "通告来自别的服务端（%s，实例 ID %s），不是本机记住的 %s，不切换",
+            signed_url, signed_uuid or "未带", server_uuid,
+        )
         return None
     return signed_url.rstrip("/")

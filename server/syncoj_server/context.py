@@ -16,6 +16,7 @@ from .registry import AgentRegistry
 from .services.diagnostics import DiagnosticsRateLimiter
 from .services.paircodes import PairCodeCache
 from .services.ratelimit import RateLimiter
+from .services.server_id import load_or_create_server_uuid
 from .services.signing import DerError, SigningKey, load_signing_key
 from .services.uninstall import PendingUninstalls
 from .storage import BlobStore
@@ -67,6 +68,9 @@ class AppContext:
     announcer: Any = field(default_factory=lambda: _new_announcer())
     #: 挑战应答端点按 IP 限速（不鉴权、每次一个 RSA 签名）
     whoami_limiter: RateLimiter = field(default_factory=lambda: RateLimiter(limit=0))
+    #: 服务端实例 ID（``<data_root>/server-id``，见 ``services/server_id.py``）。空串 =
+    #: 读写失败，tick / 发现 / 挑战应答都按不带它的旧格式回
+    server_uuid: str = ""
 
     @classmethod
     def create(cls, settings: Settings) -> "AppContext":
@@ -85,6 +89,7 @@ class AppContext:
             whoami_limiter=RateLimiter(limit=settings.whoami_per_ip_per_second),
         )
         context.load_signing_key()
+        context.server_uuid = load_or_create_server_uuid(settings.data_root)
         return context
 
     def load_signing_key(self) -> None:

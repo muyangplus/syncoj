@@ -107,7 +107,7 @@ syncoj-server genkey --out /etc/syncoj/release-key.pem   # 公钥默认同目录
 |---|---|---|
 | 包内嵌地址 | `build_bundle.py --server-url` 写入包内 `server.json`；界面「发布当前版本」自动写入 | — |
 | 服务端主动通告 | 服务端 UDP `45872` 广播：启动后 10 分钟内每 30 秒一次，之后每 5 分钟一次；「机器配对」→「召集机器」或顶栏「快捷操作」→「召集机器」立即发一次 | Agent 到通告地址做挑战应答（`/api/v1/agent/whoami`），验签后切换 |
-| UDP 发现（兜底） | Agent 向 UDP `45871` 广播探测 | 应答用发布私钥签名，Agent 用包内公钥验签；无公钥不发现 |
+| UDP 发现（兜底） | Agent 连不上时每 3 轮（约 90 秒）向 UDP `45871` 广播一次，直到连上 | 应答用发布私钥签名，Agent 用包内公钥验签；无公钥不发现；记着服务端实例 ID 时只认同一台 |
 
 → 见 [`design/07-ops-and-install.md §7.3`](design/07-ops-and-install.md)、[`design/09-server-announce.md`](design/09-server-announce.md)、[ADR-0015](decisions/ADR-0015-server-announce.md)。
 
@@ -316,7 +316,8 @@ df -h /; systemctl show syncoj-agent -p NRestarts -p ExecMainStatus -p User
 | 服务在跑、日志安静、服务端无 tick | 无凭据，等待注册 | `systemctl status syncoj-agent-enroll` |
 | `activating (auto-restart)` | 起不来或起来就崩 | `journalctl -u syncoj-agent -n 50` |
 | 机器时间偏差大 | 配对码 / 令牌时效判断错误 | 校时（开 NTP） |
-| 服务端换了 IP | 机器仍连旧地址 | 「机器配对」→「召集机器」（或顶栏「快捷操作」→「召集机器」） |
+| 服务端换了 IP | 机器仍连旧地址 | 「机器配对」→「召集机器」（或顶栏「快捷操作」→「召集机器」）；不召集也会每约 90 秒自己找一次 |
+| `agent.log` 出现 `实例 ID 与本机记住的不同` / `不认得这台机器` | 局域网里应答的不是原来那台服务端（数据目录重建过、或隔壁考场），或原来那台已删除这台机器 | 确认要连新服务端：改 `agent.ini` 的地址（连上后实例 ID 自动更新）或重装；实例 ID 在 `<data_root>/server-id`，迁移服务端时连数据目录一起搬 |
 
 前台跑一轮：
 

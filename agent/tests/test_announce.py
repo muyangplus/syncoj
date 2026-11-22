@@ -45,6 +45,8 @@ def test_两端的签名对象逐字节一致() -> None:
     if not HAS_OPENSSL:
         pytest.skip("需要服务端代码")
     assert announce.challenge_text("n", "u") == server_announce.challenge_text("n", "u")
+    assert announce.challenge_text_v2("n", "u", "s" * 32) == server_announce.challenge_text_v2("n", "u", "s" * 32)
+    assert announce.challenge_text_v2("n", "u", "s").startswith("syncoj-announce-v2\n")
     assert announce.DEFAULT_ANNOUNCE_PORT == server_announce.DEFAULT_ANNOUNCE_PORT
 
 
@@ -72,15 +74,27 @@ class _WhoAmI(http.server.BaseHTTPRequestHandler):
     key = None
     signed_url = "http://10.0.0.9:8000"
     tamper = False
+    #: 非空 = 新服务端：请求带 v=2 时按 v2 签、回 server_uuid；空 = 老服务端，只会 v1
+    server_uuid = ""
+    queries: list = []
 
     def do_GET(self):  # noqa: N802
         query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        type(self).queries.append(query)
         nonce = query["nonce"][0]
         assert "Authorization" not in self.headers, "挑战应答不该带凭据"
         signed_nonce = "f" * 32 if self.tamper else nonce
-        sig = self.key.sign(server_announce.challenge_text(signed_nonce, self.signed_url).encode("utf-8"))
-        body = json.dumps({"url": self.signed_url, "nonce": nonce,
-                           "sig": base64.urlsafe_b64encode(sig).decode().rstrip("=")}).encode()
+        v2 = bool(self.server_uuid) and query.get("v") == ["2"]
+        if v2:
+            text = server_announce.challenge_text_v2(signed_nonce, self.signed_url, self.server_uuid)
+        else:
+            text = server_announce.challenge_text(signed_nonce, self.signed_url)
+        sig = self.key.sign(text.encode("utf-8"))
+        reply = {"url": self.signed_url, "nonce": nonce,
+                 "sig": base64.urlsafe_b64encode(sig).decode().rstrip("=")}
+        if v2:
+            reply["server_uuid"] = self.server_uuid
+        body = json.dumps(reply).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -102,7 +116,7 @@ def keypair(tmp_path_factory):
 
 @pytest.fixture()
 def whoami_server(keypair):
-    handler = type("H", (_WhoAmI,), {"key": keypair[0]})
+    handler = type("H", (_WhoAmI,), {"key": keypair[0], "queries": []})
     server = http.server.HTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -187,3 +201,88 @@ def test_主循环核实后切换地址(keypair, whoami_server, tmp_path) -> Non
 
     assert agent.config.server_url == handler.signed_url
     assert any(e.get("category") == "server_address_changed" for e in agent._pending_events)
+
+
+SERVER_A = "a" * 32
+SERVER_B = "b" * 32
+
+
+@requires_openssl
+def test_v2_挑战应答实例ID相同才切(keypair, whoami_server) -> None:
+    server, handler = whoami_server
+    handler.server_uuid = SERVER_A
+    url = "http://127.0.0.1:%d" % server.server_port
+
+    assert announce.verify_announced(url, keypair[1], server_uuid=SERVER_A) == "http://10.0.0.9:8000"
+    assert handler.queries[-1].get("v") == ["2"], "新 Agent 要带 v=2"
+
+
+@requires_openssl
+def test_v2_挑战应答实例ID不同就不切(keypair, whoami_server) -> None:
+    server, handler = whoami_server
+    handler.server_uuid = SERVER_B
+    url = "http://127.0.0.1:%d" % server.server_port
+    assert announce.verify_announced(url, keypair[1], server_uuid=SERVER_A) is None
+
+
+@requires_openssl
+def test_v2_记着ID时_老服务端的v1应答不认(keypair, whoami_server) -> None:
+    server, handler = whoami_server
+    handler.server_uuid = ""
+    url = "http://127.0.0.1:%d" % server.server_port
+    assert announce.verify_announced(url, keypair[1], server_uuid=SERVER_A) is None
+
+
+@requires_openssl
+def test_v2_没记住ID时_v1_v2_都按签名认(keypair, whoami_server) -> None:
+    server, handler = whoami_server
+    url = "http://127.0.0.1:%d" % server.server_port
+    handler.server_uuid = SERVER_B
+    assert announce.verify_announced(url, keypair[1]) == "http://10.0.0.9:8000"
+    handler.server_uuid = ""
+    assert announce.verify_announced(url, keypair[1]) == "http://10.0.0.9:8000"
+
+
+@requires_openssl
+def test_v2_报文里的实例ID被改就验不过(keypair, whoami_server, monkeypatch) -> None:
+    """签的是 B，有人把报文里的 server_uuid 改成 A —— 签名对象变了，验不过。"""
+    server, handler = whoami_server
+    handler.server_uuid = SERVER_B
+    original = json.dumps
+
+    def forged_dumps(obj, *args, **kwargs):
+        if isinstance(obj, dict) and obj.get("server_uuid") == SERVER_B:
+            obj = dict(obj, server_uuid=SERVER_A)
+        return original(obj, *args, **kwargs)
+
+    monkeypatch.setattr(json, "dumps", forged_dumps)
+    url = "http://127.0.0.1:%d" % server.server_port
+    # 不记 ID 也验不过：拦下它的是签名，不是 ID 比对
+    assert announce.verify_announced(url, keypair[1]) is None
+    assert announce.verify_announced(url, keypair[1], server_uuid=SERVER_A) is None
+
+
+@requires_openssl
+def test_主循环只切到记住的那台服务端(keypair, whoami_server, tmp_path) -> None:
+    from test_pairing import make_agent
+
+    from syncoj_agent.config import AgentConfig
+
+    server, handler = whoami_server
+    handler.signed_url = "http://127.0.0.1:%d" % server.server_port
+    handler.server_uuid = SERVER_B
+    config = AgentConfig.load(None)
+    config.state_dir = tmp_path / "state"
+    config.deploy_root = tmp_path / "桌面"
+    config.scan_roots = [tmp_path / "code"]
+    config.bootstrap_key_file = tmp_path / "bootstrap.key"
+    config.server_url = "http://10.0.0.1:8000"
+    agent = make_agent(config)
+    agent.server_uuid = SERVER_A
+    agent._public_key = keypair[1]
+    agent._announce_slot = announce.CandidateSlot(keypair[1].key_id)
+    agent._announce_slot.offer(packet(url=handler.signed_url, key_id=keypair[1].key_id), now=0)
+
+    agent._consider_announcement()
+
+    assert agent.config.server_url == "http://10.0.0.1:8000", "别的服务端（实例 ID 不同）不该切过去"

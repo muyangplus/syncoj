@@ -66,12 +66,15 @@ from .state import (
     declared_xdg_desktop,
     describe_os,
     load_credential,
+    load_server_uuid,
     read_bootstrap_key,
     resolve_machine_fingerprint,
     resolve_machine_id,
     resolve_machine_uuid,
     save_credential,
+    save_server_uuid,
     sha256_file,
+    valid_server_uuid,
 )
 from .upgrade import (
     MAX_BUNDLE_BYTES,
@@ -460,6 +463,9 @@ class Agent:
         #: 服务端重启一下、网线抖一下都会连不上，而那些情况下地址并没有变，
         #: 每轮都广播只会打扰整个局域网（见 REDISCOVER_AFTER_FAILURES）
         self._network_failures = 0
+        #: 上一次 tick 成功的那台服务端的实例 ID（``<state_dir>/server_uuid``）。
+        #: 失联时的局域网发现 / 主动通告只切到同一个 ID 的服务端；空 = 老状态，只验签
+        self.server_uuid = load_server_uuid(config.state_dir)
         #: 扫描根与上报前缀。注册拿到准考证号之后才能确定，见 _resolve_roots()
         self._roots: List[Tuple[str, Path]] = []
         self._roots_ready = False
@@ -1822,6 +1828,7 @@ class Agent:
         payload, _oversize, _errors = self._build_tick_payload([], {}, scan_complete=False)
         try:
             tick = self.client.tick(payload)
+            self._note_server_uuid(tick)
         except UnboundError as exc:
             # 403：凭据**有效**，但服务端说这台机器还没配对到人（可能是刚刚被
             # 解绑，也可能是配对还没生效）。这里最要紧的是**不要重新注册** ——
@@ -1863,6 +1870,21 @@ class Agent:
         credential = self._adopt_identity(tick)
         wait = self._clamp_wait(tick.get("next_tick_seconds"))
         return credential.state, wait
+
+    def _note_server_uuid(self, tick: Dict[str, object]) -> None:
+        """记住这台服务端的实例 ID（tick 成功时）。老服务端不带它就什么都不做。"""
+        value = tick.get("server_uuid") if isinstance(tick, dict) else None
+        if not valid_server_uuid(value) or value == self.server_uuid:
+            return
+        if self.server_uuid:
+            log.warning(
+                "服务端实例 ID 变了：%s → %s（换了一台服务端，或服务端数据目录重建过）",
+                self.server_uuid, value,
+            )
+        else:
+            log.info("记住服务端实例 ID %s", value)
+        self.server_uuid = str(value)
+        save_server_uuid(self.config.state_dir, self.server_uuid)
 
     def _clamp_wait(self, seconds: object) -> float:
         """把服务端给的间隔收进 [5, 3600]。
@@ -1953,6 +1975,7 @@ class Agent:
         # 不依赖上一轮的作业列表 —— Agent 重启后照样能续传。
         try:
             tick = self.client.tick(payload)
+            self._note_server_uuid(tick)
         except UnboundError as exc:
             # 中途被解绑了（比如教师在场次里把这个人删了）。这不是故障，
             # 是状态变化 —— 所以不进指数退避，退回"安静等待"那条路。
@@ -2233,7 +2256,8 @@ class Agent:
         Agent 悄悄改它会让"配置文件里写的是什么"失去意义。代价是重启之后再发现
         一次，这可以接受（几秒钟，而且是机器自己的事）。
 
-        **认的是签名，不是"谁先回答"**：见 ``syncoj_agent/discovery.py``。
+        **认的是签名，不是"谁先回答"**：见 ``syncoj_agent/discovery.py``。记着服务端
+        实例 ID（``self.server_uuid``）时还要 ID 相同、且服务端认得本机（双向 UUID）。
         """
         if self._public_key is None:
             log.info("连不上服务端，但机器上没有发布公钥 —— 无法验证应答来源，不做发现")
@@ -2242,6 +2266,8 @@ class Agent:
         outcome = discovery.discover(
             self._public_key,
             machine_id=discovery.machine_id_hint(),
+            machine_uuid=self.machine_uuid,
+            server_uuid=self.server_uuid,
         )
         if not outcome.url:
             log.warning("局域网发现没结果：%s", outcome.explain())
@@ -2301,7 +2327,10 @@ class Agent:
         if candidate == current:
             return
         verified = announce.verify_announced(
-            candidate, self._public_key, ssl_context=getattr(self.client, "_ssl_context", None)
+            candidate,
+            self._public_key,
+            ssl_context=getattr(self.client, "_ssl_context", None),
+            server_uuid=self.server_uuid,
         )
         if verified is None or verified == current:
             return
@@ -2514,6 +2543,7 @@ def _chown_state_files(config: AgentConfig, user: str) -> None:
         config.credential_path,
         config.state_dir / "machine_uuid",
         config.state_dir / "machine_id",
+        config.state_dir / "server_uuid",
         config.hash_cache_path,
     ]
     # 日志文件：注册单元以 root 跑、先建出了 agent.log（属主 root）。不交出去的话

@@ -434,3 +434,172 @@ def test_子网广播地址按小端还原(tmp_path) -> None:
     assert discovery.broadcast_targets(str(route)) == [
         "255.255.255.255", "192.0.2.255", "10.255.255.255",
     ]
+
+
+# --------------------------------------------------------------------------- #
+# v2：双向 UUID 配对 —— 只认"原来那台"服务端
+# --------------------------------------------------------------------------- #
+
+MACHINE_UUID = "1f0e2d3c4b5a69788796a5b4c3d2e1f0"
+SERVER_A = "a" * 32
+SERVER_B = "b" * 32
+
+
+def canonical_v2(nonce: str, url: str, server_uuid: str, machine_uuid: str, known: bool) -> str:
+    """手写的 v2 签名对象（同样不 import 任何一端的实现）。"""
+    return "syncoj-discovery-v2\n%s\n%s\n%s\n%s\n%s" % (
+        nonce, url, server_uuid, machine_uuid, "1" if known else "0",
+    )
+
+
+def signed_reply_v2(
+    signing_key, raw: bytes, url: str, signed_uuid: str, signed_known: bool = True, **overrides
+) -> bytes:
+    """按探测里的 nonce 与 machine_uuid 签一条 v2 应答。``overrides`` 改报文、不改签名。"""
+    probe = json.loads(raw.decode("utf-8"))
+    text = canonical_v2(probe["nonce"], url, signed_uuid, probe.get("machine_uuid", ""), signed_known)
+    signature = base64.urlsafe_b64encode(signing_key.sign(text.encode("utf-8"))).decode("ascii").rstrip("=")
+    payload = {
+        "syncoj": "syncoj", "v": 1, "nonce": probe["nonce"], "url": url,
+        "key_id": "test", "sig": signature, "server_uuid": signed_uuid, "known": signed_known,
+    }
+    payload.update(overrides)
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+
+def run_pinned(signing_key, port: int, server_uuid: str = SERVER_A):
+    return run_discovery(signing_key, port, machine_uuid=MACHINE_UUID, server_uuid=server_uuid)
+
+
+@requires_openssl
+def test_v2_探测带上本机UUID与记住的服务端ID(signing_key) -> None:
+    with fake_server(lambda raw, peer: []) as server:
+        run_pinned(signing_key, server.port)
+
+    payload = json.loads(server.seen[0].decode("utf-8"))
+    assert payload["machine_uuid"] == MACHINE_UUID
+    assert payload["server_uuid"] == SERVER_A
+    assert payload["v"] == 1, "外层版本不变：老服务端照样应答（按 v1）"
+    assert len(server.seen[0]) >= discovery.V2_PROBE_BYTES
+
+
+@requires_openssl
+def test_v2_实例ID相同_认得本机_才切(signing_key) -> None:
+    url = "http://10.0.0.7:8000"
+    with fake_server(lambda raw, peer: [signed_reply_v2(signing_key, raw, url, SERVER_A)]) as server:
+        outcome = run_pinned(signing_key, server.port)
+
+    assert outcome.url == url
+
+
+@requires_openssl
+def test_v2_实例ID不同的应答被拒(signing_key) -> None:
+    """隔壁考场拷了同一份 .key/：签名验得过，但不是原来那台。"""
+    url = "http://10.0.0.8:8000"
+    with fake_server(lambda raw, peer: [signed_reply_v2(signing_key, raw, url, SERVER_B)]) as server:
+        outcome = run_pinned(signing_key, server.port)
+
+    assert outcome.url is None
+    assert outcome.candidates == []
+    assert outcome.foreign == (url,)
+    assert "实例 ID" in outcome.explain()
+
+
+@requires_openssl
+def test_v2_记着ID时_不带ID的老应答也不认(signing_key) -> None:
+    def build(raw, peer):
+        return [signed_reply(signing_key, probe_nonce(raw), "http://10.0.0.9:8000")]
+
+    with fake_server(build) as server:
+        outcome = run_pinned(signing_key, server.port)
+
+    assert outcome.url is None
+    assert outcome.foreign == ("http://10.0.0.9:8000",)
+
+
+@requires_openssl
+def test_v2_没记住ID时沿用只验签(signing_key) -> None:
+    """老状态（还没 tick 成功过）：v1、v2 应答都按签名认，ID 不挑。"""
+    url = "http://10.0.0.8:8000"
+    with fake_server(lambda raw, peer: [signed_reply_v2(signing_key, raw, url, SERVER_B, signed_known=False)]) as server:
+        outcome = run_pinned(signing_key, server.port, server_uuid="")
+    assert outcome.url == url
+
+    def build(raw, peer):
+        return [signed_reply(signing_key, probe_nonce(raw), url)]
+
+    with fake_server(build) as server:
+        outcome = run_pinned(signing_key, server.port, server_uuid="")
+    assert outcome.url == url
+
+
+@requires_openssl
+def test_v2_服务端说不认得本机就不切(signing_key) -> None:
+    url = "http://10.0.0.7:8000"
+    with fake_server(lambda raw, peer: [signed_reply_v2(signing_key, raw, url, SERVER_A, signed_known=False)]) as server:
+        outcome = run_pinned(signing_key, server.port)
+
+    assert outcome.url is None
+    assert outcome.unknown == (url,)
+    assert "不认得" in outcome.explain()
+
+
+@requires_openssl
+def test_v2_篡改_known_或实例ID_签名就验不过(signing_key) -> None:
+    url = "http://10.0.0.7:8000"
+
+    def build(raw, peer):
+        return [
+            # 签的是 known=False，报文改成 True
+            signed_reply_v2(signing_key, raw, url, SERVER_A, signed_known=False, known=True),
+            # 签的是 B，报文改成 A
+            signed_reply_v2(signing_key, raw, "http://10.0.0.8:8000", SERVER_B, server_uuid=SERVER_A),
+        ]
+
+    with fake_server(build) as server:
+        outcome = run_pinned(signing_key, server.port)
+
+    assert outcome.url is None
+    assert outcome.candidates == [] and outcome.foreign == () and outcome.unknown == ()
+
+
+@requires_openssl
+def test_v2_别的服务端混在里面不算歧义(signing_key) -> None:
+    def build(raw, peer):
+        return [
+            signed_reply_v2(signing_key, raw, "http://10.0.0.7:8000", SERVER_A),
+            signed_reply_v2(signing_key, raw, "http://10.0.0.8:8000", SERVER_B),
+        ]
+
+    with fake_server(build) as server:
+        outcome = run_pinned(signing_key, server.port)
+
+    assert outcome.url == "http://10.0.0.7:8000"
+    assert outcome.foreign == ("http://10.0.0.8:8000",)
+
+
+@requires_openssl
+def test_v2_同一ID两个地址仍是歧义(signing_key) -> None:
+    def build(raw, peer):
+        return [
+            signed_reply_v2(signing_key, raw, "http://10.0.0.7:8000", SERVER_A),
+            signed_reply_v2(signing_key, raw, "http://10.0.0.17:8000", SERVER_A),
+        ]
+
+    with fake_server(build) as server:
+        outcome = run_pinned(signing_key, server.port)
+
+    assert outcome.url is None
+    assert outcome.ambiguous
+
+
+def test_v2_签名文本与常量两边一致() -> None:
+    from syncoj_server.services import discovery as server_side
+
+    args = ("a" * 32, "http://10.0.0.5:8000", SERVER_A, MACHINE_UUID, True)
+    assert discovery.canonical_text_v2(*args) == server_side.canonical_text_v2(*args) == canonical_v2(*args)
+    assert discovery.V2_PROBE_BYTES == server_side.V2_PROBE_BYTES
+    raw = discovery.build_probe("b" * 32, machine_uuid=MACHINE_UUID, server_uuid=SERVER_A)
+    parsed = server_side.parse_probe(raw)
+    assert parsed is not None
+    assert server_side.probe_machine_uuid(parsed) == MACHINE_UUID

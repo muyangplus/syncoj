@@ -355,3 +355,24 @@ def test_real_checker_absolute_only_matches_testlib_rcmp(tmp_path: Path) -> None
     assert _judge(exe, tmp_path, "1.0000014\n", "1\n")[0] == 0     # (1e-6, 1.5e-6] 内仍通过
     assert _judge(exe, tmp_path, "1.0000016\n", "1\n")[0] == 1
     assert _judge(exe, tmp_path, "1000000.5\n", "1000000\n")[0] == 1  # 相对误差合格也不算
+
+
+def test_native_import_keeps_io_columns_as_is(tmp_path: Path) -> None:
+    """原生格式各列原样写回：stdio 题上存着的文件名、等于默认名的文件名都不规整。"""
+    from syncoj_server.services import problem_io
+
+    from problem_io_fixtures import make_native_zip, native_problem
+
+    problems = [
+        native_problem("sum", io_mode="stdio", input_file="data.txt"),
+        native_problem("q", io_mode="file", input_file="q.in", output_file="q.out", compile_flags="-O2  -std=c++17"),
+        native_problem("bad", io_mode="file", input_file="prog"),
+    ]
+    with problem_io.parse_archive(stage(tmp_path, make_native_zip(problems))) as parsed:
+        got = {b.ident: (b.io_mode, b.input_file, b.output_file, b.compile_flags, [e.code for e in b.errors])
+               for b in parsed.result.problems}
+    assert got == {
+        "sum": ("stdio", "data.txt", None, "-std=c++17", []),
+        "q": ("file", "q.in", "q.out", "-O2  -std=c++17", []),
+        "bad": ("file", "prog", None, "-std=c++17", ["io_name_invalid"]),
+    }

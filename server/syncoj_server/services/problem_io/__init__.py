@@ -125,7 +125,23 @@ def _flags(bundle: ProblemBundle) -> None:
     bad = [token for token in tokens if not _FLAG_RE.match(token)]
     if bad:
         bundle.warn(notice("flags_dropped", flags=" ".join(bad)))
-    bundle.compile_flags = " ".join(good)[:200] or None
+        bundle.compile_flags = " ".join(good)[:200] or None
+
+
+def _native_io_names(bundle: ProblemBundle) -> None:
+    """原生格式：各列按原值写回（PUT /judge 也是原样存），只校验文件名。"""
+    if bundle.io_mode not in ("stdio", "file"):
+        bundle.io_mode = "stdio"
+    for attr in ("input_file", "output_file"):
+        value = getattr(bundle, attr) or None
+        setattr(bundle, attr, value)
+        if value is not None and (not isinstance(value, str) or io_name_error(value)):
+            bundle.fail(notice("io_name_invalid", name=str(value)))
+    if bundle.io_mode == "file":
+        effective_in = bundle.input_file or "%s.in" % bundle.ident
+        effective_out = bundle.output_file or "%s.out" % bundle.ident
+        if effective_in == effective_out:
+            bundle.fail(notice("io_name_invalid", name=effective_in))
 
 
 def _io_names(bundle: ProblemBundle) -> None:
@@ -213,7 +229,10 @@ def finalize(result: ImportResult) -> None:
         if time_limit != bundle.time_limit_ms or memory_limit != bundle.memory_limit_mb:
             bundle.warn(notice("limit_clamped", time=time_limit or 1000, memory=memory_limit or 256))
         bundle.time_limit_ms, bundle.memory_limit_mb = time_limit, memory_limit
-        _io_names(bundle)
+        if is_native:
+            _native_io_names(bundle)
+        else:
+            _io_names(bundle)
         _flags(bundle)
         if not is_native and not bundle.cases and not bundle.errors:
             bundle.fail(notice("no_cases"))

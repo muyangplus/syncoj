@@ -31,6 +31,7 @@
 
    预期：「选手状态」列出名单里的选手。
 6. 「场次管理」→ 该行「题目」→ 登记题目。标识用作目录名与代码文件名；「代码路径」不确定时留空。
+   已有 LemonLime / HOJ / Hydro 等题目包时：「评测」→「题目」卡片 →「导入题目配置」（→ 见 [`operate.md`](operate.md)「导入导出题目配置」）。
 7. 装 Agent（→ 见 [`install-agent.md`](install-agent.md)）：
 
    ```bash

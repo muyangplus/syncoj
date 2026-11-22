@@ -219,6 +219,18 @@ python scripts/smoke_systemd245.py --keep   # 失败后保留容器与临时目�
 
 ⚠️ 考试进行中评测的是未完成的代码。数据包格式、结果格式、接口 → 见 [`reference/judge-result.md`](reference/judge-result.md) 第 6 节、[`design/10-builtin-judge.md`](design/10-builtin-judge.md)。
 
+## 导入导出题目配置
+
+导入（LemonLime 比赛目录、HOJ / Hydro / QDUOJ 导出包、FPS XML、SyncOJ 原生包）：
+
+1. 「评测」→「题目」卡片 →「导入题目配置」→ 拖入 `.zip` / `.xml`；格式保持「自动识别」或手选。LemonLime 须把整个比赛目录（`.cdf` + `data/`）打成一个 zip。
+2. 预览表逐题核对：「题目」列可改标识，「动作」选新建 / 覆盖 / 跳过（有错误的题只能跳过）；「提示」列点开看每条错误与警告。
+3. 「设为自带评测」默认开（覆盖已有题目时把评测方式改为自带评测）→「导入 N 道」。预期：提示「新建 a · 覆盖 b」，题目列表刷新；标识冲突时对应行标红。
+
+导出：「评测」→「题目」卡片 →「导出」→ 选格式（SyncOJ / HOJ / LemonLime / Hydro）→ 勾选题目，核对每题下方的警告 →「下载 N 道」。单题：该题「设置」→ 数据包一栏「导出」；「下载」取原样数据包。
+
+⚠️ 暂存包 2 小时后失效，过期后重新上传。各格式映射、警告含义、上限 → 见 [`reference/problem-formats.md`](reference/problem-formats.md)。
+
 ## 命令行等价流程
 
 ```bash

@@ -46,7 +46,7 @@ syncoj-server（服务端账号）         syncoj-judge worker（专用账号，
 
 * **语言**：C++ `g++ -O2 -std=c++14 -lm`（`.cpp/.cc/.cxx`，编译参数可按题改）；C `gcc -O2 -std=c99 -lm`。编译也在沙箱里跑（防模板递归、`#include </dev/random>` 这类编译器炸弹），限 CPU 10 秒、墙钟 30 秒、输出 64 MB。
 * **IO**：按题配置文件 IO（默认读 `<题目>.in` 写 `<题目>.out`，文件名可按题改）或标准 IO（默认）；文件 IO 下没有输出文件判 WA 并写明原因（多半忘了 `freopen`）。默认时限 1000 ms、内存 256 MB。
-* **数据包**：每题一个 zip（与下发资产同一套上传与 blob 存储），**上传时校验结构**。测试点 `<名字>.in` + `<名字>.ans`（或 `.out`），可在任意子目录，名字唯一、按自然序；可选 `config.json` 写每点分值与子任务（子任务全 AC 才得分，捆绑）；未写分值时 100 分按点均分。LemonLime 的数据目录直接打 zip 即可（不做工程文件导入）。
+* **数据包**：每题一个 zip（与下发资产同一套上传与 blob 存储），**上传时校验结构**。测试点 `<名字>.in` + `<名字>.ans`（或 `.out`），可在任意子目录，名字唯一、按自然序；可选 `config.json` 写每点分值与子任务（子任务全 AC 才得分，捆绑）；未写分值时 100 分按点均分。LemonLime 的数据目录直接打 zip 即可；整场题目配置的导入导出见 §12.8。
 * **比对**：默认逐行比较，忽略行末空白与文末空行；数据包含 `checker.cpp`（连同 `testlib.h`）时用它做 special judge，testlib 风格 `checker <in> <out> <ans>`，退出码 0 为通过，也在沙箱里编译运行。
 * 每个测试点前清空工作目录，程序不能跨点留东西。
 * **结果状态**：AC / WA / TLE / MLE / RE（带信号）/ OLE / CE（编译信息截断保存）/ SE（评测系统自己的错，**不算选手的分**，界面提示重测）。整题取最严重者（SE > CE > RE > MLE > TLE > OLE > WA > AC）。
@@ -68,3 +68,16 @@ syncoj-server（服务端账号）         syncoj-judge worker（专用账号，
 5. special judge、子任务。
 
 取舍（为何不自研 seccomp 沙箱、为何经 `judge_result/` 而不直接写表）记在 ADR-0016。
+
+### 12.8 题目配置导入导出
+
+* **入口**：「评测」页「题目」卡片「导入题目配置」/「导出」；导入先预览（逐题改标识、选新建 / 覆盖 / 跳过）再应用。格式、映射、提示代码、上限 → [`../reference/problem-formats.md`](../reference/problem-formats.md)。
+* **格式**：导入 SyncOJ 原生、HOJ、LemonLime（`.cdf` JSON）、Hydro（含旧 `config.ini`、SYZOJ `data.yml`）、QDUOJ、FPS；导出 SyncOJ 原生、HOJ、LemonLime、Hydro。
+* **数据包不变**：外来题目规整成 §12.5 的数据包（`<名字>.in/.ans` + `config.json` + `checker.cpp`），走与上传数据包相同的校验与 blob 存储；评测机与计分不改。
+* **模型只加两列**：`input_file`、`output_file`（文件 IO 文件名，NULL = `<题目>.in/.out`）。逐点限制、子任务依赖、非捆绑子任务、小数分、栈限制折算成现有语义并逐题给警告。
+* **原生格式无损**：`syncoj-problems.json` + 原样的 `testdata.zip`，导出再导入各列与 `testdata_sha256` 不变。
+* **checker**：随仓库带 testlib.h，checker 用了而包里没有时补上；实数比较与 HUSTOJ spj 由服务端生成不依赖 testlib 的 checker。
+* **YAML** 用自带的受限子集解析器，不引入 PyYAML；XML 流式解析并拒绝 DOCTYPE / ENTITY。
+* **只信服务端解析**：应用导入时重新解析暂存包，只采用客户端回传的标识与动作。
+
+取舍记在 ADR-0017。

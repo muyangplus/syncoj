@@ -37,3 +37,4 @@
 | [ADR-0014](ADR-0014-config-must-prove-it-is-read.md) | 配置项须有测试证明被读到 |
 | [ADR-0015](ADR-0015-server-announce.md) | 服务端主动通告只作线索，切换前挑战应答；保留机器探测 |
 | [ADR-0016](ADR-0016-builtin-judge.md) | 自带评测写 `judge_result/`、独立评测机、借用 isolate |
+| [ADR-0017](ADR-0017-problem-format-import.md) | 题目配置导入导出折算成现有数据包，模型只加 IO 文件名两列 |

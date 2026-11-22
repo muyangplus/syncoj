@@ -41,6 +41,7 @@
 | §7.1 密钥从哪来 / §7.2 发布当前版本 / §7.2.1 安装策略 | [`docs/design/07-ops-and-install.md`](docs/design/07-ops-and-install.md) |
 | §7.3 机器怎么知道服务端在哪 / §7.4 远程卸载 / §7.5 发布（CD） | [`docs/design/07-ops-and-install.md`](docs/design/07-ops-and-install.md) |
 | §10.5 重构遗留 | [`docs/design/08-milestones-and-open.md`](docs/design/08-milestones-and-open.md) |
+| §12.5 评测语义 / §12.8 题目配置导入导出 | [`docs/design/10-builtin-judge.md`](docs/design/10-builtin-judge.md) |
 
 `design/` 记现状，ADR 记否决的方案与代价；§0 每行指向对应 ADR。
 操作步骤：[`docs/quickstart.md`](docs/quickstart.md)、[`docs/install-agent.md`](docs/install-agent.md)、[`docs/operate.md`](docs/operate.md)。文档总入口：[`docs/README.md`](docs/README.md)。

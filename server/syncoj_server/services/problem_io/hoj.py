@@ -45,11 +45,13 @@ register({
     "hoj_extra_headers": "{files} 写进 judgeExtraFile，HOJ 再次导出时会丢失",
 })
 
-#: 导出时写的 languages（HOJ 导入要求是数组；只开 C/C++）
-EXPORT_LANGUAGES = ["C", "C With O2", "C++", "C++ With O2", "C++ 17", "C++ 17 With O2"]
+#: 导出时写的 languages（HOJ 导入要求是数组；只开 C/C++）。C++ 17 / 20 只在编译参数带了对应
+#: 标准时才加 —— 导入时 languages 里有 C++ 17 / 20 就会取 -std=c++17 / 20，否则往返会凭空多出标准
+EXPORT_LANGUAGES = ["C", "C With O2", "C++", "C++ With O2"]
+_CXX17_LANGUAGES = ["C++ 17", "C++ 17 With O2"]
 _CXX20_LANGUAGES = ["C++ 20", "C++ 20 With O2"]
-#: 能由 languages 表达的编译参数（其余导出时丢弃）
-_REPRESENTED_FLAGS = {"-O2", "-std=c++14", "-std=c++17", "-std=c++20"}
+#: 能由 languages 表达、再导入时能还原的编译参数（其余导出时丢弃并提示）
+_REPRESENTED_FLAGS = {"-std=c++17", "-std=c++20"}
 #: 有任何一项非空就算带了题面类内容 → 整包给一次 statement_dropped
 _STATEMENT_FIELDS = ("description", "input", "output", "examples", "hint", "source")
 
@@ -410,6 +412,8 @@ def _languages_for(flags: Optional[str]) -> Tuple[List[str], List[str]]:
     """编译参数 → (languages, 表达不了而丢弃的参数)。"""
     tokens = (flags or "").split()
     languages = list(EXPORT_LANGUAGES)
+    if "-std=c++17" in tokens or "-std=c++20" in tokens:
+        languages += _CXX17_LANGUAGES
     if "-std=c++20" in tokens:
         languages += _CXX20_LANGUAGES
     return languages, [token for token in tokens if token not in _REPRESENTED_FLAGS]

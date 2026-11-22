@@ -459,9 +459,12 @@ def test_export_layout_and_fields() -> None:
     assert p["ioScore"] == 100 and p["description"] == ""
     assert first["samples"] == [{"input": "%d.in" % i, "output": "%d.out" % i, "score": s}
                                 for i, s in enumerate([33, 33, 34], 1)]
-    assert first["languages"] == hoj.EXPORT_LANGUAGES and first["tags"] == [] and first["codeTemplates"] == []
-    assert [n.code for n in notices[1]] == ["flags_dropped"] and "-DLOCAL" in notices[1][0].message
-    assert "-O2" not in notices[1][0].message
+    assert first["languages"] == hoj.EXPORT_LANGUAGES + ["C++ 17", "C++ 17 With O2"]
+    assert first["tags"] == [] and first["codeTemplates"] == []
+    assert [n.code for n in notices[1]] == ["flags_dropped"]
+    assert "-DLOCAL" in notices[1][0].message and "-O2" in notices[1][0].message
+    assert "c++17" not in notices[1][0].message
+    assert json.loads(zf_text(data, "problem_2.json"))["languages"] == hoj.EXPORT_LANGUAGES
 
     p = second["problem"]
     assert (p["problemId"], p["title"], p["isFileIO"]) == ("GEO", "geo", False)
@@ -558,7 +561,7 @@ def test_api_round_trip(client: TestClient, contest: dict, admin_headers: dict) 
     body = client.get("%s/contests/%d/judge-export/preview?format=hoj" % (ADMIN, contest["id"]),
                       headers=admin_headers).json()
     assert [(p["ident"], p["included"]) for p in body["problems"]] == [("sum", True)]
-    assert [w["code"] for w in body["problems"][0]["warnings"]] == []
+    assert [w["code"] for w in body["problems"][0]["warnings"]] == ["flags_dropped"]  # -O2
 
     archive = export_zip(client, "%s/contests/%d/judge-export?format=hoj" % (ADMIN, contest["id"]), admin_headers)
     buffer = io.BytesIO()
@@ -579,7 +582,7 @@ def test_api_round_trip(client: TestClient, contest: dict, admin_headers: dict) 
     assert row["ident"] == "data"
     assert (row["input_file"] or "data.in", row["output_file"]) == ("data.in", "sum.out")
     assert (row["time_limit_ms"], row["memory_limit_mb"], row["io_mode"]) == (2000, 512, "file")
-    assert row["judge_mode"] == "builtin"
+    assert row["judge_mode"] == "builtin" and row["compile_flags"] == "-std=c++17"
     assert row["testdata"]["cases"] == original["testdata"]["cases"]
     assert row["testdata"]["total_score"] == original["testdata"]["total_score"]
     assert row["testdata"]["has_checker"] is True
@@ -606,3 +609,31 @@ def test_generated_case_name_does_not_clash(tmp_path: Path) -> None:
     })
     assert _errors(bundle) == [] and built
     assert len({name.lower() for name, _ in built["cases"]}) == 3
+
+
+def zf_text(data: bytes, name: str) -> bytes:
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        return zf.read(name)
+
+
+@pytest.mark.parametrize("flags, dropped, back", [
+    (None, None, None),
+    ("-std=c++14", "-std=c++14", None),
+    ("-O2 -std=c++14", "-O2 -std=c++14", None),
+    ("-std=c++17", None, "-std=c++17"),
+    ("-O2 -std=c++17", "-O2", "-std=c++17"),
+    ("-std=c++20", None, "-std=c++20"),
+])
+def test_export_compile_flags_round_trip(tmp_path: Path, flags, dropped, back) -> None:
+    """能还原的标准才写进 languages；还原不了的参数给 flags_dropped，不再静默变成 c++17。"""
+    blobs = _Blobs()
+    problem = _problem(blobs, 1, "a", make_testdata_zip(count=1), compile_flags=flags)
+    data, notices = _export([problem], blobs)
+    got = [n for n in notices[1] if n.code == "flags_dropped"]
+    if dropped is None:
+        assert got == []
+    else:
+        assert len(got) == 1 and dropped in got[0].message
+    result, _ = _parse(tmp_path, data)
+    (bundle,) = result.problems
+    assert bundle.compile_flags == back

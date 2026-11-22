@@ -177,7 +177,7 @@ syncoj-problems.json
 | `ident`、`title`、`order_index`、`note` | 题目列原值 |
 | `file_patterns` | 库里原值；`null` = 服务端默认模式 |
 | `judge_mode`、`time_limit_ms`、`memory_limit_mb`、`io_mode`、`input_file`、`output_file`、`compile_flags` | 题目列原值 |
-| `testdata` | `{path, name, sha256, size}`；没有数据包时省略 |
+| `testdata` | `{path, name, sha256, size}`；没有数据包时省略。导入时 `name` 只取基本名、去掉控制字符、截到 255 字符，为空用 `<ident>.zip` |
 
 导入：`format` 必须是 `syncoj-judge`，`version > 1` → `version_unsupported`；内层 zip sha256 不符 → `sha_mismatch`；内层 zip 过 `parse_testdata`；各列按原值写回，只校验（ident、IO 文件名、编译参数白名单、代码路径模式）。导出再导入：各列（id 除外）与 `testdata_sha256` 相同。
 

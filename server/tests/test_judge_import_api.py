@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 import json
+import zipfile
 from pathlib import Path
 from typing import Dict, List
 
@@ -210,3 +212,41 @@ def test_blob_is_shared_with_identical_upload(client: TestClient, contest: dict,
     with app.state.ctx.db.session() as session:
         row = session.execute(select(Problem).where(Problem.ident == "x")).scalar_one()
         assert json.loads(row.testdata_info)["cases"] == 4
+
+
+def _native_with_testdata_names(names: List[object]) -> bytes:
+    """原生包，第 i 道题清单里的 ``testdata.name`` 改成 ``names[i]``。"""
+    problems = [native_problem("p%d" % i) for i in range(len(names))]
+    raw = make_native_zip(problems)
+    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+        files = {name: zf.read(name) for name in zf.namelist()}
+    manifest = json.loads(files["syncoj-problems.json"])
+    for entry, name in zip(manifest["problems"], names):
+        entry["testdata"]["name"] = name
+    files["syncoj-problems.json"] = json.dumps(manifest, ensure_ascii=False).encode("utf-8")
+    return make_zip(files)
+
+
+def test_testdata_name_from_manifest_is_cleaned(client: TestClient, contest: dict, admin_headers: dict) -> None:
+    """清单里的 testdata.name 含 CR/LF 时，入库前去掉控制字符；空了用 <ident>.zip。下载头里不出现控制字符。"""
+    names = ["a\r\nX-Evil: 1.zip", "\r\n\t", None, "dir/sub\\数据.zip", "x" * 300 + ".zip"]
+    body = preview(client, contest, admin_headers, _native_with_testdata_names(names)).json()
+    result = apply(client, contest, admin_headers, body["token"], accept_all(body)).json()
+    assert result["created"] == 5, result
+    stored = [p["testdata"]["name"] for p in result["problems"]]
+    assert stored == ["aX-Evil: 1.zip", "p1.zip", "p2.zip", "数据.zip", "x" * 255]
+    for problem in result["problems"]:
+        response = client.get("%s/problems/%d/testdata/file" % (ADMIN, problem["id"]), headers=admin_headers)
+        assert response.status_code == 200
+        disposition = response.headers["content-disposition"]
+        assert not any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in disposition), disposition
+
+
+def test_attachment_header_drops_control_characters() -> None:
+    from syncoj_server.api.admin import _attachment_header
+
+    header = _attachment_header('a\r\nX-Evil: 1\x00"\\.zip')
+    assert header.startswith('attachment; filename="a__X-Evil: 1___.zip"; filename*=UTF-8\'\'')
+    assert "\r" not in header and "\n" not in header and "%0D" not in header and "%0A" not in header
+    assert _attachment_header("") == "attachment; filename=\"download\"; filename*=UTF-8''download"
+    assert "filename*=UTF-8''%E6%95%B0%E6%8D%AE.zip" in _attachment_header("数据.zip")

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import tempfile
 import zipfile
@@ -170,8 +171,19 @@ def _check_testdata(view: ArchiveView, bundle: ProblemBundle, meta: Any) -> None
     if not ok:
         return
     bundle.raw_testdata = FileRef(member=view.full(path))
-    name = _opt_str(meta.get("name"))
-    bundle.testdata_name = (name or "testdata.zip")[:255]
+    bundle.testdata_name = clean_testdata_name(meta.get("name"))
+
+
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def clean_testdata_name(value: Any) -> Optional[str]:
+    """清单里的 ``testdata.name``：只留基本名、去掉控制字符（CR/LF 会让下载接口的
+    Content-Disposition 发不出去）、截到 255 字符。剩下为空 → None（apply 时用 ``<ident>.zip``）。"""
+    if not isinstance(value, str):
+        return None
+    name = _CONTROL_CHARS.sub("", value).replace("\\", "/").rsplit("/", 1)[-1].strip()
+    return name[:255] or None
 
 
 def parse(view: ArchiveView) -> ImportResult:

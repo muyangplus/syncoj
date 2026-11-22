@@ -2472,8 +2472,6 @@ def _blob_response(ctx: AppContext, sha256: str, download_name: str) -> Response
     流式而不是整体读进内存：``max_file_size`` 是可配的，默认 2MB 但有人会调大，
     而"下载一个几百 MB 的文件把服务端内存打满"是完全没必要的失败模式。
     """
-    from urllib.parse import quote
-
     handle = ctx.blobs.open(sha256)
     size = ctx.blobs.path_for(sha256).stat().st_size
 
@@ -2487,16 +2485,13 @@ def _blob_response(ctx: AppContext, sha256: str, download_name: str) -> Response
         finally:
             handle.close()
 
-    # 用 RFC 5987 的 filename* 传中文名；filename 那个 ASCII 版本是给老浏览器兜底
-    ascii_name = download_name.encode("ascii", "replace").decode("ascii") or "code.txt"
-    disposition = "attachment; filename=\"%s\"; filename*=UTF-8''%s" % (
-        ascii_name.replace('"', "_"),
-        quote(download_name, safe=""),
-    )
     return StreamingResponse(
         chunks(),
         media_type="application/octet-stream",
-        headers={"Content-Disposition": disposition, "Content-Length": str(size)},
+        headers={
+            "Content-Disposition": _attachment_header(download_name, fallback="code.txt"),
+            "Content-Length": str(size),
+        },
     )
 
 
@@ -2784,12 +2779,18 @@ def _unique_arcname(used: Dict[str, int], candidate: str) -> str:
     return "%s(%d)" % (candidate, used[candidate])
 
 
-def _attachment_header(filename: str) -> str:
+def _attachment_header(filename: str, fallback: str = "download") -> str:
+    """附件头。用 RFC 5987 的 filename* 传中文名；filename 那个 ASCII 版本是给老浏览器兜底。
+
+    名字可能来自上传的文件名或导入包的清单：控制字符（CR/LF 等）换成 ``_``，
+    否则 h11 / httptools 拒发这个头，客户端只看到连接被断。
+    """
     from urllib.parse import quote
 
+    filename = "".join("_" if ord(ch) < 0x20 or ord(ch) == 0x7F else ch for ch in filename) or fallback
     ascii_name = filename.encode("ascii", "replace").decode("ascii")
     return "attachment; filename=\"%s\"; filename*=UTF-8''%s" % (
-        ascii_name.replace('"', "_"),
+        ascii_name.replace('"', "_").replace("\\", "_"),
         quote(filename, safe=""),
     )
 

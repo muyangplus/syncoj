@@ -1,0 +1,12 @@
+SyncOJ
+Copyright 2026 muyangplus
+
+本产品依据 Apache License 2.0 授权，全文见 LICENSE。
+
+本产品包含以下第三方软件：
+- testlib（server/syncoj_server/judging/vendor/testlib.h），MIT 许可，
+  Copyright (c) 2015 Mike Mirzayanov，全文见 server/syncoj_server/judging/vendor/LICENSE-testlib。
+- 前端构建产物（web/dist）中打包的第三方 JavaScript 包，清单与许可证全文见
+  web/dist/assets/third-party-licenses.txt。
+
+依赖清单与许可证全文汇总见 THIRD-PARTY-LICENSES.md。

@@ -139,6 +139,11 @@ def step_web_types(ctx: "Context") -> None:
         )
 
 
+def step_licenses(ctx: "Context") -> None:
+    """``THIRD-PARTY-LICENSES.md`` 与前端清单要和已安装的依赖一致（需要 ``web/node_modules``）。"""
+    run([ctx.python, "scripts/collect_licenses.py", "--check"])
+
+
 def step_web_build(ctx: "Context") -> None:
     """``npm run build`` 已经串了 check:routes → typecheck → vite build。"""
     run([ctx.npm, "run", "build"], cwd=WEB)
@@ -153,6 +158,7 @@ STEPS: List[Tuple[str, str, Callable[["Context"], None], bool]] = [
     ("server-tests", "服务端测试（含协议契约与端到端集成）", step_server_tests, False),
     ("openapi", "OpenAPI 与服务端 schema 是否同步", step_openapi, False),
     ("web-types", "前端类型是否已从 openapi.json 重新生成", step_web_types, True),
+    ("licenses", "第三方许可证声明与依赖一致", step_licenses, True),
     ("web-build", "前端入口对账、类型检查与构建", step_web_build, True),
 ]
 

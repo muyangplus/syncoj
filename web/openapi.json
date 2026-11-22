@@ -725,6 +725,20 @@
         "title": "BindResultOut",
         "type": "object"
       },
+      "Body_judge_import_preview_api_v1_admin_contests__contest_id__judge_import_preview_post": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_judge_import_preview_api_v1_admin_contests__contest_id__judge_import_preview_post",
+        "type": "object"
+      },
       "Body_upload_asset_api_v1_admin_contests__contest_id__assets_post": {
         "properties": {
           "file": {
@@ -2272,6 +2286,58 @@
         "title": "JudgeCaseOut",
         "type": "object"
       },
+      "JudgeExportItemOut": {
+        "additionalProperties": false,
+        "properties": {
+          "ident": {
+            "title": "Ident",
+            "type": "string"
+          },
+          "included": {
+            "title": "Included",
+            "type": "boolean"
+          },
+          "problem_id": {
+            "title": "Problem Id",
+            "type": "integer"
+          },
+          "warnings": {
+            "items": {
+              "$ref": "#/components/schemas/NoticeOut"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "problem_id",
+          "ident",
+          "included"
+        ],
+        "title": "JudgeExportItemOut",
+        "type": "object"
+      },
+      "JudgeExportPreviewOut": {
+        "additionalProperties": false,
+        "properties": {
+          "format": {
+            "title": "Format",
+            "type": "string"
+          },
+          "problems": {
+            "items": {
+              "$ref": "#/components/schemas/JudgeExportItemOut"
+            },
+            "title": "Problems",
+            "type": "array"
+          }
+        },
+        "required": [
+          "format"
+        ],
+        "title": "JudgeExportPreviewOut",
+        "type": "object"
+      },
       "JudgeFailIn": {
         "additionalProperties": false,
         "properties": {
@@ -2283,6 +2349,316 @@
           }
         },
         "title": "JudgeFailIn",
+        "type": "object"
+      },
+      "JudgeImportApplyIn": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/JudgeImportApplyItem"
+            },
+            "maxItems": 200,
+            "title": "Items",
+            "type": "array"
+          },
+          "set_builtin": {
+            "default": true,
+            "title": "Set Builtin",
+            "type": "boolean"
+          },
+          "token": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "title": "JudgeImportApplyIn",
+        "type": "object"
+      },
+      "JudgeImportApplyItem": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "create",
+              "update",
+              "skip"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "ident": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Ident",
+            "type": "string"
+          },
+          "key": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "ident",
+          "action"
+        ],
+        "title": "JudgeImportApplyItem",
+        "type": "object"
+      },
+      "JudgeImportErrorOut": {
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "message"
+        ],
+        "title": "JudgeImportErrorOut",
+        "type": "object"
+      },
+      "JudgeImportItemOut": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "default": "create",
+            "enum": [
+              "create",
+              "update",
+              "skip"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "cases": {
+            "default": 0,
+            "title": "Cases",
+            "type": "integer"
+          },
+          "compile_flags": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Compile Flags"
+          },
+          "errors": {
+            "items": {
+              "$ref": "#/components/schemas/NoticeOut"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "existing_problem_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Existing Problem Id"
+          },
+          "exists": {
+            "default": false,
+            "title": "Exists",
+            "type": "boolean"
+          },
+          "has_checker": {
+            "default": false,
+            "title": "Has Checker",
+            "type": "boolean"
+          },
+          "ident": {
+            "title": "Ident",
+            "type": "string"
+          },
+          "input_file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input File"
+          },
+          "io_mode": {
+            "default": "stdio",
+            "title": "Io Mode",
+            "type": "string"
+          },
+          "judge_mode": {
+            "default": "builtin",
+            "title": "Judge Mode",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "memory_limit_mb": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Limit Mb"
+          },
+          "output_file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output File"
+          },
+          "source_name": {
+            "title": "Source Name",
+            "type": "string"
+          },
+          "subtasks": {
+            "default": 0,
+            "title": "Subtasks",
+            "type": "integer"
+          },
+          "time_limit_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time Limit Ms"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "total_score": {
+            "default": 0,
+            "title": "Total Score",
+            "type": "integer"
+          },
+          "warnings": {
+            "items": {
+              "$ref": "#/components/schemas/NoticeOut"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "key",
+          "source_name",
+          "ident"
+        ],
+        "title": "JudgeImportItemOut",
+        "type": "object"
+      },
+      "JudgeImportOut": {
+        "additionalProperties": false,
+        "properties": {
+          "created": {
+            "default": 0,
+            "title": "Created",
+            "type": "integer"
+          },
+          "errors": {
+            "items": {
+              "$ref": "#/components/schemas/JudgeImportErrorOut"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "problems": {
+            "items": {
+              "$ref": "#/components/schemas/ProblemOut"
+            },
+            "title": "Problems",
+            "type": "array"
+          },
+          "skipped": {
+            "default": 0,
+            "title": "Skipped",
+            "type": "integer"
+          },
+          "updated": {
+            "default": 0,
+            "title": "Updated",
+            "type": "integer"
+          }
+        },
+        "title": "JudgeImportOut",
+        "type": "object"
+      },
+      "JudgeImportPreviewOut": {
+        "additionalProperties": false,
+        "properties": {
+          "format": {
+            "title": "Format",
+            "type": "string"
+          },
+          "problems": {
+            "items": {
+              "$ref": "#/components/schemas/JudgeImportItemOut"
+            },
+            "title": "Problems",
+            "type": "array"
+          },
+          "token": {
+            "title": "Token",
+            "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "$ref": "#/components/schemas/NoticeOut"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "token",
+          "format"
+        ],
+        "title": "JudgeImportPreviewOut",
         "type": "object"
       },
       "JudgeLeaseOut": {
@@ -2345,6 +2721,17 @@
             "title": "Ident",
             "type": "string"
           },
+          "input_file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input File"
+          },
           "io_mode": {
             "title": "Io Mode",
             "type": "string"
@@ -2352,6 +2739,17 @@
           "memory_limit_mb": {
             "title": "Memory Limit Mb",
             "type": "integer"
+          },
+          "output_file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output File"
           },
           "time_limit_ms": {
             "title": "Time Limit Ms",
@@ -3029,6 +3427,26 @@
           }
         },
         "title": "MetaOut",
+        "type": "object"
+      },
+      "NoticeOut": {
+        "additionalProperties": false,
+        "description": "导入 / 导出的一条警告或错误。``message`` 是给人看的中文。",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "NoticeOut",
         "type": "object"
       },
       "Page_AgentRuntimeOut_": {
@@ -4075,6 +4493,18 @@
             ],
             "title": "Compile Flags"
           },
+          "input_file": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input File"
+          },
           "io_mode": {
             "default": "stdio",
             "enum": [
@@ -4105,6 +4535,18 @@
               }
             ],
             "title": "Memory Limit Mb"
+          },
+          "output_file": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output File"
           },
           "time_limit_ms": {
             "anyOf": [
@@ -4212,6 +4654,17 @@
             "title": "Ident",
             "type": "string"
           },
+          "input_file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input File"
+          },
           "io_mode": {
             "default": "stdio",
             "title": "Io Mode",
@@ -4248,6 +4701,17 @@
             "default": 0,
             "title": "Order Index",
             "type": "integer"
+          },
+          "output_file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output File"
           },
           "testdata": {
             "anyOf": [
@@ -5898,7 +6362,7 @@
   "info": {
     "description": "通用编程考试与竞赛模拟的在线同步评测系统",
     "title": "SyncOJ",
-    "version": "0.1.0"
+    "version": "0.2.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -7660,6 +8124,285 @@
           }
         },
         "summary": "Export Source Files",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/contests/{contest_id}/judge-export": {
+      "get": {
+        "description": "导出题目评测配置（zip）。",
+        "operationId": "judge_export_api_v1_admin_contests__contest_id__judge_export_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "default": "syncoj",
+              "enum": [
+                "syncoj",
+                "hoj",
+                "lemonlime",
+                "hydro"
+              ],
+              "title": "Format",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "problem_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "integer"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Problem Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Judge Export",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/contests/{contest_id}/judge-export/preview": {
+      "get": {
+        "description": "导出前看一眼：哪些题会写进包里、每题会丢掉什么。不传 problem_id 时按默认范围选题。",
+        "operationId": "judge_export_preview_api_v1_admin_contests__contest_id__judge_export_preview_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "default": "syncoj",
+              "enum": [
+                "syncoj",
+                "hoj",
+                "lemonlime",
+                "hydro"
+              ],
+              "title": "Format",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "problem_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "integer"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Problem Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JudgeExportPreviewOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Judge Export Preview",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/contests/{contest_id}/judge-import/apply": {
+      "post": {
+        "description": "按预览时的 token 应用导入。每题只采用客户端给的 ident 与动作（新建 / 覆盖 / 跳过）。",
+        "operationId": "judge_import_apply_api_v1_admin_contests__contest_id__judge_import_apply_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JudgeImportApplyIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JudgeImportOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Judge Import Apply",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/contests/{contest_id}/judge-import/preview": {
+      "post": {
+        "description": "上传题目配置包（zip / FPS xml）：识别格式、解析、试构建数据包，返回预览与暂存 token。",
+        "operationId": "judge_import_preview_api_v1_admin_contests__contest_id__judge_import_preview_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "default": "auto",
+              "enum": [
+                "auto",
+                "syncoj",
+                "hoj",
+                "lemonlime",
+                "hydro",
+                "qduoj",
+                "fps"
+              ],
+              "title": "Format",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_judge_import_preview_api_v1_admin_contests__contest_id__judge_import_preview_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JudgeImportPreviewOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Judge Import Preview",
         "tags": [
           "admin"
         ]
@@ -9977,7 +10720,7 @@
     },
     "/api/v1/admin/problems/{problem_id}/judge": {
       "put": {
-        "description": "题目的评测方式：外部评测器 / 自带评测，以及时限、内存、IO 方式、编译参数。",
+        "description": "题目的评测方式：外部评测器 / 自带评测，以及时限、内存、IO 方式与文件名、编译参数。",
         "operationId": "set_problem_judge_api_v1_admin_problems__problem_id__judge_put",
         "parameters": [
           {
@@ -10023,6 +10766,63 @@
           }
         },
         "summary": "Set Problem Judge",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/problems/{problem_id}/judge-export": {
+      "get": {
+        "description": "单题导出：等价于场次导出只选这一题。",
+        "operationId": "judge_export_problem_api_v1_admin_problems__problem_id__judge_export_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "problem_id",
+            "required": true,
+            "schema": {
+              "title": "Problem Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "default": "syncoj",
+              "enum": [
+                "syncoj",
+                "hoj",
+                "lemonlime",
+                "hydro"
+              ],
+              "title": "Format",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Judge Export Problem",
         "tags": [
           "admin"
         ]
@@ -10116,6 +10916,47 @@
           }
         },
         "summary": "Upload Testdata",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/problems/{problem_id}/testdata/file": {
+      "get": {
+        "description": "原样下载题目的数据包（上传时的 zip，字节不变）。",
+        "operationId": "download_testdata_api_v1_admin_problems__problem_id__testdata_file_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "problem_id",
+            "required": true,
+            "schema": {
+              "title": "Problem Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download Testdata",
         "tags": [
           "admin"
         ]

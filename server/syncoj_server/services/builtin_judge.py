@@ -40,6 +40,8 @@ def problem_config(row: Problem) -> Dict[str, Any]:
         "time_limit_ms": int(row.time_limit_ms or DEFAULT_TIME_LIMIT_MS),
         "memory_limit_mb": int(row.memory_limit_mb or DEFAULT_MEMORY_LIMIT_MB),
         "io_mode": row.io_mode or "stdio",
+        "input_file": row.input_file or None,
+        "output_file": row.output_file or None,
         "compile_flags": row.compile_flags or None,
     }
 

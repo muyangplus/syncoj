@@ -1,0 +1,85 @@
+// SyncOJ 生成的实数比较 checker（不依赖 testlib）。
+// 逐个 token 比较：两边都能整段解析成实数时，绝对误差或相对误差（相对标准答案）不超过 EPS
+// 即通过（RELATIVE 为 false 时只看绝对误差，同 testlib rcmp）；否则按字符串精确比较。
+// 用法：chk <输入> <选手输出> <标准答案>
+// 退出码 0 = AC，1 = WA，3 = 评测错误；stderr 按 testlib 风格写 ok / wrong answer。
+#include <cctype>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+
+static const double EPS = {{EPS}};
+static const bool RELATIVE = {{RELATIVE}};
+
+static bool next_token(std::FILE* f, std::string& out) {
+    out.clear();
+    int c;
+    while ((c = std::fgetc(f)) != EOF && std::isspace(c)) {
+    }
+    if (c == EOF) return false;
+    do {
+        out.push_back(static_cast<char>(c));
+    } while ((c = std::fgetc(f)) != EOF && !std::isspace(c));
+    return true;
+}
+
+static bool to_double(const std::string& s, double& value) {
+    if (s.empty()) return false;
+    char* end = 0;
+    value = std::strtod(s.c_str(), &end);
+    return end != 0 && *end == '\0';
+}
+
+int main(int argc, char** argv) {
+    if (argc < 4) {
+        std::fprintf(stderr, "FAIL usage: chk <input> <output> <answer>\n");
+        return 3;
+    }
+    std::FILE* ans = std::fopen(argv[3], "r");
+    if (!ans) {
+        std::fprintf(stderr, "FAIL cannot open answer\n");
+        return 3;
+    }
+    std::FILE* ouf = std::fopen(argv[2], "r");
+    if (!ouf) {
+        std::fprintf(stderr, "wrong answer cannot open output\n");
+        return 1;
+    }
+    long n = 0;
+    std::string got, want;
+    while (true) {
+        bool has_want = next_token(ans, want);
+        bool has_got = next_token(ouf, got);
+        if (!has_want && !has_got) break;
+        ++n;
+        if (!has_want) {
+            std::fprintf(stderr, "wrong answer extra token at position %ld\n", n);
+            return 1;
+        }
+        if (!has_got) {
+            std::fprintf(stderr, "wrong answer expected %s at position %ld, found end of file\n",
+                         want.c_str(), n);
+            return 1;
+        }
+        double x = 0, y = 0;
+        if (to_double(want, y) && to_double(got, x)) {
+            if (std::isnan(x) || std::isnan(y)) {
+                if (std::isnan(x) && std::isnan(y)) continue;
+            } else {
+                double diff = std::fabs(x - y);
+                if (RELATIVE ? !(diff > EPS && diff > EPS * std::fabs(y)) : !(diff > EPS + 1e-15)) continue;
+            }
+            std::fprintf(stderr, "wrong answer %ld-th number: expected %s, found %s\n",
+                         n, want.c_str(), got.c_str());
+            return 1;
+        }
+        if (got != want) {
+            std::fprintf(stderr, "wrong answer %ld-th token: expected %s, found %s\n",
+                         n, want.c_str(), got.c_str());
+            return 1;
+        }
+    }
+    std::fprintf(stderr, "ok %ld tokens\n", n);
+    return 0;
+}

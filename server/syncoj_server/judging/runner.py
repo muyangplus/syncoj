@@ -54,6 +54,9 @@ class ProblemConfig:
     time_limit_ms: int = 1000
     memory_limit_mb: int = 256
     io_mode: str = "stdio"  # stdio | file
+    #: 文件 IO 的文件名；None = <ident>.in / <ident>.out
+    input_file: Optional[str] = None
+    output_file: Optional[str] = None
     compile_flags: Optional[str] = None  # 追加到默认编译参数之后
     output_limit_mb: int = 64
 
@@ -186,8 +189,8 @@ def _judge_in(box, archive, data: Testdata, source, main_name, compile_argv, lan
         processes=1,
     )
     file_io = config.io_mode == "file"
-    in_name = "%s.in" % config.ident if file_io else "input.txt"
-    out_name = "%s.out" % config.ident if file_io else "output.txt"
+    in_name = (config.input_file or "%s.in" % config.ident) if file_io else "input.txt"
+    out_name = (config.output_file or "%s.out" % config.ident) if file_io else "output.txt"
 
     cases: List[CaseResult] = []
     for case in data.cases:

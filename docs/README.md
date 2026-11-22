@@ -19,7 +19,7 @@
 | [`README.md`](README.md) | 文档地图与全量清单 |
 | [`quickstart.md`](quickstart.md) | 教师开考流程、配对、两个端口、目录约定 |
 | [`install-agent.md`](install-agent.md) | 安装入口与参数、注册单元、运行身份、目录与下发、卸载、排障 |
-| [`operate.md`](operate.md) | 服务端部署与环境变量、`.key/`、服务端发现与主动通告、Agent 发版、GitHub Release、systemd 245 冒烟、自带评测、心跳排障 |
+| [`operate.md`](operate.md) | 服务端部署与环境变量、`.key/`、服务端发现与主动通告、Agent 发版、GitHub Release、systemd 245 冒烟、自带评测、导入导出题目配置、心跳排障 |
 
 ### 参考
 
@@ -29,6 +29,7 @@
 | [`reference/api-conventions.md`](reference/api-conventions.md) | 管理端 API 约定：列表信封、错误体、命名、删除语义 |
 | [`reference/judge-result.md`](reference/judge-result.md) | 成绩目录与格式、三条解析规则、自带评测数据包与评测机接口 |
 | [`reference/config-keys.md`](reference/config-keys.md) | `agent.ini` 逐键说明（与 `CONFIG_POLICY_KEYS` 对账） |
+| [`reference/problem-formats.md`](reference/problem-formats.md) | 题目配置导入导出：识别顺序、各格式映射、原生格式、提示代码、上限 |
 
 ### 设计（原 `DESIGN.md` 拆分，编号不变）
 
@@ -44,7 +45,7 @@
 | [`design/07-ops-and-install.md`](design/07-ops-and-install.md) | 运维与装机：`.key/`、发布、安装策略、服务端发现、远程卸载（原 §7） |
 | [`design/08-milestones-and-open.md`](design/08-milestones-and-open.md) | 里程碑、待补信息、待办、否决的想法（原 §8 / §9 / §10） |
 | [`design/09-server-announce.md`](design/09-server-announce.md) | 服务端主动通告与挑战应答（§11） |
-| [`design/10-builtin-judge.md`](design/10-builtin-judge.md) | 自带沙箱评测（§12） |
+| [`design/10-builtin-judge.md`](design/10-builtin-judge.md) | 自带沙箱评测、题目配置导入导出（§12） |
 
 ### 决策记录（ADR）
 
@@ -69,6 +70,7 @@
 | [`decisions/ADR-0014-config-must-prove-it-is-read.md`](decisions/ADR-0014-config-must-prove-it-is-read.md) | 配置项须有测试证明被读取 |
 | [`decisions/ADR-0015-server-announce.md`](decisions/ADR-0015-server-announce.md) | 主动通告只作线索，切换前挑战应答 |
 | [`decisions/ADR-0016-builtin-judge.md`](decisions/ADR-0016-builtin-judge.md) | 自带评测：写 `judge_result/`、独立评测机、isolate 沙箱 |
+| [`decisions/ADR-0017-problem-format-import.md`](decisions/ADR-0017-problem-format-import.md) | 题目配置导入导出：折算成现有数据包、只加 IO 文件名两列 |
 
 ## 文档之间的关系
 

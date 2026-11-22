@@ -6,10 +6,11 @@
 |---|---|---|
 | 目标环境 | NOI Linux 2.0（Ubuntu 20.04 / glibc 2.31 / systemd 245 / Python 3.8.10） | v1 仅 Linux，平台层预留 Windows（[`ADR-0001`](../decisions/ADR-0001-tech-stack-and-dependencies.md)） |
 | Agent 技术栈 | Python 3.8 + **零第三方依赖**，`python3 -E -s` 启动 | 理由见 [03-agent.md §3.1](03-agent.md)（[`ADR-0001`](../decisions/ADR-0001-tech-stack-and-dependencies.md)） |
-| 通信模型 | **HTTP 自适应轮询**（空闲 30s / 有活 2s），无 WebSocket；三个节奏值可在管理端「运行参数」改 | 同步延迟容忍 20s（[`ADR-0002`](../decisions/ADR-0002-communication-and-identity.md)） |
+| 通信模型 | **HTTP 自适应轮询**（空闲 30s / 有活 2s），无 WebSocket；三个节奏值在「机器配对」→「运行参数」修改 | 同步延迟容忍 20s（[`ADR-0002`](../decisions/ADR-0002-communication-and-identity.md)） |
 | 服务端 | FastAPI + uvicorn + SQLAlchemy 2.0 + SQLite(WAL)，单机 | [`ADR-0001`](../decisions/ADR-0001-tech-stack-and-dependencies.md) |
 | 前端 | Vue3 + Vite + Pinia，TS 类型从 OpenAPI 生成 | M3 起（[`ADR-0001`](../decisions/ADR-0001-tech-stack-and-dependencies.md)） |
 | 评测对接 | 外部评测器：只投递 `source/` + 扫描结果目录回写成绩，**不触发评测**；按题可改用自带评测，结果同样写进 `judge_result/` | 外部由教师在 LemonLime/Arbiter GUI 开评（[`ADR-0001`](../decisions/ADR-0001-tech-stack-and-dependencies.md)）；自带评测见 [10-builtin-judge.md](10-builtin-judge.md)（[`ADR-0016`](../decisions/ADR-0016-builtin-judge.md)） |
+| 题目配置导入导出 | 外来格式折算成现有数据包，模型只加 `input_file` / `output_file`；折算不了的语义逐题警告 | [10-builtin-judge.md §12.8](10-builtin-judge.md)（[`ADR-0017`](../decisions/ADR-0017-problem-format-import.md)） |
 | 认证 | 每机独立 Token，服务端只存 `sha256(token)` | [`ADR-0002`](../decisions/ADR-0002-communication-and-identity.md) |
 | 机器身份 | `machine_uuid`（首选）+ SMBIOS 指纹（快照还原兜底）；`machine_id` 只供人工辨认 | [03-agent.md §3.4](03-agent.md) / [04-server.md §4.6](04-server.md)（[`ADR-0002`](../decisions/ADR-0002-communication-and-identity.md)） |
 | 数据库 | SQLite WAL，内存态优先 + 批量落库 | [`ADR-0001`](../decisions/ADR-0001-tech-stack-and-dependencies.md) |

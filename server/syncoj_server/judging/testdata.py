@@ -37,6 +37,7 @@ __all__ = [
     "Subtask",
     "Testdata",
     "parse_testdata",
+    "safe_member",
     "MAX_CASES",
 ]
 
@@ -95,9 +96,14 @@ def _natural_key(text: str):
     return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", text)]
 
 
-def _safe_member(name: str) -> bool:
+def safe_member(name: str) -> bool:
+    """zip 成员名是否安全：相对路径、不含 ``..``、不含反斜杠。导入器（problem_io）也用它。"""
     path = PurePosixPath(name)
     return not path.is_absolute() and ".." not in path.parts and "\\" not in name
+
+
+#: 旧名，保留给已有调用方
+_safe_member = safe_member
 
 
 def parse_testdata(archive: zipfile.ZipFile) -> Testdata:
@@ -107,7 +113,7 @@ def parse_testdata(archive: zipfile.ZipFile) -> Testdata:
     for info in archive.infolist():
         if info.is_dir():
             continue
-        if not _safe_member(info.filename):
+        if not safe_member(info.filename):
             raise TestdataError("数据包里有不安全的路径：%s" % info.filename)
         total += info.file_size
         if total > MAX_UNCOMPRESSED_BYTES:

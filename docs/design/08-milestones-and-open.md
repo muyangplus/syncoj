@@ -47,15 +47,15 @@
 
 ### 10.2 客户机同步服务端的时区与时间
 
-**要做什么**：让机房机器与服务端的时区、时间对齐，由服务端**一个开关**控制（关掉什么都不做）。
-现状：服务端只按 `SYNCOJ_TZ`（默认 UTC+8）**显示**时间（[`04-server.md`](04-server.md)），机器时区与时钟由装机镜像决定，各自漂移。
+**目标**：机房机器与服务端的时区、时间对齐，由服务端**一个开关**控制（关闭时不做任何事）。
+**现状**：服务端只按 `SYNCOJ_TZ`（默认 UTC+8）**显示**时间（[`04-server.md`](04-server.md)）；机器时区与时钟由装机镜像决定，各自漂移。
 
-**先看清两件事**，否则会做成"加一行 `date -s`"：
+**约束**：
 
-* 改时区、改时钟要 root，而常驻 Agent 以普通账号跑。现有提权通道是 **root 管理单元**：Agent 往 `<状态目录>/handoff/` 写请求，root 单元验签后执行（[ADR-0012](../decisions/ADR-0012-remote-uninstall-authorization.md)）；另有 root 一次性单元的先例 `syncoj-agent-enroll.service`（[ADR-0009](../decisions/ADR-0009-registration-is-a-root-unit.md)）。
-* **时钟跳变会连累**：日志时间戳、`source_file.mtime`（台账按它记最后看到的版本）、结果扫描里"mtime 没变就跳过"那层。考场常规是让机器跟 NTP 走，源可以是服务端自己（第 2 条的由来）。
+* 改时区、改时钟要 root，常驻 Agent 以普通账号运行。现有提权通道：**root 管理单元**（Agent 往 `<状态目录>/handoff/` 写请求，root 单元验签后执行，[ADR-0012](../decisions/ADR-0012-remote-uninstall-authorization.md)）；root 一次性单元先例 `syncoj-agent-enroll.service`（[ADR-0009](../decisions/ADR-0009-registration-is-a-root-unit.md)）。
+* **时钟跳变影响**：日志时间戳、`source_file.mtime`（台账按它记最后看到的版本）、结果扫描的"mtime 未变即跳过"。考场常规做法是机器跟 NTP 走，源可以是服务端（第 2 条）。
 
-**动手前要定的岔路**（未定不动手）：
+**待定岔路**（未定不动手）：
 
 1. 同步到哪一步：A. 只设时区（`timedatectl set-timezone`）；B. 时区 + 时钟；C. 只比对偏差并显示在机器列表，改不改由教师定。
 2. 时钟怎么校：A. 直接 `timedatectl set-time` / `date -s`（简单、立即，但跳变）；B. 服务端做 NTP 源，客户端 `chrony` / `systemd-timesyncd` 指向它（平滑标准，但服务端多一个常驻进程、装机要带配置）；C. B 优先、A 兜底。
@@ -66,14 +66,14 @@
 
 **落地时要一起改的**：
 
-- 「运行参数」现在只有三个整数秒（`services/runtime_settings.py`，整间机房粒度、非法值拒绝），加布尔开关要想清界面与校验。
+- 「运行参数」（「机器配对」页）现只有三个整数秒（`services/runtime_settings.py`，整间机房粒度、非法值拒绝）；加布尔开关需同步界面与校验。
 - `docs/reference/protocol.md` 的 tick 响应加下发项（时区名 / 时间基准 / 偏差回执），`agent/tools/build_fixture.py` 契约样本重生成。
 - 时区名若走配置项：`docs/reference/config-keys.md` 与 `CONFIG_POLICY_KEYS` 同步（文档守卫逐键对账）。
 - 客户机时间**不参与**考试时间窗判定（服务端算，选手页倒计时也取服务端时间），要写进协议文档。
 
 ### 10.3 已知限制
 
-（主动留下的取舍，不是缺陷。）
+主动留下的取舍：
 
 * 上传时让服务端生成随机密码，密码只落在 `password.txt` 文本资产里，上传回执不为它加字段；教师要当场拿密码就走「文件下发」页「打包成 zip」。
 * 「运行参数」（空闲心跳 / 有活心跳 / 离线判定）**整间机房**生效，没有按机器、按场次的粒度。
@@ -85,8 +85,8 @@
 
 不再重新提案：
 
-* **违规判定 / 迟到上传告警**（如结束后上传记 `late_upload` 并点名）：考试结束后服务端直接**不收**就够；判定"谁违规"是把技术状态变成对人的指控，而网络抖动、机器卡顿都会让正常选手撞线。到点只做两件事：拒收（409 `contest_ended`）+ 场次自动置「已结束」（`contest_auto_closed`，info 级审计，不点名）。
-* **从题目模式推导"保存规则"给选手看**：服务端不知道每台机器的 `scan.roots` 与前缀，错的操作指引比没有更坏。公告改为教师下发 `NOTICE.md`（../design/05-api-and-frontend.md §5.6）。
+* **违规判定 / 迟到上传告警**（如结束后上传记 `late_upload` 并点名）：否决理由——把技术状态变成对人的指控，网络抖动、机器卡顿会让正常选手撞线。决定：到点只做两件事，拒收（409 `contest_ended`）+ 场次自动置「已结束」（`contest_auto_closed`，info 级审计，不点名）。
+* **从题目模式推导"保存规则"给选手看**：否决理由——服务端不知道每台机器的 `scan.roots` 与前缀，错误指引比没有更坏。决定：公告由教师下发 `NOTICE.md`（../design/05-api-and-frontend.md §5.6）。
 
 ### 10.5 重构遗留（2026-11 四路审计 + 方案盲审）
 

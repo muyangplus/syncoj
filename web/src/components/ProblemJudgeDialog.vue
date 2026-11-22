@@ -1,11 +1,12 @@
 <script setup lang="ts">
 /**
- * 一道题的评测设置（§12）：外部评测器 / 自带评测、时限内存、IO 方式、编译参数、数据包。
+ * 一道题的评测设置（§12）：外部评测器 / 自带评测、时限内存、IO 方式与文件名、编译参数、数据包。
  */
 import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
-import { judgingApi } from '@/api'
+import { JUDGE_EXPORT_FORMATS, judgeIoApi, judgingApi } from '@/api'
+import type { JudgeExportFormat } from '@/api'
 import type { ProblemOut } from '@/api/types'
 import { useMutation } from '@/composables/useMutation'
 
@@ -25,6 +26,8 @@ const form = reactive({
   time_limit_ms: null as number | null,
   memory_limit_mb: null as number | null,
   io_mode: 'stdio' as 'stdio' | 'file',
+  input_file: '',
+  output_file: '',
   compile_flags: '',
 })
 const current = ref<ProblemOut | null>(null)
@@ -38,6 +41,8 @@ watch(
     form.time_limit_ms = problem.time_limit_ms ?? null
     form.memory_limit_mb = problem.memory_limit_mb ?? null
     form.io_mode = (problem.io_mode as 'stdio' | 'file') || 'stdio'
+    form.input_file = problem.input_file ?? ''
+    form.output_file = problem.output_file ?? ''
     form.compile_flags = problem.compile_flags ?? ''
   },
   { immediate: true },
@@ -55,6 +60,8 @@ const save = useMutation(
       time_limit_ms: form.time_limit_ms || null,
       memory_limit_mb: form.memory_limit_mb || null,
       io_mode: form.io_mode,
+      input_file: (form.io_mode === 'file' && form.input_file.trim()) || null,
+      output_file: (form.io_mode === 'file' && form.output_file.trim()) || null,
       compile_flags: form.compile_flags.trim() || null,
     }),
   {
@@ -104,6 +111,24 @@ async function removeTestdata(): Promise<void> {
   }
 }
 
+async function downloadTestdata(): Promise<void> {
+  if (!current.value?.testdata) return
+  try {
+    await judgeIoApi.downloadTestdata(current.value.id, current.value.testdata.name || 'testdata.zip')
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  }
+}
+
+async function exportProblem(format: JudgeExportFormat): Promise<void> {
+  if (!current.value) return
+  try {
+    await judgeIoApi.exportProblem(current.value.id, format)
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  }
+}
+
 function formatSize(bytes: number): string {
   if (bytes >= 1 << 20) return `${(bytes / (1 << 20)).toFixed(1)} MB`
   return `${Math.max(1, Math.round(bytes / 1024))} KB`
@@ -134,9 +159,17 @@ function formatSize(bytes: number): string {
         <el-form-item label="输入输出">
           <el-radio-group v-model="form.io_mode">
             <el-radio value="stdio">标准输入输出</el-radio>
-            <el-radio value="file">文件（{{ current?.ident }}.in / {{ current?.ident }}.out）</el-radio>
+            <el-radio value="file">文件</el-radio>
           </el-radio-group>
         </el-form-item>
+        <template v-if="form.io_mode === 'file'">
+          <el-form-item label="输入文件">
+            <el-input v-model="form.input_file" :placeholder="`${current?.ident ?? ''}.in`" maxlength="64" clearable />
+          </el-form-item>
+          <el-form-item label="输出文件">
+            <el-input v-model="form.output_file" :placeholder="`${current?.ident ?? ''}.out`" maxlength="64" clearable />
+          </el-form-item>
+        </template>
         <el-form-item label="编译参数">
           <el-input v-model="form.compile_flags" placeholder="例如 -std=c++14 -O2" clearable />
         </el-form-item>
@@ -152,10 +185,30 @@ function formatSize(bytes: number): string {
               </span>
             </template>
             <span v-else class="muted">无</span>
-            <div>
+            <div class="testdata-actions">
               <el-button :loading="uploading" @click="fileInput?.click()">
                 <el-icon><Upload /></el-icon>上传 zip
               </el-button>
+              <el-button v-if="current?.testdata" @click="downloadTestdata">
+                <el-icon><Download /></el-icon>下载
+              </el-button>
+              <el-dropdown trigger="click" @command="exportProblem">
+                <el-button>
+                  导出<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+                </el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item
+                      v-for="f in JUDGE_EXPORT_FORMATS"
+                      :key="f.value"
+                      :command="f.value"
+                      :disabled="f.value !== 'syncoj' && !current?.testdata"
+                    >
+                      {{ f.label }}
+                    </el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
               <el-button v-if="current?.testdata" type="danger" plain @click="removeTestdata">
                 删除
               </el-button>
@@ -177,6 +230,14 @@ function formatSize(bytes: number): string {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+.testdata-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.testdata-actions :deep(.el-button + .el-button) {
+  margin-left: 0;
 }
 .testdata .mono {
   color: var(--sj-text);

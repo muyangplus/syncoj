@@ -682,6 +682,86 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/contests/{contest_id}/judge-export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Judge Export
+         * @description 导出题目评测配置（zip）。
+         */
+        get: operations["judge_export_api_v1_admin_contests__contest_id__judge_export_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/contests/{contest_id}/judge-export/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Judge Export Preview
+         * @description 导出前看一眼：哪些题会写进包里、每题会丢掉什么。不传 problem_id 时按默认范围选题。
+         */
+        get: operations["judge_export_preview_api_v1_admin_contests__contest_id__judge_export_preview_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/contests/{contest_id}/judge-import/apply": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Judge Import Apply
+         * @description 按预览时的 token 应用导入。每题只采用客户端给的 ident 与动作（新建 / 覆盖 / 跳过）。
+         */
+        post: operations["judge_import_apply_api_v1_admin_contests__contest_id__judge_import_apply_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/contests/{contest_id}/judge-import/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Judge Import Preview
+         * @description 上传题目配置包（zip / FPS xml）：识别格式、解析、试构建数据包，返回预览与暂存 token。
+         */
+        post: operations["judge_import_preview_api_v1_admin_contests__contest_id__judge_import_preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/contests/{contest_id}/judge/builtin": {
         parameters: {
             query?: never;
@@ -1578,9 +1658,29 @@ export interface paths {
         get?: never;
         /**
          * Set Problem Judge
-         * @description 题目的评测方式：外部评测器 / 自带评测，以及时限、内存、IO 方式、编译参数。
+         * @description 题目的评测方式：外部评测器 / 自带评测，以及时限、内存、IO 方式与文件名、编译参数。
          */
         put: operations["set_problem_judge_api_v1_admin_problems__problem_id__judge_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/problems/{problem_id}/judge-export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Judge Export Problem
+         * @description 单题导出：等价于场次导出只选这一题。
+         */
+        get: operations["judge_export_problem_api_v1_admin_problems__problem_id__judge_export_get"];
+        put?: never;
         post?: never;
         delete?: never;
         options?: never;
@@ -1604,6 +1704,26 @@ export interface paths {
         post: operations["upload_testdata_api_v1_admin_problems__problem_id__testdata_post"];
         /** Delete Testdata */
         delete: operations["delete_testdata_api_v1_admin_problems__problem_id__testdata_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/problems/{problem_id}/testdata/file": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download Testdata
+         * @description 原样下载题目的数据包（上传时的 zip，字节不变）。
+         */
+        get: operations["download_testdata_api_v1_admin_problems__problem_id__testdata_file_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -2765,6 +2885,11 @@ export interface components {
              */
             roster_name: string;
         };
+        /** Body_judge_import_preview_api_v1_admin_contests__contest_id__judge_import_preview_post */
+        Body_judge_import_preview_api_v1_admin_contests__contest_id__judge_import_preview_post: {
+            /** File */
+            file: string;
+        };
         /** Body_upload_asset_api_v1_admin_contests__contest_id__assets_post */
         Body_upload_asset_api_v1_admin_contests__contest_id__assets_post: {
             /** File */
@@ -3474,6 +3599,24 @@ export interface components {
             /** Time Ms */
             time_ms?: number | null;
         };
+        /** JudgeExportItemOut */
+        JudgeExportItemOut: {
+            /** Ident */
+            ident: string;
+            /** Included */
+            included: boolean;
+            /** Problem Id */
+            problem_id: number;
+            /** Warnings */
+            warnings?: components["schemas"]["NoticeOut"][];
+        };
+        /** JudgeExportPreviewOut */
+        JudgeExportPreviewOut: {
+            /** Format */
+            format: string;
+            /** Problems */
+            problems?: components["schemas"]["JudgeExportItemOut"][];
+        };
         /** JudgeFailIn */
         JudgeFailIn: {
             /**
@@ -3481,6 +3624,138 @@ export interface components {
              * @default
              */
             message: string;
+        };
+        /** JudgeImportApplyIn */
+        JudgeImportApplyIn: {
+            /** Items */
+            items?: components["schemas"]["JudgeImportApplyItem"][];
+            /**
+             * Set Builtin
+             * @default true
+             */
+            set_builtin: boolean;
+            /** Token */
+            token: string;
+        };
+        /** JudgeImportApplyItem */
+        JudgeImportApplyItem: {
+            /**
+             * Action
+             * @enum {string}
+             */
+            action: "create" | "update" | "skip";
+            /** Ident */
+            ident: string;
+            /** Key */
+            key: string;
+        };
+        /** JudgeImportErrorOut */
+        JudgeImportErrorOut: {
+            /** Key */
+            key: string;
+            /** Message */
+            message: string;
+        };
+        /** JudgeImportItemOut */
+        JudgeImportItemOut: {
+            /**
+             * Action
+             * @default create
+             * @enum {string}
+             */
+            action: "create" | "update" | "skip";
+            /**
+             * Cases
+             * @default 0
+             */
+            cases: number;
+            /** Compile Flags */
+            compile_flags?: string | null;
+            /** Errors */
+            errors?: components["schemas"]["NoticeOut"][];
+            /** Existing Problem Id */
+            existing_problem_id?: number | null;
+            /**
+             * Exists
+             * @default false
+             */
+            exists: boolean;
+            /**
+             * Has Checker
+             * @default false
+             */
+            has_checker: boolean;
+            /** Ident */
+            ident: string;
+            /** Input File */
+            input_file?: string | null;
+            /**
+             * Io Mode
+             * @default stdio
+             */
+            io_mode: string;
+            /**
+             * Judge Mode
+             * @default builtin
+             */
+            judge_mode: string;
+            /** Key */
+            key: string;
+            /** Memory Limit Mb */
+            memory_limit_mb?: number | null;
+            /** Output File */
+            output_file?: string | null;
+            /** Source Name */
+            source_name: string;
+            /**
+             * Subtasks
+             * @default 0
+             */
+            subtasks: number;
+            /** Time Limit Ms */
+            time_limit_ms?: number | null;
+            /** Title */
+            title?: string | null;
+            /**
+             * Total Score
+             * @default 0
+             */
+            total_score: number;
+            /** Warnings */
+            warnings?: components["schemas"]["NoticeOut"][];
+        };
+        /** JudgeImportOut */
+        JudgeImportOut: {
+            /**
+             * Created
+             * @default 0
+             */
+            created: number;
+            /** Errors */
+            errors?: components["schemas"]["JudgeImportErrorOut"][];
+            /** Problems */
+            problems?: components["schemas"]["ProblemOut"][];
+            /**
+             * Skipped
+             * @default 0
+             */
+            skipped: number;
+            /**
+             * Updated
+             * @default 0
+             */
+            updated: number;
+        };
+        /** JudgeImportPreviewOut */
+        JudgeImportPreviewOut: {
+            /** Format */
+            format: string;
+            /** Problems */
+            problems?: components["schemas"]["JudgeImportItemOut"][];
+            /** Token */
+            token: string;
+            /** Warnings */
+            warnings?: components["schemas"]["NoticeOut"][];
         };
         /**
          * JudgeLeaseOut
@@ -3505,10 +3780,14 @@ export interface components {
             compile_flags?: string | null;
             /** Ident */
             ident: string;
+            /** Input File */
+            input_file?: string | null;
             /** Io Mode */
             io_mode: string;
             /** Memory Limit Mb */
             memory_limit_mb: number;
+            /** Output File */
+            output_file?: string | null;
             /** Time Limit Ms */
             time_limit_ms: number;
         };
@@ -3766,6 +4045,16 @@ export interface components {
              * @default 480
              */
             display_utc_offset_minutes: number;
+        };
+        /**
+         * NoticeOut
+         * @description 导入 / 导出的一条警告或错误。``message`` 是给人看的中文。
+         */
+        NoticeOut: {
+            /** Code */
+            code: string;
+            /** Message */
+            message: string;
         };
         /** Page[AgentRuntimeOut] */
         Page_AgentRuntimeOut_: {
@@ -4371,6 +4660,8 @@ export interface components {
         ProblemJudgeIn: {
             /** Compile Flags */
             compile_flags?: string | null;
+            /** Input File */
+            input_file?: string | null;
             /**
              * Io Mode
              * @default stdio
@@ -4385,6 +4676,8 @@ export interface components {
             judge_mode: "external" | "builtin";
             /** Memory Limit Mb */
             memory_limit_mb?: number | null;
+            /** Output File */
+            output_file?: string | null;
             /** Time Limit Ms */
             time_limit_ms?: number | null;
         };
@@ -4423,6 +4716,8 @@ export interface components {
             id: number;
             /** Ident */
             ident: string;
+            /** Input File */
+            input_file?: string | null;
             /**
              * Io Mode
              * @default stdio
@@ -4442,6 +4737,8 @@ export interface components {
              * @default 0
              */
             order_index: number;
+            /** Output File */
+            output_file?: string | null;
             testdata?: components["schemas"]["ProblemTestdataOut"] | null;
             /** Time Limit Ms */
             time_limit_ms?: number | null;
@@ -6182,6 +6479,146 @@ export interface operations {
             };
         };
     };
+    judge_export_api_v1_admin_contests__contest_id__judge_export_get: {
+        parameters: {
+            query?: {
+                format?: "syncoj" | "hoj" | "lemonlime" | "hydro";
+                problem_id?: number[] | null;
+            };
+            header?: never;
+            path: {
+                contest_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    judge_export_preview_api_v1_admin_contests__contest_id__judge_export_preview_get: {
+        parameters: {
+            query?: {
+                format?: "syncoj" | "hoj" | "lemonlime" | "hydro";
+                problem_id?: number[] | null;
+            };
+            header?: never;
+            path: {
+                contest_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JudgeExportPreviewOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    judge_import_apply_api_v1_admin_contests__contest_id__judge_import_apply_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contest_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JudgeImportApplyIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JudgeImportOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    judge_import_preview_api_v1_admin_contests__contest_id__judge_import_preview_post: {
+        parameters: {
+            query?: {
+                format?: "auto" | "syncoj" | "hoj" | "lemonlime" | "hydro" | "qduoj" | "fps";
+            };
+            header?: never;
+            path: {
+                contest_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_judge_import_preview_api_v1_admin_contests__contest_id__judge_import_preview_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JudgeImportPreviewOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     builtin_judge_progress_api_v1_admin_contests__contest_id__judge_builtin_get: {
         parameters: {
             query?: never;
@@ -7674,6 +8111,39 @@ export interface operations {
             };
         };
     };
+    judge_export_problem_api_v1_admin_problems__problem_id__judge_export_get: {
+        parameters: {
+            query?: {
+                format?: "syncoj" | "hoj" | "lemonlime" | "hydro";
+            };
+            header?: never;
+            path: {
+                problem_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     upload_testdata_api_v1_admin_problems__problem_id__testdata_post: {
         parameters: {
             query?: never;
@@ -7727,6 +8197,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ProblemOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    download_testdata_api_v1_admin_problems__problem_id__testdata_file_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                problem_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */

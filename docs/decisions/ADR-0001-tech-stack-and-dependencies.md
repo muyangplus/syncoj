@@ -4,8 +4,9 @@
 
 ## 背景
 
-目标机是 **NOI Linux 2.0**（Ubuntu 20.04 / glibc 2.31 / systemd 245 / Python 3.8.10），考场通常**离线**，整间机房共用一份镜像。
-Python 3.8 已 EOL，在那些机器上 `pip install` 要么没网，要么装出说不清的版本组合。
+- 目标机：**NOI Linux 2.0**（Ubuntu 20.04 / glibc 2.31 / systemd 245 / Python 3.8.10）。
+- 考场通常**离线**，整间机房共用一份镜像。
+- Python 3.8 已 EOL；目标机上 `pip install` 无网或版本组合不可控。
 
 ## 决定
 
@@ -34,12 +35,12 @@ Python 3.8 已 EOL，在那些机器上 `pip install` 要么没网，要么装�
 
 ## 后果
 
-- **每次 tick 上报全量文件索引**（50 文件约 5KB/次，可忽略），换来完整文件台账与删除检测（比对快照，Agent 停机期间的变化不丢），也免去 `fs.inotify.max_user_watches` 调优。
+- **每次 tick 上报全量文件索引**（50 文件约 5KB/次）；得到完整文件台账与删除检测（比对快照，Agent 停机期间的变化不丢），无需调 `fs.inotify.max_user_watches`。
 - 协议一致性靠 CI 契约测试而非共享模型（[`../design/05-api-and-frontend.md`](../design/05-api-and-frontend.md) §5.1）。
 
 ## 被否掉的替代方案
 
 * **`watchdog` / inotify 事件流**：多一个依赖，且停机期间事件会丢；tick 本就报全量索引，inotify 冗余。
-* **WebSocket**：需求只要秒级，它却引入重连、半开检测、连接生命周期、本地队列状态机；轮询让 Agent 无状态，崩溃/断网/重装天然自愈。
-* **`requests` / `httpx` / `pydantic` / 本地队列 SQLite**：目标机离线，每个都多一个版本组合；校验改放 CI 契约测试。
-* **TOML**：`tomllib` 3.11 才进标准库，INI 是唯一不需要 pip 的选择。
+* **WebSocket**：需求只到秒级，却要引入重连、半开检测、连接生命周期与本地队列状态机。
+* **`requests` / `httpx` / `pydantic` / 本地队列 SQLite**：目标机离线，每个都多一个版本组合。
+* **TOML**：`tomllib` 3.11 才进标准库。

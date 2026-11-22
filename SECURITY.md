@@ -7,24 +7,22 @@
 | `main` 上的最新状态 | ✅ |
 | 更早的提交、已经发出去的旧包 | ❌（先升到最新再报） |
 
-升级路径本身就是产品的一部分（[`docs/operate.md`](docs/operate.md)）；旧版本
-（尤其是还留在机房镜像里的旧 Agent）不再修，也不承诺回补。
+旧版本（含留在机房镜像里的旧 Agent）不修复、不回补；升级步骤见 [`docs/operate.md`](docs/operate.md)。
 
 ## 怎么报
 
-**只用 GitHub 的私密漏洞报告**：仓库的 `Security` 标签页 → `Report a vulnerability`。
-不要开公开 issue、不要发到讨论区 —— 这个仓库里有考试期间正在跑的通信协议、签名自更新
-与选手代码回收，公开披露等于把所有还没考完的考场一起暴露。
+1. 仓库 `Security` 标签页 → `Report a vulnerability`（GitHub 私密漏洞报告）。
+2. 不开公开 issue、不发讨论区。
 
-报告里请带上：
+报告内容：
 
-- 受影响的是服务端还是 Agent、是什么版本（服务端看 `server/pyproject.toml` 里的
-  version，Agent 看状态目录里记录的版本）
-- 能复现的最小步骤，以及你认为的攻击面在哪
-- 有没有在你自己搭的环境里验证过、有没有留下日志
+| 项 | 说明 |
+|---|---|
+| 组件与版本 | 服务端：`server/pyproject.toml` 的 `version`；Agent：状态目录里记录的版本 |
+| 复现步骤 | 最小步骤与攻击面 |
+| 验证情况 | 是否在自建环境验证、有无日志 |
 
-我会在那条私密报告里回复：确认、修复计划，或者说明为什么不修。修完再一起商量
-什么时候公开。
+回复在该私密报告内：确认、修复计划或不修复的原因；修复后再商定公开时间。
 
 ## 算漏洞的
 
@@ -37,13 +35,7 @@
 
 ## 不算漏洞的
 
-- **选手对自己的机器有 root。** Agent 跑在选手机器上、随时可能被替换
-  （[`docs/design/06-security.md`](docs/design/06-security.md)），所以本地篡改与
-  侧信道不在防护范围内：同步上来的代码只当"参考"，不当"证据"。考试期间也刻意
-  不做违规判定（[`docs/design/08-milestones-and-open.md`](docs/design/08-milestones-and-open.md)）。
-- **zip 密码只挡"随手翻看"。** 用的是 ZipCrypto，不是加密保护
-  （[`ADR-0011`](docs/decisions/ADR-0011-zipcrypto-not-aes.md)）。
-- 内网明文 HTTP 部署、把管理端口暴露到公网 —— 那是部署选择，不是产品缺陷；
-  公开端口只放装机页与选手页的设计见
-  [`ADR-0005`](docs/decisions/ADR-0005-public-port.md)。
-- 服务端是单机 SQLite，没有多副本、没有高可用：v1 就是单机内网部署。
+- **选手对自己的机器有 root**：本地篡改与侧信道不在防护范围（Agent 可被替换，见 [`docs/design/06-security.md`](docs/design/06-security.md)）；同步上来的代码作参考，不作证据；不做违规判定（[`docs/design/08-milestones-and-open.md`](docs/design/08-milestones-and-open.md)）。
+- **zip 密码只挡随手翻看**：ZipCrypto，不是加密保护（[`ADR-0011`](docs/decisions/ADR-0011-zipcrypto-not-aes.md)）。
+- 内网明文 HTTP 部署、管理端口暴露到公网：属部署选择；公开端口只放装机页与选手页（[`ADR-0005`](docs/decisions/ADR-0005-public-port.md)）。
+- 单机 SQLite，无多副本、无高可用（v1 为单机内网部署）。

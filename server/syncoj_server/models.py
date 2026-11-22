@@ -344,8 +344,11 @@ class Problem(Base, TimestampMixin):
     judge_mode = Column(String(16), nullable=True, default="external")
     time_limit_ms = Column(Integer, nullable=True)
     memory_limit_mb = Column(Integer, nullable=True)
-    #: stdio | file（读 <ident>.in、写 <ident>.out，NOI 惯例）
+    #: stdio | file（默认读 <ident>.in、写 <ident>.out，NOI 惯例）
     io_mode = Column(String(16), nullable=True, default="stdio")
+    #: 文件 IO 的输入/输出文件名；NULL = 沿用 <ident>.in / <ident>.out
+    input_file = Column(String(64), nullable=True)
+    output_file = Column(String(64), nullable=True)
     #: 追加到默认编译参数之后（如 -std=c++17）
     compile_flags = Column(String(200), nullable=True)
     #: 数据包（zip）的内容指纹，内容在 blobs/ 里

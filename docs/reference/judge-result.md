@@ -247,7 +247,8 @@ curl -H "Authorization: Bearer <管理员令牌>" \
 | `judge_mode` | `external` / `builtin` | `external` |
 | `time_limit_ms` | 100–60000 | 1000 |
 | `memory_limit_mb` | 16–4096 | 256 |
-| `io_mode` | `stdio` / `file`（读 `<题目>.in`、写 `<题目>.out`） | `stdio` |
+| `io_mode` | `stdio` / `file`（读输入文件、写输出文件） | `stdio` |
+| `input_file` / `output_file` | 文件 IO 的文件名，≤64 字符：字母或数字开头，只含字母、数字、`.` `_` `-`；不能用评测机自己的文件名（`prog`、`main.cpp`、`chk`、`in.txt` 等）；两者生效名不能相同；空 = `<题目>.in` / `<题目>.out`。`PUT` 整体覆盖，不传即回到默认名 | 空 |
 | `compile_flags` | ≤200 字符；只收 `-std=` / `-O` / `-D` / `-W` / `-f…`（不含 `-fplugin`）/ `-g` / `-static` / `-m…` | 空 |
 
 数据包：`POST /api/v1/admin/problems/{id}/testdata` 上传，`DELETE` 同路径删除。
@@ -284,7 +285,7 @@ checker.cpp          # 可选：special judge（testlib 风格），testlib.h �
 
 ### 评测机
 
-成绩页「自带评测」→「添加评测机」签发令牌（只显示一次；`POST /api/v1/admin/judge-workers`）。在评测机上以专用账号运行：
+「评测」→「评测机」卡片 →「添加评测机」签发令牌（只显示一次；`POST /api/v1/admin/judge-workers`）。在评测机上以专用账号运行：
 
 ```bash
 syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
@@ -340,7 +341,9 @@ syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
 
 | 接口 | 说明 |
 |---|---|
-| `POST /api/v1/judge/lease` | 领任务（租约 15 分钟，过期回队列）；无任务 `204`。返回 `id`、`contest_slug`、`player_no`、`problem`（`ident` / `time_limit_ms` / `memory_limit_mb` / `io_mode` / `compile_flags`）、`source`（`path` / `sha256`）、`testdata`（`sha256` / `name`）、`attempt` |
+| `POST /api/v1/judge/lease` | 领任务（租约 15 分钟，过期回队列）；无任务 `204`。返回 `id`、`contest_slug`、`player_no`、`problem`（`ident` / `time_limit_ms` / `memory_limit_mb` / `io_mode` / `input_file` / `output_file` / `compile_flags`；文件名为 `null` = 用 `<ident>.in` / `<ident>.out`）、`source`（`path` / `sha256`）、`testdata`（`sha256` / `name`）、`attempt` |
 | `GET /api/v1/judge/tasks/{id}/blobs/{sha256}` | 取本任务的代码或数据包；其他内容 `404` |
 | `POST /api/v1/judge/tasks/{id}/result` | `{score, max_score, status, detail}`（`score` / `max_score` 0–1000000，`status` 1–16 字符），写 `result.json` |
 | `POST /api/v1/judge/tasks/{id}/fail` | `{message}`（≤2000），退回队列 |
+
+评测机与服务端出自同一个包，需一起升级：旧评测机不认 `input_file` / `output_file`，仍按 `<ident>.in` / `<ident>.out` 读写，设了自定义文件名的题会被评错。

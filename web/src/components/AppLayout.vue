@@ -4,6 +4,7 @@ import { RouterView, useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 
 import { authApi } from '@/api'
+import AboutDialog from '@/components/AboutDialog.vue'
 import CommandPalette from '@/components/CommandPalette.vue'
 import { usePolling } from '@/composables/usePolling'
 import { NAV_GROUPS, useQuickActions } from '@/composables/useQuickActions'
@@ -24,6 +25,7 @@ const onlineCount = ref(0)
 const totalCount = ref(0)
 const palette = ref<InstanceType<typeof CommandPalette> | null>(null)
 const collapsed = ref(false)
+const aboutOpen = ref(false)
 
 const currentGroup = computed(() => {
   for (const group of NAV_GROUPS) {
@@ -52,6 +54,10 @@ function runAction(key: string): void {
 }
 
 async function handleUser(command: string): Promise<void> {
+  if (command === 'about') {
+    aboutOpen.value = true
+    return
+  }
   if (command === 'logout') {
     await auth.logout()
     ElMessage.success('已退出登录')
@@ -196,6 +202,9 @@ onMounted(async () => {
             <template #dropdown>
               <el-dropdown-menu>
                 <el-dropdown-item disabled>{{ auth.username ?? '未登录' }}</el-dropdown-item>
+                <el-dropdown-item command="about">
+                  <el-icon><InfoFilled /></el-icon>关于与许可
+                </el-dropdown-item>
                 <el-dropdown-item command="logout" divided>
                   <el-icon><SwitchButton /></el-icon>退出登录
                 </el-dropdown-item>
@@ -226,6 +235,7 @@ onMounted(async () => {
     </div>
 
     <CommandPalette ref="palette" />
+    <AboutDialog v-model="aboutOpen" />
   </div>
 </template>
 

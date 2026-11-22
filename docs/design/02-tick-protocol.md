@@ -1,7 +1,6 @@
 ## 2. 核心协议：`tick`
 
-全系统只有这一个关键接口。**服务端持有全部状态，Agent 近乎无状态。**
-完整字段规范见 [`docs/reference/protocol.md`](../reference/protocol.md)。
+核心接口只有这一个。**服务端持有全部状态，Agent 近乎无状态。** 完整字段规范见 [`docs/reference/protocol.md`](../reference/protocol.md)。
 
 ```jsonc
 // POST /api/v1/agent/tick   (Authorization: Bearer <token>)
@@ -36,11 +35,8 @@
 }
 ```
 
-**`diagnostics_request` 是一次性字段**：教师在机器行上点「诊断」后，**下一次** tick 响应里为
-`true`，服务端同时清掉标记；没收到就再点一次，服务端不重发 —— 少收一份诊断包代价很小
-（与卸载令牌"多轮原样重发"刻意不同）。正常与未配对两条 tick 路径都处理它。
-
-每次 tick 上报全量索引：50 文件 × ~100 字节 ≈ **5KB/次**，成本可忽略。收益：
+- **`diagnostics_request` 是一次性字段**：教师在机器行上点「诊断」后，**下一次** tick 响应里为 `true`，服务端同时清掉标记；未收到则再点一次。否决多轮重发（卸载令牌的做法）：少收一份诊断包代价小。正常与未配对两条 tick 路径都处理该字段。
+- 决定：每次 tick 上报全量索引（50 文件 × ~100 字节 ≈ **5KB/次**）。收益：
 
 | 收益 | 说明 |
 |---|---|

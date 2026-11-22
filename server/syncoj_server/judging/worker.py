@@ -126,6 +126,8 @@ class Worker:
                 time_limit_ms=int(problem["time_limit_ms"]),
                 memory_limit_mb=int(problem["memory_limit_mb"]),
                 io_mode=problem.get("io_mode") or "stdio",
+                input_file=problem.get("input_file") or None,
+                output_file=problem.get("output_file") or None,
                 compile_flags=problem.get("compile_flags"),
             )
             return runner.judge(source, source_name, testdata, config, self.sandbox_factory)

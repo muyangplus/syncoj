@@ -644,6 +644,18 @@ def _migration_018_problem_builtin_judge(engine: Engine) -> None:
         conn.execute(text("UPDATE problem SET io_mode = 'stdio' WHERE io_mode IS NULL"))
 
 
+def _migration_019_problem_io_files(engine: Engine) -> None:
+    """题目可自定义文件 IO 的输入/输出文件名。
+
+    导入的外来题目（LemonLime / HOJ / Hydro）常常文件名与 ident 不同；两列为 NULL
+    表示沿用 ``<ident>.in`` / ``<ident>.out``，老数据行为不变。
+    """
+    if "problem" not in _tables(engine):
+        return
+    for name in ("input_file", "output_file"):
+        _add_column(engine, "problem", name, "VARCHAR(64)")
+
+
 MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
     (1, "统一密钥注册 + 名单库所需的结构", _migration_001_enrollment),
     (2, "机器永久绑定名单条目；去掉注册码链路", _migration_002_roster_binding),
@@ -718,6 +730,11 @@ MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
         18,
         "题目加自带评测的配置与数据包指纹",
         _migration_018_problem_builtin_judge,
+    ),
+    (
+        19,
+        "题目可自定义文件 IO 的输入/输出文件名",
+        _migration_019_problem_io_files,
     ),
 ]
 

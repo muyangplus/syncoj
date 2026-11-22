@@ -1,10 +1,11 @@
 {
   "name": "syncoj-web",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "SyncOJ 管理界面",
   "license": "Apache-2.0",
+  "author": "muyangplus",
   "scripts": {
     "dev": "vite",
     "build": "npm run check:routes && npm run typecheck && vite build",

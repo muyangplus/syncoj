@@ -164,6 +164,16 @@ export const paths = {
   problemTestdata: (problemId: number) => `${ADMIN}/problems/${problemId}/testdata`,
   contestBuiltinJudge: (contestId: number) => `${ADMIN}/contests/${contestId}/judge/builtin`,
   judgeWorkers: () => `${ADMIN}/judge-workers`,
+  // ---- 题目评测配置导入 / 导出 ----
+  contestJudgeImportPreview: (contestId: number) =>
+    `${ADMIN}/contests/${contestId}/judge-import/preview`,
+  contestJudgeImportApply: (contestId: number) => `${ADMIN}/contests/${contestId}/judge-import/apply`,
+  contestJudgeExportPreview: (contestId: number) =>
+    `${ADMIN}/contests/${contestId}/judge-export/preview`,
+  contestJudgeExport: (contestId: number) => `${ADMIN}/contests/${contestId}/judge-export`,
+  problemJudgeExport: (problemId: number) => `${ADMIN}/problems/${problemId}/judge-export`,
+  /** 数据包原样下载（上传时的 zip）。 */
+  problemTestdataFile: (problemId: number) => `${ADMIN}/problems/${problemId}/testdata/file`,
   judgeWorker: (workerId: number) => `${ADMIN}/judge-workers/${workerId}`,
 
   // ---- 成绩 ----

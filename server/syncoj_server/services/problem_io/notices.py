@@ -93,7 +93,6 @@ MESSAGES: Dict[str, str] = {
     # ---- 导出警告 ----
     "no_testdata": "无数据包，已跳过",
     "checker_needs_build": "checker 需在 LemonLime 机器上编译为 {path}",
-    "checker_extra_headers": "{files} 未导出",
     "io_names_lost": "文件名 {input} / {output} 未导出，按 {ident}.in / {ident}.out",
     "pid_omitted": "pid {ident} 未导出",
     "hydro_total_not_100": "满分 {total}，Hydro 不换算成 100",

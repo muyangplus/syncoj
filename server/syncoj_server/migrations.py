@@ -656,6 +656,16 @@ def _migration_019_problem_io_files(engine: Engine) -> None:
         _add_column(engine, "problem", name, "VARCHAR(64)")
 
 
+def _migration_022_contest_player_password(engine: Engine) -> None:
+    """场次加考生页密码哈希列。
+
+    NULL = 本场不开放「准考证号 + 密码」登录考生页，老场次行为不变。
+    """
+    if "contest" not in _tables(engine):
+        return
+    _add_column(engine, "contest", "player_password_hash", "VARCHAR(255)")
+
+
 MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
     (1, "统一密钥注册 + 名单库所需的结构", _migration_001_enrollment),
     (2, "机器永久绑定名单条目；去掉注册码链路", _migration_002_roster_binding),
@@ -735,6 +745,11 @@ MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
         19,
         "题目可自定义文件 IO 的输入/输出文件名",
         _migration_019_problem_io_files,
+    ),
+    (
+        22,
+        "场次加考生页密码",
+        _migration_022_contest_player_password,
     ),
 ]
 

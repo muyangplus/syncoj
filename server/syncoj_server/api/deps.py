@@ -325,7 +325,7 @@ def _client_ip(request: Request) -> Optional[str]:
     """这次请求的来源地址。
 
     ``request.client`` 在极少数情况下是 ``None``（ASGI 服务器没给出对端地址），
-    那时返回 None —— 记不下地址只会让选手页退回手填那一条路，不该让请求失败。
+    那时返回 None —— 记不下地址只会让选手页退回降级预览 / 登录，不该让请求失败。
     """
     return request.client.host if request.client else None
 

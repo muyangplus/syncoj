@@ -35,7 +35,8 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from syncoj_server.models import Asset, DeployStatus, DeployTarget, DeployTask, EventLog
+from syncoj_server.models import Asset, Contest, DeployStatus, DeployTarget, DeployTask, EventLog
+from syncoj_server.security import hash_password
 
 from conftest import do_tick
 
@@ -194,9 +195,18 @@ def audit_events(client: TestClient) -> List[dict]:
 
 
 def fetch_player(client: TestClient, contest_slug: str, player_no: str):
-    return client.get(
-        PLAYER_PATH, params={"contest": contest_slug, "player_no": player_no}
+    """以"准考证号 + 考生页密码"登录后取考生页上下文（密码直接写进库）。"""
+    ctx = client.app.state.ctx
+    with ctx.db.session() as session:
+        row = session.execute(select(Contest).where(Contest.slug == contest_slug)).scalar_one()
+        if not row.player_password_hash:
+            row.player_password_hash = hash_password("kaosheng-123")
+    login = client.post(
+        "/api/v1/player/login",
+        json={"contest": contest_slug, "player_no": player_no, "password": "kaosheng-123"},
     )
+    assert login.status_code == 200, login.text
+    return client.get(PLAYER_PATH, headers={"X-Player-Token": login.json()["token"]})
 
 
 # --------------------------------------------------------------------------- #

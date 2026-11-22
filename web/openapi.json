@@ -1332,6 +1332,11 @@
             ],
             "title": "Ends At"
           },
+          "has_player_password": {
+            "default": false,
+            "title": "Has Player Password",
+            "type": "boolean"
+          },
           "id": {
             "title": "Id",
             "type": "integer"
@@ -1400,6 +1405,11 @@
             "title": "Clear Default Roster",
             "type": "boolean"
           },
+          "clear_player_password": {
+            "default": false,
+            "title": "Clear Player Password",
+            "type": "boolean"
+          },
           "default_roster_id": {
             "anyOf": [
               {
@@ -1446,6 +1456,19 @@
               }
             ],
             "title": "Note"
+          },
+          "player_password": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 4,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Player Password"
           },
           "starts_at": {
             "anyOf": [
@@ -3989,7 +4012,7 @@
       },
       "PlayerAssetOut": {
         "additionalProperties": false,
-        "description": "清单里的一行：下发了什么、该落在哪个目录、到没到。\n\n``dest_dir`` 是**任务的**目标目录模板展开后的样子（``DeployTask.dest_dir``），\n不是某个选手磁盘上的绝对路径 —— 服务端不认识选手机器上的家目录，编一个\n绝对路径只会是错的。空串表示\"直接落在下发根目录\"（默认就是桌面）。",
+        "description": "清单里的一行：下发了什么、该落在哪个目录、到没到。\n\n``id`` 是资产 id，考生页的「下载」按它取文件（``GET /player/assets/{id}``）。\n\n``dest_dir`` 是**任务的**目标目录模板展开后的样子（``DeployTask.dest_dir``），\n不是某个选手磁盘上的绝对路径 —— 服务端不认识选手机器上的家目录，编一个\n绝对路径只会是错的。空串表示\"直接落在下发根目录\"（默认就是桌面）。",
         "properties": {
           "dest_dir": {
             "default": "",
@@ -4011,6 +4034,10 @@
             ],
             "title": "Finished At"
           },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
           "sha256": {
             "title": "Sha256",
             "type": "string"
@@ -4026,6 +4053,7 @@
           }
         },
         "required": [
+          "id",
           "filename",
           "status",
           "sha256"
@@ -4104,7 +4132,7 @@
       },
       "PlayerContextOut": {
         "additionalProperties": false,
-        "description": "选手页一次要拿到的全部内容。\n\n刻意做成**一个**接口而不是三个：这一页是给选手看的，\"半张页面\"（场次加载到了、\n清单还在转圈）比多等一会儿更糟；而且\"同一个场次、同一个人\"这个一致性本来\n就只能由服务端保证。\n\n两种查法共用同一个模型：\n\n* ``matched_by=\"machine\"``：请求没带参数，服务端按来源 IP 认出了这台机器。\n  这是主路径 —— 选手在考场机器上打开就是一个带参数的快捷方式，一个字都不用填。\n* ``matched_by=\"explicit\"``：请求带了 ``contest`` + ``player_no``，按这两个值\n  精确查找。自动匹配不上时（教师的笔记本、Agent 没起来的机器、换了 IP）\n  靠它兜底。\n\n回这个字段是让**页面**能说清\"我这份清单是怎么定位到你的\"：自动匹配到别人的\n机器上时，页面上的考号会当场露馅，而不是安静地显示一份不属于这台机器的清单。",
+        "description": "选手页一次要拿到的全部内容。\n\n刻意做成**一个**接口而不是三个：这一页是给选手看的，\"半张页面\"（场次加载到了、\n清单还在转圈）比多等一会儿更糟；而且\"同一个场次、同一个人\"这个一致性本来\n就只能由服务端保证。\n\n两种查法共用同一个模型：\n\n* ``matched_by=\"machine\"``：请求没带参数，服务端按来源 IP 认出了这台机器。\n  这是主路径 —— 选手在考场机器上打开就是一个带参数的快捷方式，一个字都不用填。\n* ``matched_by=\"token\"``：请求带了考生页登录令牌（``X-Player-Token``），\n  那是用「准考证号 + 场次考生页密码」换来的（``POST /player/login``）。\n  自动匹配不上时（教师的笔记本、Agent 没起来的机器、换了 IP）靠它兜底。\n\n回这个字段是让**页面**能说清\"我这份清单是怎么定位到你的\"：自动匹配到别人的\n机器上时，页面上的考号会当场露馅，而不是安静地显示一份不属于这台机器的清单。",
         "properties": {
           "assets": {
             "items": {
@@ -4170,6 +4198,57 @@
           }
         },
         "title": "PlayerImportOut",
+        "type": "object"
+      },
+      "PlayerLoginIn": {
+        "additionalProperties": false,
+        "description": "考生页登录：场次标识 + 准考证号（精确匹配）+ 场次的考生页密码。",
+        "properties": {
+          "contest": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Contest",
+            "type": "string"
+          },
+          "password": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Password",
+            "type": "string"
+          },
+          "player_no": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Player No",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contest",
+          "player_no",
+          "password"
+        ],
+        "title": "PlayerLoginIn",
+        "type": "object"
+      },
+      "PlayerLoginOut": {
+        "additionalProperties": false,
+        "description": "登录成功签出的短期令牌。之后放进 ``X-Player-Token`` 头取上下文与下载。",
+        "properties": {
+          "expires_at": {
+            "title": "Expires At",
+            "type": "integer"
+          },
+          "token": {
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "expires_at"
+        ],
+        "title": "PlayerLoginOut",
         "type": "object"
       },
       "PlayerNoticeOut": {
@@ -4273,6 +4352,90 @@
           "player_no"
         ],
         "title": "PlayerOut",
+        "type": "object"
+      },
+      "PlayerPreviewContestOut": {
+        "additionalProperties": false,
+        "description": "降级预览里的一场：只有场次本身与**面向全场**的公告。\n\n降级预览是谁都能打开的（没认出本机、也没登录），所以这里**绝不**出现任何\n选手的信息或个人下发清单。公告只取\"目标是全场\"的 ``NOTICE.md`` 下发\n（``DeployTask.target_kind == \"all\"`` 且没取消）—— 只发给部分人的公告不算。",
+        "properties": {
+          "ends_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ends At"
+          },
+          "login_enabled": {
+            "default": false,
+            "title": "Login Enabled",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "notice": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlayerNoticeOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          },
+          "starts_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Starts At"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slug",
+          "name",
+          "status"
+        ],
+        "title": "PlayerPreviewContestOut",
+        "type": "object"
+      },
+      "PlayerPreviewOut": {
+        "additionalProperties": false,
+        "description": "考生页的降级预览：当前在考的场次（多场可切换）。",
+        "properties": {
+          "contests": {
+            "items": {
+              "$ref": "#/components/schemas/PlayerPreviewContestOut"
+            },
+            "title": "Contests",
+            "type": "array"
+          },
+          "server_time": {
+            "title": "Server Time",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "server_time"
+        ],
+        "title": "PlayerPreviewOut",
         "type": "object"
       },
       "PlayerProfileOut": {
@@ -12419,47 +12582,86 @@
         ]
       }
     },
-    "/api/v1/player/context": {
+    "/api/v1/player/assets/{asset_id}": {
       "get": {
-        "description": "取选手页要显示的全部内容。**不鉴权。**\n\n不传参数 = 按来源 IP 自动匹配本机；两个参数都传 = 显式查找。\n只传一个直接 400：单独一个 ``contest`` 或单独一个 ``player_no`` 都定位不到人，\n而\"猜另一半\"正是这一页最不该做的事。",
-        "operationId": "player_context_api_v1_player_context_get",
+        "description": "网页下载一个下发给本人的文件。\n\n身份二选一：登录令牌，或来源 IP 自动匹配到本机。之后**必须**确实有一条\n\"这个资产 → 这个选手\"的下发目标，而且任务没取消、目标也没被取消 ——\n与 Agent 下载（``api/agent.py::download_asset``）同一个判据。\n\n* 认不出你是谁 → 403\n* 资产不存在 / 不在你这一场 / 这一场里根本没下发过 → 404\n* 下发过、但不是给你（或已取消）→ 403\n* 内容已被清理 → 410",
+        "operationId": "player_download_asset_api_v1_player_assets__asset_id__get",
         "parameters": [
           {
-            "description": "场次标识（slug），自动匹配不上时手填",
-            "in": "query",
-            "name": "contest",
-            "required": false,
+            "in": "path",
+            "name": "asset_id",
+            "required": true,
             "schema": {
-              "anyOf": [
-                {
-                  "maxLength": 64,
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "场次标识（slug），自动匹配不上时手填",
-              "title": "Contest"
+              "title": "Asset Id",
+              "type": "integer"
             }
           },
           {
-            "description": "考号，自动匹配不上时手填",
-            "in": "query",
-            "name": "player_no",
+            "in": "header",
+            "name": "x-player-token",
             "required": false,
             "schema": {
               "anyOf": [
                 {
-                  "maxLength": 64,
+                  "maxLength": 256,
                   "type": "string"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "description": "考号，自动匹配不上时手填",
-              "title": "Player No"
+              "title": "X-Player-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Player Download Asset",
+        "tags": [
+          "player"
+        ]
+      }
+    },
+    "/api/v1/player/context": {
+      "get": {
+        "description": "取考生页上\"这个选手\"的全部内容。**不需要管理端凭据。**\n\n带 ``X-Player-Token`` = 已登录的考生；不带 = 按来源 IP 自动匹配本机。\n自动匹配失败时回 403/404/409 人话，页面据此退到降级预览（``GET /preview``）。",
+        "operationId": "player_context_api_v1_player_context_get",
+        "parameters": [
+          {
+            "description": "考生页登录令牌（POST /player/login 签出）。不带 = 按来源 IP 自动匹配本机",
+            "in": "header",
+            "name": "x-player-token",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "考生页登录令牌（POST /player/login 签出）。不带 = 按来源 IP 自动匹配本机",
+              "title": "X-Player-Token"
             }
           }
         ],
@@ -12486,6 +12688,70 @@
           }
         },
         "summary": "Player Context",
+        "tags": [
+          "player"
+        ]
+      }
+    },
+    "/api/v1/player/login": {
+      "post": {
+        "description": "准考证号 + 场次考生页密码 → 短期令牌。\n\n* 考号**精确匹配**（只去掉首尾空白：从准考证上抄过来多一个空格是常事）\n* 考号不存在与密码错**统一 403** ``player_login_failed``；两种情况都完整地算一遍\n  scrypt，响应时间上也分不出来\n* 场次没设密码 → 409 ``player_login_disabled``：这条路关着，页面只剩降级预览\n* 按来源 IP 限速（``player_lookup_per_ip_per_minute``），先限速再算 scrypt",
+        "operationId": "player_login_api_v1_player_login_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlayerLoginIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlayerLoginOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Player Login",
+        "tags": [
+          "player"
+        ]
+      }
+    },
+    "/api/v1/player/preview": {
+      "get": {
+        "description": "降级预览：当前在考的场次与面向全场的公告。**谁都能看，所以不含任何个人信息。**\n\n\"在考\" = 状态是 ``running`` / ``frozen``（不是这两个就不算，以后加的状态也一样），\n并且还没到结束时间。**还没开考的也列出来**：考生提前进场时要看到\"距开考\"\n倒计时和全场公告，而那份公告本来就已经下发到了每台机器上。",
+        "operationId": "player_preview_api_v1_player_preview_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlayerPreviewOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Player Preview",
         "tags": [
           "player"
         ]

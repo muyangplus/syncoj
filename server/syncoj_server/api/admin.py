@@ -169,6 +169,7 @@ from ..services import (
 from ..services.deploy import validate_dest_template
 from ..services.signing import release_signing_message, validate_release_version
 from ..storage import BlobTooLarge, HashMismatch
+from .attachments import attachment_header, blob_response
 from .deps import PageParams, get_ctx
 
 __all__ = ["router", "require_admin", "AdminIdentity"]
@@ -492,6 +493,15 @@ def update_contest(
         contest.starts_at = starts_at
         contest.ends_at = ends_at
 
+        # 考生页密码只写不读：清除优先（关掉「准考证号 + 密码」登录、旧令牌一并失效），
+        # 否则给了新密码就换掉 —— 令牌里签了密码指纹，换密码同样吊销全部旧令牌。
+        if payload.clear_player_password:
+            contest.player_password_hash = None
+        elif payload.player_password is not None:
+            if not payload.player_password.strip():
+                raise HTTPException(status_code=400, detail="考生页密码不能全是空白")
+            contest.player_password_hash = hash_password(payload.player_password)
+
         roster = None
         if payload.clear_default_roster:
             contest.default_roster_id = None
@@ -539,6 +549,7 @@ def _contest_out(
         # 不回显的话他会重新填一遍，而且永远不知道自己有没有填上。
         starts_at=_iso(contest.starts_at),
         ends_at=_iso(contest.ends_at),
+        has_player_password=bool(contest.player_password_hash),
     )
 
 
@@ -2467,32 +2478,8 @@ def download_source_file(
 
 
 def _blob_response(ctx: AppContext, sha256: str, download_name: str) -> Response:
-    """把 blob 作为附件流出去。
-
-    流式而不是整体读进内存：``max_file_size`` 是可配的，默认 2MB 但有人会调大，
-    而"下载一个几百 MB 的文件把服务端内存打满"是完全没必要的失败模式。
-    """
-    handle = ctx.blobs.open(sha256)
-    size = ctx.blobs.path_for(sha256).stat().st_size
-
-    def chunks() -> Iterator[bytes]:
-        try:
-            while True:
-                chunk = handle.read(256 * 1024)
-                if not chunk:
-                    break
-                yield chunk
-        finally:
-            handle.close()
-
-    return StreamingResponse(
-        chunks(),
-        media_type="application/octet-stream",
-        headers={
-            "Content-Disposition": _attachment_header(download_name, fallback="code.txt"),
-            "Content-Length": str(size),
-        },
-    )
+    """把 blob 作为附件流出去（实现见 ``api/attachments.py``，考生页共用）。"""
+    return blob_response(ctx, sha256, download_name, fallback="code.txt")
 
 
 @router.delete("/files/{file_id}", response_model=SimpleAck)
@@ -2780,19 +2767,8 @@ def _unique_arcname(used: Dict[str, int], candidate: str) -> str:
 
 
 def _attachment_header(filename: str, fallback: str = "download") -> str:
-    """附件头。用 RFC 5987 的 filename* 传中文名；filename 那个 ASCII 版本是给老浏览器兜底。
-
-    名字可能来自上传的文件名或导入包的清单：控制字符（CR/LF 等）换成 ``_``，
-    否则 h11 / httptools 拒发这个头，客户端只看到连接被断。
-    """
-    from urllib.parse import quote
-
-    filename = "".join("_" if ord(ch) < 0x20 or ord(ch) == 0x7F else ch for ch in filename) or fallback
-    ascii_name = filename.encode("ascii", "replace").decode("ascii")
-    return "attachment; filename=\"%s\"; filename*=UTF-8''%s" % (
-        ascii_name.replace('"', "_").replace("\\", "_"),
-        quote(filename, safe=""),
-    )
+    """附件头（实现见 ``api/attachments.py``，考生页共用）。"""
+    return attachment_header(filename, fallback)
 
 
 def _spool_chunks(spool) -> Iterator[bytes]:

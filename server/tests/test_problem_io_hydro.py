@@ -435,7 +435,7 @@ def test_testlib_checker_with_extra_headers(tmp_path: Path) -> None:
     _, checker, support = semantics(built)  # type: ignore[arg-type]
     assert checker == TESTLIB_CHECKER.encode() and support == ["testlib.h", "util.h"]
     with zipfile.ZipFile(io.BytesIO(built)) as zf:  # type: ignore[arg-type]
-        assert zf.read("testlib.h") == checkers.vendor_testlib()
+        assert zf.read("testlib.h") == checkers.injected_testlib()
 
 
 def test_checker_must_exist_and_be_cpp(tmp_path: Path) -> None:

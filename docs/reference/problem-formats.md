@@ -38,7 +38,7 @@
 | 分值 | 小数向下取整；全部为 0 或缺失 → 100 分平分到计分单元（子任务 + 散点） | `score_truncated`、`scores_missing` |
 | IO 文件名 | `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`，非保留名，输入输出生效名不同；等于 `<ident>.in/.out` 时存 NULL（原生格式不改） | `io_name_invalid`（错误） |
 | 编译参数 | 过 `PUT /judge` 的白名单，不合法的参数丢弃 | `flags_dropped` |
-| checker | 只收 `.cpp/.cc/.cxx/.c`（按 C++ 编译）；`#include "testlib.h"` 而包里没有时补随仓库的 testlib.h | `checker_language`（错误）、`testlib_injected`、`testlib_missing` |
+| checker | 只收 `.cpp/.cc/.cxx/.c`（按 C++ 编译）；`#include "testlib.h"` 而包里没有时补随仓库的 testlib.h（副本最前面加注释：来源、版本、MIT 许可全文） | `checker_language`（错误）、`testlib_injected`、`testlib_missing` |
 | 数据包 | 规整成 `<名字>.in/.ans` + `config.json` + `checker.cpp`，名字 `[A-Za-z0-9._-]`、撞名加 `-2`；写完用 `parse_testdata` 回读自检 | `testdata_invalid`（错误） |
 | 不支持的语义 | 逐点 / 逐组时限内存取最大值；子任务依赖丢弃；max / mul / average 子任务降级；栈限制丢弃 | 见第 9 节 |
 

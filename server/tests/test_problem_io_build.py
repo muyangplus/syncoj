@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import shutil
@@ -122,7 +123,7 @@ def test_raw_testdata_is_returned_byte_for_byte() -> None:
 def test_testlib_is_injected_when_missing() -> None:
     bundle = ProblemBundle(key="k", ident="x", cases=[_case("1", score=100)], checker=FileRef(data=TESTLIB_CHECKER.encode()))
     _parsed, files = _parse(build_testdata_zip(bundle, None))
-    assert files["testlib.h"] == checkers.vendor_testlib()
+    assert files["testlib.h"] == checkers.injected_testlib()
     assert [w.code for w in bundle.warnings] == ["testlib_injected"]
     # 包里自带了就不注入
     own = ProblemBundle(
@@ -145,6 +146,31 @@ def test_vendor_testlib_and_license_ship_with_the_package() -> None:
     data = checkers.vendor_testlib()
     assert data is not None and b"_TESTLIB_H_" in data
     assert (checkers.VENDOR_DIR / "LICENSE-testlib").read_text().startswith("The MIT License")
+    # 仓库里的 vendor/testlib.h 与上游逐字节一致；许可声明只加在注入的副本上
+    assert hashlib.sha256(data).hexdigest() == "d92ca8a6b3690d34d5c56c9394d99798130e21cb0096db817d91e265f8d958c3"
+
+
+def test_injected_testlib_carries_the_license_notice() -> None:
+    """注入的副本随数据包 / 导出包分发：最前面是注明来源、版本与 MIT 全文的注释，之后是上游原文。"""
+    upstream = checkers.vendor_testlib()
+    data = checkers.injected_testlib()
+    assert upstream is not None and data is not None
+    assert data.startswith(b"/*\n * testlib.h, bundled with this problem's test data by SyncOJ.\n")
+    head, rest = data.split(b"*/\n", 1)
+    assert rest == upstream
+    assert b"https://github.com/MikeMirzayanov/testlib" in head
+    assert b"Version: 0.9.51" in head
+    assert b"Copyright (c) 2015 Mike Mirzayanov" in head
+    assert b"Permission is hereby granted" in head and b"THE SOFTWARE IS PROVIDED" in head
+    head.decode("ascii")  # 注释纯 ASCII
+
+
+def test_missing_testlib_license_counts_as_missing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    (tmp_path / "testlib.h").write_bytes(checkers.vendor_testlib() or b"")
+    monkeypatch.setattr(checkers, "VENDOR_DIR", tmp_path)
+    assert checkers.injected_testlib() is None
+    got = checkers.inject_testlib(TESTLIB_CHECKER.encode(), {})
+    assert got is not None and got.code == "testlib_missing"
 
 
 # --------------------------------------------------------------------------- #
@@ -314,6 +340,7 @@ int main(int argc, char *argv[]) {
 def test_injected_testlib_compiles(tmp_path: Path) -> None:
     bundle = ProblemBundle(key="k", ident="x", cases=[_case("1", score=100)], checker=FileRef(data=TESTLIB_CHECKER.encode()))
     _parsed, files = _parse(build_testdata_zip(bundle, None))
+    assert files["testlib.h"].startswith(b"/*\n * testlib.h, bundled") and b"Mike Mirzayanov" in files["testlib.h"]
     exe = _compile(tmp_path, {"checker.cpp": files["checker.cpp"], "testlib.h": files["testlib.h"]})
     assert _judge(exe, tmp_path, "3\n", "3\n")[0] == 0
     assert _judge(exe, tmp_path, "4\n", "3\n")[0] == 1

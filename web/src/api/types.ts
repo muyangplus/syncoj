@@ -150,6 +150,8 @@ export type BuiltinJudgeQueuedOut = S['BuiltinJudgeQueuedOut']
 export type BuiltinJudgeProgressOut = S['BuiltinJudgeProgressOut']
 export type JudgeWorkerOut = S['JudgeWorkerOut']
 export type JudgeWorkerCreatedOut = S['JudgeWorkerCreatedOut']
+export type JudgeWorkerPatchIn = S['JudgeWorkerPatchIn']
+export type LocalJudgeOut = S['LocalJudgeOut']
 /** 自动入队设置、评测任务（任务即历史）、代码版本与 timeline（§12.9） */
 export type JudgeAutoIn = S['JudgeAutoIn']
 export type JudgeAutoOut = S['JudgeAutoOut']

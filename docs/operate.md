@@ -51,6 +51,7 @@ python -m venv .venv && .venv/bin/pip install -e "server[dev]"
 | `SYNCOJ_ANNOUNCE` | `true` | 服务端主动通告 |
 | `SYNCOJ_ANNOUNCE_PORT` | `45872` | 通告 UDP 端口 |
 | `SYNCOJ_DEFAULT_FILE_PATTERN` | 内置 | 题目未配代码路径时的默认 glob |
+| `SYNCOJ_JUDGE_LOCAL_RUN_AS` | `nobody` | 本机评测机用 rlimit 后端且服务端以 root 运行时，选手程序的运行账号 |
 
 ⚠️ 改 `SYNCOJ_DISCOVERY_PORT` / `SYNCOJ_ANNOUNCE_PORT` 需整间机房 Agent 同步修改。
 
@@ -210,15 +211,22 @@ python scripts/smoke_systemd245.py --keep   # 失败后保留容器与临时目�
 
 1. 「场次管理」→ 该行「题目」→ 登记题目（已登记则跳过）。
 2. 「评测」→「题目」卡片 → 该题「设置」：评测方式选「自带评测」，填时限（ms）/ 内存（MB）/ 输入输出 / 编译参数，上传数据包。预期：数据包上传时即校验，结构不对直接报错。
-3. 「评测」→「评测机」卡片 →「添加评测机」→ 输入名称 →「签发令牌」，复制令牌（只显示一次）写入文件。
-4. 评测机上以专用账号运行：
+3. 「评测」→「评测机」卡片 →「添加评测机」→ 输入名称 →「签发令牌」。预期：对话框给出令牌（只显示一次）与 Linux / Windows 两条安装命令，各带「复制」。
+4. 在评测机上运行对应命令：
 
    ```bash
-   pip install -e server
-   syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
+   # Linux：有 isolate 用 isolate；没有会询问是否用 rlimit（加 --yes 不询问）
+   curl -fsSL http://10.0.0.5:8000/judge/install.sh | sudo bash -s -- <令牌>
    ```
 
-   预期：「评测机」卡片中该评测机状态为在线。
+   ```powershell
+   # Windows：「以管理员身份运行」的 PowerShell；需先装 Python 3.8+ 与 MinGW-w64 g++（加进系统 PATH）
+   $p = Join-Path $env:TEMP syncoj-judge-install.ps1; iwr -UseBasicParsing http://10.0.0.5:8000/judge/install.ps1 -OutFile $p; & $p -Token '<令牌>'
+   ```
+
+   预期：脚本最后打印「评测机已启动」；「评测机」卡片中该评测机为在线，显示后端、主机、版本。已装好 `syncoj-judge` 时也可用对话框里的「手动运行」命令。
+
+   只有服务端一台 Linux 机器时：卡片头「本机评测机」→「启动」。预期：表格多出「本机评测机」一行并在线；「停止」后它评完手上的任务退出。非 Linux 服务端上该按钮禁用，标「仅 Linux」。
 5. 「评测」→「任务」卡片 → 选「全部自带评测题目」或某题 →「评测 / 重测」（或顶栏「快捷操作」→「评测全部题目」）。场次未结束时服务端回 409 `contest_in_progress`，界面弹「仍要评测？」，确认后带 `force` 排队。预期：进度条显示排队 / 评测中 / 完成 / 失败计数；失败行列出考号、题目、失败原因与「重测本题」。
 6. 「成绩」：矩阵出现分数；点格子看测试点明细。
 
@@ -240,9 +248,18 @@ python scripts/smoke_systemd245.py --keep   # 失败后保留容器与临时目�
 | `--isolate` | `isolate` | isolate 可执行文件路径 |
 | `--cgroups` | 关 | isolate 用 cgroup 统计内存 |
 | `--cache-dir` | `~/.cache/syncoj-judge` | 数据包缓存目录 |
-| `--poll` | `5` 秒 | 无任务时轮询间隔 |
+| `--slots` | `1` | 同时评几个任务 |
+| `--poll` | `5` 秒 | 轮询间隔（评测中也按它报状态） |
+| `--log-file` | stderr | 日志文件 |
 | `--once` | 关 | 评一个任务后退出 |
 | `--verbose` / `-v` | 关 | 调试日志 |
+
+管理评测机（「评测机」卡片该行）：
+
+1. 「暂停」：不再领新任务，手上的评完照常交；「恢复」重新领。
+2. 「停止」/「重启」：下一次轮询（默认 5 秒内）送达，评完手上的任务后退出 / 以同样参数重启。离线或旧版本评测机上不可用，到那台机器上 `systemctl stop|restart syncoj-judge`（Windows：计划任务「SyncOJ Judge」）。
+3. 「改名」。
+4. 「吊销」→ 输入名称确认。预期：令牌立即失效，它正在评的任务立即回到队列。
 
 ⚠️ 考试进行中评测的是未完成的代码。数据包格式、结果格式、接口 → 见 [`reference/judge-result.md`](reference/judge-result.md) 第 6 节、[`design/10-builtin-judge.md`](design/10-builtin-judge.md)。
 

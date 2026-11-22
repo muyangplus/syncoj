@@ -25,7 +25,7 @@ syncoj-server（服务端账号）         syncoj-judge worker（专用账号，
 ```
 
 * worker（`syncoj-judge --server … --token-file … --backend isolate|rlimit`）是**独立进程、独立账号**，经 HTTP 领任务（服务端持有全部状态），碰不到 `.key/`、数据库与 `source/` 目录，只拿到任务所需的代码与数据包。可与服务端同机；条件允许时放另一台（评测时 CPU 满载，避免与收代码的服务端争用）。
-* worker 令牌在「评测」→「评测机」签发，只存哈希（`judge_worker`），只授权评测相关端点；吊销 = 删行（需输评测机名称确认）。
+* worker 令牌在「评测」→「评测机」签发，只存哈希（`judge_worker`），只授权评测相关端点；吊销 = 删行（需输评测机名称确认）。状态上报、远程动作与一键安装见 §12.10。
 * 任务表 `judge_task(contest, player, problem, status, attempt, worker, lease_until, source_path, source_sha256, outcome, error, …)`：状态 `queued → running → done / failed`；领任务带 15 分钟租约（worker 崩了租约过期自动回队列），最多尝试 3 次。任务即历史（§12.9）：重测只替换同一对**还在排队**的任务，跑完的留着。没交代码的选手直接 `done`、不写 `result.json`（矩阵照旧显示未交）。
 * 数据包按 sha256 缓存在 worker 的 `--cache-dir`，同题几十个选手只下载一次。
 
@@ -40,7 +40,7 @@ syncoj-server（服务端账号）         syncoj-judge worker（专用账号，
 * 否决自研 `unshare` + seccomp：安全边界，自研维护成本与出错代价过高；`rlimit` 覆盖无更好选择时的情形。
 * 否决 `systemd-run` 后端：统计单次运行的 CPU 时间与峰值内存需绕路；有 root 的机器直接装 isolate。
 * 计时：**CPU 时间**判 TLE；墙钟只作硬上限（时限的 2 倍 + 1 秒），防 sleep 卡死。内存取峰值常驻集，isolate 开 `--cgroups` 时取 cgroup 峰值。`rlimit` 后端经一层 shim 取选手程序自己的 rusage（Linux 的 `ru_maxrss` 跨 exec 保留，直接从 worker fork 会把 worker 的内存算到选手头上）。
-* 一个 worker 一次评一个任务；要并发就起多个 worker（各用不同 box）。
+* 一个 worker 默认一次评一个任务；`--slots N` 并发评 N 个（各占一个 box，§12.10），或起多个 worker（各用不同 `--box-id`）。
 
 ### 12.5 评测语义（NOI 惯例）
 
@@ -56,7 +56,7 @@ syncoj-server（服务端账号）         syncoj-judge worker（专用账号，
 
 * 「评测」页「题目」卡片：每题「设置」——上传数据包、设时空限制与 IO 方式、选择「自带评测 / 外部评测器」。
 * 「评测」页「任务」卡片：题目（全部 / 单题）× 选手（全部 / 单人）「评测 / 重测」，可勾「不复用已有结果」；自动评测开关与去抖秒数；失败行「重测本题」；进度沿用已有聚合进度接口形状。顶栏「快捷操作」→「评测全部题目」等价。「评测记录」卡片列出每次评测（含复用的）。
-* 「评测」页「评测机」卡片：签发与吊销 worker 令牌。
+* 「评测」页「评测机」卡片：签发令牌（附一行安装命令）、状态与正在评的任务、暂停 / 停止 / 重启 / 改名 / 吊销、本机评测机启停（§12.10）。
 * 「成绩」：格子点开看每个测试点明细，可重测、看版本；选手列「版本与分数」看这位选手全部题目的 timeline。
 * 评测用**领任务时 `source/` 里按题目模式选定的那份代码**（记下路径与 sha256）。场次仍在进行（`is_active` 或未到结束时间）时排任务回 409 `contest_in_progress`（评的是考到一半的代码）；教师确认后带 `force` 再排。
 
@@ -93,3 +93,13 @@ syncoj-server（服务端账号）         syncoj-judge worker（专用账号，
 * **自动入队**：场次 `auto_judge = off | on_change`（默认 `off`）、`auto_judge_delay`（默认 60 秒）。开启后上传某题新版本 → 对 (选手, 题目) 排 `auto` 任务，带 `not_before = 收到时刻 + 去抖`；同一对已有排队中的自动任务时只把它往后推（领任务时才选代码，评的总是最后一版）。只对自带评测且有数据包、语言后缀认得的题；场次进行中也排（这是它的意义）。
 * **timeline**：`GET …/judge/versions?player_id=&problem=` 每版带最近一次评测；界面画「版本 × 分数」阶梯线（内联 SVG），点的颜色是状态、状态变化处标状态字，矩阵采用的那一版加外环，未评的版本画在基线下方。
 * **进度**：排队 / 在评全数；完成 / 失败只数每 (选手, 题目) 最新的那条。
+
+### 12.10 评测机管理：状态、远程动作与一键接入
+
+* **一个循环**：评测机每个轮询间隔 `POST /api/v1/judge/poll` 一次，自报 `version` / `backend` / `isolated` / `hostname` / `platform` / `slots` / `poll_seconds`，有空位时 `want = 1` 顺带领一个任务；评测中照样 poll（`want = 0`）。服务端记进 `judge_worker` 的新列（迁移 023），在线 = 最近联系不超过 3 × 轮询间隔（下限 15 秒）。正在评什么不靠自报，直接看任务表里租约在它名下的 `running` 任务。旧评测机只调 `/lease`：照常领任务、算心跳，自报列为空，收不到命令。
+* **管理动作**：暂停（`enabled = false`：领不到新任务、照常心跳、手上的评完照常交）；停止 / 重启记进 `desired`，在下一次 poll 的响应 `command` 里带走并复位成 `run`（一次性，评测机日后被重新拉起不会再停一次）。评测机收到后不再领任务，评完手上的：停止 = 退出码 0（systemd 的 `Restart=on-failure` 不再拉起）；重启 = 以同样的参数重启自己（Linux 原地 exec，进程号不变；Windows 起新进程后退出）。只对在线、报过状态的评测机下命令（否则 409），免得命令在库里放到下次开机才生效。吊销 = 删行，它名下在评的任务**立刻**退回队列（令牌已失效，交不回结果，不必等 15 分钟租约）。
+* **并发**：`--slots N` 起 N 个评测线程，各领各的任务；isolate 的 box 编号从 `--box-id` 起依次占用。
+* **一键接入**：服务端（只在管理端口）发 `GET /judge/worker.pyz`、`/judge/install.sh`、`/judge/install.ps1`。pyz 把 `syncoj_server/judging/`（只用标准库，测试用 AST 守着）连同只有版本号的包根打成 zipapp，按「版本号 + 源码指纹」缓存在 `<数据目录>/cache/judge-worker/`；另一台机器只要有 Python 3.8+ 与编译器，不必装服务端包。安装脚本嵌入请求的 Host 头（形状不安全就不嵌）与 pyz 的 sha256，令牌由教师在命令行给。签发令牌的响应直接带 Linux / Windows 两条一行命令。
+  * Linux：`/opt/syncoj-judge/syncoj-judge.pyz`、`/etc/syncoj-judge/token`（0600）、systemd 单元 `syncoj-judge`。有 isolate 用 isolate、服务以专用账号 `syncoj-judge` 运行；没有 isolate 先询问（`--yes` 跳过），用 rlimit、服务以 root 运行、选手程序换成 `syncoj-judge-run` 跑。幂等，重跑 = 换令牌 / 升级。
+  * Windows：`%ProgramData%\SyncOJ\judge\`，令牌只给 SYSTEM 与 Administrators（按 SID 授权），计划任务「SyncOJ Judge」开机启动、以 SYSTEM 运行、失败每分钟重启，`--backend winjob`。检查 Python ≥ 3.8 与 g++ 是否在**系统** PATH。脚本是 UTF-8 BOM（PowerShell 5.1 无 BOM 按 ANSI 读），所以一行命令先下载到文件再执行，而不是 `iwr | iex`。
+* **本机评测机**：Linux 服务端可在界面一键启停一个子进程评测机（`python -m syncoj_server.judging.worker`，连 `127.0.0.1:<管理端口>`）。它是 `judge_worker` 里 `is_local = 1` 的那一行，每次启动换一枚令牌（写 `<数据目录>/judge-local/token`，0600）；有 isolate 用 isolate，否则 rlimit（服务端是 root 时选手程序以 `SYNCOJ_JUDGE_LOCAL_RUN_AS`，默认 `nobody` 运行）。日志 `<数据目录>/logs/judge-local.log`。服务端退出时一并停掉（SIGTERM，10 秒后 SIGKILL）；不随服务端启动自动拉起。非 Linux 服务端不提供。

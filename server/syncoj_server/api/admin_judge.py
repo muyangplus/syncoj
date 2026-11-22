@@ -10,7 +10,7 @@ import re
 import zipfile
 from typing import Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, File, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
 from sqlalchemy import func, select
 
 from ..context import AppContext
@@ -40,6 +40,8 @@ from ..schemas import (
     JudgeWorkerCreatedOut,
     JudgeWorkerIn,
     JudgeWorkerOut,
+    JudgeWorkerPatchIn,
+    LocalJudgeOut,
     Page,
     ProblemJudgeIn,
     ProblemOut,
@@ -51,7 +53,7 @@ from ..schemas import (
 )
 from ..security import hash_token, new_token
 from ..storage import BlobTooLarge
-from ..services import builtin_judge
+from ..services import builtin_judge, judge_dist, judge_workers
 from ..services.judge import SCAN_LOCK, scan_contest_results
 from .admin import (
     AdminIdentity,
@@ -543,11 +545,17 @@ def builtin_judge_progress(
         return BuiltinJudgeProgressOut(**builtin_judge.progress(session, contest_id))
 
 
-def _worker_out(row: JudgeWorker) -> JudgeWorkerOut:
-    return JudgeWorkerOut(
-        id=row.id, name=row.name, created_at=_iso(row.created_at),
-        last_seen_at=_iso(row.last_seen_at), last_seen_ip=row.last_seen_ip,
-    )
+def _workers_out(session, rows: List[JudgeWorker]) -> List[JudgeWorkerOut]:
+    now = utcnow()
+    running = judge_workers.running_tasks(session, [row.id for row in rows])
+    return [judge_workers.worker_out(row, now, running.get(row.id)) for row in rows]
+
+
+def _load_worker(session, worker_id: int) -> JudgeWorker:
+    row = session.get(JudgeWorker, worker_id)
+    if row is None:
+        raise ApiError(404, "not_found", "评测机不存在")
+    return row
 
 
 @router.get("/judge-workers", response_model=Page[JudgeWorkerOut])
@@ -556,25 +564,84 @@ def list_judge_workers(
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> Page[JudgeWorkerOut]:
+    """评测机与它们自报的状态、在线与否、手上正在评的任务（§12.10）。"""
     with ctx.db.session() as session:
-        rows = session.execute(select(JudgeWorker).order_by(JudgeWorker.id)).scalars()
-        return slice_page([_worker_out(row) for row in rows], page)
+        rows = list(session.execute(select(JudgeWorker).order_by(JudgeWorker.id)).scalars())
+        return slice_page(_workers_out(session, rows), page)
 
 
 @router.post("/judge-workers", response_model=JudgeWorkerCreatedOut)
 def create_judge_worker(
     payload: JudgeWorkerIn,
+    request: Request,
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> JudgeWorkerCreatedOut:
-    """签发一台评测机的令牌。明文只在这一次返回，库里只存哈希。"""
+    """签发一台评测机的令牌。明文只在这一次返回，库里只存哈希；顺带给出一行安装命令。"""
     token = new_token()
     with ctx.db.session() as session:
         row = JudgeWorker(name=payload.name.strip(), token_hash=hash_token(token))
         session.add(row)
         session.flush()
-        out = _worker_out(row)
-    return JudgeWorkerCreatedOut(**out.model_dump(), token=token)
+        out = _workers_out(session, [row])[0]
+    server = judge_dist.base_url(request.headers.get("host"), request.url.scheme, ctx.settings.http_port)
+    linux, windows, manual = judge_dist.install_commands(server, token)
+    return JudgeWorkerCreatedOut(
+        **out.model_dump(), token=token, linux_command=linux, windows_command=windows, manual_command=manual,
+    )
+
+
+@router.patch("/judge-workers/{worker_id}", response_model=JudgeWorkerOut)
+def update_judge_worker(
+    worker_id: int,
+    payload: JudgeWorkerPatchIn,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> JudgeWorkerOut:
+    """改名；暂停（``enabled`` = false：领不到新任务，手上的照常评完）/ 恢复。"""
+    with ctx.db.session() as session:
+        row = _load_worker(session, worker_id)
+        if payload.name is not None:
+            name = payload.name.strip()
+            if not name:
+                raise ApiError(400, "validation_error", "名称不能为空")
+            row.name = name
+        if payload.enabled is not None:
+            row.enabled = payload.enabled
+        session.flush()
+        return _workers_out(session, [row])[0]
+
+
+def _command(ctx: AppContext, worker_id: int, command: str) -> JudgeWorkerOut:
+    with ctx.db.session() as session:
+        row = _load_worker(session, worker_id)
+        if not judge_workers.remote_control(row):
+            raise ApiError(409, "judge_worker_unsupported", "这台评测机版本太旧，收不到远程命令；请在那台机器上操作")
+        if not judge_workers.is_online(row, utcnow()):
+            raise ApiError(409, "judge_worker_offline", "评测机不在线")
+        row.desired = command
+        session.flush()
+        return _workers_out(session, [row])[0]
+
+
+@router.post("/judge-workers/{worker_id}/stop", response_model=JudgeWorkerOut)
+def stop_judge_worker(
+    worker_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> JudgeWorkerOut:
+    """停止：评测机下一次 poll 时取走命令，评完手上的任务后退出（systemd / 计划任务不会再拉起它）。"""
+    return _command(ctx, worker_id, "stop")
+
+
+@router.post("/judge-workers/{worker_id}/restart", response_model=JudgeWorkerOut)
+def restart_judge_worker(
+    worker_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> JudgeWorkerOut:
+    """重启：评完手上的任务后以同样的参数重新启动自己（换上磁盘上的新程序）。"""
+    return _command(ctx, worker_id, "restart")
 
 
 @router.delete("/judge-workers/{worker_id}", response_model=SimpleAck)
@@ -584,11 +651,43 @@ def delete_judge_worker(
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> SimpleAck:
-    """吊销一台评测机（删行）。它手上没交的任务租约到期后回到队列。"""
+    """吊销一台评测机（删行）。它手上没交的任务立刻退回队列；本机评测机一并停掉。"""
     with ctx.db.session() as session:
         row = session.get(JudgeWorker, worker_id)
         if row is None:
             return SimpleAck(ok=True, detail="没有这台评测机")
         require_confirm(row.name, confirm, "评测机名称")
+        local = bool(row.is_local)
+        released = judge_workers.release_tasks(session, row.id)
         session.delete(row)
-    return SimpleAck(ok=True, detail="已吊销评测机")
+    if local:
+        ctx.local_judge.stop()
+    detail = "已吊销评测机" + ("，%d 个任务已退回队列" % released if released else "")
+    return SimpleAck(ok=True, detail=detail)
+
+
+@router.get("/judge-local", response_model=LocalJudgeOut)
+def local_judge_status(
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> LocalJudgeOut:
+    """本机评测机（服务端子进程）的状态；非 Linux 服务端 ``supported`` = false。"""
+    return ctx.local_judge.status()
+
+
+@router.post("/judge-local/start", response_model=LocalJudgeOut)
+def local_judge_start(
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> LocalJudgeOut:
+    """启动本机评测机：签一枚新令牌（记为本机评测机那一行），以子进程运行 worker。已在运行则不动。"""
+    return ctx.local_judge.start(ctx)
+
+
+@router.post("/judge-local/stop", response_model=LocalJudgeOut)
+def local_judge_stop(
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> LocalJudgeOut:
+    """停止本机评测机：评完手上的任务后退出。"""
+    return ctx.local_judge.stop()

@@ -1491,6 +1491,66 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/judge-local": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Local Judge Status
+         * @description 本机评测机（服务端子进程）的状态；非 Linux 服务端 ``supported`` = false。
+         */
+        get: operations["local_judge_status_api_v1_admin_judge_local_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/judge-local/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Local Judge Start
+         * @description 启动本机评测机：签一枚新令牌（记为本机评测机那一行），以子进程运行 worker。已在运行则不动。
+         */
+        post: operations["local_judge_start_api_v1_admin_judge_local_start_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/judge-local/stop": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Local Judge Stop
+         * @description 停止本机评测机：评完手上的任务后退出。
+         */
+        post: operations["local_judge_stop_api_v1_admin_judge_local_stop_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/judge-workers": {
         parameters: {
             query?: never;
@@ -1498,12 +1558,15 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Judge Workers */
+        /**
+         * List Judge Workers
+         * @description 评测机与它们自报的状态、在线与否、手上正在评的任务（§12.10）。
+         */
         get: operations["list_judge_workers_api_v1_admin_judge_workers_get"];
         put?: never;
         /**
          * Create Judge Worker
-         * @description 签发一台评测机的令牌。明文只在这一次返回，库里只存哈希。
+         * @description 签发一台评测机的令牌。明文只在这一次返回，库里只存哈希；顺带给出一行安装命令。
          */
         post: operations["create_judge_worker_api_v1_admin_judge_workers_post"];
         delete?: never;
@@ -1524,9 +1587,53 @@ export interface paths {
         post?: never;
         /**
          * Delete Judge Worker
-         * @description 吊销一台评测机（删行）。它手上没交的任务租约到期后回到队列。
+         * @description 吊销一台评测机（删行）。它手上没交的任务立刻退回队列；本机评测机一并停掉。
          */
         delete: operations["delete_judge_worker_api_v1_admin_judge_workers__worker_id__delete"];
+        options?: never;
+        head?: never;
+        /**
+         * Update Judge Worker
+         * @description 改名；暂停（``enabled`` = false：领不到新任务，手上的照常评完）/ 恢复。
+         */
+        patch: operations["update_judge_worker_api_v1_admin_judge_workers__worker_id__patch"];
+        trace?: never;
+    };
+    "/api/v1/admin/judge-workers/{worker_id}/restart": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Restart Judge Worker
+         * @description 重启：评完手上的任务后以同样的参数重新启动自己（换上磁盘上的新程序）。
+         */
+        post: operations["restart_judge_worker_api_v1_admin_judge_workers__worker_id__restart_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/judge-workers/{worker_id}/stop": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Stop Judge Worker
+         * @description 停止：评测机下一次 poll 时取走命令，评完手上的任务后退出（systemd / 计划任务不会再拉起它）。
+         */
+        post: operations["stop_judge_worker_api_v1_admin_judge_workers__worker_id__stop_post"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -2594,9 +2701,32 @@ export interface paths {
         put?: never;
         /**
          * Lease
-         * @description 领下一个任务；没有就 204。租约 15 分钟，过期没交结果的任务自动回到队列。
+         * @description 领下一个任务；没有（或这台评测机被暂停）就 204。租约 15 分钟，过期没交结果的任务自动回到队列。
          */
         post: operations["lease_api_v1_judge_lease_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/judge/poll": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Poll
+         * @description 自报状态；``want`` = 1 时顺带领一个任务；响应带管理端下的命令（§12.10）。
+         *
+         *     有命令（``stop`` / ``restart``）时不发任务：评测机要做的是评完手上的然后退出。
+         *     暂停时也不发任务，但命令照样送达。
+         */
+        post: operations["poll_api_v1_judge_poll_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2800,6 +2930,66 @@ export interface paths {
         };
         /** Healthz */
         get: operations["healthz_healthz_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/judge/install.ps1": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Install Ps1
+         * @description Windows 一键安装（PowerShell，UTF-8 BOM）：下载到文件后 ``& $p -Token '<令牌>'``。
+         */
+        get: operations["install_ps1_judge_install_ps1_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/judge/install.sh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Install Sh
+         * @description Linux 一键安装：``curl -fsSL <地址>/judge/install.sh | sudo bash -s -- <令牌>``。
+         */
+        get: operations["install_sh_judge_install_sh_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/judge/worker.pyz": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Worker Pyz
+         * @description 评测机程序（zipapp）：``python3 syncoj-judge.pyz --server … --token-file …``。
+         */
+        get: operations["worker_pyz_judge_worker_pyz_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -4226,6 +4416,55 @@ export interface components {
             testdata: components["schemas"]["JudgeBlobRefOut"];
         };
         /**
+         * JudgePollIn
+         * @description 评测机的一次 poll：自报状态，``want`` = 1 时顺带领一个任务（§12.10）。
+         */
+        JudgePollIn: {
+            /** Backend */
+            backend?: string | null;
+            /** Hostname */
+            hostname?: string | null;
+            /** Isolated */
+            isolated?: boolean | null;
+            /** Platform */
+            platform?: string | null;
+            /**
+             * Poll Seconds
+             * @default 5
+             */
+            poll_seconds: number;
+            /**
+             * Slots
+             * @default 1
+             */
+            slots: number;
+            /** Version */
+            version?: string | null;
+            /**
+             * Want
+             * @default 1
+             */
+            want: number;
+        };
+        /**
+         * JudgePollOut
+         * @description ``task`` 为空 = 没领到（没有任务、已暂停或 ``want`` = 0）。``command`` 见 §12.10。
+         */
+        JudgePollOut: {
+            /**
+             * Command
+             * @default run
+             * @enum {string}
+             */
+            command: "run" | "stop" | "restart";
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            task?: components["schemas"]["JudgeLeaseOut"] | null;
+        };
+        /**
          * JudgePrecheckFindingOut
          * @description 源码预检的一条预警（规则 code 见 ``judging/precheck.py``）。
          */
@@ -4583,18 +4822,64 @@ export interface components {
         };
         /** JudgeWorkerCreatedOut */
         JudgeWorkerCreatedOut: {
+            /** Backend */
+            backend?: string | null;
             /** Created At */
             created_at: string;
+            /**
+             * Desired
+             * @default run
+             * @enum {string}
+             */
+            desired: "run" | "stop" | "restart";
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /** Hostname */
+            hostname?: string | null;
             /** Id */
             id: number;
+            /** Isolated */
+            isolated?: boolean | null;
             /** Last Seen At */
             last_seen_at?: string | null;
             /** Last Seen Ip */
             last_seen_ip?: string | null;
+            /** Linux Command */
+            linux_command: string;
+            /**
+             * Local
+             * @default false
+             */
+            local: boolean;
+            /** Manual Command */
+            manual_command: string;
             /** Name */
             name: string;
+            /**
+             * Online
+             * @default false
+             */
+            online: boolean;
+            /** Platform */
+            platform?: string | null;
+            /**
+             * Remote Control
+             * @default false
+             */
+            remote_control: boolean;
+            /** Running */
+            running?: components["schemas"]["JudgeWorkerTaskOut"][];
+            /** Slots */
+            slots?: number | null;
             /** Token */
             token: string;
+            /** Version */
+            version?: string | null;
+            /** Windows Command */
+            windows_command: string;
         };
         /** JudgeWorkerIn */
         JudgeWorkerIn: {
@@ -4603,16 +4888,105 @@ export interface components {
         };
         /** JudgeWorkerOut */
         JudgeWorkerOut: {
+            /** Backend */
+            backend?: string | null;
             /** Created At */
             created_at: string;
+            /**
+             * Desired
+             * @default run
+             * @enum {string}
+             */
+            desired: "run" | "stop" | "restart";
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /** Hostname */
+            hostname?: string | null;
             /** Id */
             id: number;
+            /** Isolated */
+            isolated?: boolean | null;
             /** Last Seen At */
             last_seen_at?: string | null;
             /** Last Seen Ip */
             last_seen_ip?: string | null;
+            /**
+             * Local
+             * @default false
+             */
+            local: boolean;
             /** Name */
             name: string;
+            /**
+             * Online
+             * @default false
+             */
+            online: boolean;
+            /** Platform */
+            platform?: string | null;
+            /**
+             * Remote Control
+             * @default false
+             */
+            remote_control: boolean;
+            /** Running */
+            running?: components["schemas"]["JudgeWorkerTaskOut"][];
+            /** Slots */
+            slots?: number | null;
+            /** Version */
+            version?: string | null;
+        };
+        /**
+         * JudgeWorkerPatchIn
+         * @description 改名 / 暂停与恢复。不给的字段不动。
+         */
+        JudgeWorkerPatchIn: {
+            /** Enabled */
+            enabled?: boolean | null;
+            /** Name */
+            name?: string | null;
+        };
+        /**
+         * JudgeWorkerTaskOut
+         * @description 评测机手上正在评的一个任务。
+         */
+        JudgeWorkerTaskOut: {
+            /** Contest Id */
+            contest_id: number;
+            /** Id */
+            id: number;
+            /** Player No */
+            player_no: string;
+            /** Problem */
+            problem: string;
+        };
+        /**
+         * LocalJudgeOut
+         * @description 本机评测机（服务端以子进程运行的 worker）的状态。
+         */
+        LocalJudgeOut: {
+            /** Backend */
+            backend?: string | null;
+            /** Exit Code */
+            exit_code?: number | null;
+            /** Pid */
+            pid?: number | null;
+            /** Reason */
+            reason?: string | null;
+            /**
+             * Running
+             * @default false
+             */
+            running: boolean;
+            /** Started At */
+            started_at?: string | null;
+            /** Supported */
+            supported: boolean;
+            /** Worker Id */
+            worker_id?: number | null;
         };
         /** LoginRequest */
         LoginRequest: {
@@ -8722,6 +9096,66 @@ export interface operations {
             };
         };
     };
+    local_judge_status_api_v1_admin_judge_local_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LocalJudgeOut"];
+                };
+            };
+        };
+    };
+    local_judge_start_api_v1_admin_judge_local_start_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LocalJudgeOut"];
+                };
+            };
+        };
+    };
+    local_judge_stop_api_v1_admin_judge_local_stop_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LocalJudgeOut"];
+                };
+            };
+        };
+    };
     list_judge_workers_api_v1_admin_judge_workers_get: {
         parameters: {
             query?: {
@@ -8810,6 +9244,103 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_judge_worker_api_v1_admin_judge_workers__worker_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                worker_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JudgeWorkerPatchIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JudgeWorkerOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    restart_judge_worker_api_v1_admin_judge_workers__worker_id__restart_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                worker_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JudgeWorkerOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    stop_judge_worker_api_v1_admin_judge_workers__worker_id__stop_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                worker_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JudgeWorkerOut"];
                 };
             };
             /** @description Validation Error */
@@ -10510,6 +11041,39 @@ export interface operations {
             };
         };
     };
+    poll_api_v1_judge_poll_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JudgePollIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JudgePollOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     task_blob_api_v1_judge_tasks__task_id__blobs__sha256__get: {
         parameters: {
             query?: never;
@@ -10769,6 +11333,60 @@ export interface operations {
                         [key: string]: unknown;
                     };
                 };
+            };
+        };
+    };
+    install_ps1_judge_install_ps1_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    install_sh_judge_install_sh_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    worker_pyz_judge_worker_pyz_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

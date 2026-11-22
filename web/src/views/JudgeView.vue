@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * 自带评测（§12）：题目评测设置、自动评测、排任务 / 重测（全场 / 某人 / 某题）、进度与
- * 失败原因、最近的评测任务（任务即历史，§12.9）、评测机令牌。
+ * 失败原因、最近的评测任务（任务即历史，§12.9）、评测机（§12.10，见 JudgeWorkersCard）。
  */
 import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
@@ -10,10 +10,10 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { JUDGE_EXPORT_FORMATS, judgingApi, playerApi, problemApi } from '@/api'
 import type { JudgeExportFormat } from '@/api'
 import { ApiError } from '@/api/client'
-import type { BuiltinJudgeProgressOut, JudgeTaskOut, JudgeWorkerOut, PlayerOut, ProblemOut } from '@/api/types'
-import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
+import type { BuiltinJudgeProgressOut, JudgeTaskOut, PlayerOut, ProblemOut } from '@/api/types'
 import DataTable from '@/components/DataTable.vue'
 import JudgeRunDetailDialog from '@/components/JudgeRunDetailDialog.vue'
+import JudgeWorkersCard from '@/components/JudgeWorkersCard.vue'
 import ScoreTimelineDialog from '@/components/ScoreTimelineDialog.vue'
 import { useList } from '@/composables/useList'
 import PageShell from '@/components/PageShell.vue'
@@ -29,7 +29,7 @@ const contest = useContestStore()
 const router = useRouter()
 
 const problems = ref<ProblemOut[]>([])
-const workers = ref<JudgeWorkerOut[]>([])
+const workersCard = ref<InstanceType<typeof JudgeWorkersCard> | null>(null)
 const progress = ref<BuiltinJudgeProgressOut | null>(null)
 const error = ref<string | null>(null)
 const loading = ref(false)
@@ -64,10 +64,6 @@ async function loadPlayers(): Promise<void> {
   players.value = all
 }
 
-async function loadWorkers(): Promise<void> {
-  workers.value = (await judgingApi.workers()).items
-}
-
 async function loadProgress(): Promise<void> {
   const contestId = contest.currentId
   progress.value = contestId ? await judgingApi.progress(contestId) : null
@@ -77,7 +73,7 @@ async function reload(): Promise<void> {
   loading.value = true
   error.value = null
   try {
-    await Promise.all([loadProblems(), loadWorkers(), loadProgress(), loadPlayers()])
+    await Promise.all([loadProblems(), loadProgress(), loadPlayers(), workersCard.value?.reload()])
   } catch (err) {
     error.value = (err as Error).message
   } finally {
@@ -90,7 +86,7 @@ watch(() => contest.currentId, () => void reload(), { immediate: true })
 usePolling(
   async () => {
     try {
-      await Promise.all([loadProgress(), loadWorkers()])
+      await loadProgress()
       if (progress.value && (progress.value.queued || progress.value.running)) await tasks.reload()
     } catch {
       // 轮询失败不打断页面；下一轮再取
@@ -275,71 +271,6 @@ function openPlayerTimeline(): void {
   if (player) openTimeline(player.id, player.player_no, target.value === '*' ? null : target.value)
 }
 
-// ---- 评测机 ----
-
-const ONLINE_MS = 60_000
-
-function workerOnline(row: JudgeWorkerOut): boolean {
-  return !!row.last_seen_at && Date.now() - new Date(row.last_seen_at).getTime() < ONLINE_MS
-}
-
-const issued = ref<{ name: string; token: string } | null>(null)
-const command = computed(() =>
-  issued.value
-    ? `echo '${issued.value.token}' > judge.token\n` +
-      `syncoj-judge --server ${window.location.origin} --token-file judge.token --backend isolate`
-    : '',
-)
-
-async function createWorker(): Promise<void> {
-  let name: string
-  try {
-    const reply = await ElMessageBox.prompt('评测机名称', '添加评测机', {
-      inputPattern: /\S/,
-      inputErrorMessage: '名称不能为空',
-      confirmButtonText: '签发令牌',
-      cancelButtonText: '取消',
-    })
-    name = reply.value.trim()
-  } catch {
-    return
-  }
-  try {
-    const created = await judgingApi.createWorker(name)
-    issued.value = { name: created.name, token: created.token }
-    await loadWorkers()
-  } catch (err) {
-    ElMessage.error((err as Error).message)
-  }
-}
-
-async function copyCommand(): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(command.value)
-    ElMessage.success('已复制')
-  } catch {
-    ElMessage.warning('复制失败')
-  }
-}
-
-const removing = ref<JudgeWorkerOut | null>(null)
-const removeOpen = ref(false)
-
-function askRemove(worker: JudgeWorkerOut): void {
-  removing.value = worker
-  removeOpen.value = true
-}
-
-async function confirmRemove(): Promise<void> {
-  if (!removing.value) return
-  try {
-    await judgingApi.removeWorker(removing.value.id, removing.value.name)
-    removeOpen.value = false
-    await loadWorkers()
-  } catch (err) {
-    ElMessage.error((err as Error).message)
-  }
-}
 </script>
 
 <template>
@@ -587,51 +518,7 @@ async function confirmRemove(): Promise<void> {
       </DataTable>
     </SectionCard>
 
-    <SectionCard title="评测机" :meta="`在线 ${workers.filter(workerOnline).length} 台 / 共 ${workers.length} 台`" flush>
-      <template #extra>
-        <el-button type="primary" plain @click="createWorker">
-          <el-icon><Plus /></el-icon>添加评测机
-        </el-button>
-      </template>
-    <el-alert
-      v-if="issued"
-      type="success"
-      :closable="true"
-      show-icon
-      style="margin: 12px 20px"
-      :title="`评测机 ${issued.name} 的令牌仅显示一次`"
-      @close="issued = null"
-    >
-      <pre class="command">{{ command }}</pre>
-      <el-button @click="copyCommand">
-        <el-icon><DocumentCopy /></el-icon>复制命令
-      </el-button>
-    </el-alert>
-    <el-table :data="workers">
-      <el-table-column prop="name" label="名称" min-width="160" />
-      <el-table-column label="状态" width="90">
-        <template #default="{ row }">
-          <el-tag v-if="workerOnline(row)" size="small" type="success">在线</el-tag>
-          <el-tag v-else size="small" type="info" effect="plain">离线</el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column label="最近联系" width="170">
-        <template #default="{ row }">{{ row.last_seen_at ? formatTime(row.last_seen_at) : '从未' }}</template>
-      </el-table-column>
-      <el-table-column label="地址" width="140">
-        <template #default="{ row }">{{ row.last_seen_ip || '—' }}</template>
-      </el-table-column>
-      <el-table-column label="签发时间" width="170">
-        <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
-      </el-table-column>
-      <el-table-column label="操作" width="80" fixed="right">
-        <template #default="{ row }">
-          <el-button link type="danger" size="small" @click="askRemove(row)">吊销</el-button>
-        </template>
-      </el-table-column>
-      <template #empty>无评测机</template>
-    </el-table>
-    </SectionCard>
+    <JudgeWorkersCard ref="workersCard" />
 
     <ProblemJudgeDialog v-model="settingOpen" :problem="settingTarget" @saved="loadProblems" />
     <JudgeImportDialog v-model="importOpen" :contest-id="contest.currentId" @imported="loadProblems" />
@@ -655,14 +542,6 @@ async function confirmRemove(): Promise<void> {
       :player-no="timelineTarget?.playerNo ?? ''"
       :problem="timelineTarget?.problem ?? null"
       @changed="tasks.reload"
-    />
-    <ConfirmByNameDialog
-      v-model="removeOpen"
-      title="吊销评测机？"
-      :expected="removing?.name ?? ''"
-      confirm-text="吊销"
-      detail="令牌立即失效；该评测机未交回的任务 15 分钟后重新排队。"
-      @confirm="confirmRemove"
     />
   </PageShell>
 </template>
@@ -701,13 +580,6 @@ async function confirmRemove(): Promise<void> {
 .cell-sub {
   font-size: 12px;
   color: var(--el-text-color-secondary);
-}
-.command {
-  margin: 6px 0;
-  font-family: var(--el-font-family-mono, monospace);
-  font-size: 12px;
-  white-space: pre-wrap;
-  word-break: break-all;
 }
 .empty-block {
   padding: 16px 0;

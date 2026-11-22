@@ -20,6 +20,8 @@ import type {
   JudgeTaskOut,
   JudgeWorkerCreatedOut,
   JudgeWorkerOut,
+  JudgeWorkerPatchIn,
+  LocalJudgeOut,
   ProblemJudgeIn,
   ProblemOut,
   SourceVersionOut,
@@ -76,9 +78,28 @@ export const judgingApi = {
   workers: (params: ListParams = {}, signal?: AbortSignal) =>
     listPage<JudgeWorkerOut>(paths.judgeWorkers(), { limit: 100, ...params }, signal),
 
-  /** 签发评测机令牌：明文只在这一次返回。 */
+  /** 签发评测机令牌：明文只在这一次返回，连同 Linux / Windows 一行安装命令。 */
   createWorker: (name: string) =>
     request<JudgeWorkerCreatedOut>(paths.judgeWorkers(), { method: 'POST', body: { name } }),
+
+  /** 改名；暂停（`enabled: false`，领不到新任务、照常心跳）/ 恢复。 */
+  updateWorker: (workerId: number, payload: JudgeWorkerPatchIn) =>
+    request<JudgeWorkerOut>(paths.judgeWorker(workerId), { method: 'PATCH', body: payload }),
+
+  /** 停止：下一次轮询送达，评完手上的任务后退出。离线 / 旧评测机 409。 */
+  stopWorker: (workerId: number) =>
+    request<JudgeWorkerOut>(paths.judgeWorkerStop(workerId), { method: 'POST' }),
+
+  /** 重启：评完手上的任务后以同样的参数重启。 */
+  restartWorker: (workerId: number) =>
+    request<JudgeWorkerOut>(paths.judgeWorkerRestart(workerId), { method: 'POST' }),
+
+  /** 本机评测机状态；非 Linux 服务端 `supported: false`。 */
+  localJudge: () => request<LocalJudgeOut>(paths.judgeLocal()),
+
+  startLocalJudge: () => request<LocalJudgeOut>(paths.judgeLocalStart(), { method: 'POST' }),
+
+  stopLocalJudge: () => request<LocalJudgeOut>(paths.judgeLocalStop(), { method: 'POST' }),
 
   /** 吊销（删行）。`confirm` 必须逐字等于评测机名称。 */
   removeWorker: (workerId: number, name: string) => removeItem(paths.judgeWorker(workerId), name),

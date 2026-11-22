@@ -170,6 +170,12 @@ class Settings:
     # 周期扫描 judge_result/ 目录并回写成绩。对延迟不敏感，所以放得比较宽
     judge_scan_interval: float = 10.0
 
+    #: 本机评测机（§12.10）用 rlimit 后端、且服务端以 root 运行时，选手程序换成这个账号跑。
+    #: 装了 isolate 时用不到它；服务端不是 root 时也用不到（以服务端账号跑）。
+    judge_local_run_as: str = field(
+        default_factory=lambda: _env_opt_str("SYNCOJ_JUDGE_LOCAL_RUN_AS") or "nobody"
+    )
+
     # ---- 自更新 ----
     #: 发布包大小上限。签名私钥见上面的 ``release_signing_key`` —— 它**只能有
     #: 一处定义**：这个 dataclass 曾经把同一个字段声明了两遍（一次读环境变量、

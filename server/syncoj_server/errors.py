@@ -206,6 +206,12 @@ ERROR_CODES = {
     "judge_task_no_result": "这个评测任务没有可采用的结果",
     #: 采用历史版本成绩：这一格是教师手工录入的，扫描器不会覆盖它 —— 先清除手工成绩
     "manual_score": "这一格是手工录入的成绩",
+    #: 评测机远程停止 / 重启（§12.10）：评测机不在线，命令送不到
+    "judge_worker_offline": "评测机不在线",
+    #: 评测机远程停止 / 重启：旧版评测机不报状态，也不认命令
+    "judge_worker_unsupported": "评测机版本太旧，不支持远程命令",
+    #: 本机评测机（§12.10）只在 Linux 服务端上提供
+    "local_judge_unsupported": "本机评测机只能在 Linux 服务端上运行",
 }
 
 

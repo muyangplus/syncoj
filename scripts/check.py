@@ -92,11 +92,13 @@ def step_ps1_bom(ctx: "Context") -> None:
     Windows PowerShell 5.1 在**没有 BOM** 时按当前 ANSI 代码页（简体中文系统上是
     GBK）解码脚本，于是里面的中文注释会让它**整个文件解析失败**，报的还是"字符串
     缺少终止符"这种指向别处的错。编辑工具保存时通常不保留 BOM —— 改一行注释就
-    可能把它弄丢，所以单独一步守着。
+    可能把它弄丢，所以单独一步守着。服务端发给评测机的 ``install.ps1`` 模板（§12.10）同样要。
     """
+    scripts = sorted((REPO_ROOT / "scripts").glob("*.ps1"))
+    scripts += sorted((REPO_ROOT / "server" / "syncoj_server").rglob("*.ps1"))
     missing = [
         path.relative_to(REPO_ROOT).as_posix()
-        for path in sorted((REPO_ROOT / "scripts").glob("*.ps1"))
+        for path in scripts
         if not path.read_bytes().startswith(b"\xef\xbb\xbf")
     ]
     if missing:

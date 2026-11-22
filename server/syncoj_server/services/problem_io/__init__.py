@@ -77,7 +77,7 @@ EXPORT_FORMATS = tuple(key for key, spec in FORMATS.items() if spec.export is no
 
 @dataclass
 class ParsedImport:
-    """解析结果 + 仍打开着的归档（``build_testdata_zip`` 要从里面读）。用完 ``close()``。"""
+    """解析结果 + 仍打开着的归档（``build.try_build`` / ``try_summarize`` 要从里面读）。用完 ``close()``。"""
 
     result: ImportResult
     archive: Union[SafeArchive, SingleFileArchive]

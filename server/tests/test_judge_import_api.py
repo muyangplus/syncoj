@@ -250,3 +250,22 @@ def test_attachment_header_drops_control_characters() -> None:
     assert "\r" not in header and "\n" not in header and "%0D" not in header and "%0A" not in header
     assert _attachment_header("") == "attachment; filename=\"download\"; filename*=UTF-8''download"
     assert "filename*=UTF-8''%E6%95%B0%E6%8D%AE.zip" in _attachment_header("数据.zip")
+
+
+def test_apply_streams_blobs_instead_of_bytes(client: TestClient, contest: dict, admin_headers: dict, app,
+                                              monkeypatch) -> None:
+    """应用时数据包流式入库（put_stream），不整包读成 bytes 再 put_bytes。原生包与外来格式都一样。"""
+    from problem_io_fixtures import lemon_task, make_lemon_zip
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("不应整包读进内存")
+
+    monkeypatch.setattr(app.state.ctx.blobs, "put_bytes", forbidden)
+    for data, ident in ((make_native_zip([native_problem("nat")]), "nat"),
+                        (make_lemon_zip([lemon_task("lem")]), "lem")):
+        body = preview(client, contest, admin_headers, data).json()
+        assert [p["ident"] for p in body["problems"]] == [ident]
+        response = apply(client, contest, admin_headers, body["token"], accept_all(body))
+        assert response.status_code == 200, response.text
+        (out,) = response.json()["problems"]
+        assert out["testdata"]["cases"] == body["problems"][0]["cases"] > 0

@@ -23,6 +23,7 @@
 | `GET /problems/{id}/testdata/file` | 原样下载数据包 |
 
 * 预览默认动作：有错误 → `skip`；ident 已存在 → `update`；否则 `create`。有错误的题只能 `skip`（否则 400）。
+* 试构建：预览只算摘要，不写出完整数据包（测试点写成空文件的骨架包回读自检，测试数据按成员各解压一遍查损坏，同一成员每次请求只读一遍）；apply 把数据包写到暂存目录下的临时文件再流式入库，原生包的内层 zip 直接从导入包流式入库。
 * apply：token 不存在 / 过期 / 属于别的场次 → 404 `import_token_expired`；本批 ident 重复或 `create` 撞已有 ident → 409 `ident_conflict`。
 * 新建题目 `judge_mode=builtin`；覆盖已有题目时 `set_builtin=true`（默认）才改成 builtin。覆盖时 `title` 只在包里有值、且不等于来源名或 ident（不分大小写）时覆盖，`file_patterns` 不动（原生格式除外）。
 * 导出不传 `problem_id`：`syncoj` 取全部题目；其他格式取全部带数据包的自带评测题。非原生格式跳过没有数据包或 blob 丢失的题（`included=false`）。
@@ -230,6 +231,7 @@ syncoj-problems.json
 | 题目数 | ≤ 200，拿到题目目录列表时就查 | 413 `too_many_problems` |
 | 每题测试点 | ≤ 500，解析时就查 | `too_many_cases` |
 | 每题数据包解压量 | 按引用（含重复引用）累计 ≤ 2 GiB，写之前查 | `testdata_invalid` |
+| 一次 preview / apply 的数据包解压量 | 全部题目按引用累计 ≤ 4 GiB，超出的题报错 | `testdata_invalid` |
 | 暂存 | `<data_dir>/tmp/judge-import/<token>.bin`，token 为 32 位十六进制；2 小时过期；每场次最多 5 份 | 404 `import_token_expired` |
 
 ## 8. 提示代码

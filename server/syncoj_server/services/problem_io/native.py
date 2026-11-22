@@ -6,7 +6,8 @@
     <ident>/testdata.zip          # 原样的 blob 字节（sha256 不变）
 
 清单里每道题的列按原值写出（``file_patterns`` 是库里的原值，None = 默认模式）；
-导入时原样写回，内层 zip 的 sha256 必须与清单一致。
+导入时原样写回，内层 zip 的 sha256 必须与清单一致。多道题指向同一个内层包时按 path 只校验一遍；
+构建时直接流式读归档成员写 blob（``build.try_build``），不整包读进内存。
 """
 
 from __future__ import annotations
@@ -119,10 +120,22 @@ def _load_manifest(view: ArchiveView) -> List[Any]:
     return problems
 
 
-def _verify_inner(
-    view: ArchiveView, bundle: ProblemBundle, path: str, meta: Dict[str, Any], spool: IO[bytes]
-) -> bool:
-    """把内层 zip 读进 ``spool``、核对 sha256、过 ``parse_testdata``。不通过时记错误并返回 False。"""
+class _Inner:
+    """一个内层 zip 的校验结果（按 path 缓存：多题指向同一个包时只读、哈希、解析一遍）。
+
+    ``error`` 是读取 / 结构上的错误（与清单里的 sha256 无关）；``sha256`` 读完整包才有。"""
+
+    __slots__ = ("sha256", "summary", "error")
+
+    def __init__(self) -> None:
+        self.sha256: Optional[str] = None
+        self.summary: Optional[Dict[str, object]] = None
+        self.error: Optional[Notice] = None
+
+
+def _verify_inner(view: ArchiveView, path: str, spool: IO[bytes]) -> _Inner:
+    """把内层 zip 流式读进 ``spool``、算 sha256、过 ``parse_testdata``。"""
+    inner = _Inner()
     digest = hashlib.sha256()
     size = 0
     with view.open(path) as source:
@@ -132,27 +145,36 @@ def _verify_inner(
                 break
             size += len(chunk)
             if size > MAX_TESTDATA_BYTES:
-                bundle.fail(notice("testdata_invalid", reason="超过 512 MB"))
-                return False
+                inner.error = notice("testdata_invalid", reason="超过 512 MB")
+                return inner
             digest.update(chunk)
             spool.write(chunk)
-    if digest.hexdigest() != str(meta.get("sha256") or "").lower():
-        bundle.fail(notice("sha_mismatch", path=path))
-        return False
+    inner.sha256 = digest.hexdigest()
     spool.seek(0)
     try:
-        with zipfile.ZipFile(spool) as inner:
-            parse_testdata(inner)
+        with zipfile.ZipFile(spool) as archive:
+            inner.summary = parse_testdata(archive).summary()
     except zipfile.BadZipFile:
-        bundle.fail(notice("testdata_invalid", reason="不是合法的 zip"))
-        return False
+        inner.error = notice("testdata_invalid", reason="不是合法的 zip")
     except TestdataError as exc:
-        bundle.fail(notice("testdata_invalid", reason=str(exc)))
-        return False
-    return True
+        inner.error = notice("testdata_invalid", reason=str(exc))
+    return inner
 
 
-def _check_testdata(view: ArchiveView, bundle: ProblemBundle, meta: Any) -> None:
+def _inspect(view: ArchiveView, path: str) -> _Inner:
+    # 用真正的临时文件：SpooledTemporaryFile 在 3.11 之前没有 seekable，zipfile 读它会 AttributeError
+    spool = tempfile.TemporaryFile(mode="w+b")
+    try:
+        return _verify_inner(view, path, spool)
+    except CORRUPT_ERRORS:
+        inner = _Inner()
+        inner.error = notice("testdata_invalid", reason="压缩数据已损坏")
+        return inner
+    finally:
+        spool.close()
+
+
+def _check_testdata(view: ArchiveView, bundle: ProblemBundle, meta: Any, cache: Dict[str, _Inner]) -> None:
     if not isinstance(meta, dict) or not isinstance(meta.get("path"), str):
         bundle.fail(notice("bad_manifest", path=MANIFEST, reason="testdata 缺少 path"))
         return
@@ -160,18 +182,18 @@ def _check_testdata(view: ArchiveView, bundle: ProblemBundle, meta: Any) -> None
     if not view.exists(path):
         bundle.fail(notice("missing_file", path=path))
         return
-    # 用真正的临时文件：SpooledTemporaryFile 在 3.11 之前没有 seekable，zipfile 读它会 AttributeError
-    spool = tempfile.TemporaryFile(mode="w+b")
-    try:
-        ok = _verify_inner(view, bundle, path, meta, spool)
-    except CORRUPT_ERRORS:
-        bundle.fail(notice("testdata_invalid", reason="压缩数据已损坏"))
-        ok = False
-    finally:
-        spool.close()
-    if not ok:
+    inner = cache.get(path)
+    if inner is None:
+        inner = cache[path] = _inspect(view, path)
+    if inner.sha256 is not None and inner.sha256 != str(meta.get("sha256") or "").lower():
+        bundle.fail(notice("sha_mismatch", path=path))
+        return
+    if inner.error is not None:
+        bundle.fail(inner.error)
         return
     bundle.raw_testdata = FileRef(member=view.full(path))
+    bundle.raw_sha256 = inner.sha256
+    bundle.raw_summary = dict(inner.summary or {})
     bundle.testdata_name = clean_testdata_name(meta.get("name"))
 
 
@@ -189,6 +211,7 @@ def clean_testdata_name(value: Any) -> Optional[str]:
 
 def parse(view: ArchiveView) -> ImportResult:
     result = ImportResult(format="syncoj")
+    checked: Dict[str, _Inner] = {}
     for index, item in enumerate(_load_manifest(view)):
         key = "problems[%d]" % index
         if not isinstance(item, dict):
@@ -217,6 +240,6 @@ def parse(view: ArchiveView) -> ImportResult:
             judge_mode="builtin" if item.get("judge_mode") == "builtin" else "external",
         )
         if item.get("testdata") is not None:
-            _check_testdata(view, bundle, item["testdata"])
+            _check_testdata(view, bundle, item["testdata"], checked)
         result.problems.append(bundle)
     return result

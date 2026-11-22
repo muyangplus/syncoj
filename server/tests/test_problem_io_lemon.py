@@ -93,7 +93,8 @@ def test_real_sample_package(tmp_path: Path) -> None:
             assert bundle.cases[0].input.member == "sample/data/%s/%s1.in" % (bundle.ident, bundle.ident)
             built = try_build(bundle, parsed.archive)
             assert built is not None, bundle.errors
-            assert built[1] == {"cases": 20, "subtasks": 0, "has_checker": False, "total_score": 100}
+            built.close()
+            assert built.summary == {"cases": 20, "subtasks": 0, "has_checker": False, "total_score": 100}
         assert not parsed.result.warnings
 
 
@@ -121,7 +122,8 @@ def test_real_sample_package_with_backslash_member_names(tmp_path: Path) -> None
             assert bundle.cases[0].input.member == "sample/data/%s/%s1.in" % (bundle.ident, bundle.ident)
             built = try_build(bundle, parsed.archive)
             assert built is not None, bundle.errors
-            assert built[1]["cases"] == 20 and built[1]["total_score"] == 100
+            built.close()
+            assert built.summary["cases"] == 20 and built.summary["total_score"] == 100
 
 
 def test_real_sample_package_through_api(client: TestClient, contest: dict, admin_headers: dict) -> None:
@@ -302,7 +304,8 @@ def test_testlib_checker_injects_testlib(tmp_path: Path) -> None:
     with problem_io.parse_archive(stage(tmp_path, data), "auto") as parsed:
         (bundle,) = parsed.result.problems
         built = try_build(bundle, parsed.archive)
-        assert built is not None and built[1]["has_checker"]
+        assert built is not None and built.summary["has_checker"]
+        built.close()
         assert "testlib_injected" in codes(bundle.warnings)
 
 

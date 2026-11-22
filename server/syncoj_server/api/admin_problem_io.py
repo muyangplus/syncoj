@@ -5,6 +5,9 @@
 （不信任客户端回传的配置，只采用 ident 与动作），写 blob、建题或覆盖。暂存 2 小时过期，
 每个场次最多留 5 份。
 
+内存：preview 只算摘要（``try_summarize``，不写出完整数据包）；apply 把数据包写到暂存目录下的
+临时文件再流式入库（``try_build`` + ``put_stream``）。两者各有一份整请求共用的构建预算。
+
 格式解析与写出在 ``services/problem_io``；这里只管暂存、鉴权、落库。
 """
 
@@ -37,9 +40,10 @@ from ..schemas import (
     NoticeOut,
 )
 from ..services import problem_io
-from ..services.problem_io.build import try_build
+from ..services.problem_io.build import BuildBudget, try_build, try_summarize
 from ..services.problem_io.bundle import ExportProblem, Notice, ProblemBundle
 from ..services.problem_io.notices import ProblemIoError
+from ..storage import BlobTooLarge, HashMismatch
 from .admin import (
     AdminIdentity,
     _attachment_header,
@@ -224,14 +228,14 @@ def judge_import_preview(
         _drop(folder, token)
         raise
     with parsed:
+        # 预览只要摘要：不写出完整数据包；整个请求共用一份构建预算
+        budget = BuildBudget()
         summaries: Dict[str, Optional[dict]] = {}
         for bundle in parsed.result.problems:
             summaries[bundle.key] = None
             if bundle.errors or not bundle.has_testdata:
                 continue
-            built = try_build(bundle, parsed.archive)
-            if built is not None:
-                summaries[bundle.key] = built[1]
+            summaries[bundle.key] = try_summarize(bundle, parsed.archive, budget)
     (folder / (token + ".json")).write_text(
         json.dumps({
             "contest_id": contest_id,
@@ -349,22 +353,29 @@ def judge_import_apply(
                 raise ApiError(400, "validation_error", "题目 %s 不存在，无法覆盖" % ident, details={"key": key})
             plan.append((bundle, ident, item.action))
 
-        # 先写全部 blob，再在一个会话里建题 / 覆盖
+        # 先写全部 blob，再在一个会话里建题 / 覆盖。数据包一题一题写临时文件（放在暂存目录，
+        # 与数据同盘，不占 /tmp 的内存盘）再流式入库，同一时刻只有一份在盘上
         built: Dict[str, Tuple[str, int, dict]] = {}
+        budget = BuildBudget()
         try:
             for bundle, ident, _action in plan:
                 if not bundle.has_testdata:
                     continue
-                output = try_build(bundle, parsed.archive)
+                output = try_build(bundle, parsed.archive, budget, tmp_dir=folder)
                 if output is None:
                     raise ApiError(
                         400, "validation_error",
                         "%s：%s" % (ident, bundle.errors[-1].message), details={"key": bundle.key},
                     )
-                data, summary = output
-                sha256, size = ctx.blobs.put_bytes(data)
+                with output:
+                    try:
+                        sha256, size = ctx.blobs.put_stream(
+                            output.file, max_bytes=output.max_bytes, expected_sha256=output.sha256,
+                        )
+                    except (BlobTooLarge, HashMismatch) as exc:
+                        raise ApiError(400, "validation_error", "%s：%s" % (ident, exc), details={"key": bundle.key})
                 new_blobs.append(sha256)
-                built[bundle.key] = (sha256, size, summary)
+                built[bundle.key] = (sha256, size, output.summary)
         except Exception:
             _reclaim_blobs(ctx, new_blobs)
             raise

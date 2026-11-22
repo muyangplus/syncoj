@@ -181,3 +181,23 @@ def test_problem_ids_must_belong_to_the_contest(client: TestClient, contest: dic
 def test_export_formats_are_validated(client: TestClient, contest: dict, admin_headers: dict) -> None:
     url = "%s/contests/%d/judge-export?format=qduoj" % (ADMIN, contest["id"])
     assert client.get(url, headers=admin_headers).status_code == 422
+
+
+@pytest.mark.parametrize("fmt", ["hoj", "lemonlime", "hydro"])
+def test_lost_blob_is_not_counted_as_included(fmt: str) -> None:
+    """数据包 blob 丢了：格式模块跳过并记 missing_file，预览也不能再说它"已包含"。"""
+    from syncoj_server.services.problem_io.bundle import ExportProblem
+
+    data = make_testdata_zip(count=2)
+    good = ExportProblem(id=1, ident="good", judge_mode="builtin", testdata_sha256=sha256_hex(data))
+    lost = ExportProblem(id=2, ident="lost", judge_mode="builtin", testdata_sha256="0" * 64)
+
+    def open_blob(sha: str):
+        if sha != sha256_hex(data):
+            raise FileNotFoundError(sha)
+        return io.BytesIO(data)
+
+    for dry_run in (True, False):
+        outcome = problem_io.export_problems([good, lost], fmt, open_blob, dry_run=dry_run)
+        assert outcome.included == [1]
+        assert [n.code for n in outcome.notices[2]] == ["missing_file"]

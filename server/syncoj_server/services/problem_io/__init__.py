@@ -269,4 +269,8 @@ def export_problems(
         raise
     for problem_id, items in extra.items():
         notices.setdefault(problem_id, []).extend(items)
-    return ExportOutcome(spool=spool, notices=notices, included=[p.id for p in included])
+    # 非原生格式读不到数据包 blob 的题，格式模块记 missing_file 并没写进包里
+    lost = set() if fmt == "syncoj" else {
+        problem_id for problem_id, items in extra.items() if any(item.code == "missing_file" for item in items)
+    }
+    return ExportOutcome(spool=spool, notices=notices, included=[p.id for p in included if p.id not in lost])

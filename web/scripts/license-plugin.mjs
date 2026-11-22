@@ -9,7 +9,8 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 
-const LICENSE_FILE = /^(licen[cs]e|copying|notice)(\.(md|txt|markdown))?$/i
+// 与 scripts/collect_licenses.py 的 LICENSE_FILE 一致：允许 LICENSE-MPL、LICENSE_APACHE 这类后缀
+const LICENSE_FILE = /^(licen[cs]e|copying|notice)([-_.].*)?(\.(md|txt|rst|markdown))?$/i
 
 /** 包里没带许可证文件时使用的原文（必须是该包官方仓库的许可证原文）。 */
 const FALLBACK_TEXTS = {}

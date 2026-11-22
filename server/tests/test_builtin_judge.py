@@ -305,11 +305,22 @@ def test_删题回收数据包(client, admin_headers, problem) -> None:
     assert not blobs.has(sha)
 
 
-def test_worker_refuses_non_linux(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
+def test_worker_platform_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
+    """Linux 用 isolate / rlimit，Windows 用 winjob（默认），其余组合报错退出。"""
     from syncoj_server.judging import worker
 
     token = tmp_path / "token"
     token.write_text("x", encoding="utf-8")
-    monkeypatch.setattr(worker.sys, "platform", "win32")
-    assert worker.main(["--server", "http://127.0.0.1:1", "--token-file", str(token)]) == 2
-    assert "只能在 Linux 上运行" in capsys.readouterr().err
+
+    def main(platform: str, *extra: str) -> int:
+        monkeypatch.setattr(worker.sys, "platform", platform)
+        return worker.main(["--server", "http://127.0.0.1:1", "--token-file", str(token)] + list(extra))
+
+    assert main("darwin") == 2
+    assert "只支持 Linux" in capsys.readouterr().err
+    assert main("win32", "--backend", "isolate") == 2
+    assert "Windows 上用 winjob" in capsys.readouterr().err
+    assert main("linux", "--backend", "winjob") == 2
+    assert "Linux 上用 isolate" in capsys.readouterr().err
+    assert main("win32", "--run-as", "judge") == 2  # Windows 上默认 winjob，不支持换账号
+    assert "--run-as" in capsys.readouterr().err

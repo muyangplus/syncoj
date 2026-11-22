@@ -38,3 +38,6 @@ include = ["syncoj_server*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "windows: 只在 Windows 上真跑的用例（winjob 沙箱 + MinGW-w64 g++），其他平台跳过",
+]

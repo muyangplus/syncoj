@@ -121,7 +121,7 @@ ALLOWED_TOP_LEVEL: Set[str] = {
     "syslog", "tarfile", "tempfile", "textwrap", "threading", "time",
     "timeit", "tokenize", "traceback", "types", "typing", "unicodedata",
     "unittest", "urllib", "uuid", "venv", "warnings", "weakref",
-    "webbrowser", "winreg", "xml", "zipfile", "zlib",
+    "webbrowser", "winreg", "msvcrt", "xml", "zipfile", "zlib",
     # 本脚本与测试工具需要的（开发机侧，不随 Agent 分发）
     "pytest",
 }

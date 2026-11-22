@@ -1,6 +1,6 @@
 """运行不可信程序的沙箱后端（§12）。
 
-两个后端，接口相同（:class:`Sandbox`）：
+三个后端，接口相同（:class:`Sandbox`）；``winjob``（Windows Job Object）在 :mod:`.sandbox_win`：
 
 ``isolate``（推荐，正式考试用）
     调用 IOI 的 isolate（命名空间 + 可选 cgroup）。它是竞赛圈事实标准的沙箱，自己写一份
@@ -36,6 +36,9 @@ __all__ = [
     "RlimitSandbox",
     "IsolateSandbox",
     "make_sandbox",
+    "default_backend",
+    "backend_problem",
+    "BACKENDS",
     "parse_isolate_meta",
 ]
 
@@ -376,6 +379,29 @@ class IsolateSandbox(Sandbox):
         shutil.rmtree(str(self._meta_dir), ignore_errors=True)
 
 
+BACKENDS = ("isolate", "rlimit", "winjob")
+LINUX_BACKENDS = ("isolate", "rlimit")
+
+
+def default_backend(platform: str) -> str:
+    return "winjob" if platform == "win32" else "isolate"
+
+
+def backend_problem(backend: str, platform: str, run_as: Optional[str] = None) -> Optional[str]:
+    """这个平台能不能用这个后端；不能时返回给人看的原因。"""
+    if platform.startswith("linux"):
+        if backend in LINUX_BACKENDS:
+            return None
+        return "%s 后端只能在 Windows 上用；Linux 上用 isolate（推荐）或 rlimit" % backend
+    if platform == "win32":
+        if backend != "winjob":
+            return "%s 后端只能在 Linux 上用；Windows 上用 winjob" % backend
+        if run_as:
+            return "winjob 后端不支持 --run-as：请直接以低权限专用账号运行评测机"
+        return None
+    return "syncoj-judge 只支持 Linux（isolate / rlimit）与 Windows（winjob），当前平台 %s" % platform
+
+
 def make_sandbox(
     backend: str, *, base: Optional[Path] = None, run_as: Optional[str] = None,
     box_id: int = 0, isolate_binary: str = "isolate", cgroups: bool = False,
@@ -384,4 +410,8 @@ def make_sandbox(
         return IsolateSandbox(box_id=box_id, binary=isolate_binary, cgroups=cgroups)
     if backend == "rlimit":
         return RlimitSandbox(base=base, run_as=run_as)
-    raise SandboxError("不认识的沙箱后端：%s（isolate / rlimit）" % backend)
+    if backend == "winjob":
+        from .sandbox_win import WinJobSandbox
+
+        return WinJobSandbox(base=base, run_as=run_as)
+    raise SandboxError("不认识的沙箱后端：%s（%s）" % (backend, " / ".join(BACKENDS)))

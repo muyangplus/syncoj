@@ -6,7 +6,7 @@
 ### 12.1 目标与边界
 
 * **要**：教师对一个场次（或一道题、一个选手）发起评测，按 NOI 惯例编译、运行、比对，成绩进成绩矩阵；能重测；能看每个测试点。
-* **不要**：在线 OJ 那一套（题库、提交队列、实时排行榜）；交互题与通信题；Windows 评测（沙箱只做 Linux）。
+* **不要**：在线 OJ 那一套（题库、提交队列、实时排行榜）；交互题与通信题；Windows 上的隔离沙箱（`winjob` 只限资源）。
 * **硬约束**：选手代码**不可信**；服务端进程持有数据库、发布私钥（`.key/`）、统一注册密钥，**不在服务端进程内、不以服务端账号**运行选手程序。
 
 ### 12.2 关键决定：产物写进现有的 `judge_result/`
@@ -24,7 +24,7 @@ syncoj-server（服务端账号）         syncoj-judge worker（专用账号，
   ResultScanner 收结果
 ```
 
-* worker（`syncoj-judge --server … --token-file … --backend isolate|rlimit`）是**独立进程、独立账号**，经 HTTP 领任务（服务端持有全部状态），碰不到 `.key/`、数据库与 `source/` 目录，只拿到任务所需的代码与数据包。可与服务端同机；条件允许时放另一台（评测时 CPU 满载，避免与收代码的服务端争用）。
+* worker（`syncoj-judge --server … --token-file … --backend isolate|rlimit|winjob`）是**独立进程、独立账号**，经 HTTP 领任务（服务端持有全部状态），碰不到 `.key/`、数据库与 `source/` 目录，只拿到任务所需的代码与数据包。可与服务端同机；条件允许时放另一台（评测时 CPU 满载，避免与收代码的服务端争用）。
 * worker 令牌在「评测」→「评测机」签发，只存哈希（`judge_worker`），只授权评测相关端点；吊销 = 删行（需输评测机名称确认）。
 * 任务表 `judge_task(contest, player, problem, status, attempt, worker, lease_until, source_path, source_sha256, outcome, error, …)`：状态 `queued → running → done / failed`；领任务带 15 分钟租约（worker 崩了租约过期自动回队列），最多尝试 3 次。任务即历史（§12.9）：重测只替换同一对**还在排队**的任务，跑完的留着。没交代码的选手直接 `done`、不写 `result.json`（矩阵照旧显示未交）。
 * 数据包按 sha256 缓存在 worker 的 `--cache-dir`，同题几十个选手只下载一次。
@@ -35,12 +35,15 @@ syncoj-server（服务端账号）         syncoj-judge worker（专用账号，
 |---|---|---|---|
 | `isolate` | 调用 IOI 的 isolate（命名空间 + 可选 cgroup） | 机器装了 isolate（setuid root）；同机多个 worker 用不同 `--box-id` | **推荐**，正式考试用 |
 | `rlimit` | `fork` + `setrlimit`（CPU / 内存 / 输出 / 进程数）+ 另一账号运行 + 每点前清空工作目录 | 无；worker 以 root 跑时必须给 `--run-as`，否则拒绝 | **只给开发与自测**，无网络与文件系统隔离，界面标红"不隔离" |
+| `winjob` | Windows Job Object（CPU / 内存 / 活动进程数 1 / UI 限制 / 关 Job 即杀）+ 每次运行独立临时目录 | Windows，Python ≥ 3.8，MinGW-w64 `g++` 在 `PATH`；不支持 `--run-as` | Windows 上的评测机；无网络与文件系统隔离（`isolated: false`），以低权限专用账号运行 |
 
 * isolate 是**调用**不是链接（它是 GPL-2），不影响本仓库许可证。
 * 否决自研 `unshare` + seccomp：安全边界，自研维护成本与出错代价过高；`rlimit` 覆盖无更好选择时的情形。
 * 否决 `systemd-run` 后端：统计单次运行的 CPU 时间与峰值内存需绕路；有 root 的机器直接装 isolate。
 * 计时：**CPU 时间**判 TLE；墙钟只作硬上限（时限的 2 倍 + 1 秒），防 sleep 卡死。内存取峰值常驻集，isolate 开 `--cgroups` 时取 cgroup 峰值。`rlimit` 后端经一层 shim 取选手程序自己的 rusage（Linux 的 `ru_maxrss` 跨 exec 保留，直接从 worker fork 会把 worker 的内存算到选手头上）。
 * 一个 worker 一次评一个任务；要并发就起多个 worker（各用不同 box）。
+* 平台守卫：Linux 只认 `isolate` / `rlimit`，Windows 只认 `winjob`（默认），其余组合启动即报错。
+* `winjob`：自己调 `CreateProcessW`（`CREATE_SUSPENDED`）→ `AssignProcessToJobObject` → `ResumeThread`，程序进 Job 前不执行任何指令；否决 `subprocess.Popen` + 未公开的 `NtResumeProcess`（Popen 不给主线程句柄）。继承句柄用 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 限定为标准输入输出三个；限进程数时以 `DETACHED_PROCESS` 启动（否则 conhost.exe 占掉 Job 的活动进程名额），编译用不限进程数、限整个 Job CPU 与内存的 Job。CPU 取 Job 记账的用户 + 内核时间；内存取峰值提交量；墙钟超限 `TerminateJobObject`；运行中轮询工作目录增长判 OLE。崩溃（NTSTATUS / `abort()`）且峰值已达内存限制 90% 记 MLE（Job 挡住的分配不计入峰值）。编译加 `-static`（不依赖 MinGW 的 DLL）与 `-Wl,--stack=<内存限制>`（对齐 Linux 栈不限）。
 
 ### 12.5 评测语义（NOI 惯例）
 

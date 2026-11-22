@@ -20,8 +20,8 @@
   --sj-text-2: #5b6478;
   --sj-text-3: #8a92a6;
 
-  --sj-primary: #4f46e5;
-  --sj-primary-soft: #eef0ff;
+  --sj-primary: #0284c7;
+  --sj-primary-soft: #e6f3f9;
   --sj-success: #16a34a;
   --sj-success-soft: #e9f8ef;
   --sj-warning: #d97706;
@@ -35,19 +35,19 @@
   --sj-shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.06);
   --sj-shadow-lg: 0 8px 24px rgba(16, 24, 40, 0.08);
 
-  --sj-brand-gradient: linear-gradient(135deg, #6366f1, #8b5cf6);
+  --sj-brand-gradient: linear-gradient(135deg, #0ea5e9, #0369a1);
 
   --sj-sidebar-w: 232px;
   --sj-topbar-h: 60px;
 
   /* Element Plus 主题覆盖 */
-  --el-color-primary: #4f46e5;
-  --el-color-primary-light-3: #8480ee;
-  --el-color-primary-light-5: #a7a3f2;
-  --el-color-primary-light-7: #cac8f7;
-  --el-color-primary-light-8: #dcdafa;
-  --el-color-primary-light-9: #eef0ff;
-  --el-color-primary-dark-2: #3f38b7;
+  --el-color-primary: #0284c7;
+  --el-color-primary-light-3: #4ea9d8;
+  --el-color-primary-light-5: #81c2e3;
+  --el-color-primary-light-7: #b3daee;
+  --el-color-primary-light-8: #cce6f4;
+  --el-color-primary-light-9: #e6f3f9;
+  --el-color-primary-dark-2: #026a9f;
   --el-color-success: #16a34a;
   --el-color-warning: #d97706;
   --el-color-danger: #dc2626;
@@ -75,8 +75,8 @@ html.dark {
   --sj-text-2: #aab1c2;
   --sj-text-3: #7a8294;
 
-  --sj-primary: #8b85ff;
-  --sj-primary-soft: rgba(139, 133, 255, 0.14);
+  --sj-primary: #4bb3e8;
+  --sj-primary-soft: rgba(75, 179, 232, 0.14);
   --sj-success: #34d399;
   --sj-success-soft: rgba(52, 211, 153, 0.12);
   --sj-warning: #fbbf24;
@@ -87,13 +87,13 @@ html.dark {
   --sj-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
   --sj-shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4);
 
-  --el-color-primary: #7c76f5;
-  --el-color-primary-light-3: #5d58b8;
-  --el-color-primary-light-5: #47448a;
-  --el-color-primary-light-7: #322f5e;
-  --el-color-primary-light-8: #29274b;
-  --el-color-primary-light-9: #201f38;
-  --el-color-primary-dark-2: #a29df8;
+  --el-color-primary: #3aa8e0;
+  --el-color-primary-light-3: #2f7ea7;
+  --el-color-primary-light-5: #286282;
+  --el-color-primary-light-7: #21465c;
+  --el-color-primary-light-8: #1d3849;
+  --el-color-primary-light-9: #1a2936;
+  --el-color-primary-dark-2: #61b9e6;
   --el-bg-color: var(--sj-surface);
   --el-bg-color-overlay: var(--sj-surface);
   --el-fill-color-blank: var(--sj-surface);

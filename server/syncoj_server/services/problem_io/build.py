@@ -27,6 +27,7 @@ from .notices import ProblemIoError, notice
 __all__ = [
     "MAX_TESTDATA_BYTES",
     "flat_case_names",
+    "unique_name",
     "read_ref",
     "build_testdata_zip",
     "summarize",
@@ -49,19 +50,25 @@ def _flat(name: str) -> str:
     return text[:120]
 
 
+def unique_name(base: str, used: set, sep: str = "-") -> str:
+    """``base`` 不撞 ``used``（不分大小写）就用它，否则加 ``<sep>2``、``<sep>3``……；结果记进 ``used``。
+
+    生成的名字也记进去，后面真实存在的同名文件才不会撞上它。"""
+    candidate = base
+    serial = 2
+    while candidate.lower() in used:
+        candidate = "%s%s%d" % (base, sep, serial)
+        serial += 1
+    used.add(candidate.lower())
+    return candidate
+
+
 def flat_case_names(names: List[str]) -> Dict[str, str]:
     """来源测试点名 → 扁平名。冲突（不分大小写）时加 ``-2``、``-3``。"""
     out: Dict[str, str] = {}
-    used = set()
+    used: set = set()
     for name in names:
-        base = _flat(name)
-        candidate = base
-        serial = 2
-        while candidate.lower() in used:
-            candidate = "%s-%d" % (base, serial)
-            serial += 1
-        used.add(candidate.lower())
-        out[name] = candidate
+        out[name] = unique_name(_flat(name), used)
     return out
 
 

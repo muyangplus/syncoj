@@ -592,3 +592,17 @@ def test_infinite_numbers_do_not_crash(tmp_path: Path) -> None:
     assert _errors(bundle) == [] and built
     assert "limits_defaulted" in _codes(bundle)
     assert built["cases"][0][1] == 0
+
+
+def test_generated_case_name_does_not_clash(tmp_path: Path) -> None:
+    doc = hoj_problem_json(count=3)
+    doc["samples"] = [
+        {"input": "a.in", "output": "a.out", "score": 30},
+        {"input": "sub/a.in", "output": "sub/a.out", "score": 30},
+        {"input": "a#2.in", "output": "a#2.out", "score": 40},
+    ]
+    bundle, built, _ = _one(tmp_path, doc, extra={
+        "problem_1/sub/a.in": "5 5\n", "problem_1/sub/a.out": "10\n",
+    })
+    assert _errors(bundle) == [] and built
+    assert len({name.lower() for name, _ in built["cases"]}) == 3

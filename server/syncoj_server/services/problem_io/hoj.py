@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ...judging.testdata import MAX_CASES
 from .archive import ArchiveView
+from .build import unique_name
 from .bundle import (
     DEFAULT_MEMORY_LIMIT_MB,
     DEFAULT_TIME_LIMIT_MS,
@@ -247,19 +248,16 @@ def _scoring(
         bundle.warn(notice("subtask_average_split"))
 
 
-def _case_name(raw: str, used: Dict[str, int]) -> str:
+def _case_name(raw: str, used: set) -> str:
     base = _base(raw)
     stem = base.rsplit(".", 1)[0] if "." in base else base
-    stem = stem or "case"
-    count = used.get(stem.lower(), 0) + 1
-    used[stem.lower()] = count
-    return stem if count == 1 else "%s#%d" % (stem, count)
+    return unique_name(stem or "case", used, "#")
 
 
 def _cases(bundle: ProblemBundle, view: ArchiveView, folder: str, samples: List[Any]) -> List[int]:
     """samples → 测试点；返回每个点的 groupNum（缺省 1）。"""
     groups: List[int] = []
-    used: Dict[str, int] = {}
+    used: set = set()
     if len(samples) > MAX_CASES:
         bundle.fail(notice("too_many_cases", count=len(samples), limit=MAX_CASES))
         return groups

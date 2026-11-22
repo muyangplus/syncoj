@@ -742,3 +742,14 @@ def test_infinite_limits_through_api(client: TestClient, contest: dict, admin_he
     assert response.status_code == 200, response.text
     (item,) = response.json()["problems"]
     assert item["action"] == "skip" and [e["code"] for e in item["errors"]] == ["bad_manifest"]
+
+
+def test_reused_case_name_does_not_clash_with_real_file(tmp_path: Path) -> None:
+    """子任务之间复用 a：第二次出现生成的 a-2 不能和真实的 a-2.in 撞名。"""
+    config = ("subtasks:\n"
+              "  - score: 40\n    cases: [{input: a.in, output: a.out}]\n"
+              "  - score: 60\n    cases: [{input: a.in, output: a.out}, {input: a-2.in, output: a-2.out}]\n")
+    bundle, built = one(tmp_path, hydro_pkg(config, data=data_for("a", "a-2")))
+    assert bundle.errors == [] and built is not None
+    names = [case.name for case in bundle.cases]
+    assert len(set(n.lower() for n in names)) == 3 and names[:2] == ["a", "a-2"]

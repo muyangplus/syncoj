@@ -39,7 +39,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 from ...judging.testdata import MAX_CASES
 from . import yaml_lite
 from .archive import ArchiveView
-from .build import flat_case_names
+from .build import flat_case_names, unique_name
 from .bundle import (
     DEFAULT_MEMORY_LIMIT_MB,
     DEFAULT_TIME_LIMIT_MS,
@@ -493,15 +493,12 @@ def _normalize(
     scores = [_int_score(bundle, s.score) for s in subtasks]
     fill = _get_score(max(100 - sum(scores), 0), sum(1 for s in scores if not s))
     out = _Normalized()
-    used: Dict[str, int] = {}
+    used: set = set()
 
     def case_name(raw: _RawCase) -> str:
         base = str(raw.input or "case").replace("\\", "/").rsplit("/", 1)[-1]
         base = base.rsplit(".", 1)[0] if "." in base else base
-        base = base or "case"
-        serial = used.get(base.lower(), 0) + 1
-        used[base.lower()] = serial
-        return base if serial == 1 else "%s-%d" % (base, serial)
+        return unique_name(base or "case", used, "-")
 
     for number, (sub, explicit) in enumerate(zip(subtasks, scores), 1):
         if not sub.cases:

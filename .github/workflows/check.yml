@@ -22,8 +22,10 @@ on:
     # 只跑分支（标签由 release.yml 以 workflow_call 调本工作流）。main 只经 PR 从 dev 合入，
     # 内容已在 dev 上检查过，发版时 release.yml 还会对 main 的提交再跑一遍，所以 push 到 main 不跑
     branches: ["**", "!main"]
-  # 本仓库分支发起的 PR（如 dev → main）由 push 那次覆盖，各 job 用 if 跳过；外部 fork 的 PR 照跑
+  # 合入 main 的 PR 只来自 dev，push 那次已经跑过，不再触发 pull_request 运行（PR 上只剩一组检查）。
+  # 其余 PR：本仓库分支发起的由 push 覆盖，各 job 用 if 跳过；外部 fork 的 PR 照跑
   pull_request:
+    branches-ignore: [main]
   workflow_call:
 
 permissions:

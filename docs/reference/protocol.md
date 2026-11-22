@@ -362,7 +362,7 @@ bootstrap.key ──换凭据──▶  桌面「配对码.txt」 ──读码�
 
 ### 规则
 
-- `next_tick_seconds`：本轮有 `need_upload`、`deploy_jobs` 或发现删除 → `tick_active_seconds`（默认 2，范围 1–60）；否则 `tick_idle_seconds`（默认 30，范围 5–3600）。两者与 `offline_after_seconds`（默认 90，范围 10–86400）在管理端「运行参数」修改，下一轮生效。
+- `next_tick_seconds`：本轮有 `need_upload`、`deploy_jobs` 或发现删除 → `tick_active_seconds`（默认 2，范围 1–60）；否则 `tick_idle_seconds`（默认 30，范围 5–3600）。两者与 `offline_after_seconds`（默认 90，范围 10–86400）在「机器配对」→「运行参数」修改，下一轮生效。
 - `need_upload` 由服务端决定，Agent 只执行。
 - 下发作业按 `target_id` 派发；作业不带续传偏移，续传位置只看本地分片 `deploy_root/.syncoj-parts/<sha256>.part`。
 - 收到 `deploy_done` 之前每轮都派发，即使进度已满长；已取消的目标不派发、不可下载。

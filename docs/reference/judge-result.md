@@ -284,7 +284,7 @@ checker.cpp          # 可选：special judge（testlib 风格），testlib.h �
 
 ### 评测机
 
-成绩页「自带评测」→「添加评测机」签发令牌（只显示一次；`POST /api/v1/admin/judge-workers`）。在评测机上以专用账号运行：
+「评测」→「评测机」卡片 →「添加评测机」签发令牌（只显示一次；`POST /api/v1/admin/judge-workers`）。在评测机上以专用账号运行：
 
 ```bash
 syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate

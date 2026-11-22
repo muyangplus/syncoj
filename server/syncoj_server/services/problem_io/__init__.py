@@ -290,7 +290,8 @@ def export_problems(
         if dry_run:
             extra = spec.export(included, open_blob, NullZip())
         else:
-            spool = tempfile.SpooledTemporaryFile(max_size=32 * 1024 * 1024, mode="w+b")
+            # 真正的临时文件：SpooledTemporaryFile 在 3.11 之前没有 seekable，不能交给 zipfile 读
+            spool = tempfile.TemporaryFile(mode="w+b")
             with zipfile.ZipFile(spool, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                 extra = spec.export(included, open_blob, zf)
             spool.seek(0)

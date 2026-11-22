@@ -160,7 +160,8 @@ def _check_testdata(view: ArchiveView, bundle: ProblemBundle, meta: Any) -> None
     if not view.exists(path):
         bundle.fail(notice("missing_file", path=path))
         return
-    spool = tempfile.SpooledTemporaryFile(max_size=32 * 1024 * 1024, mode="w+b")
+    # 用真正的临时文件：SpooledTemporaryFile 在 3.11 之前没有 seekable，zipfile 读它会 AttributeError
+    spool = tempfile.TemporaryFile(mode="w+b")
     try:
         ok = _verify_inner(view, bundle, path, meta, spool)
     except CORRUPT_ERRORS:

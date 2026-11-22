@@ -208,7 +208,7 @@ def make_hoj_zip(
             name = str(sample["input"]).replace("\\", "/").rsplit("/", 1)[-1]
             files["%s/%s" % (key, name)] = inp
             out = sample.get("output") or name.split(".")[0] + ".out"
-            files["%s/%s" % (key, str(out).rsplit("/", 1)[-1])] = ans
+            files["%s/%s" % (key, str(out).replace("\\", "/").rsplit("/", 1)[-1])] = ans
     return make_zip(files, shell=shell, extra=extra, drop=drop)
 
 

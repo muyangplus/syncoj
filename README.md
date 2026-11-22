@@ -11,7 +11,7 @@ Python 3.8.10）；服务端：内网单机 Python 3.8+，管理端口 8000，�
 
 ## 启动服务端
 
-1. 取代码：下载 [Releases](https://github.com/muyangplus/syncoj/releases) 里的 `syncoj-<版本>.tar.gz` 并解压（自带前端），或 `git clone` 本仓库（前端需 `cd web && npm ci && npm run build`）。
+1. 取代码：下载 [Releases](https://github.com/muyangplus/syncoj/releases) 里的 `syncoj-<版本>.tar.gz` 并解压（自带前端），或 `git clone` 本仓库（前端需 `syncoj-server build-web`；每次更新代码后启动时会检测，过期即提示）。
 2. 安装（必须 `-e`，服务端按目录找 `web/dist` 与 `agent/`）：
    ```bash
    python3 -m venv .venv && .venv/bin/pip install -e server

@@ -15,8 +15,27 @@ python -m venv .venv && .venv/bin/pip install -e "server[dev]"
 | `--public-url` | 空 | 对考试机的地址，同 `SYNCOJ_PUBLIC_URL` |
 | `--log-level` | `info` | `critical` / `error` / `warning` / `info` / `debug` / `trace` |
 | `--quiet-access` | 关 | 关闭访问日志 |
+| `--rebuild-web` | 关 | 前端构建过期时先重新构建再启动（需要 npm） |
 
 全局参数：`--data-root`（默认 `runtime/server`）、`--verbose`。`syncoj-server info` 打印配置与统计。
+
+### 前端构建是否过期
+
+`serve` 启动时比对 `web/dist/build-info.json`（构建时写入的版本号与前端源码指纹）与当前代码：
+
+| 情况 | 启动日志 |
+|---|---|
+| 一致 | 无提示 |
+| 版本号不同、`web/` 源码改过、或产物里没有 `build-info.json` | `[!] 前端构建已过期（原因），管理界面仍是旧版本。` 并给出命令 |
+
+重新构建（需要 Node.js）：
+
+```bash
+.venv/bin/syncoj-server build-web            # 没有 node_modules 或 package-lock.json 更新过时先 npm ci，再 npm run build
+.venv/bin/syncoj-server build-web --install  # 强制先 npm ci
+```
+
+或启动时加 `--rebuild-web`：过期则先构建再启动，构建失败不启动。发布包自带构建好的前端，版本一致时无提示。
 
 | 环境变量 | 默认 | 说明 |
 |---|---|---|

@@ -325,6 +325,49 @@ def _warn_public_port_unavailable(port: int, admin_port: int) -> None:
     )
 
 
+def _check_web_dist(settings: Settings, rebuild: bool = False) -> int:
+    """前端构建过期时提示（``rebuild`` 时就地重建）。返回非 0 表示重建失败、应中止启动。"""
+    from . import __version__, webdist
+
+    status = webdist.check(settings.web_dist, __version__)
+    if not status.stale:
+        return 0
+    if rebuild and status.web_root is not None:
+        print("[!] 前端构建已过期（%s），开始重新构建 …" % status.reason, flush=True)
+        code = webdist.build(status.web_root)
+        if code != 0:
+            print("错误：前端重新构建失败，未启动服务", file=sys.stderr)
+        return code
+    print("[!] 前端构建已过期（%s），管理界面仍是旧版本。" % status.reason, file=sys.stderr)
+    if status.web_root is not None:
+        print(
+            "    重新构建：syncoj-server build-web，或启动时加 --rebuild-web"
+            "（等价于在 %s 运行 npm ci 与 npm run build）" % status.web_root,
+            file=sys.stderr,
+        )
+    else:
+        print("    产物目录 %s：换用同版本的发布包，或改 SYNCOJ_WEB_DIST 指向新构建" % status.dist, file=sys.stderr)
+    return 0
+
+
+def _cmd_build_web(args: argparse.Namespace) -> int:
+    from . import webdist
+
+    dist = Settings().web_dist
+    web_root = dist.parent if dist is not None and (dist.parent / "src").is_dir() else None
+    if web_root is None:
+        guess = Path(__file__).resolve().parents[2] / "web"
+        web_root = guess if (guess / "src").is_dir() else None
+    if web_root is None:
+        print("错误：找不到前端源码目录（web/src）。发布包自带构建好的前端，不需要构建", file=sys.stderr)
+        return 2
+    install = True if args.install else None
+    code = webdist.build(web_root, install=install)
+    if code == 0:
+        print("[+] 前端已构建：%s" % (web_root / "dist"))
+    return code
+
+
 def _cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
@@ -346,6 +389,9 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             "[i] 对外地址: 还没有 —— 第一次从局域网打开管理界面时会算出并打印出来"
             "（也可用 SYNCOJ_PUBLIC_URL / --public-url 现在就固定下来）"
         )
+
+    if _check_web_dist(settings, rebuild=args.rebuild_web) != 0:
+        return 2
 
     # 用工厂模式，避免 import 时产生磁盘副作用
     from . import main as app_module
@@ -639,7 +685,16 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["critical", "error", "warning", "info", "debug", "trace"],
     )
     p_serve.add_argument("--quiet-access", action="store_true", help="关闭访问日志")
+    p_serve.add_argument(
+        "--rebuild-web",
+        action="store_true",
+        help="前端构建过期（源码改过 / 版本不符）时先重新构建再启动（需要 npm）",
+    )
     p_serve.set_defaults(func=_cmd_serve)
+
+    p_web = sub.add_parser("build-web", help="构建前端（需要时先 npm ci，再 npm run build）")
+    p_web.add_argument("--install", action="store_true", help="无论如何先 npm ci 重装依赖")
+    p_web.set_defaults(func=_cmd_build_web)
 
     p_info = sub.add_parser("info", help="打印配置与统计")
     p_info.set_defaults(func=_cmd_info)

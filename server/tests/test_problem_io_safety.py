@@ -36,12 +36,45 @@ def _code(callable_, *args, **kwargs) -> str:
 @pytest.mark.parametrize(
     "name",
     # NUL 不在这里测：zipfile 读名字时已在 NUL 处截断，到不了我们这一层
-    ["../evil.in", "a/../../evil", "/etc/passwd", "a\\..\\b", "C:/win.ini"],
+    [
+        "../evil.in",
+        "a/../../evil",
+        "/etc/passwd",
+        "a\\..\\b",
+        "..\\evil.in",
+        "\\etc\\passwd",
+        "C:/win.ini",
+        "C:\\win.ini",
+    ],
 )
 def test_unsafe_member_names(tmp_path: Path, name: str) -> None:
     path = stage(tmp_path, _raw_zip(["ok.txt", name]))
     assert _code(SafeArchive, path) == "unsafe_path"
     assert _code(problem_io.parse_archive, path) == "unsafe_path"
+
+
+def test_backslash_member_names_are_normalized(tmp_path: Path) -> None:
+    """Windows PowerShell 5.1 的 Compress-Archive 写 ``a\\b``：规整成 ``a/b``，按原名读内容。"""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zf:
+        for name, data in (("pkg\\", b""), ("pkg\\data\\1.in", b"in"), ("pkg/top.txt", b"top")):
+            info = zipfile.ZipInfo("placeholder")
+            info.filename = name
+            zf.writestr(info, data)
+    with SafeArchive(stage(tmp_path, buffer.getvalue())) as archive:
+        assert archive.names == ["pkg/data/1.in", "pkg/top.txt"]
+        assert archive.is_dir("pkg/data")
+        assert archive.read("pkg/data/1.in") == b"in"
+        with archive.open("pkg/data/1.in") as handle:
+            assert handle.read() == b"in"
+        assert archive.size("pkg/data/1.in") == 2
+        assert not archive.exists("pkg\\data\\1.in")
+
+
+def test_names_colliding_after_normalization(tmp_path: Path) -> None:
+    path = stage(tmp_path, _raw_zip(["a/b.in", "a\\b.in"]))
+    assert _code(SafeArchive, path) == "duplicate_member"
+    assert _code(problem_io.parse_archive, path) == "duplicate_member"
 
 
 def test_member_count_limit(tmp_path: Path) -> None:

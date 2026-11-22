@@ -216,7 +216,8 @@ syncoj-problems.json
 | 项 | 上限 / 规则 | 代码 |
 |---|---|---|
 | 上传 | 512 MiB | 413 `payload_too_large` |
-| 成员名 | `safe_member`；拒 NUL、盘符 | `unsafe_path` |
+| 成员名 | `\` 先换成 `/`；再过 `safe_member`；拒 NUL、盘符 | `unsafe_path` |
+| 成员名重复（含 `\` 换 `/` 之后） | 拒绝 | `duplicate_member` |
 | 成员名每段 | ≤ 255 字节 | `name_too_long` |
 | 成员数 | ≤ 20000 | `too_many_members` |
 | 解压总量（按 `file_size`） | ≤ 2 GiB | `archive_too_large` |
@@ -243,6 +244,7 @@ syncoj-problems.json
 | `cdf_without_data` | 缺少 data/ 目录，请把整个比赛目录打包为 zip |
 | `unsafe_path` | 不安全的路径：{path} |
 | `name_too_long` | 文件名超过 255 字节：{path} |
+| `duplicate_member` | {path} 重复出现 |
 | `too_many_members` | 文件数超过 {limit} 个 |
 | `archive_too_large` | 解压后超过 {limit} |
 | `zip_bomb` | {path} 压缩比异常 |

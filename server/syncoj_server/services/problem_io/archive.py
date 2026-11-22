@@ -2,7 +2,9 @@
 
 限制（打开时一次查完，任何一条不过就整包拒绝，抛 :class:`ProblemIoError`）：
 
-* 成员名：``testdata.safe_member``，另拒 NUL 与盘符（``C:``）；每一段 ≤ :data:`MAX_NAME_BYTES` 字节
+* 成员名：先把 ``\\`` 规整为 ``/``（Windows PowerShell 5.1 的 ``Compress-Archive`` 等工具这样写），
+  再过 ``testdata.safe_member``，另拒 NUL 与盘符（``C:``）；每一段 ≤ :data:`MAX_NAME_BYTES` 字节；
+  规整后重名 → ``duplicate_member``。对外只用规整名，读内容时按原 ``ZipInfo`` 取
 * 成员数 ≤ :data:`MAX_MEMBERS`
 * 按 ``file_size`` 累计的解压总量 ≤ :data:`MAX_UNCOMPRESSED_BYTES`
 * 单成员压缩比 > 1000 且解压后 > 64 MiB 视为炸弹
@@ -102,10 +104,13 @@ class SafeArchive:
         total = 0
         files: Dict[str, zipfile.ZipInfo] = {}
         for info in infos:
-            name = info.filename
-            _check_name(name.rstrip("/") if info.is_dir() else name)
-            if info.is_dir():
+            name = info.filename.replace("\\", "/")
+            is_dir = name.endswith("/")
+            _check_name(name.rstrip("/") if is_dir else name)
+            if is_dir:
                 continue
+            if name in files:
+                raise ProblemIoError("duplicate_member", path=name)
             total += info.file_size
             if total > max_total:
                 raise ProblemIoError("archive_too_large", limit=human_size(max_total))

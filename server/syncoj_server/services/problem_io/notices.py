@@ -24,6 +24,7 @@ MESSAGES: Dict[str, str] = {
     "unsafe_path": "不安全的路径：{path}",
     "too_many_members": "文件数超过 {limit} 个",
     "name_too_long": "文件名超过 255 字节：{path}",
+    "duplicate_member": "{path} 重复出现",
     "archive_too_large": "解压后超过 {limit}",
     "zip_bomb": "{path} 压缩比异常",
     "member_too_large": "{path} 超过 {limit}",

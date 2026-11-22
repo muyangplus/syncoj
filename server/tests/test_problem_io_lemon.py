@@ -97,6 +97,33 @@ def test_real_sample_package(tmp_path: Path) -> None:
         assert not parsed.result.warnings
 
 
+def _backslash_names(data: bytes) -> bytes:
+    """把成员名里的 ``/`` 换成 ``\\``，模拟 Windows PowerShell 5.1 ``Compress-Archive`` 打出的包。"""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(data)) as src, zipfile.ZipFile(buffer, "w") as dst:
+        for info in src.infolist():
+            raw = zipfile.ZipInfo("placeholder", date_time=info.date_time)
+            raw.filename = info.filename.replace("/", "\\")
+            dst.writestr(raw, src.read(info))
+    return buffer.getvalue()
+
+
+def test_real_sample_package_with_backslash_member_names(tmp_path: Path) -> None:
+    data = _backslash_names(make_lemon_sample_zip())
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        assert "sample\\sample.cdf" in zf.namelist()
+    with problem_io.parse_archive(stage(tmp_path, data), "auto") as parsed:
+        assert parsed.result.format == "lemonlime"
+        problems = parsed.result.problems
+        assert [(p.ident, p.time_limit_ms) for p in problems] == list(LEMON_SAMPLE_TASKS)
+        for bundle in problems:
+            assert not bundle.errors and not bundle.warnings, (bundle.errors, bundle.warnings)
+            assert bundle.cases[0].input.member == "sample/data/%s/%s1.in" % (bundle.ident, bundle.ident)
+            built = try_build(bundle, parsed.archive)
+            assert built is not None, bundle.errors
+            assert built[1]["cases"] == 20 and built[1]["total_score"] == 100
+
+
 def test_real_sample_package_through_api(client: TestClient, contest: dict, admin_headers: dict) -> None:
     response = preview(client, contest, admin_headers, make_lemon_sample_zip(), name="sample.zip")
     assert response.status_code == 200, response.text

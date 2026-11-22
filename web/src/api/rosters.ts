@@ -4,7 +4,19 @@ import { request } from './client'
 import { clearCollection, listPage, removeItem } from './crud'
 import type { ListParams } from './crud'
 import { paths } from './endpoints'
-import type { ApplyRosterIn, ApplyRosterOut, RosterCreate, RosterDetailOut, RosterEntryIn, RosterEntryOut, RosterImportOut, RosterOut } from './types'
+import type {
+  ApplyRosterIn,
+  ApplyRosterOut,
+  RosterCreate,
+  RosterDetailOut,
+  RosterEntryIn,
+  RosterEntryOut,
+  RosterImportOut,
+  RosterMatchApplyOut,
+  RosterMatchPairIn,
+  RosterMatchPreviewOut,
+  RosterOut,
+} from './types'
 
 export const rosterApi = {
   list: (params: ListParams = {}, signal?: AbortSignal) =>
@@ -38,6 +50,17 @@ export const rosterApi = {
   /** 清空名单里的全部条目，保留名单本身。`confirm` 是名单名称。 */
   clearEntries: (rosterId: number, name: string) =>
     clearCollection(paths.rosterEntriesClear(rosterId), name),
+
+  /** 「按姓名匹配机器」预览：列出将要绑定的对、冲突与跳过原因。不写库。 */
+  matchPreview: (rosterId: number) =>
+    request<RosterMatchPreviewOut>(paths.rosterMatchPreview(rosterId), { method: 'POST' }),
+
+  /** 应用预览里确认过的对；服务端逐对重新校验。 */
+  matchApply: (rosterId: number, pairs: RosterMatchPairIn[]) =>
+    request<RosterMatchApplyOut>(paths.rosterMatchApply(rosterId), {
+      method: 'POST',
+      body: { pairs },
+    }),
 
   /** 把名单应用到场次：补人、更新，默认不删。 */
   applyToContest: (contestId: number, payload: ApplyRosterIn) =>

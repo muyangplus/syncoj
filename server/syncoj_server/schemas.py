@@ -683,6 +683,80 @@ class BindResultOut(_Base):
     player_no: str
     roster_name: str = ""
     detail: str = ""
+    #: 其他名单里与这个人**同名**的条目（智能匹配，§4.6）：界面一键「同时绑定」
+    suggestions: List["BindingSuggestionOut"] = Field(default_factory=list)
+
+
+class BindingSuggestionOut(_Base):
+    """一条同名建议：把 ``agent_id`` 也绑到 ``roster_name`` 里的这个人。"""
+
+    agent_id: int
+    roster_id: int
+    roster_name: str = ""
+    roster_entry_id: int
+    player_no: str
+    name: Optional[str] = None
+    seat: Optional[str] = None
+    #: 依据：机器在哪份名单里绑着的谁（"名单 · 考号 姓名"）
+    source: str = ""
+
+
+class BoundMachineOut(_Base):
+    """已配对的机器（至少绑了一份名单）。"""
+
+    id: int
+    machine_id: str
+    hostname: Optional[str] = None
+    agent_version: Optional[str] = None
+    contest_id: Optional[int] = None
+    last_seen_at: Optional[str] = None
+    bindings: List[AgentBindingOut] = Field(default_factory=list)
+
+
+class RosterMatchPairOut(_Base):
+    """「按姓名匹配机器」预览里的一对。"""
+
+    agent_id: int
+    hostname: Optional[str] = None
+    machine_id: str = ""
+    roster_entry_id: int
+    player_no: str
+    name: Optional[str] = None
+    #: 依据：机器在哪份名单里绑着的谁
+    source: str = ""
+
+
+class RosterMatchSkipOut(_Base):
+    """没有配成对的人及原因。"""
+
+    roster_entry_id: int
+    player_no: str
+    name: Optional[str] = None
+    reason: str
+
+
+class RosterMatchPreviewOut(_Base):
+    roster_id: int
+    roster_name: str
+    pairs: List[RosterMatchPairOut] = Field(default_factory=list)
+    conflicts: List[RosterMatchSkipOut] = Field(default_factory=list)
+    skipped: List[RosterMatchSkipOut] = Field(default_factory=list)
+
+
+class RosterMatchPairIn(_Base):
+    agent_id: int
+    roster_entry_id: int
+
+
+class RosterMatchApplyIn(_Base):
+    """教师在预览里确认过的那些对。逐对重新校验，失败的列进 ``failed``。"""
+
+    pairs: List[RosterMatchPairIn] = Field(default_factory=list, max_length=5000)
+
+
+class RosterMatchApplyOut(_Base):
+    bound: int = 0
+    failed: List[RosterMatchSkipOut] = Field(default_factory=list)
 
 
 class SetAgentContestIn(_Base):
@@ -1151,6 +1225,17 @@ class ProblemMatchOut(_Base):
     expanded: List[str] = Field(default_factory=list)
 
 
+class AgentBindingOut(_Base):
+    """机器的一条绑定：名单 · 考号 · 姓名。"""
+
+    roster_id: int
+    roster_name: str = ""
+    roster_entry_id: int
+    player_no: str
+    name: Optional[str] = None
+    seat: Optional[str] = None
+
+
 class AgentRuntimeOut(_Base):
     agent_id: int
     player_id: int
@@ -1180,6 +1265,8 @@ class AgentRuntimeOut(_Base):
     #: 页面上写一句「有 N 个文件不符合题目预设，已跳过」：没有它，教师看到的是
     #: "这个学生一份代码都没交"，而那与"他把文件存错了地方"长得一模一样。
     scan_skipped: int = Field(default=0, ge=0)
+    #: 这台机器在各份名单里的全部绑定（一机可绑多份名单，§4.6）
+    bindings: List[AgentBindingOut] = Field(default_factory=list)
 
 
 class DiagnosticsOut(_Base):

@@ -48,7 +48,9 @@ def scan_all_contests(ctx: AppContext, force: bool = False) -> int:
         contests = [
             (contest.id, contest.slug)
             for contest in session.execute(
-                select(Contest).where(Contest.status != ContestStatus.CLOSED)
+                select(Contest).where(
+                    Contest.status.notin_((ContestStatus.CLOSED, ContestStatus.ARCHIVED))
+                )
             ).scalars()
         ]
 

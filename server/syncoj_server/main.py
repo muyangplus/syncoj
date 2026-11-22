@@ -22,6 +22,8 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __version__, errors
 from .api import admin as admin_api
+from .api import admin_archive as admin_archive_api
+from .api import admin_bindings as admin_bindings_api
 from .api import admin_judge as admin_judge_api
 from .api import admin_problem_io as admin_problem_io_api
 from .api import judge as judge_api
@@ -89,6 +91,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # 而它们都要按同一个钟点显示时间。
     app.include_router(meta_api.router)
     app.include_router(admin_api.router)
+    app.include_router(admin_archive_api.router)
+    app.include_router(admin_bindings_api.router)
     app.include_router(admin_judge_api.router)
     app.include_router(admin_problem_io_api.router)
     app.include_router(judge_api.router)

@@ -2,9 +2,15 @@
 import { computed, ref, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 
-import { agentApi, authApi, playerApi, rosterApi, scoreApi } from '@/api'
+import { agentApi, authApi, machineApi, playerApi, rosterApi, scoreApi } from '@/api'
 import type { AdminHealth } from '@/api'
-import type { AgentRuntimeOut, PlayerOut, PlayerProgressOut } from '@/api/types'
+import type {
+  AgentRuntimeOut,
+  BindingSuggestionOut,
+  PlayerOut,
+  PlayerProgressOut,
+} from '@/api/types'
+import BindingSuggestionsDialog from '@/components/BindingSuggestionsDialog.vue'
 import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
 import DataTable from '@/components/DataTable.vue'
 import DiagnosticsDialog from '@/components/DiagnosticsDialog.vue'
@@ -302,11 +308,13 @@ const clearPlayers = useMutation(() => {
 // --------------------------------------------------------------------------- //
 
 const unbindTarget = ref<AgentRuntimeOut | null>(null)
+/** 只解这份名单里的绑定；`undefined` = 全部名单。 */
+const unbindRosterId = ref<number | undefined>(undefined)
 
 const unbind = useMutation(() => {
   const target = unbindTarget.value
   if (!target) throw new Error('没有选中机器')
-  return agentApi.unbind(target.agent_id)
+  return agentApi.unbind(target.agent_id, unbindRosterId.value)
 }, {
   onDone: async () => {
     unbindTarget.value = null
@@ -314,10 +322,20 @@ const unbind = useMutation(() => {
   },
 })
 
-async function askUnbind(agent: AgentRuntimeOut): Promise<void> {
+/** 本场所用名单里的那条绑定（场次没指定名单时没有）。 */
+function contestBinding(agent: AgentRuntimeOut) {
+  const rosterId = contest.current?.default_roster_id
+  return rosterId ? (agent.bindings ?? []).find((item) => item.roster_id === rosterId) : undefined
+}
+
+async function askUnbind(agent: AgentRuntimeOut, onlyThisRoster = false): Promise<void> {
+  const binding = onlyThisRoster ? contestBinding(agent) : undefined
+  const remaining = (agent.bindings ?? []).length - (binding ? 1 : (agent.bindings ?? []).length)
   try {
     await ElMessageBox.confirm(
-      `${agent.player_no} 的机器将回到待配对列表，凭据保留。`,
+      remaining > 0
+        ? `解除 ${binding?.roster_name} 里的绑定；其他 ${remaining} 份名单的绑定不变。`
+        : `${agent.player_no} 的机器将回到待配对列表，凭据保留。`,
       '解除绑定？',
       { type: 'warning', confirmButtonText: '解除绑定', cancelButtonText: '取消' },
     )
@@ -327,7 +345,24 @@ async function askUnbind(agent: AgentRuntimeOut): Promise<void> {
     return
   }
   unbindTarget.value = agent
+  unbindRosterId.value = binding?.roster_id
   await unbind.run(undefined)
+}
+
+// 改派之后的同名建议（其他名单里与新的人同名、还没机器的条目）
+const suggestOpen = ref(false)
+const suggestAgent = ref<AgentRuntimeOut | null>(null)
+const suggestions = ref<BindingSuggestionOut[]>([])
+
+async function offerSuggestions(agent: AgentRuntimeOut): Promise<void> {
+  try {
+    const page = await machineApi.suggestions(agent.agent_id)
+    suggestAgent.value = agent
+    suggestions.value = page.items
+    suggestOpen.value = page.items.length > 0
+  } catch {
+    // 建议拿不到不影响改派本身
+  }
 }
 
 const rebindOpen = ref(false)
@@ -352,10 +387,12 @@ const rebind = useMutation(() => {
   return agentApi.rebind(target.agent_id, rebindEntryId.value)
 }, {
   onDone: async () => {
+    const target = rebindTarget.value
     rebindOpen.value = false
     rebindTarget.value = null
     rebindEntryId.value = null
     await list.reload()
+    if (target) await offerSuggestions(target)
   },
 })
 
@@ -446,6 +483,7 @@ function handleCommand(
   // 下拉本身只在这一列有值时出现，但模板里 narrowing 不过去，这里再挡一次
   if (!agent) return
   if (command === 'unbind') void askUnbind(agent)
+  else if (command === 'unbind-roster') void askUnbind(agent, true)
   else if (command === 'rebind') askRebind(agent)
   else if (command === 'contest') askSetContest(agent)
   else if (command === 'revoke') askRevokeAgent(agent)
@@ -620,6 +658,11 @@ function handleCommand(
                   Agent {{ row.agent.agent_version || '未知' }}
                   <span v-if="row.agent.scan_root"> · {{ row.agent.scan_root }}</span>
                 </div>
+                <div v-if="(row.agent.bindings ?? []).length > 1" class="cell-sub">
+                  <div v-for="item in row.agent.bindings" :key="item.roster_id">
+                    {{ item.roster_name }} · {{ item.player_no }}{{ item.name ? ` · ${item.name}` : '' }}
+                  </div>
+                </div>
               </template>
               <span v-else class="muted">未配对</span>
             </template>
@@ -679,7 +722,16 @@ function handleCommand(
                     <el-dropdown-item command="rebind">改派</el-dropdown-item>
                     <!-- 命令名必须与 handleCommand 里的分支一致 -->
                     <el-dropdown-item command="contest">指定场次</el-dropdown-item>
-                    <el-dropdown-item command="unbind" divided>解除绑定</el-dropdown-item>
+                    <el-dropdown-item
+                      v-if="contestBinding(row.agent) && (row.agent.bindings ?? []).length > 1"
+                      command="unbind-roster"
+                      divided
+                    >
+                      解除本场名单的绑定
+                    </el-dropdown-item>
+                    <el-dropdown-item command="unbind" :divided="!contestBinding(row.agent)">
+                      解除全部绑定
+                    </el-dropdown-item>
                     <el-dropdown-item command="revoke" class="danger-item">作废机器</el-dropdown-item>
                     <el-dropdown-item command="uninstall" class="danger-item">卸载 Agent</el-dropdown-item>
                   </el-dropdown-menu>
@@ -788,6 +840,14 @@ function handleCommand(
       />
     </FormDialog>
 
+    <BindingSuggestionsDialog
+      v-model="suggestOpen"
+      :agent-id="suggestAgent?.agent_id ?? null"
+      :label="suggestAgent?.hostname || suggestAgent?.player_no"
+      :suggestions="suggestions"
+      @done="list.reload()"
+    />
+
     <FormDialog
       v-model="contestOpen"
       title="指定场次"
@@ -799,7 +859,7 @@ function handleCommand(
         <el-form-item label="场次">
           <el-select v-model="contestChoice" clearable placeholder="自动匹配" style="width: 260px">
             <el-option
-              v-for="item in contest.contests"
+              v-for="item in contest.active"
               :key="item.id"
               :label="`${item.name}（${item.slug}）`"
               :value="item.id"

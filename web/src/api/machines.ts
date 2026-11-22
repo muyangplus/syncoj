@@ -13,6 +13,8 @@ import { GLOBAL_CONFIRM, paths } from './endpoints'
 import type {
   AnnounceStatusOut,
   BindResultOut,
+  BindingSuggestionOut,
+  BoundMachineOut,
   CloneAlertOut,
   DiagnosticsOut,
   PendingMachineOut,
@@ -35,6 +37,14 @@ export const machineApi = {
   cloneAlerts: (params: ListParams = {}, signal?: AbortSignal) =>
     listPage<CloneAlertOut>(paths.machinesCloneAlerts(), { limit: 500, ...params }, signal),
 
+  /** 已配对的机器，每台带上全部名单绑定（一机可绑多份名单）。 */
+  bound: (params: ListParams = {}, signal?: AbortSignal) =>
+    listPage<BoundMachineOut>(paths.machinesBound(), { limit: 500, ...params }, signal),
+
+  /** 这台机器在其他名单里的同名建议（姓名一致、对方还没有机器）。 */
+  suggestions: (agentId: number) =>
+    listPage<BindingSuggestionOut>(paths.agentBindingSuggestions(agentId), { limit: 500 }),
+
   /** 按配对码配对：机器上显示什么就输什么。六位数字，用一次即作废。 */
   bindByCode: (pairCode: string, rosterEntryId: number) =>
     request<BindResultOut>(paths.machinesBindByCode(), {
@@ -42,7 +52,7 @@ export const machineApi = {
       body: { pair_code: pairCode, roster_entry_id: rosterEntryId },
     }),
 
-  /** 从待配对列表里点选。给了配对码就必须对得上。 */
+  /** 按机器配对（待配对列表点选，或给已配对的机器再绑一份名单）。给了配对码就必须对得上。 */
   bind: (agentId: number, rosterEntryId: number, pairCode?: string) =>
     request<BindResultOut>(paths.machineBind(agentId), {
       method: 'POST',

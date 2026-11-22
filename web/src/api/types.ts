@@ -48,6 +48,13 @@ export type RebindAgentIn = S['RebindAgentIn']
 export type SetAgentContestIn = S['SetAgentContestIn']
 /** 配对成功的回执。回显"绑到了谁、在哪份名单里"。 */
 export type BindResultOut = S['BindResultOut']
+export type BindingSuggestionOut = S['BindingSuggestionOut']
+export type AgentBindingOut = S['AgentBindingOut']
+export type BoundMachineOut = S['BoundMachineOut']
+export type RosterMatchPreviewOut = S['RosterMatchPreviewOut']
+export type RosterMatchPairOut = S['RosterMatchPairOut']
+export type RosterMatchPairIn = S['RosterMatchPairIn']
+export type RosterMatchApplyOut = S['RosterMatchApplyOut']
 export type CloneAlertOut = S['CloneAlertOut']
 export type BootstrapKeyOut = S['BootstrapKeyOut']
 export type BootstrapKeyIssuedOut = S['BootstrapKeyIssuedOut']
@@ -123,7 +130,7 @@ export type ParseStatus = 'ok' | 'unparsed' | 'manual' | 'missing'
 export type DeployStatus = 'pending' | 'ready' | 'done' | 'failed' | 'cancelled'
 
 /** 场次状态。定义在后端 `models.ContestStatus`。 */
-export type ContestStatus = 'draft' | 'running' | 'frozen' | 'closed'
+export type ContestStatus = 'draft' | 'running' | 'frozen' | 'closed' | 'archived'
 
 // ---- 自带评测（§12）----
 export type ProblemJudgeIn = S['ProblemJudgeIn']

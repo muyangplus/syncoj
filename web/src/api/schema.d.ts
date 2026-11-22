@@ -47,13 +47,35 @@ export interface paths {
          * Unbind Agent
          * @description 解除机器与人的绑定（不是作废凭据）。
          *
-         *     解绑之后机器回到"待配对"，并在下一次心跳里重新拿到一个配对码 ——
+         *     给了 ``roster_id`` 就只解除那份名单里的绑定，其他名单不动；不给则全部解除。
+         *     一条都不剩时机器回到"待配对"，并在下一次心跳里重新拿到一个配对码 ——
          *     这样它能被绑给别人，而不用重新注册（重新注册要读 root 只读的密钥，
          *     在考场上等于要重启）。
          *
          *     要彻底让一台机器下线请用「作废」。
          */
         delete: operations["unbind_agent_api_v1_admin_agents__agent_id__bind_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/agents/{agent_id}/binding-suggestions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Binding Suggestions
+         * @description 这台机器在其他名单里的同名建议：姓名（去首尾空白、全半角统一）完全相等，
+         *     同名多人时用座位号 / 考号收窄，仍不唯一、或对方已有机器就不建议。
+         */
+        get: operations["binding_suggestions_api_v1_admin_agents__agent_id__binding_suggestions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -163,6 +185,10 @@ export interface paths {
          *
          *     目标条目**必须还没有机器**：两台机器绑同一个人，代码会往同一个目录里写，
          *     而且完全静默（成绩矩阵只是看起来"这个人交了两遍"）。
+         *
+         *     一台机器可以绑多份名单：改派只替换**目标所在那份名单**里的绑定（那份名单里
+         *     原来没绑就等于新绑一条），其他名单不动。同名建议见
+         *     ``GET /agents/{id}/binding-suggestions``。
          */
         post: operations["rebind_agent_api_v1_admin_agents__agent_id__rebind_post"];
         delete?: never;
@@ -396,6 +422,26 @@ export interface paths {
         get: operations["list_agents_api_v1_admin_contests__contest_id__agents_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/contests/{contest_id}/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Archive Contest
+         * @description 归档场次。已归档时是空操作。
+         */
+        post: operations["archive_contest_api_v1_admin_contests__contest_id__archive_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1221,6 +1267,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/contests/{contest_id}/unarchive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Unarchive Contest
+         * @description 取消归档：回到「已结束」。不是已归档时是空操作。
+         */
+        post: operations["unarchive_contest_api_v1_admin_contests__contest_id__unarchive_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/deploys/{task_id}": {
         parameters: {
             query?: never;
@@ -1544,6 +1610,26 @@ export interface paths {
          *     配对之后认机器靠 machine_uuid。
          */
         post: operations["bind_machine_by_code_api_v1_admin_machines_bind_by_code_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/machines/bound": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Bound Machines
+         * @description 已配对的机器（至少绑了一份名单），每台带上全部绑定。按主机名排序。
+         */
+        get: operations["list_bound_machines_api_v1_admin_machines_bound_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2110,6 +2196,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/rosters/{roster_id}/match-machines/apply": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Apply Roster Match
+         * @description 应用预览里确认过的对。每一对都按配对规则重新校验（一机在一份名单里一人、
+         *     一人一机），不成的列进 ``failed`` 并说明原因，其余照常绑定。
+         */
+        post: operations["apply_roster_match_api_v1_admin_rosters__roster_id__match_machines_apply_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/rosters/{roster_id}/match-machines/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview Roster Match
+         * @description 「按姓名匹配机器」预览：这份名单里每个未绑定的人，若恰好有一台机器在别的名单里
+         *     绑着同名的人、且那台机器在这份名单里还没绑，就列成一对。不写库。
+         */
+        post: operations["preview_roster_match_api_v1_admin_rosters__roster_id__match_machines_preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/settings/runtime": {
         parameters: {
             query?: never;
@@ -2627,6 +2755,27 @@ export interface components {
             /** Username */
             username: string;
         };
+        /**
+         * AgentBindingOut
+         * @description 机器的一条绑定：名单 · 考号 · 姓名。
+         */
+        AgentBindingOut: {
+            /** Name */
+            name?: string | null;
+            /** Player No */
+            player_no: string;
+            /** Roster Entry Id */
+            roster_entry_id: number;
+            /** Roster Id */
+            roster_id: number;
+            /**
+             * Roster Name
+             * @default
+             */
+            roster_name: string;
+            /** Seat */
+            seat?: string | null;
+        };
         /** AgentEvent */
         AgentEvent: {
             /** Category */
@@ -2649,6 +2798,8 @@ export interface components {
             agent_id: number;
             /** Agent Version */
             agent_version?: string | null;
+            /** Bindings */
+            bindings?: components["schemas"]["AgentBindingOut"][];
             /** Contest Id */
             contest_id: number;
             /**
@@ -2991,6 +3142,36 @@ export interface components {
              * @default
              */
             roster_name: string;
+            /** Suggestions */
+            suggestions?: components["schemas"]["BindingSuggestionOut"][];
+        };
+        /**
+         * BindingSuggestionOut
+         * @description 一条同名建议：把 ``agent_id`` 也绑到 ``roster_name`` 里的这个人。
+         */
+        BindingSuggestionOut: {
+            /** Agent Id */
+            agent_id: number;
+            /** Name */
+            name?: string | null;
+            /** Player No */
+            player_no: string;
+            /** Roster Entry Id */
+            roster_entry_id: number;
+            /** Roster Id */
+            roster_id: number;
+            /**
+             * Roster Name
+             * @default
+             */
+            roster_name: string;
+            /** Seat */
+            seat?: string | null;
+            /**
+             * Source
+             * @default
+             */
+            source: string;
         };
         /** Body_judge_import_preview_api_v1_admin_contests__contest_id__judge_import_preview_post */
         Body_judge_import_preview_api_v1_admin_contests__contest_id__judge_import_preview_post: {
@@ -3108,6 +3289,26 @@ export interface components {
              * @default 0
              */
             use_count: number;
+        };
+        /**
+         * BoundMachineOut
+         * @description 已配对的机器（至少绑了一份名单）。
+         */
+        BoundMachineOut: {
+            /** Agent Version */
+            agent_version?: string | null;
+            /** Bindings */
+            bindings?: components["schemas"]["AgentBindingOut"][];
+            /** Contest Id */
+            contest_id?: number | null;
+            /** Hostname */
+            hostname?: string | null;
+            /** Id */
+            id: number;
+            /** Last Seen At */
+            last_seen_at?: string | null;
+            /** Machine Id */
+            machine_id: string;
         };
         /** BuiltinJudgeFailureOut */
         BuiltinJudgeFailureOut: {
@@ -4402,10 +4603,50 @@ export interface components {
              */
             total: number;
         };
+        /** Page[BindingSuggestionOut] */
+        Page_BindingSuggestionOut_: {
+            /** Items */
+            items?: components["schemas"]["BindingSuggestionOut"][];
+            /**
+             * Limit
+             * @default 50
+             */
+            limit: number;
+            /**
+             * Offset
+             * @default 0
+             */
+            offset: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        };
         /** Page[BootstrapKeyOut] */
         Page_BootstrapKeyOut_: {
             /** Items */
             items?: components["schemas"]["BootstrapKeyOut"][];
+            /**
+             * Limit
+             * @default 50
+             */
+            limit: number;
+            /**
+             * Offset
+             * @default 0
+             */
+            offset: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        };
+        /** Page[BoundMachineOut] */
+        Page_BoundMachineOut_: {
+            /** Items */
+            items?: components["schemas"]["BoundMachineOut"][];
             /**
              * Limit
              * @default 50
@@ -5379,6 +5620,84 @@ export interface components {
              */
             updated: number;
         };
+        /**
+         * RosterMatchApplyIn
+         * @description 教师在预览里确认过的那些对。逐对重新校验，失败的列进 ``failed``。
+         */
+        RosterMatchApplyIn: {
+            /** Pairs */
+            pairs?: components["schemas"]["RosterMatchPairIn"][];
+        };
+        /** RosterMatchApplyOut */
+        RosterMatchApplyOut: {
+            /**
+             * Bound
+             * @default 0
+             */
+            bound: number;
+            /** Failed */
+            failed?: components["schemas"]["RosterMatchSkipOut"][];
+        };
+        /** RosterMatchPairIn */
+        RosterMatchPairIn: {
+            /** Agent Id */
+            agent_id: number;
+            /** Roster Entry Id */
+            roster_entry_id: number;
+        };
+        /**
+         * RosterMatchPairOut
+         * @description 「按姓名匹配机器」预览里的一对。
+         */
+        RosterMatchPairOut: {
+            /** Agent Id */
+            agent_id: number;
+            /** Hostname */
+            hostname?: string | null;
+            /**
+             * Machine Id
+             * @default
+             */
+            machine_id: string;
+            /** Name */
+            name?: string | null;
+            /** Player No */
+            player_no: string;
+            /** Roster Entry Id */
+            roster_entry_id: number;
+            /**
+             * Source
+             * @default
+             */
+            source: string;
+        };
+        /** RosterMatchPreviewOut */
+        RosterMatchPreviewOut: {
+            /** Conflicts */
+            conflicts?: components["schemas"]["RosterMatchSkipOut"][];
+            /** Pairs */
+            pairs?: components["schemas"]["RosterMatchPairOut"][];
+            /** Roster Id */
+            roster_id: number;
+            /** Roster Name */
+            roster_name: string;
+            /** Skipped */
+            skipped?: components["schemas"]["RosterMatchSkipOut"][];
+        };
+        /**
+         * RosterMatchSkipOut
+         * @description 没有配成对的人及原因。
+         */
+        RosterMatchSkipOut: {
+            /** Name */
+            name?: string | null;
+            /** Player No */
+            player_no: string;
+            /** Reason */
+            reason: string;
+            /** Roster Entry Id */
+            roster_entry_id: number;
+        };
         /** RosterOut */
         RosterOut: {
             /** Created At */
@@ -5875,7 +6194,10 @@ export interface operations {
     };
     unbind_agent_api_v1_admin_agents__agent_id__bind_delete: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description 只解除这份名单里的绑定；不传 = 全部名单 */
+                roster_id?: number | null;
+            };
             header?: never;
             path: {
                 agent_id: number;
@@ -5891,6 +6213,42 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    binding_suggestions_api_v1_admin_agents__agent_id__binding_suggestions_get: {
+        parameters: {
+            query?: {
+                /** @description 每页条数 */
+                limit?: number;
+                /** @description 起始位置 */
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                agent_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_BindingSuggestionOut_"];
                 };
             };
             /** @description Validation Error */
@@ -6268,6 +6626,8 @@ export interface operations {
     list_contests_api_v1_admin_contests_get: {
         parameters: {
             query?: {
+                /** @description true 只列已归档的；false 只列未归档的；不传列全部 */
+                archived?: boolean | null;
                 /** @description 每页条数 */
                 limit?: number;
                 /** @description 起始位置 */
@@ -6424,6 +6784,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Page_AgentRuntimeOut_"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    archive_contest_api_v1_admin_contests__contest_id__archive_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contest_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContestOut"];
                 };
             };
             /** @description Validation Error */
@@ -7840,6 +8231,37 @@ export interface operations {
             };
         };
     };
+    unarchive_contest_api_v1_admin_contests__contest_id__unarchive_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contest_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContestOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_deploy_api_v1_admin_deploys__task_id__get: {
         parameters: {
             query?: never;
@@ -8333,6 +8755,40 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BindResultOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_bound_machines_api_v1_admin_machines_bound_get: {
+        parameters: {
+            query?: {
+                /** @description 每页条数 */
+                limit?: number;
+                /** @description 起始位置 */
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_BoundMachineOut_"];
                 };
             };
             /** @description Validation Error */
@@ -9366,6 +9822,72 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    apply_roster_match_api_v1_admin_rosters__roster_id__match_machines_apply_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                roster_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RosterMatchApplyIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RosterMatchApplyOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    preview_roster_match_api_v1_admin_rosters__roster_id__match_machines_preview_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                roster_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RosterMatchPreviewOut"];
                 };
             };
             /** @description Validation Error */

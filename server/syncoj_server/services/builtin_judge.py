@@ -26,7 +26,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from sqlalchemy import delete, func, select
 
 from ..judging.runner import LANGUAGES
-from ..models import Contest, JudgeTask, Player, Problem, SourceFile, SourceVersion, utcnow
+from ..models import Contest, ContestStatus, JudgeTask, Player, Problem, SourceFile, SourceVersion, utcnow
 from ..paths import safe_join
 from . import matching, problem_rules
 
@@ -220,7 +220,7 @@ def auto_enqueue(session, contest: Contest, player_id: int, rel_path: str, now: 
     不新增 —— 领任务时才选代码，所以评的总是最后一版。已有排队中的手动任务时不动它（它领到时
     同样评最新版）。场次进行中也排：这是自动入队的意义，与手动排任务的 409 不同。
     """
-    if auto_mode(contest) != AUTO_ON_CHANGE:
+    if auto_mode(contest) != AUTO_ON_CHANGE or contest.status == ContestStatus.ARCHIVED:
         return None
     ident = judgeable_ident(session, contest.id, rel_path, settings)
     if ident is None:

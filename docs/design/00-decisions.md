@@ -14,7 +14,7 @@
 | 认证 | 每机独立 Token，服务端只存 `sha256(token)` | [`ADR-0002`](../decisions/ADR-0002-communication-and-identity.md) |
 | 机器身份 | `machine_uuid`（首选）+ SMBIOS 指纹（快照还原兜底）；`machine_id` 只供人工辨认 | [03-agent.md §3.4](03-agent.md) / [04-server.md §4.6](04-server.md)（[`ADR-0002`](../decisions/ADR-0002-communication-and-identity.md)） |
 | 数据库 | SQLite WAL，内存态优先 + 批量落库 | [`ADR-0001`](../decisions/ADR-0001-tech-stack-and-dependencies.md) |
-| 场次 | 多场次隔离（`contest_id`）；机器绑**人**，场次动态解析 | [04-server.md §4.6](04-server.md)（[`ADR-0002`](../decisions/ADR-0002-communication-and-identity.md)） |
+| 场次 | 多场次隔离（`contest_id`）；机器绑**人**（可同时绑多份名单），场次按所用名单动态解析；可归档 | [04-server.md §4.6](04-server.md) / [§4.9](04-server.md)（[`ADR-0002`](../decisions/ADR-0002-communication-and-identity.md)、[`ADR-0018`](../decisions/ADR-0018-multi-roster-binding.md)） |
 | 防篡改 | 完整性校验 + 审计日志，不干预选手 | [`ADR-0002`](../decisions/ADR-0002-communication-and-identity.md) |
 | 自更新 | **RSA-2048 + PKCS#1 v1.5 (SHA-256)** 验签；`upgrade.mode` **默认 `apply`**（下载→验签→切换→重启），发布「高级选项」可改 `stage`/`off`；服务端仍需**显式铺开** | 非 Ed25519 见 [06-security.md §6.1](06-security.md)，安装策略见 [07-ops-and-install.md §7.2](07-ops-and-install.md)（[`ADR-0013`](../decisions/ADR-0013-install-policy-defaults.md)） |
 | 后台账号 | 单管理员 | [`ADR-0002`](../decisions/ADR-0002-communication-and-identity.md) |

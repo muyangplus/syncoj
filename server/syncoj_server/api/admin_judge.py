@@ -18,6 +18,7 @@ from ..errors import ApiError
 from ..judging.testdata import TestdataError, parse_testdata
 from ..models import (
     Contest,
+    ContestStatus,
     EventLog,
     JudgeRun,
     JudgeTask,
@@ -207,6 +208,8 @@ def queue_builtin_judge(
         contest = session.get(Contest, contest_id)
         if contest is None:
             raise ApiError(404, "not_found", "场次不存在")
+        if contest.status == ContestStatus.ARCHIVED:
+            raise ApiError(409, "contest_archived", "场次已归档，取消归档后再评测")
         if payload.version_id is not None:
             return _queue_version(ctx, session, contest, payload, admin)
         if builtin_judge.contest_in_progress(contest, now) and not payload.force:

@@ -58,6 +58,9 @@ export const paths = {
   // ---- 场次 ----
   contests: () => `${ADMIN}/contests`,
   contest: (contestId: number) => `${ADMIN}/contests/${contestId}`,
+  /** 归档 / 取消归档（取消归档回到已结束）。 */
+  contestArchive: (contestId: number) => `${ADMIN}/contests/${contestId}/archive`,
+  contestUnarchive: (contestId: number) => `${ADMIN}/contests/${contestId}/unarchive`,
 
   // ---- 名单库 ----
   rosters: () => `${ADMIN}/rosters`,
@@ -66,6 +69,9 @@ export const paths = {
   /** 清空名单条目（保留名单本身）。体里要带名单 `name`。 */
   rosterEntriesClear: (rosterId: number) => `${ADMIN}/rosters/${rosterId}/entries/clear`,
   rosterEntry: (entryId: number) => `${ADMIN}/roster-entries/${entryId}`,
+  /** 「按姓名匹配机器」：先预览（不写库），确认后应用。 */
+  rosterMatchPreview: (rosterId: number) => `${ADMIN}/rosters/${rosterId}/match-machines/preview`,
+  rosterMatchApply: (rosterId: number) => `${ADMIN}/rosters/${rosterId}/match-machines/apply`,
 
   // ---- 场次内的选手 ----
   contestPlayers: (contestId: number) => `${ADMIN}/contests/${contestId}/players`,
@@ -81,6 +87,8 @@ export const paths = {
   /** 清空待配对列表。范围是"全部"，所以体里带 `all`。 */
   machinesPendingClear: () => `${ADMIN}/machines/pending/clear`,
   machinesCloneAlerts: () => `${ADMIN}/machines/clone-alerts`,
+  /** 已配对的机器（每台带全部名单绑定）。 */
+  machinesBound: () => `${ADMIN}/machines/bound`,
   /** 服务端主动通告：GET 读现状，POST 立即喊一次（「召集机器」）。 */
   machinesAnnounce: () => `${ADMIN}/machines/announce`,
   machinesBindByCode: () => `${ADMIN}/machines/bind-by-code`,
@@ -88,6 +96,8 @@ export const paths = {
   agent: (agentId: number) => `${ADMIN}/agents/${agentId}`,
   agentBind: (agentId: number) => `${ADMIN}/agents/${agentId}/bind`,
   agentRebind: (agentId: number) => `${ADMIN}/agents/${agentId}/rebind`,
+  /** 这台机器在其他名单里的同名建议。 */
+  agentBindingSuggestions: (agentId: number) => `${ADMIN}/agents/${agentId}/binding-suggestions`,
   agentContest: (agentId: number) => `${ADMIN}/agents/${agentId}/contest`,
   /** 某台机器**最新一份**诊断包。没收到过是 404 `diagnostics_not_found`。 */
   agentDiagnostics: (agentId: number) => `${ADMIN}/agents/${agentId}/diagnostics`,

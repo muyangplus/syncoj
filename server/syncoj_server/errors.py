@@ -98,7 +98,7 @@ ERROR_CODES = {
     "bootstrap_key_revoked": "统一密钥已被吊销",
     "bootstrap_key_expired": "统一密钥已过期",
     "pair_code_invalid": "配对码不对，或者已经过期了",
-    "machine_already_bound": "这台机器已经配对给别人了",
+    "machine_already_bound": "这台机器在这份名单里已经配对给别人了",
     "machine_mismatch": "凭据与这台机器对不上（凭据可能被复制到了别的机器）",
     "stale_upload": "这份内容已经过期，服务端手上是更新的版本",
     #: 上传了一个台账里**没有在等上传**的路径：没被扫描上报过、不属于任何题目、
@@ -124,6 +124,9 @@ ERROR_CODES = {
     "validation_error": "请求内容不合法",
     "rate_limited": "操作太频繁，请稍后再试",
     "contest_in_progress": "场次还在进行",
+    #: 归档（§4.9）：进行中 / 封榜的场次要先结束；已归档的场次不再排评测、不再指定给机器
+    "contest_running": "场次还在进行，先结束再归档",
+    "contest_archived": "场次已归档",
     "no_signing_key": "这台服务端没有发布签名私钥",
     "no_public_url": "这台服务端还不知道自己的对外地址",
     "payload_too_large": "内容太大了",
@@ -166,7 +169,7 @@ ERROR_CODES = {
     #:
     #: 这个码曾经被我当死码删掉过（理由写的是"删名单本来就是允许的，只是把引用它的
     #: 场次置空"）。那个理由对**场次**成立，对**机器**不成立：机器绑的是名单条目，
-    #: 条目随名单一起删、外键是 SET NULL，于是那批机器静默回到"未配对"。
+    #: 条目随名单一起删、绑定随之级联删除，于是那批机器静默回到"未配对"。
     #: 它不是死码，是缺了一条保护。
     "roster_in_use": "这份名单上还有机器绑着人，删掉会让它们全部解除配对",
     "install_unavailable": "这台服务端还没有铺开任何可装机的 Agent 版本",

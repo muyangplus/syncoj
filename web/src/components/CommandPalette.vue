@@ -3,7 +3,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
-import { NAV_GROUPS, useQuickActions } from '@/composables/useQuickActions'
+import { navPages, useQuickActions } from '@/composables/useQuickActions'
 import { useContestStore } from '@/stores/contest'
 
 const open = ref(false)
@@ -18,6 +18,7 @@ const { actions } = useQuickActions()
 interface Entry {
   key: string
   label: string
+  keywords?: string
   icon: string
   kind: '页面' | '操作'
   disabled: boolean
@@ -33,9 +34,10 @@ const entries = computed<Entry[]>(() => [
     disabled: !!action.needsContest && !contest.currentId,
     run: action.run,
   })),
-  ...NAV_GROUPS.flatMap((group) => group.items).map((item) => ({
+  ...navPages().map((item) => ({
     key: `p:${item.name}`,
     label: item.label,
+    keywords: item.keywords,
     icon: item.icon,
     kind: '页面' as const,
     disabled: false,
@@ -47,7 +49,9 @@ const entries = computed<Entry[]>(() => [
 
 const filtered = computed(() => {
   const q = query.value.trim().toLowerCase()
-  return entries.value.filter((entry) => !q || entry.label.toLowerCase().includes(q))
+  return entries.value.filter(
+    (entry) => !q || `${entry.label} ${entry.keywords ?? ''}`.toLowerCase().includes(q),
+  )
 })
 
 watch(filtered, () => {

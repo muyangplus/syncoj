@@ -469,19 +469,46 @@ def make_qduoj_zip(
 # --------------------------------------------------------------------------- #
 
 
-def fps_item(title: str = "A+B Problem", count: int = 2, *, extra_xml: str = "") -> str:
-    tests = "".join(
-        '<test_input name="test_%02d"><![CDATA[%d %d\n]]></test_input>'
-        '<test_output name="test_%02d"><![CDATA[%d\n]]></test_output>' % (i, i, i, i, 2 * i)
-        for i in range(1, count + 1)
-    )
+def fps_tests(count: int = 2, *, layout: str = "interleaved", named: bool = True) -> str:
+    """``count`` 组 a+b 测试数据的 XML 片段。``layout``：``interleaved``（HUSTOJ 导出的
+    in,out,in,out）或 ``grouped``（DTD 的先全部输入、再全部输出）；``named`` 控制 name 属性。"""
+
+    def tag(kind: str, i: int, body: str) -> str:
+        attr = ' name="test_%02d"' % i if named else ""
+        return "<%s%s><![CDATA[%s]]></%s>" % (kind, attr, body, kind)
+
+    inputs = [tag("test_input", i, "%d %d\n" % (i, i)) for i in range(1, count + 1)]
+    outputs = [tag("test_output", i, "%d\n" % (2 * i)) for i in range(1, count + 1)]
+    if layout == "grouped":
+        return "".join(inputs) + "".join(outputs)
+    return "".join(a + b for a, b in zip(inputs, outputs))
+
+
+def fps_item(
+    title: str = "A+B Problem",
+    count: int = 2,
+    *,
+    extra_xml: str = "",
+    time: str = "1",
+    time_unit: Optional[str] = "s",
+    memory: str = "256",
+    memory_unit: Optional[str] = "mb",
+    tests: Optional[str] = None,
+) -> str:
+    """一个 ``<item>``。``tests`` 给了就整段替换测试数据（默认 :func:`fps_tests` 交错带名）；
+    单位传 None 则不写 ``unit`` 属性。"""
+    tests = tests if tests is not None else fps_tests(count)
+
+    def unit(value: Optional[str]) -> str:
+        return ' unit="%s"' % value if value is not None else ""
+
     return (
         "<item><title><![CDATA[%s]]></title>"
-        '<time_limit unit="s"><![CDATA[1]]></time_limit>'
-        '<memory_limit unit="mb"><![CDATA[256]]></memory_limit>'
+        "<time_limit%s><![CDATA[%s]]></time_limit>"
+        "<memory_limit%s><![CDATA[%s]]></memory_limit>"
         "<description><![CDATA[<p>a+b</p>]]></description>"
         "<sample_input><![CDATA[1 2]]></sample_input><sample_output><![CDATA[3]]></sample_output>"
-        "%s%s</item>" % (title, tests, extra_xml)
+        "%s%s</item>" % (title, unit(time_unit), time, unit(memory_unit), memory, tests, extra_xml)
     )
 
 

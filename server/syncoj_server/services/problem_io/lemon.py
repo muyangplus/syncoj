@@ -2,7 +2,7 @@
 
 比赛目录::
 
-    <contest>.cdf               # JSON，version "1.0"（缺省也认）；一个文件含全部题目
+    <contest>.cdf               # JSON，version "1.0"（数字 1.0 与缺省也认）；一个文件含全部题目
     data/<pid>/<pid><i>.in/.out # testCases 里的路径都相对 .cdf 所在目录的 data/
     source/<选手>/...            # 忽略
 
@@ -144,6 +144,20 @@ def _find_cdf(view: ArchiveView) -> Tuple[str, str]:
     raise ProblemIoError("cdf_without_data")
 
 
+def _supported_version(value: Any) -> bool:
+    """版本 1.0：LemonLime 写字符串 "1.0"，第三方脚本生成的包常写数字 1.0 或 1。"""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return float(value) == 1.0
+    if isinstance(value, str):
+        try:
+            return float(value.strip()) == 1.0
+        except ValueError:
+            return False
+    return False
+
+
 def _load_cdf(view: ArchiveView, name: str) -> Dict[str, Any]:
     raw = view.read(name)
     if raw.startswith(CDF_MAGIC):
@@ -154,7 +168,7 @@ def _load_cdf(view: ArchiveView, name: str) -> Dict[str, Any]:
         raise ProblemIoError("bad_manifest", path=name, reason=str(exc)[:200])
     if not isinstance(doc, dict):
         raise ProblemIoError("bad_manifest", path=name, reason="顶层不是对象")
-    if "version" in doc and doc["version"] != "1.0":
+    if "version" in doc and not _supported_version(doc["version"]):
         raise ProblemIoError("version_unsupported", path=name, version=doc["version"])
     if not isinstance(doc.get("tasks"), list):
         raise ProblemIoError("bad_manifest", path=name, reason="tasks 不是数组")

@@ -339,6 +339,20 @@ def test_version(tmp_path: Path) -> None:
     assert exc.value.code == "version_unsupported"
 
 
+@pytest.mark.parametrize("version", ["1.0", 1.0, 1, "1"])
+def test_version_accepts_number_or_string(tmp_path: Path, version) -> None:
+    # 用户真实包（脚本生成）写的是数字 1.0
+    (bundle,) = parse(tmp_path, make_lemon_zip([lemon_task("sum")], version=version))
+    assert not bundle.errors
+
+
+@pytest.mark.parametrize("version", ["2.0", 2, True, "abc", [1]])
+def test_version_rejects_others(tmp_path: Path, version) -> None:
+    with pytest.raises(problem_io.ProblemIoError) as exc:
+        problem_io.parse_archive(stage(tmp_path, make_lemon_zip(version=version)), "auto")
+    assert exc.value.code == "version_unsupported"
+
+
 @pytest.mark.parametrize("cdf, code", [
     (CDF_MAGIC + b"\x00\x01binary", "cdf_binary"),
     (b"{not json", "bad_manifest"),

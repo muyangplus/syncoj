@@ -45,7 +45,7 @@ Agent 支持 `https://` + `ca_file`（`verify_tls`，标准 CA 校验，非 pinn
 
 * `curl http://…/bootstrap.sh | sudo sh` 以 root 执行明文下载的脚本，脚本再明文下载 `install.py`（`/api/v1/agent/install/installer`）并以 root 执行，**两步都不验签**。脚本嵌着安装器的 sha256，但与脚本同源，只挡传坏；`RELEASE_PUBLIC_KEY` / `--public-key` 只能验后面的安装包，验不到安装器本身。
 * 没有预置发布公钥时，安装包只对照 sha256，而台账与包同源且不鉴权（[`../install-agent.md`](../install-agent.md) 已写明）。
-* 勾了「附带统一注册密钥」的包**不经**免鉴权装机入口下发（409 `install_bundle_has_key`），只能管理端登录后下载做成离线包；离线包拷出去就收不回来。
+* 勾了「附带统一注册密钥」的版本铺开后，免鉴权装机入口照常下发，包内 `bootstrap.key` 对能访问公开端口的人可见；装完机即吊销该密钥。离线包拷出去就收不回来。
 * 卸载用同一条 `bootstrap.sh`；脚本里的服务端地址由服务端发脚本时嵌入，不读机器上属运行账号的 `agent.ini`（否则改掉地址就能让下次 `sudo sh` 去别处取"安装器"）。
 
 **3. 发布签名私钥常驻在线服务端，等于整个机群的 root 钥匙。** `release-key.pem`（`.key/` 或 `SYNCOJ_RELEASE_KEY`）由 `serve` 常驻加载，用它签：

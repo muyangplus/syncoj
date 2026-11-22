@@ -265,9 +265,10 @@ python3 build_bundle.py --verify-signature /etc/syncoj/release-key.pem   # 另�
 | 效果 | 说明 |
 |---|---|
 | 构建时现场签发新密钥 | 明文放进包根 `bootstrap.key`（0600），库里只存哈希，版本记录上可见、可就地吊销（只影响未注册机器） |
-| 装机入口拒发 | `/api/v1/agent/install/*` 返回 409 `install_bundle_has_key`；只能登录管理端下载做离线包 / 镜像 |
+| 在线装机免给密钥 | 铺开后 `/api/v1/agent/install/*` 照常下发，`bootstrap.sh` 不带 `--bootstrap-key` 即可注册 |
+| 离线包 / 镜像 | 登录管理端下载 |
 
-⚠️ 附带密钥的包可注册进本服务端；离线包发完即吊销该密钥。在线装机用不带密钥的版本，密钥由 `bootstrap.sh --bootstrap-key …` 给出。
+⚠️ 装机入口不鉴权：铺开期间，能访问公开端口的人都能取到这把密钥并注册任意多台机器。装完机即在版本记录上吊销该密钥，或改铺不带密钥的版本。
 
 ## 发布时的「高级选项」
 

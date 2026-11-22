@@ -170,7 +170,6 @@ ERROR_CODES = {
     #: 它不是死码，是缺了一条保护。
     "roster_in_use": "这份名单上还有机器绑着人，删掉会让它们全部解除配对",
     "install_unavailable": "这台服务端还没有铺开任何可装机的 Agent 版本",
-    "install_bundle_has_key": "当前铺开的版本夹带了注册密钥，公开装机入口不发它",
     "agent_outdated": "这台机器上的 Agent 协议太旧，要重新装机",
     "installer_unavailable": "这台服务端不提供安装器（它不在源码仓库里运行）",
     #: 机器不在台账里。**不是** ``not_found`` 的重复：这个码能让人一眼看出

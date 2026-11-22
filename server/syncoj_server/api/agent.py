@@ -890,24 +890,6 @@ def _installable_release(session) -> Optional[AgentRelease]:
     ).scalar_one_or_none()
 
 
-def _refuse_bundled_key(row: AgentRelease) -> None:
-    """夹带了注册密钥的包**不经公开装机入口发**。
-
-    装机入口不鉴权、公开端口可达：夹带密钥的包从这里发，等于把 ``bootstrap.key``
-    交给局域网里任何一个会 curl 的人 —— 拿着它就能注册任意多台"机器"。这种包只该
-    经管理端（登录后）下载、做成离线包或镜像；在线装机改用不带密钥的版本，
-    密钥在命令行上给（``bootstrap.sh --bootstrap-key``）。
-    """
-    if row.bootstrap_key_id is not None:
-        raise ApiError(
-            409,
-            "install_bundle_has_key",
-            "当前铺开的版本 %s 夹带了注册密钥，不能经公开装机入口下发。"
-            "请铺开一个不带密钥的版本用于在线装机（密钥在命令行上用 --bootstrap-key 给），"
-            "带密钥的包只经管理端下载、做成离线包。" % row.version,
-        )
-
-
 @router.get("/install.json", response_model=InstallLedgerOut)
 def install_ledger(ctx: AppContext = Depends(get_ctx)) -> InstallLedgerOut:
     """当前可装机版本的台账。**不鉴权。**
@@ -924,7 +906,6 @@ def install_ledger(ctx: AppContext = Depends(get_ctx)) -> InstallLedgerOut:
                 "这台服务端还没有铺开任何 Agent 版本。装机入口只发已铺开的版本 ——"
                 "在管理界面「Agent 发布」里选一个版本点「铺开」之后再来。",
             )
-        _refuse_bundled_key(row)
         return InstallLedgerOut(
             version=row.version,
             sha256=row.sha256,
@@ -961,7 +942,6 @@ def install_bundle(request: Request, ctx: AppContext = Depends(get_ctx)) -> Resp
                 "install_unavailable",
                 "这台服务端还没有铺开任何 Agent 版本。",
             )
-        _refuse_bundled_key(row)
         sha256 = row.sha256
         expected_size = int(row.size)
 

@@ -311,7 +311,7 @@ def test_台账与包内清单逐字相同_升级清单不带策略(env: SimpleN
     """同一份真相出现在两处（装机台账、包内 install_policy.json），由同一个 helper 产生。
 
     升级清单曾经是第三处，但 Agent 从来不读它 —— 升级时生效的是包内那份 ——
-    已删掉。带密钥的版本不经公开装机入口（409），所以这里用不带密钥的构建。
+    已删掉。
     """
     release = build(
         env,
@@ -538,17 +538,11 @@ def _plant_legacy(
 
 
 @requires_source
-def test_老记录夹带了密钥时公开装机入口不发(env: SimpleNamespace) -> None:
-    """迁移之前建的、夹带过密钥的版本：判据是 ``bootstrap_key_id``，与新记录一样 409。
-
-    （曾经这里验的是"补 replace 而不是 keep"。带密钥的包不再经公开入口发之后，
-    这个默认值只剩包内 install_policy.json 那一处，由构建时写定。）
-    """
+def test_老记录夹带了密钥时默认替换(env: SimpleNamespace) -> None:
+    """迁移之前建的、夹带过密钥的版本：策略列是 NULL，判据用 ``bootstrap_key_id``，补 ``replace``。"""
     _plant_legacy(env, "legacy-1.0.0", bundled_key_id=1)
 
-    response = env.client.get(LEDGER_URL)
-    assert response.status_code == 409
-    assert response.json()["code"] == "install_bundle_has_key"
+    assert ledger(env)["bootstrap_key_policy"] == "replace"
 
 
 @requires_source

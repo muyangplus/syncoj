@@ -96,7 +96,7 @@
 
 * 阶段 0：检查链路全绿、自更新止血。
 * 阶段 1：回收 / 下发 / 成绩 / 配对正确性。
-* 阶段 2 中：发布签名覆盖版本号与大小；未配对机器也能升级；带密钥的包不经公开装机入口；`bootstrap.sh` 加固；协议版本 + 426；迁移前备份；单元家目录不再用 `%h`；辅助件路径可配置并收回 `needs_layout`；`--skip-service` 管住注册单元；**root 管理单元**（升级切换与远程卸载经交接目录由 root 验签执行，Agent 恢复 `NoNewPrivileges=yes`，删 sudoers 与 `/usr/local/lib/syncoj`，见 ADR-0012）。
+* 阶段 2 中：发布签名覆盖版本号与大小；未配对机器也能升级；带密钥的包经公开装机入口下发（铺开期间密钥公开，装完即吊销）；`bootstrap.sh` 加固；协议版本 + 426；迁移前备份；单元家目录不再用 `%h`；辅助件路径可配置并收回 `needs_layout`；`--skip-service` 管住注册单元；**root 管理单元**（升级切换与远程卸载经交接目录由 root 验签执行，Agent 恢复 `NoNewPrivileges=yes`，删 sudoers 与 `/usr/local/lib/syncoj`，见 ADR-0012）。
 * 阶段 3 中：边沿触发的审计事件；删 `agent_status`；`DeployTask` 状态读时聚合 + `cancelled_at`；blob 提交后回收（含删资产 / 选手 / 场次）；删除语义前端文案；注册表身份随解析更新、待配对心跳记在线；tick 运行参数每轮只读一次。
 * 阶段 4：列表 SQL 分页与聚合、审计索引、批量清理、前端轮询与概览聚合接口。
 * 阶段 5：文档对账。

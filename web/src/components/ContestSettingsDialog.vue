@@ -46,7 +46,18 @@ const form = reactive({
   startsAt: null as Date | null,
   endsAt: null as Date | null,
   defaultRosterId: null as number | null,
+  /**
+   * 考生页密码。**只写不读**：服务端只回 `has_player_password`。
+   * 留空 = 不动；填了 = 替换；`clearPlayerPassword` = 清除（关掉考生登录）。
+   */
+  playerPassword: '',
+  clearPlayerPassword: false,
 })
+
+/** 填了新密码但不足 4 位：服务端会 422，在本地就拦住保存按钮。 */
+const playerPasswordTooShort = computed(
+  () => form.playerPassword.length > 0 && form.playerPassword.length < 4,
+)
 
 watch(visible, async (open) => {
   if (!open || !props.contest) return
@@ -56,6 +67,8 @@ watch(visible, async (open) => {
   form.startsAt = props.contest.starts_at ? new Date(props.contest.starts_at) : null
   form.endsAt = props.contest.ends_at ? new Date(props.contest.ends_at) : null
   form.defaultRosterId = props.contest.default_roster_id ?? null
+  form.playerPassword = ''
+  form.clearPlayerPassword = false
   applyReceipt.value = ''
   try {
     const page = await rosterApi.list({ limit: 500 })
@@ -129,6 +142,11 @@ async function submit(): Promise<void> {
     // null 分不清"没传"和"要清空"，所以清空走显式开关
     clear_default_roster: form.defaultRosterId === null,
     default_roster_id: form.defaultRosterId,
+    // 只写不读：没填就不传（不动），清除走显式开关
+    clear_player_password: form.clearPlayerPassword,
+    ...(form.playerPassword && !form.clearPlayerPassword
+      ? { player_password: form.playerPassword }
+      : {}),
   })
 }
 </script>
@@ -139,7 +157,7 @@ async function submit(): Promise<void> {
     title="场次设置"
     width="560px"
     :submitting="saveContest.pending.value"
-    :disabled="!form.name.trim()"
+    :disabled="!form.name.trim() || playerPasswordTooShort"
     @submit="submit"
   >
     <el-form label-width="90px">
@@ -212,6 +230,23 @@ async function submit(): Promise<void> {
         </div>
       </el-form-item>
 
+      <el-form-item label="考生页密码">
+        <el-input
+          v-model="form.playerPassword"
+          type="password"
+          show-password
+          autocomplete="new-password"
+          maxlength="128"
+          :disabled="form.clearPlayerPassword"
+          :placeholder="contest?.has_player_password ? '已设置 · 留空不改' : '未设置'"
+        />
+        <div v-if="contest?.has_player_password" class="apply-row">
+          <el-checkbox v-model="form.clearPlayerPassword">清除密码</el-checkbox>
+          <span v-if="form.clearPlayerPassword" class="cell-sub">考生将无法用准考证号登录考生页</span>
+        </div>
+        <div v-if="playerPasswordTooShort" class="cell-sub password-warn">至少 4 位</div>
+      </el-form-item>
+
       <el-form-item label="备注">
         <el-input
           v-model="form.note"
@@ -230,6 +265,10 @@ async function submit(): Promise<void> {
   align-items: center;
   gap: 8px;
   margin-top: 6px;
+}
+
+.password-warn {
+  color: var(--el-color-danger);
 }
 
 .apply-receipt {

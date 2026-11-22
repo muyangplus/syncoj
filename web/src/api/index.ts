@@ -33,7 +33,13 @@ export { installApi, absolute, bootstrapCommand, uninstallCommand } from './inst
 export { metaApi } from './meta'
 export { settingsApi } from './settings'
 export { playerPageApi } from './playerPage'
-export type { PlayerAssetOut, PlayerContextOut, PlayerNoticeOut } from './playerPage'
+export type {
+  PlayerAssetOut,
+  PlayerContextOut,
+  PlayerNoticeOut,
+  PlayerPreviewContestOut,
+  PlayerPreviewOut,
+} from './playerPage'
 
 // 公共类型也在这里转出去：页面不该关心它实际定义在 crud.ts 还是别处
 export type { ListParams } from './crud'

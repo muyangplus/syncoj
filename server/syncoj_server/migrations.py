@@ -656,6 +656,38 @@ def _migration_019_problem_io_files(engine: Engine) -> None:
         _add_column(engine, "problem", name, "VARCHAR(64)")
 
 
+def _migration_020_source_versions(engine: Engine) -> None:
+    """代码版本历史与按版本记的评测结果（§12.9）。
+
+    1. ``contest`` 加自动入队的开关与去抖秒数，老场次回填 ``off`` / 60（不改变行为）；
+    2. ``judge_task`` 按模型重建：去掉"每 (选手, 题目) 只留一条"的唯一约束（任务即历史），
+       补上版本、触发方式、结果等列（全部可空，老任务 ``trigger`` 为空读作 ``manual``）。
+       删约束只能重建，配方见 :func:`_rebuild_table`；
+    3. 新表 ``source_version`` 交给 ``create_all``；这里用 ``source_file`` 里**已存下内容**的
+       当前版本补一条初始版本（``received_at`` 取最近一次见到的时刻，``problem`` 留空，
+       读的一侧按当前题目模式归题）。已有同一 (选手, 路径, 指纹) 的不重复补，可重跑。
+    """
+    tables = _tables(engine)
+    if "contest" in tables:
+        _add_column(engine, "contest", "auto_judge", "VARCHAR(16)")
+        _add_column(engine, "contest", "auto_judge_delay", "INTEGER")
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE contest SET auto_judge = 'off' WHERE auto_judge IS NULL"))
+            conn.execute(text("UPDATE contest SET auto_judge_delay = 60 WHERE auto_judge_delay IS NULL"))
+    if "judge_task" in tables and "trigger" not in _columns(engine, "judge_task"):
+        _rebuild_table(engine, "judge_task")
+    if "source_file" in tables and "source_version" in _tables(engine):
+        with engine.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO source_version (player_id, rel_path, sha256, size, received_at) "
+                "SELECT f.player_id, f.rel_path, f.sha256, f.size, f.last_seen_at FROM source_file f "
+                "WHERE f.content_stored = 1 AND NOT EXISTS ("
+                " SELECT 1 FROM source_version v WHERE v.player_id = f.player_id"
+                " AND v.rel_path = f.rel_path AND v.sha256 = f.sha256) "
+                "ORDER BY f.last_seen_at, f.id"
+            ))
+
+
 MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
     (1, "统一密钥注册 + 名单库所需的结构", _migration_001_enrollment),
     (2, "机器永久绑定名单条目；去掉注册码链路", _migration_002_roster_binding),
@@ -735,6 +767,11 @@ MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
         19,
         "题目可自定义文件 IO 的输入/输出文件名",
         _migration_019_problem_io_files,
+    ),
+    (
+        20,
+        "代码版本历史；评测任务按版本记结果、可自动入队",
+        _migration_020_source_versions,
     ),
 ]
 

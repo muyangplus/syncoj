@@ -762,6 +762,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/contests/{contest_id}/judge/auto": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set Auto Judge
+         * @description 自动入队（§12.9）：``on_change`` = 收到某题的新版本就排评测，同一 (选手, 题目)
+         *     在 ``auto_judge_delay`` 秒内连续改动只评最后一版。场次进行中也排。
+         */
+        put: operations["set_auto_judge_api_v1_admin_contests__contest_id__judge_auto_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/contests/{contest_id}/judge/builtin": {
         parameters: {
             query?: never;
@@ -777,10 +798,12 @@ export interface paths {
         put?: never;
         /**
          * Queue Builtin Judge
-         * @description 排自带评测：指定的题（或全部用自带评测的题）× 指定的选手（或全部选手）。
+         * @description 排自带评测：指定的题（或全部用自带评测的题）× 指定的选手（或全部选手），评最新版。
          *
          *     场次还在进行时拒绝（``contest_in_progress``）：那时评的是考到一半的代码；教师确认后带
-         *     ``force`` 再来。已有的任务（不管什么状态）会被替换 —— 重测就是重新排。
+         *     ``force`` 再来。同一对还在排队的最新版任务会被替换；跑完的留作历史（§12.9）。
+         *
+         *     带 ``version_id`` = 重测那一个历史版本：结果只进历史与 timeline，不受场次进行中的限制。
          */
         post: operations["queue_builtin_judge_api_v1_admin_contests__contest_id__judge_builtin_post"];
         delete?: never;
@@ -900,6 +923,90 @@ export interface paths {
          *     题目标识已经在这个请求的 `problem` 参数里了，再要求拼一遍只会让人打错。
          */
         delete: operations["clear_judge_score_api_v1_admin_contests__contest_id__judge_score_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/contests/{contest_id}/judge/tasks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Judge Tasks
+         * @description 评测任务（新的在前）。任务即历史：每一次评测（含复用的）都在这里。
+         */
+        get: operations["list_judge_tasks_api_v1_admin_contests__contest_id__judge_tasks_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/contests/{contest_id}/judge/tasks/{task_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Judge Task
+         * @description 一个评测任务及其结果的测试点明细（历史版本的结果从这里看）。
+         */
+        get: operations["get_judge_task_api_v1_admin_contests__contest_id__judge_tasks__task_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/contests/{contest_id}/judge/tasks/{task_id}/adopt": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Adopt Judge Task
+         * @description 采用此版本成绩：把这个任务的结果写成当前 ``result.json`` 并立即重扫，成绩矩阵这一格
+         *     换成它。手工录入的格子不动（409 ``manual_score``，先清除手工成绩）。
+         */
+        post: operations["adopt_judge_task_api_v1_admin_contests__contest_id__judge_tasks__task_id__adopt_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/contests/{contest_id}/judge/versions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Source Versions
+         * @description 一位选手的代码版本历史（旧的在前），每版带最近一次评测结果 —— 分数 timeline 的数据。
+         *
+         *     归题按**当前**题目模式现算（改了题目标识或模式也对得上）。一个人的版本数有界，在
+         *     Python 里切页。
+         */
+        get: operations["list_source_versions_api_v1_admin_contests__contest_id__judge_versions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -3013,7 +3120,10 @@ export interface components {
         };
         /**
          * BuiltinJudgeIn
-         * @description 排自带评测任务。都不填 = 全场所有用自带评测的题 × 所有选手。
+         * @description 排自带评测任务。都不填 = 全场所有用自带评测的题 × 所有选手（评最新版）。
+         *
+         *     给了 ``version_id`` = 重测那一个历史版本（§12.9）：选手与题目由版本定，结果只进历史与
+         *     timeline，不覆盖成绩矩阵（教师「采用」才写）；不受"场次还在进行"的限制。
          */
         BuiltinJudgeIn: {
             /**
@@ -3025,9 +3135,24 @@ export interface components {
             player_id?: number | null;
             /** Problem */
             problem?: string | null;
+            /**
+             * Rerun
+             * @default false
+             */
+            rerun: boolean;
+            /** Version Id */
+            version_id?: number | null;
         };
-        /** BuiltinJudgeProgressOut */
+        /**
+         * BuiltinJudgeProgressOut
+         * @description 排队 / 在评是全数；完成 / 失败只数每 (选手, 题目) 最新的那条任务。
+         */
         BuiltinJudgeProgressOut: {
+            /**
+             * Delayed
+             * @default 0
+             */
+            delayed: number;
             /**
              * Done
              * @default 0
@@ -3123,6 +3248,16 @@ export interface components {
         };
         /** ContestOut */
         ContestOut: {
+            /**
+             * Auto Judge
+             * @default off
+             */
+            auto_judge: string;
+            /**
+             * Auto Judge Delay
+             * @default 60
+             */
+            auto_judge_delay: number;
             /** Created At */
             created_at: string;
             /** Default Roster Id */
@@ -3569,6 +3704,29 @@ export interface components {
             /** Version */
             version: string;
         };
+        /**
+         * JudgeAutoIn
+         * @description 场次的自动入队设置（§12.9）。
+         */
+        JudgeAutoIn: {
+            /**
+             * Auto Judge
+             * @enum {string}
+             */
+            auto_judge: "off" | "on_change";
+            /**
+             * Auto Judge Delay
+             * @default 60
+             */
+            auto_judge_delay: number;
+        };
+        /** JudgeAutoOut */
+        JudgeAutoOut: {
+            /** Auto Judge */
+            auto_judge: string;
+            /** Auto Judge Delay */
+            auto_judge_delay: number;
+        };
         /** JudgeBlobRefOut */
         JudgeBlobRefOut: {
             /** Name */
@@ -3876,6 +4034,8 @@ export interface components {
             status?: string | null;
             /** Subtasks */
             subtasks?: components["schemas"]["JudgeSubtaskOut"][];
+            /** Task Id */
+            task_id?: number | null;
             /**
              * Truncated
              * @default false
@@ -3954,6 +4114,152 @@ export interface components {
             max_score: number;
             /** Score */
             score: number;
+        };
+        /**
+         * JudgeTaskDetailOut
+         * @description 任务连同结果里的测试点明细（形状同 ``JudgeRunDetailOut`` 的明细部分）。
+         */
+        JudgeTaskDetailOut: {
+            /**
+             * Applied
+             * @default false
+             */
+            applied: boolean;
+            /** Cases */
+            cases?: components["schemas"]["JudgeCaseOut"][];
+            /**
+             * Compile Message
+             * @default
+             */
+            compile_message: string;
+            /** Created At */
+            created_at: string;
+            /** Error */
+            error?: string | null;
+            /** Finished At */
+            finished_at?: string | null;
+            /**
+             * Has Result
+             * @default false
+             */
+            has_result: boolean;
+            /** Id */
+            id: number;
+            /**
+             * In Matrix
+             * @default false
+             */
+            in_matrix: boolean;
+            /** Isolated */
+            isolated?: boolean | null;
+            /** Judge */
+            judge?: string | null;
+            /** Judged At */
+            judged_at?: string | null;
+            /** Language */
+            language?: string | null;
+            /** Max Score */
+            max_score?: number | null;
+            /** Not Before */
+            not_before?: string | null;
+            /** Outcome */
+            outcome?: string | null;
+            /** Player Id */
+            player_id: number;
+            /** Player No */
+            player_no: string;
+            /** Problem */
+            problem: string;
+            /** Requested By */
+            requested_by?: string | null;
+            /**
+             * Rerun
+             * @default false
+             */
+            rerun: boolean;
+            /** Reused From */
+            reused_from?: number | null;
+            /** Score */
+            score?: number | null;
+            /** Source Path */
+            source_path?: string | null;
+            /** Source Sha256 */
+            source_sha256?: string | null;
+            /** Source Version Id */
+            source_version_id?: number | null;
+            /** Status */
+            status: string;
+            /** Subtasks */
+            subtasks?: components["schemas"]["JudgeSubtaskOut"][];
+            /** Trigger */
+            trigger: string;
+            /**
+             * Truncated
+             * @default false
+             */
+            truncated: boolean;
+        };
+        /**
+         * JudgeTaskOut
+         * @description 一个评测任务（任务即历史，§12.9）。
+         */
+        JudgeTaskOut: {
+            /**
+             * Applied
+             * @default false
+             */
+            applied: boolean;
+            /** Created At */
+            created_at: string;
+            /** Error */
+            error?: string | null;
+            /** Finished At */
+            finished_at?: string | null;
+            /**
+             * Has Result
+             * @default false
+             */
+            has_result: boolean;
+            /** Id */
+            id: number;
+            /**
+             * In Matrix
+             * @default false
+             */
+            in_matrix: boolean;
+            /** Max Score */
+            max_score?: number | null;
+            /** Not Before */
+            not_before?: string | null;
+            /** Outcome */
+            outcome?: string | null;
+            /** Player Id */
+            player_id: number;
+            /** Player No */
+            player_no: string;
+            /** Problem */
+            problem: string;
+            /** Requested By */
+            requested_by?: string | null;
+            /**
+             * Rerun
+             * @default false
+             */
+            rerun: boolean;
+            /** Reused From */
+            reused_from?: number | null;
+            /** Score */
+            score?: number | null;
+            /** Source Path */
+            source_path?: string | null;
+            /** Source Sha256 */
+            source_sha256?: string | null;
+            /** Source Version Id */
+            source_version_id?: number | null;
+            /** Status */
+            status: string;
+            /** Trigger */
+            trigger: string;
         };
         /** JudgeWorkerCreatedOut */
         JudgeWorkerCreatedOut: {
@@ -4216,6 +4522,26 @@ export interface components {
              */
             total: number;
         };
+        /** Page[JudgeTaskOut] */
+        Page_JudgeTaskOut_: {
+            /** Items */
+            items?: components["schemas"]["JudgeTaskOut"][];
+            /**
+             * Limit
+             * @default 50
+             */
+            limit: number;
+            /**
+             * Offset
+             * @default 0
+             */
+            offset: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        };
         /** Page[JudgeWorkerOut] */
         Page_JudgeWorkerOut_: {
             /** Items */
@@ -4340,6 +4666,26 @@ export interface components {
         Page_SourceFileOut_: {
             /** Items */
             items?: components["schemas"]["SourceFileOut"][];
+            /**
+             * Limit
+             * @default 50
+             */
+            limit: number;
+            /**
+             * Offset
+             * @default 0
+             */
+            offset: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        };
+        /** Page[SourceVersionOut] */
+        Page_SourceVersionOut_: {
+            /** Items */
+            items?: components["schemas"]["SourceVersionOut"][];
             /**
              * Limit
              * @default 50
@@ -5242,6 +5588,45 @@ export interface components {
             /** Size */
             size: number;
         };
+        /**
+         * SourceVersionOut
+         * @description 代码的一个历史版本（§12.9），连同它的评测结果。
+         */
+        SourceVersionOut: {
+            /**
+             * Current
+             * @default false
+             */
+            current: boolean;
+            /** Id */
+            id: number;
+            /**
+             * In Matrix
+             * @default false
+             */
+            in_matrix: boolean;
+            judge?: components["schemas"]["VersionJudgeOut"] | null;
+            /** Player Id */
+            player_id: number;
+            /** Problem */
+            problem?: string | null;
+            /** Received At */
+            received_at: string;
+            /** Rel Path */
+            rel_path: string;
+            /** Sha256 */
+            sha256: string;
+            /**
+             * Size
+             * @default 0
+             */
+            size: number;
+            /**
+             * Tasks
+             * @default 0
+             */
+            tasks: number;
+        };
         /** TickRequest */
         TickRequest: {
             /** Agent Version */
@@ -5388,6 +5773,36 @@ export interface components {
             msg: string;
             /** Error Type */
             type: string;
+        };
+        /**
+         * VersionJudgeOut
+         * @description 一个版本最近一次评测的摘要。
+         */
+        VersionJudgeOut: {
+            /**
+             * Applied
+             * @default false
+             */
+            applied: boolean;
+            /** Finished At */
+            finished_at?: string | null;
+            /** Max Score */
+            max_score?: number | null;
+            /** Outcome */
+            outcome?: string | null;
+            /**
+             * Reused
+             * @default false
+             */
+            reused: boolean;
+            /** Score */
+            score?: number | null;
+            /** Status */
+            status: string;
+            /** Task Id */
+            task_id: number;
+            /** Trigger */
+            trigger: string;
         };
         /**
          * WhoAmIOut
@@ -6619,6 +7034,41 @@ export interface operations {
             };
         };
     };
+    set_auto_judge_api_v1_admin_contests__contest_id__judge_auto_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contest_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JudgeAutoIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JudgeAutoOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     builtin_judge_progress_api_v1_admin_contests__contest_id__judge_builtin_get: {
         parameters: {
             query?: never;
@@ -6878,6 +7328,150 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_judge_tasks_api_v1_admin_contests__contest_id__judge_tasks_get: {
+        parameters: {
+            query?: {
+                player_id?: number | null;
+                problem?: string | null;
+                status?: string | null;
+                trigger?: string | null;
+                /** @description 每页条数 */
+                limit?: number;
+                /** @description 起始位置 */
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                contest_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_JudgeTaskOut_"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_judge_task_api_v1_admin_contests__contest_id__judge_tasks__task_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contest_id: number;
+                task_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JudgeTaskDetailOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    adopt_judge_task_api_v1_admin_contests__contest_id__judge_tasks__task_id__adopt_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contest_id: number;
+                task_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JudgeTaskOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_source_versions_api_v1_admin_contests__contest_id__judge_versions_get: {
+        parameters: {
+            query: {
+                /** @description 选手 */
+                player_id: number;
+                /** @description 只看归到这道题的版本 */
+                problem?: string | null;
+                /** @description 每页条数 */
+                limit?: number;
+                /** @description 起始位置 */
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                contest_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_SourceVersionOut_"];
                 };
             };
             /** @description Validation Error */

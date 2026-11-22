@@ -63,6 +63,7 @@ from ..models import (
     Roster,
     RosterEntry,
     SourceFile,
+    SourceVersion,
     iso_utc,
     utcnow,
 )
@@ -539,6 +540,8 @@ def _contest_out(
         # 不回显的话他会重新填一遍，而且永远不知道自己有没有填上。
         starts_at=_iso(contest.starts_at),
         ends_at=_iso(contest.ends_at),
+        auto_judge=contest.auto_judge or "off",
+        auto_judge_delay=60 if contest.auto_judge_delay is None else contest.auto_judge_delay,
     )
 
 
@@ -1791,9 +1794,7 @@ def delete_player(
             )
         ).scalar_one()
 
-        hashes = list(session.execute(
-            select(SourceFile.sha256).where(SourceFile.player_id == player_id).distinct()
-        ).scalars())
+        hashes = _player_code_hashes(session, select(Player.id).where(Player.id == player_id))
         session.delete(player)
         session.add(
             EventLog(
@@ -1845,12 +1846,18 @@ def clear_players(
 
         removed = 0
         protected = []
+        doomed = []
         for player in players:
             if keep_with_submissions and player.id in protected_ids:
                 protected.append(player.player_no)
                 continue
-            session.delete(player)
-            removed += 1
+            doomed.append(player.id)
+        # 代码台账与版本历史随选手级联删掉；内容在提交后回收
+        hashes = _player_code_hashes(session, doomed) if doomed else []
+        for player in players:
+            if player.id in doomed:
+                session.delete(player)
+                removed += 1
 
         session.add(
             EventLog(
@@ -1862,6 +1869,7 @@ def clear_players(
             )
         )
 
+    _reclaim_blobs(ctx, hashes)
     detail = "已删除 %d 名选手" % removed
     if protected:
         detail += "；保留 %d 名有提交的：%s" % (
@@ -2520,9 +2528,15 @@ def delete_source_file(
         sha256 = row.sha256
         was_live = row.deleted_at is None
         player_no = player.player_no if player else "?"
+        # 这个路径的版本历史一起删（§12.9）
+        version_filter = (SourceVersion.player_id == row.player_id, SourceVersion.rel_path == rel_path)
+        version_hashes = list(session.execute(
+            select(SourceVersion.sha256).where(*version_filter).distinct()
+        ).scalars())
+        _bulk_delete(session, SourceVersion, *version_filter)
         session.delete(row)
         session.flush()
-        candidates = _unreferenced(session, [sha256])
+        candidates = _unreferenced(session, [sha256] + version_hashes)
     freed = _reclaim_blobs(ctx, candidates)
 
     detail = "已删除 %s 的台账记录 %s" % (player_no, rel_path)
@@ -2538,11 +2552,24 @@ def delete_source_file(
 #: 以后再加消费者，改这一处。
 _BLOB_REFERENCES = (
     (SourceFile, SourceFile.sha256),
+    #: 代码的历史版本（§12.9）：被新内容替换掉的旧版本仍被它引用，不回收
+    (SourceVersion, SourceVersion.sha256),
     (Asset, Asset.sha256),
     (AgentRelease, AgentRelease.sha256),
     #: 自带评测的数据包（§12）
     (Problem, Problem.testdata_sha256),
 )
+
+
+def _player_code_hashes(session, player_ids) -> List[str]:
+    """一批选手的代码内容指纹：台账当前版本 + 版本历史。删选手 / 删场次时拿去回收。"""
+    hashes = set(session.execute(
+        select(SourceFile.sha256).where(SourceFile.player_id.in_(player_ids)).distinct()
+    ).scalars())
+    hashes.update(session.execute(
+        select(SourceVersion.sha256).where(SourceVersion.player_id.in_(player_ids)).distinct()
+    ).scalars())
+    return sorted(hashes)
 
 
 def _unreferenced(session, hashes) -> List[str]:
@@ -2628,6 +2655,16 @@ def clear_source_files(
         hashes = set(
             session.execute(select(SourceFile.sha256).where(*conditions).distinct()).scalars()
         )
+        # 版本历史（§12.9）跟着被删的台账行走：同一 (选手, 路径) 的历史一起删
+        doomed = select(SourceFile.id).where(
+            *conditions,
+            SourceFile.player_id == SourceVersion.player_id,
+            SourceFile.rel_path == SourceVersion.rel_path,
+        ).exists()
+        hashes.update(
+            session.execute(select(SourceVersion.sha256).where(doomed).distinct()).scalars()
+        )
+        _bulk_delete(session, SourceVersion, doomed)
         removed = _bulk_delete(session, SourceFile, *conditions)
 
         candidates = _unreferenced(session, hashes)
@@ -2997,11 +3034,9 @@ def delete_contest(
         }
         slug = contest.slug
         name = contest.name
-        hashes = list(session.execute(
-            select(SourceFile.sha256).where(
-                SourceFile.player_id.in_(select(Player.id).where(Player.contest_id == contest_id))
-            ).distinct()
-        ).scalars()) + list(session.execute(
+        hashes = _player_code_hashes(
+            session, select(Player.id).where(Player.contest_id == contest_id)
+        ) + list(session.execute(
             select(Asset.sha256).where(Asset.contest_id == contest_id)
         ).scalars()) + [sha for sha in session.execute(
             select(Problem.testdata_sha256).where(Problem.contest_id == contest_id)
@@ -5261,15 +5296,17 @@ def _int_or_none(value: Any) -> Optional[int]:
     return None
 
 
-def _run_detail(run: JudgeRun, player_no: str) -> JudgeRunDetailOut:
-    """结果文件原文里的测试点明细。字段缺失或形状不对的项跳过，不报错。"""
-    base = _judge_run_out(run, player_no).model_dump()
+def _result_details(raw: Optional[str]) -> Dict[str, Any]:
+    """结果文档（``result.json`` 原文或评测任务记下的那份）里的明细字段。
+
+    字段缺失或形状不对的项跳过，不报错。成绩矩阵的明细与评测任务的明细共用它。
+    """
     try:
-        document = json.loads(run.raw_json) if run.raw_json else None
+        document = json.loads(raw) if raw else None
     except ValueError:
         document = None
     if not isinstance(document, dict):
-        return JudgeRunDetailOut(**base)
+        return {}
     cases = []
     for item in document.get("cases") or []:
         if not isinstance(item, dict) or item.get("name") is None:
@@ -5297,19 +5334,25 @@ def _run_detail(run: JudgeRun, player_no: str) -> JudgeRunDetailOut:
             }
         )
     isolated = document.get("isolated")
-    return JudgeRunDetailOut(
-        **base,
-        judge=str(document["judge"])[:64] if document.get("judge") else None,
-        language=str(document["language"])[:16] if document.get("language") else None,
-        isolated=isolated if isinstance(isolated, bool) else None,
-        compile_message=str(document.get("compile_message") or "")[:8000],
-        judged_at=str(document["judged_at"])[:32] if document.get("judged_at") else None,
-        source_sha256=str(document["source_sha256"])[:64] if document.get("source_sha256") else None,
-        judged_source=str(document["source_path"])[:1024] if document.get("source_path") else None,
-        cases=cases,
-        subtasks=subtasks,
-        truncated=bool(document.get("truncated")),
-    )
+    return {
+        "judge": str(document["judge"])[:64] if document.get("judge") else None,
+        "language": str(document["language"])[:16] if document.get("language") else None,
+        "isolated": isolated if isinstance(isolated, bool) else None,
+        "compile_message": str(document.get("compile_message") or "")[:8000],
+        "judged_at": str(document["judged_at"])[:32] if document.get("judged_at") else None,
+        "source_sha256": str(document["source_sha256"])[:64] if document.get("source_sha256") else None,
+        "judged_source": str(document["source_path"])[:1024] if document.get("source_path") else None,
+        "cases": cases,
+        "subtasks": subtasks,
+        "truncated": bool(document.get("truncated")),
+        "task_id": _int_or_none(document.get("task_id")),
+    }
+
+
+def _run_detail(run: JudgeRun, player_no: str) -> JudgeRunDetailOut:
+    """结果文件原文里的测试点明细。"""
+    base = _judge_run_out(run, player_no).model_dump()
+    return JudgeRunDetailOut(**base, **_result_details(run.raw_json))
 
 
 @router.get("/contests/{contest_id}/judge/runs/{run_id}", response_model=JudgeRunDetailOut)

@@ -149,7 +149,8 @@ MIGRATION_ADDED_COLUMNS = {
     #: ``player_notice`` 曾经在这一档里（迁移 003 加的"给选手看的注意事项"）。
     #: 考场公告改成"下发一份 NOTICE.md 文件"之后它没有读者了，所以本轮由迁移 005
     #: 真的把它删掉 —— 它现在在 ``MIGRATION_DROPPED_COLUMNS`` 里。
-    "contest": {"default_roster_id"},
+    #: 自带评测的自动入队开关与去抖秒数（迁移 020，§12.9）
+    "contest": {"default_roster_id", "auto_judge", "auto_judge_delay"},
     #: file_patterns；以及自带评测的配置与数据包指纹（迁移 018，§12）
     "problem": {
         "file_patterns",

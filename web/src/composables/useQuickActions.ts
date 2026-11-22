@@ -101,7 +101,7 @@ export function useQuickActions() {
     const contestId = contest.currentId
     if (!contestId) return
     try {
-      const result = await judgingApi.queue(contestId, { force })
+      const result = await judgingApi.queue(contestId, { force, rerun: false })
       ElMessage.success(`已排队 ${result.queued} 个评测任务`)
     } catch (err) {
       if (err instanceof ApiError && err.code === 'contest_in_progress' && !force) {

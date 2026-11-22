@@ -164,6 +164,17 @@ export const paths = {
   problemTestdata: (problemId: number) => `${ADMIN}/problems/${problemId}/testdata`,
   contestBuiltinJudge: (contestId: number) => `${ADMIN}/contests/${contestId}/judge/builtin`,
   judgeWorkers: () => `${ADMIN}/judge-workers`,
+  /** 自动入队开关与去抖秒数（§12.9）。 */
+  contestJudgeAuto: (contestId: number) => `${ADMIN}/contests/${contestId}/judge/auto`,
+  /** 评测任务（任务即历史）。 */
+  contestJudgeTasks: (contestId: number) => `${ADMIN}/contests/${contestId}/judge/tasks`,
+  contestJudgeTask: (contestId: number, taskId: number) =>
+    `${ADMIN}/contests/${contestId}/judge/tasks/${taskId}`,
+  /** 采用此版本成绩：把任务结果写成当前 result.json。 */
+  contestJudgeTaskAdopt: (contestId: number, taskId: number) =>
+    `${ADMIN}/contests/${contestId}/judge/tasks/${taskId}/adopt`,
+  /** 一位选手的代码版本历史与每版评测结果（分数 timeline）。 */
+  contestJudgeVersions: (contestId: number) => `${ADMIN}/contests/${contestId}/judge/versions`,
   // ---- 题目评测配置导入 / 导出 ----
   contestJudgeImportPreview: (contestId: number) =>
     `${ADMIN}/contests/${contestId}/judge-import/preview`,

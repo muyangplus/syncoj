@@ -331,9 +331,21 @@ syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
 - 代码选择：只看仍在机器上、内容已存下的文件，按题目代码路径归题；多份候选时取文件名与题目同名者；仍无法区分 → 记失败。
 - 未交代码：不写结果，矩阵显示"未交"。
 - 场次进行中：`POST /api/v1/admin/contests/{id}/judge/builtin` 返回 `409 contest_in_progress`；带 `"force": true` 后执行。
-- 重测 = 再次排任务：旧任务被替换，结果覆盖 `result.json`；手工录入的成绩不被覆盖。
+- 重测 = 再次排任务：同一对还在排队的任务被替换，跑完的留作历史；新结果覆盖 `result.json`（若已写进去的是更新版本的结果则只进历史）；手工录入的成绩不被覆盖。
+- 同一 (数据包, 评测配置, 代码) 评过（`SE` 除外）：直接复用结果，不占评测机；`rerun: true` 时真跑。
+- 自带评测写的 `result.json` 多带 `task_id`、`source_version_id`（复用的还有 `reused_from`）。
 
-排任务：`POST /api/v1/admin/contests/{id}/judge/builtin`，体 `{problem?, player_id?, force}`，都不填 = 全场所有自带评测题 × 所有选手；响应 `{queued, problems}`。进度：`GET` 同路径，返回 `total` / `queued` / `running` / `done` / `failed` / `failures[]`。
+排任务：`POST /api/v1/admin/contests/{id}/judge/builtin`，体 `{problem?, player_id?, force, version_id?, rerun}`，都不填 = 全场所有自带评测题 × 所有选手（评最新版）；`version_id` = 重测那个历史版本（结果只进历史，不受场次进行中限制）；响应 `{queued, problems}`。进度：`GET` 同路径，返回 `total` / `queued` / `running` / `done` / `failed` / `delayed`（去抖中）/ `failures[]`；完成 / 失败只数每 (选手, 题目) 最新那条。
+
+### 版本、自动评测与 timeline（§12.9）
+
+| 接口 | 说明 |
+|---|---|
+| `PUT /api/v1/admin/contests/{id}/judge/auto` | `{auto_judge: "off"\|"on_change", auto_judge_delay: 0–3600}`；场次列表回显这两项 |
+| `GET /api/v1/admin/contests/{id}/judge/versions?player_id=&problem=` | 选手的代码版本（旧的在前，列表信封）：`id` / `rel_path` / `sha256` / `size` / `received_at` / `problem`（按当前题目模式）/ `current` / `tasks` / `judge{task_id, status, trigger, score, max_score, outcome, reused, applied, finished_at}` / `in_matrix` |
+| `GET /api/v1/admin/contests/{id}/judge/tasks?player_id=&problem=&status=&trigger=` | 评测任务（新的在前，列表信封），含复用的 |
+| `GET /api/v1/admin/contests/{id}/judge/tasks/{task_id}` | 任务与测试点明细 |
+| `POST /api/v1/admin/contests/{id}/judge/tasks/{task_id}/adopt` | 采用此版本成绩：写成当前 `result.json` 并立即重扫；无结果 `409 judge_task_no_result`，手工录入的格子 `409 manual_score` |
 
 ### 评测机接口
 

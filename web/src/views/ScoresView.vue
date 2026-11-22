@@ -7,6 +7,7 @@ import { judgingApi, scoreApi } from '@/api'
 import { ApiError } from '@/api/client'
 import type { JudgeRunDetailOut, JudgeRunOut, JudgeScanOut, ScoreCellOut, ScoreRowOut } from '@/api/types'
 import JudgeRunDetailDialog from '@/components/JudgeRunDetailDialog.vue'
+import ScoreTimelineDialog from '@/components/ScoreTimelineDialog.vue'
 import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
 import DataTable from '@/components/DataTable.vue'
 import FormDialog from '@/components/FormDialog.vue'
@@ -470,11 +471,28 @@ function manualFromDetail(run: JudgeRunDetailOut): void {
   openManual(run, run.problem, run)
 }
 
+// --------------------------------------------------------------------------- //
+// 版本与分数 timeline（§12.9）
+// --------------------------------------------------------------------------- //
+
+const timelineOpen = ref(false)
+const timelineTarget = ref<{ playerId: number; playerNo: string; problem: string | null } | null>(null)
+
+function openTimeline(playerId: number, playerNo: string, problem: string | null): void {
+  timelineTarget.value = { playerId, playerNo, problem }
+  timelineOpen.value = true
+}
+
+function timelineFromDetail(run: JudgeRunDetailOut): void {
+  detailOpen.value = false
+  openTimeline(run.player_id, run.player_no, run.problem)
+}
+
 async function rejudge(run: JudgeRunDetailOut, force = false): Promise<void> {
   const contestId = contest.currentId
   if (!contestId) return
   try {
-    const result = await judgingApi.queue(contestId, { problem: run.problem, player_id: run.player_id, force })
+    const result = await judgingApi.queue(contestId, { problem: run.problem, player_id: run.player_id, force, rerun: false })
     ElMessage.success(result.queued ? '已排队重测' : '未排队：该题不是自带评测')
   } catch (err) {
     if (err instanceof ApiError && err.code === 'contest_in_progress' && !force) {
@@ -624,8 +642,23 @@ async function rejudge(run: JudgeRunDetailOut, force = false): Promise<void> {
       <el-table v-if="view && view.columns.length" :data="view.rows" v-loading="loading" class="matrix">
         <el-table-column label="选手" width="150" fixed>
           <template #default="{ row }">
-            <div class="mono">{{ row.player_no }}</div>
-            <div class="cell-sub">{{ row.player_name || '—' }}</div>
+            <div class="player-cell">
+              <div>
+                <div class="mono">{{ row.player_no }}</div>
+                <div class="cell-sub">{{ row.player_name || '—' }}</div>
+              </div>
+              <el-tooltip content="版本与分数" :show-after="300">
+                <el-button
+                  link
+                  type="primary"
+                  size="small"
+                  aria-label="版本与分数"
+                  @click="openTimeline(row.player_id, row.player_no, null)"
+                >
+                  <el-icon><TrendCharts /></el-icon>
+                </el-button>
+              </el-tooltip>
+            </div>
           </template>
         </el-table-column>
 
@@ -832,11 +865,27 @@ async function rejudge(run: JudgeRunDetailOut, force = false): Promise<void> {
       :run-id="detailRunId"
       @manual="manualFromDetail"
       @rejudge="rejudge"
+      @timeline="timelineFromDetail"
+    />
+
+    <ScoreTimelineDialog
+      v-model="timelineOpen"
+      :contest-id="contest.currentId"
+      :player-id="timelineTarget?.playerId ?? null"
+      :player-no="timelineTarget?.playerNo ?? ''"
+      :problem="timelineTarget?.problem ?? null"
+      @changed="reloadMatrix"
     />
   </PageShell>
 </template>
 
 <style scoped>
+.player-cell {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
 .clickable {
   cursor: pointer;
 }

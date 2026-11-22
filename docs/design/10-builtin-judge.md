@@ -26,7 +26,7 @@ syncoj-server（服务端账号）         syncoj-judge worker（专用账号，
 
 * worker（`syncoj-judge --server … --token-file … --backend isolate|rlimit`）是**独立进程、独立账号**，经 HTTP 领任务（服务端持有全部状态），碰不到 `.key/`、数据库与 `source/` 目录，只拿到任务所需的代码与数据包。可与服务端同机；条件允许时放另一台（评测时 CPU 满载，避免与收代码的服务端争用）。
 * worker 令牌在「评测」→「评测机」签发，只存哈希（`judge_worker`），只授权评测相关端点；吊销 = 删行（需输评测机名称确认）。
-* 任务表 `judge_task(contest, player, problem, status, attempt, worker, lease_until, source_path, source_sha256, outcome, error)`：状态 `queued → running → done / failed`；领任务带 15 分钟租约（worker 崩了租约过期自动回队列），最多尝试 3 次；同一 (选手, 题目) 只留最新一条，重测 = 删旧排新。没交代码的选手直接 `done`、不写 `result.json`（矩阵照旧显示未交）。
+* 任务表 `judge_task(contest, player, problem, status, attempt, worker, lease_until, source_path, source_sha256, outcome, error, …)`：状态 `queued → running → done / failed`；领任务带 15 分钟租约（worker 崩了租约过期自动回队列），最多尝试 3 次。任务即历史（§12.9）：重测只替换同一对**还在排队**的任务，跑完的留着。没交代码的选手直接 `done`、不写 `result.json`（矩阵照旧显示未交）。
 * 数据包按 sha256 缓存在 worker 的 `--cache-dir`，同题几十个选手只下载一次。
 
 ### 12.4 沙箱：可插拔后端，按安全程度排
@@ -54,9 +54,9 @@ syncoj-server（服务端账号）         syncoj-judge worker（专用账号，
 ### 12.6 界面与触发
 
 * 「评测」页「题目」卡片：每题「设置」——上传数据包、设时空限制与 IO 方式、选择「自带评测 / 外部评测器」。
-* 「评测」页「任务」卡片：全部自带评测题目或单题「评测 / 重测」，失败行「重测本题」；进度沿用已有聚合进度接口形状。顶栏「快捷操作」→「评测全部题目」等价。
+* 「评测」页「任务」卡片：题目（全部 / 单题）× 选手（全部 / 单人）「评测 / 重测」，可勾「不复用已有结果」；自动评测开关与去抖秒数；失败行「重测本题」；进度沿用已有聚合进度接口形状。顶栏「快捷操作」→「评测全部题目」等价。「评测记录」卡片列出每次评测（含复用的）。
 * 「评测」页「评测机」卡片：签发与吊销 worker 令牌。
-* 「成绩」：格子点开看每个测试点明细，可重测。
+* 「成绩」：格子点开看每个测试点明细，可重测、看版本；选手列「版本与分数」看这位选手全部题目的 timeline。
 * 评测用**领任务时 `source/` 里按题目模式选定的那份代码**（记下路径与 sha256）。场次仍在进行（`is_active` 或未到结束时间）时排任务回 409 `contest_in_progress`（评的是考到一半的代码）；教师确认后带 `force` 再排。
 
 ### 12.7 落地顺序（已完成）
@@ -81,3 +81,14 @@ syncoj-server（服务端账号）         syncoj-judge worker（专用账号，
 * **只信服务端解析**：应用导入时重新解析暂存包，只采用客户端回传的标识与动作。
 
 取舍记在 ADR-0017。
+
+### 12.9 版本历史、自动评测与分数 timeline
+
+* **版本**：`source_version(player, rel_path, sha256, size, received_at, problem)`，Agent 每传上来一份新内容（指纹变了）记一条；`source_file` 仍只记当前版本。版本内容列入 blob 引用清单，被替换的旧版本不回收；删选手、删场次、删台账行 / 清空台账（含已消失的）时历史随之删除并回收内容。`problem` 是收到时归的题；读的一侧按**当前**题目模式现算。迁移 020 用 `source_file` 里已存下的当前版本补一条初始版本。
+* **任务按版本记**：`judge_task` 加 `source_version_id`、`trigger`（`auto` / `manual` / `rejudge`）、`requested_by`、`score` / `max_score` / `result_json`、`applied_at`、`judge_key`、`reused_from`、`rerun`、`not_before`；去掉"每 (选手, 题目) 一条"的唯一约束（迁移 020 重建表）。
+  * `auto` / `manual` 评最新版：领任务时才选代码（规则同上一节）。结果写 `result.json`；乱序（旧版本的任务比新版本晚交回）时只进历史。
+  * `rejudge` 评指定的历史版本：排任务时钉死版本，结果只进历史与 timeline，教师「采用此版本成绩」才写 `result.json`（手工录入的格子拒绝采用）。不受"场次还在进行"的限制。
+* **复用**：`judge_key` = (数据包 sha, 评测配置, 代码 sha) 的指纹；已有同 key 的完成结果（`SE` 除外）时领任务就地抄结果、不占评测机，任务标 `reused_from`。教师勾「不复用已有结果」（`rerun`）时真跑。
+* **自动入队**：场次 `auto_judge = off | on_change`（默认 `off`）、`auto_judge_delay`（默认 60 秒）。开启后上传某题新版本 → 对 (选手, 题目) 排 `auto` 任务，带 `not_before = 收到时刻 + 去抖`；同一对已有排队中的自动任务时只把它往后推（领任务时才选代码，评的总是最后一版）。只对自带评测且有数据包、语言后缀认得的题；场次进行中也排（这是它的意义）。
+* **timeline**：`GET …/judge/versions?player_id=&problem=` 每版带最近一次评测；界面画「版本 × 分数」阶梯线（内联 SVG），点的颜色是状态、状态变化处标状态字，矩阵采用的那一版加外环，未评的版本画在基线下方。
+* **进度**：排队 / 在评全数；完成 / 失败只数每 (选手, 题目) 最新的那条。

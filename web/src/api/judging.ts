@@ -13,11 +13,16 @@ import type {
   BuiltinJudgeIn,
   BuiltinJudgeProgressOut,
   BuiltinJudgeQueuedOut,
+  JudgeAutoIn,
+  JudgeAutoOut,
   JudgeRunDetailOut,
+  JudgeTaskDetailOut,
+  JudgeTaskOut,
   JudgeWorkerCreatedOut,
   JudgeWorkerOut,
   ProblemJudgeIn,
   ProblemOut,
+  SourceVersionOut,
 } from './types'
 
 export const judgingApi = {
@@ -43,6 +48,26 @@ export const judgingApi = {
     request<BuiltinJudgeQueuedOut>(paths.contestBuiltinJudge(contestId), { method: 'POST', body: payload }),
 
   progress: (contestId: number) => request<BuiltinJudgeProgressOut>(paths.contestBuiltinJudge(contestId)),
+
+  /** 自动入队：`on_change` = 收到某题新版本就评，`auto_judge_delay` 秒内的连续改动只评最后一版。 */
+  setAuto: (contestId: number, payload: JudgeAutoIn) =>
+    request<JudgeAutoOut>(paths.contestJudgeAuto(contestId), { method: 'PUT', body: payload }),
+
+  /** 评测任务，新的在前；可按选手、题目、状态、触发方式筛。 */
+  tasks: (contestId: number, params: ListParams = {}, signal?: AbortSignal) =>
+    listPage<JudgeTaskOut>(paths.contestJudgeTasks(contestId), params, signal),
+
+  /** 一个任务及其测试点明细（历史版本的结果从这里看）。 */
+  task: (contestId: number, taskId: number) =>
+    request<JudgeTaskDetailOut>(paths.contestJudgeTask(contestId, taskId)),
+
+  /** 采用此版本成绩：成绩矩阵这一格换成该任务的结果。手工录入的格子 409 `manual_score`。 */
+  adopt: (contestId: number, taskId: number) =>
+    request<JudgeTaskOut>(paths.contestJudgeTaskAdopt(contestId, taskId), { method: 'POST' }),
+
+  /** 一位选手的代码版本（旧的在前），每版带最近一次评测结果。`problem` 只看归到这道题的。 */
+  versions: (contestId: number, params: ListParams = {}, signal?: AbortSignal) =>
+    listPage<SourceVersionOut>(paths.contestJudgeVersions(contestId), { limit: 500, ...params }, signal),
 
   /** 一条评测记录与测试点明细。 */
   run: (contestId: number, runId: number) =>

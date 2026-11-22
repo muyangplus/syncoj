@@ -376,6 +376,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     # 让后台的发现应答器知道 HTTP 监听在哪个端口：它跑在任务里，拿不到命令行参数。
     # 而它要广播的地址必须带上这个端口，否则机器找得到服务端却连不上。
     settings.http_port = args.port
+    settings.http_host = args.host
     if args.public_url:
         settings.public_url = args.public_url
     if settings.public_url:

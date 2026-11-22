@@ -750,6 +750,8 @@ def _migration_023_judge_worker_status(engine: Engine) -> None:
         ("enabled", "BOOLEAN"),
         ("desired", "VARCHAR(16)"),
         ("is_local", "BOOLEAN"),
+        ("boot_id", "VARCHAR(32)"),
+        ("desired_boot", "VARCHAR(32)"),
     ):
         _add_column(engine, "judge_worker", name, ddl)
     with engine.begin() as conn:

@@ -40,8 +40,9 @@ syncoj-server（服务端账号）         syncoj-judge worker（专用账号，
 * isolate 是**调用**不是链接（它是 GPL-2），不影响本仓库许可证。
 * 否决自研 `unshare` + seccomp：安全边界，自研维护成本与出错代价过高；`rlimit` 覆盖无更好选择时的情形。
 * 否决 `systemd-run` 后端：统计单次运行的 CPU 时间与峰值内存需绕路；有 root 的机器直接装 isolate。
+* 工作目录里的文件一律先删同名条目再 `O_CREAT|O_EXCL|O_NOFOLLOW` 新建、属主与权限经 fd 设置，读输出 `O_NOFOLLOW|O_NONBLOCK` 且只读普通文件：选手程序换成符号链接 / FIFO 也带不走评测机（可能是 root）的权限。rlimit 以 `--run-as` 运行时，每次运行后杀掉该账号在本次运行开始之后起的全部进程（`setsid` 逃出进程组的也算）。
 * 计时：**CPU 时间**判 TLE；墙钟只作硬上限（时限的 2 倍 + 1 秒），防 sleep 卡死。内存取峰值常驻集，isolate 开 `--cgroups` 时取 cgroup 峰值。`rlimit` 后端经一层 shim 取选手程序自己的 rusage（Linux 的 `ru_maxrss` 跨 exec 保留，直接从 worker fork 会把 worker 的内存算到选手头上）。
-* 一个 worker 默认一次评一个任务；`--slots N` 并发评 N 个（各占一个 box，§12.10），或起多个 worker（各用不同 `--box-id`）。
+* 一个 worker 默认一次评一个任务；`--slots N` 并发评 N 个（各占一个 box，§12.10），或起多个 worker（各用不同 `--box-id`；rlimit 下要各用不同的 `--run-as` 账号）。
 * 平台守卫：Linux 只认 `isolate` / `rlimit`，Windows 只认 `winjob`（默认），其余组合启动即报错。
 * `winjob`：自己调 `CreateProcessW`（`CREATE_SUSPENDED`）→ `AssignProcessToJobObject` → `ResumeThread`，程序进 Job 前不执行任何指令；否决 `subprocess.Popen` + 未公开的 `NtResumeProcess`（Popen 不给主线程句柄）。继承句柄用 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 限定为标准输入输出三个；限进程数时以 `DETACHED_PROCESS` 启动（否则 conhost.exe 占掉 Job 的活动进程名额），编译用不限进程数、限整个 Job CPU 与内存的 Job。CPU 取 Job 记账的用户 + 内核时间；内存取峰值提交量；墙钟超限 `TerminateJobObject`；运行中轮询工作目录增长判 OLE。崩溃（NTSTATUS / `abort()`）且峰值已达内存限制 90% 记 MLE（Job 挡住的分配不计入峰值）。编译加 `-static`（不依赖 MinGW 的 DLL）、`-Wl,--stack=<内存限制>`（对齐 Linux 栈不限）与 `-pipe`。
   * 降权：选手程序与 checker 用本进程令牌派生的受限令牌（`CreateRestrictedToken` 去掉全部特权）、完整性级别 Low，经 `CreateProcessAsUserW` 启动（同样挂起 → 进 Job → 恢复）；编译器用普通令牌，也在 Job 里。工作目录标 Low（`S:(ML;OICI;NW;;;LW)`），输入输出照常读写；目录以外写不了（no-write-up），评测机进程内存读不了（进程默认 no-read-up）。降权失败时退回评测机令牌并告警，不静默。
@@ -105,7 +106,7 @@ syncoj-server（服务端账号）         syncoj-judge worker（专用账号，
 
 * **一个循环**：评测机每个轮询间隔 `POST /api/v1/judge/poll` 一次，自报 `version` / `backend` / `isolated` / `hostname` / `platform` / `slots` / `poll_seconds`，有空位时 `want = 1` 顺带领一个任务；评测中照样 poll（`want = 0`）。服务端记进 `judge_worker` 的新列（迁移 023），在线 = 最近联系不超过 3 × 轮询间隔（下限 15 秒）。正在评什么不靠自报，直接看任务表里租约在它名下的 `running` 任务。旧评测机只调 `/lease`：照常领任务、算心跳，自报列为空，收不到命令。
 * **管理动作**：暂停（`enabled = false`：领不到新任务、照常心跳、手上的评完照常交）；停止 / 重启记进 `desired`，在下一次 poll 的响应 `command` 里带走并复位成 `run`（一次性，评测机日后被重新拉起不会再停一次）。评测机收到后不再领任务，评完手上的：停止 = 退出码 0（systemd 的 `Restart=on-failure` 不再拉起）；重启 = 以同样的参数重启自己（Linux 原地 exec，进程号不变；Windows 起新进程后退出）。只对在线、报过状态的评测机下命令（否则 409），免得命令在库里放到下次开机才生效。吊销 = 删行，它名下在评的任务**立刻**退回队列（令牌已失效，交不回结果，不必等 15 分钟租约）。
-* **并发**：`--slots N` 起 N 个评测线程，各领各的任务；isolate 的 box 编号从 `--box-id` 起依次占用。
+* **并发**：`--slots N` 起 N 个评测线程，各领各的任务；isolate 的 box 编号从 `--box-id` 起依次占用。只有 isolate 可以大于 1（每个 box 一个账号）；rlimit / winjob 共用一个运行账号，并发任务能互相读写工作目录，启动即拒绝。
 * **一键接入**：服务端（只在管理端口）发 `GET /judge/worker.pyz`、`/judge/install.sh`、`/judge/install.ps1`。pyz 把 `syncoj_server/judging/`（只用标准库，测试用 AST 守着）连同只有版本号的包根打成 zipapp，按「版本号 + 源码指纹」缓存在 `<数据目录>/cache/judge-worker/`；另一台机器只要有 Python 3.8+ 与编译器，不必装服务端包。安装脚本嵌入请求的 Host 头（形状不安全就不嵌）与 pyz 的 sha256，令牌由教师在命令行给。签发令牌的响应直接带 Linux / Windows 两条一行命令。
   * Linux：`/opt/syncoj-judge/syncoj-judge.pyz`、`/etc/syncoj-judge/token`（0600）、systemd 单元 `syncoj-judge`。有 isolate 用 isolate、服务以专用账号 `syncoj-judge` 运行；没有 isolate 先询问（`--yes` 跳过），用 rlimit、服务以 root 运行、选手程序换成 `syncoj-judge-run` 跑。幂等，重跑 = 换令牌 / 升级。
   * Windows：`%ProgramData%\SyncOJ\judge\`（不继承上级权限），令牌只给 SYSTEM、Administrators 读写与 LOCAL SERVICE 读（按 SID 授权）并标 `NO_READ_UP`，`cache\` / `boxes\` / 日志给 LOCAL SERVICE 修改；计划任务「SyncOJ Judge」开机启动、以 LOCAL SERVICE 运行（不是 SYSTEM）、失败每分钟重启，`--backend winjob`。检查 Python ≥ 3.8 与 g++ 是否在**系统** PATH、LOCAL SERVICE 能否读到（Python 装在用户目录下时提示改为「为所有用户安装」）。脚本是 UTF-8 BOM（PowerShell 5.1 无 BOM 按 ANSI 读），所以一行命令先下载到文件再执行，而不是 `iwr | iex`。

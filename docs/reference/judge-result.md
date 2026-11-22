@@ -322,7 +322,7 @@ syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
 | `--token-file` | 令牌文件（必填） |
 | `--backend` | `isolate`（Linux 默认，需先装 [isolate](https://github.com/ioi/isolate)）/ `rlimit`（只用 `setrlimit`，不隔离网络与文件系统，仅开发自测；结果 `isolated: false`）/ `winjob`（Windows 默认，Job Object 限 CPU / 内存 / 进程数，选手程序低完整性级别运行；不隔离网络，结果 `isolated: false`） |
 | `--box-id` | isolate box 编号，同机多 worker 各不相同（默认 0） |
-| `--slots` | 同时评几个任务（默认 1）；isolate 的 box 编号从 `--box-id` 起依次占用 |
+| `--slots` | 同时评几个任务（默认 1）；只有 isolate 可大于 1（box 编号从 `--box-id` 起依次占用）。rlimit / winjob 的并发任务共用一个运行账号、能互相读写工作目录，启动即拒绝 |
 | `--cgroups` | isolate 用 cgroup 记内存 |
 | `--isolate` | isolate 可执行文件路径（默认 `isolate`） |
 | `--run-as` | rlimit 后端以 root 运行时必填：选手程序的运行账号；`winjob` 不支持 |

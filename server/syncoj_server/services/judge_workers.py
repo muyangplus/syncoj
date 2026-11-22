@@ -48,13 +48,31 @@ def record_poll(row: JudgeWorker, payload: JudgePollIn) -> None:
     row.platform = payload.platform
     row.slots = payload.slots
     row.poll_seconds = max(1, int(round(payload.poll_seconds)))
+    if payload.boot_id:
+        row.boot_id = payload.boot_id
 
 
-def take_command(row: JudgeWorker) -> str:
-    """取走一次性命令（``stop`` / ``restart``），复位成 ``run``。"""
+def issue_command(row: JudgeWorker, command: str) -> None:
+    row.desired = command
+    row.desired_boot = row.boot_id
+
+
+def take_command(row: JudgeWorker, boot_id: Optional[str] = None) -> str:
+    """这次 poll 要送达的命令。
+
+    带 ``boot_id`` 的评测机：命令一直重发给下命令时的那个进程（停止 / 重启都是幂等的，
+    响应丢了下一次 poll 还会收到）；换了进程说明命令已经生效，复位成 ``run``。
+    不带的（或下命令时还没报过）按一次性送达。
+    """
     command = row.desired if row.desired in COMMANDS else "run"
-    if command != "run":
-        row.desired = "run"
+    if command == "run":
+        return command
+    if boot_id and row.desired_boot:
+        if boot_id == row.desired_boot:
+            return command
+        row.desired, row.desired_boot = "run", None
+        return "run"
+    row.desired, row.desired_boot = "run", None
     return command
 
 

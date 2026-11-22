@@ -77,6 +77,7 @@ if ($Token -notmatch '^[A-Za-z0-9_-]+$') { Fail '令牌只含字母、数字、-
 if (-not $Server) { Fail '缺少服务端地址：加 -Server http://<服务端>:8000' }
 $Server = $Server.TrimEnd('/')
 if ($Slots -lt 1) { Fail '-Slots 要是正整数' }
+if ($Slots -gt 1) { Fail '-Slots 大于 1 只能用于 Linux 的 isolate（winjob 的并发任务能互相读写工作目录）' }
 if ($Backend -notmatch '^[a-z0-9]+$') { Fail "后端名不合法：$Backend" }
 
 $identity = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -158,7 +159,10 @@ try {
 }
 if ($PyzSha256) {
     $actual = (Get-FileHash -Algorithm SHA256 -Path $Tmp).Hash.ToLower()
-    if ($actual -ne $PyzSha256) { Warn "评测机程序的 sha256 与脚本里记的不同（服务端刚升级过？）：$actual" }
+    if ($actual -ne $PyzSha256) {
+        Remove-Item -Force $Tmp
+        Fail "评测机程序的 sha256 与脚本里记的不同（$actual）：下载被篡改，或服务端刚升级过；重新复制安装命令再跑"
+    }
 }
 & $PythonExe $Tmp --help | Out-Null
 if ($LASTEXITCODE -ne 0) { Remove-Item -Force $Tmp; Fail '下载的评测机程序跑不起来' }

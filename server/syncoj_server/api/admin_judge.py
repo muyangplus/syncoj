@@ -619,7 +619,7 @@ def _command(ctx: AppContext, worker_id: int, command: str) -> JudgeWorkerOut:
             raise ApiError(409, "judge_worker_unsupported", "这台评测机版本太旧，收不到远程命令；请在那台机器上操作")
         if not judge_workers.is_online(row, utcnow()):
             raise ApiError(409, "judge_worker_offline", "评测机不在线")
-        row.desired = command
+        judge_workers.issue_command(row, command)
         session.flush()
         return _workers_out(session, [row])[0]
 

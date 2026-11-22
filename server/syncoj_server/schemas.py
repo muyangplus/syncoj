@@ -1125,6 +1125,8 @@ class JudgePollIn(_Base):
     slots: int = Field(default=1, ge=1, le=64)
     poll_seconds: float = Field(default=5.0, ge=0.5, le=3600)
     want: int = Field(default=1, ge=0, le=1)
+    #: 本进程的随机标识（每次启动换新）；不带 = 旧评测机，命令按一次性送达
+    boot_id: Optional[str] = Field(default=None, max_length=32)
 
 
 class LocalJudgeOut(_Base):

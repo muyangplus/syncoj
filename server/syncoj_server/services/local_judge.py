@@ -30,6 +30,15 @@ from ..models import JudgeWorker, iso_utc, utcnow
 from ..schemas import LocalJudgeOut
 from ..security import hash_token, new_token
 
+
+def loopback_host(listen_host: str) -> str:
+    """本机评测机连服务端用的主机名：通配地址 / 回环 → 127.0.0.1；具体地址原样（IPv6 加方括号）。"""
+    host = (listen_host or "").strip()
+    if host in ("", "0.0.0.0", "::", "localhost", "127.0.0.1", "::1"):
+        return "127.0.0.1"
+    return "[%s]" % host if ":" in host else host
+
+
 log = logging.getLogger(__name__)
 
 LOCAL_NAME = "本机评测机"
@@ -113,7 +122,7 @@ class LocalJudge:
         backend = "isolate" if shutil.which("isolate") else "rlimit"
         argv: List[str] = [
             sys.executable, "-m", "syncoj_server.judging.worker",
-            "--server", "http://127.0.0.1:%d" % settings.http_port,
+            "--server", "http://%s:%d" % (loopback_host(settings.http_host), settings.http_port),
             "--token-file", str(token_file),
             "--backend", backend,
             "--cache-dir", str(root / "cache"),

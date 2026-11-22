@@ -205,6 +205,18 @@ def test_停止与重启_随下一次poll送达一次(client, admin_headers, iss
     assert response.status_code == 409 and response.json()["code"] == "judge_worker_offline"
 
 
+def test_带boot_id的评测机_命令重发到换了进程为止(client, admin_headers, issued) -> None:
+    """响应丢了命令不丢：同一个进程每次 poll 都收到，换了进程（命令已生效）才复位。"""
+    base = "/api/v1/admin/judge-workers/%d" % issued["id"]
+    poll(client, issued["token"], boot_id="a" * 32)
+    client.post(base + "/restart", headers=admin_headers)
+    assert poll(client, issued["token"], boot_id="a" * 32)["command"] == "restart"
+    assert poll(client, issued["token"], boot_id="a" * 32)["command"] == "restart"  # 上一次的响应丢了也还在
+    assert workers(client, admin_headers)["评测机1"]["desired"] == "restart"
+    assert poll(client, issued["token"], boot_id="b" * 32)["command"] == "run"  # 新进程：已重启
+    assert workers(client, admin_headers)["评测机1"]["desired"] == "run"
+
+
 def test_吊销_手上的任务立刻回队列(client, admin_headers, contest, issued, queued) -> None:
     task = poll(client, issued["token"], want=1)["task"]
     response = client.delete("/api/v1/admin/judge-workers/%d" % issued["id"],
@@ -514,3 +526,23 @@ def test_worker_多个并发位同时评(tmp_path, monkeypatch) -> None:
     assert judge.run_forever() == 0
     assert sorted(finished) == [(1, 0), (2, 1)]
     assert seen[:2] == [1, 1] and judge.command == "stop"
+
+
+def test_多槽位只允许isolate(tmp_path, capsys) -> None:
+    from syncoj_server.judging import worker as judge_worker
+
+    token = tmp_path / "token"
+    token.write_text("x", encoding="utf-8")
+    argv = ["--server", "http://127.0.0.1:1", "--token-file", str(token), "--backend", "rlimit",
+            "--run-as", "nobody", "--slots", "2"]
+    assert judge_worker.main(argv) == 2
+    assert "只能用 isolate" in capsys.readouterr().err
+
+
+def test_本机评测机连回服务端的地址跟着监听地址走() -> None:
+    from syncoj_server.services.local_judge import loopback_host
+
+    assert loopback_host("0.0.0.0") == "127.0.0.1"
+    assert loopback_host("::") == "127.0.0.1"
+    assert loopback_host("192.168.1.5") == "192.168.1.5"
+    assert loopback_host("fe80::1") == "[fe80::1]"

@@ -4422,6 +4422,8 @@ export interface components {
         JudgePollIn: {
             /** Backend */
             backend?: string | null;
+            /** Boot Id */
+            boot_id?: string | null;
             /** Hostname */
             hostname?: string | null;
             /** Isolated */

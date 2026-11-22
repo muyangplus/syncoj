@@ -70,7 +70,7 @@ def poll(
         if row is None:  # 恰好在这一刻被吊销
             raise ApiError(401, "unauthorized", "评测机令牌无效（被吊销了，或者抄错了）")
         judge_workers.record_poll(row, payload)
-        command = judge_workers.take_command(row)
+        command = judge_workers.take_command(row, payload.boot_id)
         enabled = row.enabled is not False
     task = None
     if payload.want and enabled and command == "run":

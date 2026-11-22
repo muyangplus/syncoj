@@ -100,6 +100,9 @@ case "$BACKEND" in
     rlimit) ;;
     *) die "Linux 上的后端只有 isolate / rlimit（收到 $BACKEND）" ;;
 esac
+if [ "$BACKEND" != isolate ] && [ "$SLOTS" -gt 1 ]; then
+    die "--slots 大于 1 只能用 isolate（rlimit 的并发任务共用一个运行账号，能互相读写）"
+fi
 
 # ---- 账号 ----
 NOLOGIN="$(command -v nologin || echo /usr/sbin/nologin)"
@@ -136,7 +139,10 @@ else
 fi
 if [ -n "$PYZ_SHA256" ] && command -v sha256sum >/dev/null 2>&1; then
     actual="$(sha256sum "$TMP" | cut -d' ' -f1)"
-    [ "$actual" = "$PYZ_SHA256" ] || warn "评测机程序的 sha256 与脚本里记的不同（服务端刚升级过？）：$actual"
+    if [ "$actual" != "$PYZ_SHA256" ]; then
+        rm -f "$TMP"
+        die "评测机程序的 sha256 与脚本里记的不同（$actual）：下载被篡改，或服务端刚升级过 —— 重新复制安装命令再跑"
+    fi
 fi
 "$PYTHON" "$TMP" --help >/dev/null || die "下载的评测机程序跑不起来"
 chmod 0755 "$TMP"

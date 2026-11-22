@@ -32,6 +32,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -102,6 +103,8 @@ class Worker:
             "isolated": BACKEND_ISOLATED.get(backend or ""),
             "hostname": socket.gethostname()[:128],
             "platform": sys.platform[:32],
+            # 每个进程一个：服务端据此知道命令是否已经生效（换了进程才复位）
+            "boot_id": uuid.uuid4().hex,
         }
         self._stop = False
         #: 服务端下的命令（``stop`` / ``restart``）；``main`` 据此决定退出后是否重启自己
@@ -347,6 +350,10 @@ def main(argv=None) -> int:
         return 2
     if args.slots < 1:
         print("--slots 要是正整数", file=sys.stderr)
+        return 2
+    if args.slots > 1 and backend != "isolate":
+        # rlimit / winjob 的并发任务以同一个账号运行，能互相读写工作目录（看到别人的答案、改别人的输出）
+        print("--slots 大于 1 只能用 isolate 后端（每个 box 一个账号）", file=sys.stderr)
         return 2
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,

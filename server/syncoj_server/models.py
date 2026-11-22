@@ -558,6 +558,10 @@ class JudgeWorker(Base):
     #: 教师要它做的事：``run`` / ``stop`` / ``restart``。后两者在下一次 poll 里随响应带走，
     #: 带走即复位成 ``run`` —— 命令是一次性的，评测机日后重新启动不会再被停一次
     desired = Column(String(16), nullable=False, default="run")
+    #: 评测机进程的随机标识（每次启动换新）；``desired_boot`` = 下命令时它是哪个进程。
+    #: 命令一直重发给那个进程，等换了进程（重启 / 停止后再起）才复位：响应丢了命令不丢
+    boot_id = Column(String(32), nullable=True)
+    desired_boot = Column(String(32), nullable=True)
     #: 服务端以子进程拉起的「本机评测机」（§12.10）。同时最多一行
     is_local = Column(Boolean, nullable=False, default=False)
 

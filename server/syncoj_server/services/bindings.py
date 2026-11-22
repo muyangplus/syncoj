@@ -219,9 +219,11 @@ def agents_in_contest(
     bindings = load_bindings(session, agents.keys())
     holders: Dict[str, int] = {}
     if contest.default_roster_id is None:
-        for persons in bindings.values():
-            for number in {person.player_no for person in persons}:
-                holders[number] = holders.get(number, 0) + 1
+        # 与 /tick（resolve_machine）同一个口径：任何名单里、任何未作废的机器都算占着，
+        # 包括钉到别的场次、因而不在上面 agents 里的那些
+        holders = holder_counts(
+            session, {person.player_no for persons in bindings.values() for person in persons}
+        )
     numbers = set(players)
     result: List[Tuple[Agent, BoundPerson, Player]] = []
     for agent_id, agent in agents.items():

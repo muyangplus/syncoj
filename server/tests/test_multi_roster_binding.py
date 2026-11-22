@@ -213,6 +213,29 @@ def test_未指定名单的场次_考号被两台机器分别绑着时谁也不�
         assert body["bound"] is False, body
 
 
+def test_未指定名单的场次_占号的机器钉在别的场次_列表与tick口径一致(
+    client, admin_headers, bootstrap_key, two_rosters, contest
+) -> None:
+    """另一台机器钉到了别的场次也照样占着考号：/tick 不认，「选手状态」也不能显示成在干活。"""
+    from syncoj_server.models import Agent, Contest
+    from syncoj_server.services.bindings import agents_in_contest
+
+    a, b = two_rosters
+    client.post(
+        "%s/contests/%d/players" % (ADMIN, contest["id"]), json=[{"player_no": "1"}], headers=admin_headers
+    )
+    other = new_contest(client, admin_headers, "elsewhere")
+    one = bound_machine(client, admin_headers, bootstrap_key, entry_of(a, "1")["id"])
+    bound_machine(client, admin_headers, bootstrap_key, entry_of(b, "1")["id"], hostname="pc-2")
+    ctx = client.app.state.ctx
+    with ctx.db.session() as session:
+        session.query(Agent).filter(Agent.hostname == "pc-2").one().contest_id = other["id"]
+
+    assert tick(client, one["token"], [], machine_id=one["machine_id"])["bound"] is False
+    with ctx.db.session() as session:
+        assert agents_in_contest(session, session.get(Contest, contest["id"])) == []
+
+
 # --------------------------------------------------------------------------- #
 # 改派 / 解绑只动一份名单
 # --------------------------------------------------------------------------- #

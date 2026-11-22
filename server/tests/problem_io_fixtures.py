@@ -381,6 +381,42 @@ def make_hydro_zip(
     return make_zip(files, shell=shell, extra=extra, drop=drop)
 
 
+SYZOJ_DATA_YML = """subtasks:
+  - score: 30
+    type: min
+    cases: [1, 2]
+  - score: 70
+    type: sum
+    cases: [3, 4]
+inputFile: 'data#.in'
+outputFile: 'data#.out'
+"""
+
+
+def make_syzoj_zip(
+    *,
+    folder: str = "",
+    data_yml: Optional[str] = SYZOJ_DATA_YML,
+    data: Optional[Dict[str, Content]] = None,
+    shell: Optional[str] = None,
+    extra: Optional[Dict[str, Content]] = None,
+    drop: Iterable[str] = (),
+) -> bytes:
+    """SYZOJ 的平铺数据目录：``data.yml`` 与 ``data<i>.in`` / ``data<i>.out`` 同级（默认 4 个点）。"""
+    prefix = folder + "/" if folder else ""
+    files: Dict[str, Content] = {}
+    if data_yml is not None:
+        files[prefix + "data.yml"] = data_yml
+    if data is None:
+        data = {}
+        for i in range(1, 5):
+            data["data%d.in" % i] = "%d %d\n" % (i, i)
+            data["data%d.out" % i] = "%d\n" % (2 * i)
+    for name, content in data.items():
+        files[prefix + name] = content
+    return make_zip(files, shell=shell, extra=extra, drop=drop)
+
+
 # --------------------------------------------------------------------------- #
 # QDUOJ：<i>/problem.json + <i>/testcase/<k>.in/.out
 # --------------------------------------------------------------------------- #

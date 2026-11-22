@@ -1,5 +1,7 @@
 # 第三方许可证声明
 
+SyncOJ 版权所有 © 2026 muyangplus，依据 Apache License 2.0 授权（见 `LICENSE`、`NOTICE`）。以下为本项目使用的第三方软件。
+
 本文件由 `python scripts/collect_licenses.py` 生成：版本与许可证取自依赖清单与实际安装的依赖元数据，
 许可证全文取自各包自带的许可证文件。收录范围：
 

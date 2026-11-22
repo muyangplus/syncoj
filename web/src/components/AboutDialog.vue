@@ -23,7 +23,7 @@ const REPO = 'https://github.com/muyangplus/syncoj'
       <div>
         <div class="name">SyncOJ <span class="muted">{{ version }}</span></div>
         <div class="muted">
-          许可证 Apache-2.0 ·
+          © 2026 muyangplus · 许可证 Apache-2.0 ·
           <a :href="REPO" target="_blank" rel="noopener">源码</a>
         </div>
       </div>
@@ -41,6 +41,7 @@ const REPO = 'https://github.com/muyangplus/syncoj'
       <a href="/assets/third-party-licenses.txt" target="_blank" rel="noopener">前端产物许可证全文</a>
       <a :href="`${REPO}/blob/main/THIRD-PARTY-LICENSES.md`" target="_blank" rel="noopener">THIRD-PARTY-LICENSES.md</a>
       <a :href="`${REPO}/blob/main/LICENSE`" target="_blank" rel="noopener">LICENSE</a>
+      <a :href="`${REPO}/blob/main/NOTICE`" target="_blank" rel="noopener">NOTICE</a>
     </div>
 
     <template #footer>

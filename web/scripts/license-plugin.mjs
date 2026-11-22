@@ -74,6 +74,8 @@ export function thirdPartyLicenses({ fileName = 'assets/third-party-licenses.txt
 
       const sorted = [...entries.values()].sort((a, b) => a.name.localeCompare(b.name))
       const out = [
+        'SyncOJ 版权所有 © 2026 muyangplus，依据 Apache License 2.0 授权。',
+        '',
         'SyncOJ 管理端前端产物中包含的第三方软件',
         '本文件由构建自动生成（web/scripts/license-plugin.mjs），列出打包进 web/dist 的全部第三方包及其许可证全文。',
         '',

@@ -2,7 +2,7 @@
 
 限制（打开时一次查完，任何一条不过就整包拒绝，抛 :class:`ProblemIoError`）：
 
-* 成员名：``testdata.safe_member``，另拒 NUL 与盘符（``C:``）
+* 成员名：``testdata.safe_member``，另拒 NUL 与盘符（``C:``）；每一段 ≤ :data:`MAX_NAME_BYTES` 字节
 * 成员数 ≤ :data:`MAX_MEMBERS`
 * 按 ``file_size`` 累计的解压总量 ≤ :data:`MAX_UNCOMPRESSED_BYTES`
 * 单成员压缩比 > 1000 且解压后 > 64 MiB 视为炸弹
@@ -27,6 +27,7 @@ __all__ = [
     "SingleFileArchive",
     "ArchiveView",
     "MAX_MEMBERS",
+    "MAX_NAME_BYTES",
     "MAX_UNCOMPRESSED_BYTES",
     "MAX_DESCRIPTOR_BYTES",
     "BOMB_RATIO",
@@ -38,6 +39,8 @@ __all__ = [
 ]
 
 MAX_MEMBERS = 20000
+#: 路径每一段的上限（与 Linux 文件名上限相同）；按名字逐个处理的规则因此都有界
+MAX_NAME_BYTES = 255
 MAX_DESCRIPTOR_BYTES = 16 * 1024 * 1024
 BOMB_RATIO = 1000
 BOMB_MIN_BYTES = 64 * 1024 * 1024
@@ -63,6 +66,8 @@ def _check_name(name: str) -> None:
         or (len(name) >= 2 and name[1] == ":")
     ):
         raise ProblemIoError("unsafe_path", path=name.replace("\x00", "\\0"))
+    if any(len(part.encode("utf-8", "surrogateescape")) > MAX_NAME_BYTES for part in name.split("/")):
+        raise ProblemIoError("name_too_long", path=name[:60] + "…")
 
 
 class SafeArchive:

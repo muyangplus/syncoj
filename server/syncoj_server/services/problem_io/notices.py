@@ -23,6 +23,7 @@ MESSAGES: Dict[str, str] = {
     "cdf_without_data": "缺少 data/ 目录，请把整个比赛目录打包为 zip",
     "unsafe_path": "不安全的路径：{path}",
     "too_many_members": "文件数超过 {limit} 个",
+    "name_too_long": "文件名超过 255 字节：{path}",
     "archive_too_large": "解压后超过 {limit}",
     "zip_bomb": "{path} 压缩比异常",
     "member_too_large": "{path} 超过 {limit}",

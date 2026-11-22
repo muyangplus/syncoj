@@ -655,3 +655,30 @@ def test_round_trip_through_the_api(client: TestClient, contest: dict, admin_hea
     response = client.get("%s/problems/%d/testdata/file" % (ADMIN, made["id"]), headers=admin_headers)
     assert response.status_code == 200
     assert semantics(response.content) == semantics(problems["sum"]["_zip"])
+
+
+_HYDRO_RULE1 = r"^(([\w.-]*?)(?:(\d*)[-_])?(\d+))\.(in|IN|txt|TXT|in\.txt|IN\.TXT)$"
+
+
+@pytest.mark.parametrize("name", [
+    "1.in", "a10.in", "1-2.in", "a1_23.in", "ab12.txt", "x1.in.txt", "X1.IN.TXT", "_5.in", "-5.in",
+    "1.2.in", "a-b1.in", "1-.in", "a.in", "1.in.TXT", "1.inx", "a b1.in", "1__2.in", "07-003.IN",
+])
+def test_auto_rule_matches_hydro_regex(name: str) -> None:
+    import re
+
+    want = re.match(_HYDRO_RULE1, name, re.A)
+    got = hydro._rule1_match(name)
+    assert (want is None) == (got is None)
+    if want is not None:
+        assert [got.group(i) for i in range(1, 6)] == list(want.groups())
+
+
+def test_auto_rule_is_linear() -> None:
+    """Hydro 原正则对长数字串加不匹配的结尾会二次方回溯；这里必须是线性的。"""
+    import time
+
+    start = time.monotonic()
+    for name in ("1" * 200000 + ".inx", "1" * 200000 + "a1.in", "1_" * 100000 + ".inx"):
+        hydro._rule1_match(name)
+    assert time.monotonic() - start < 1.0

@@ -356,9 +356,51 @@ def _rule2_outputs(match: "re.Match") -> List[str]:
     return [x for n in names for x in (n, n.replace("input", "output").replace("INPUT", "OUTPUT"))]
 
 
+class _Groups:
+    """只提供 ``group(i)`` 的匹配结果（:func:`_rule1_match` 用）。"""
+
+    def __init__(self, *groups: Optional[str]) -> None:
+        self._groups = (None,) + groups
+
+    def group(self, index: int) -> Optional[str]:
+        return self._groups[index]
+
+
+_RULE1_EXTS = ("in.txt", "IN.TXT", "in", "IN", "txt", "TXT")
+_RULE1_STEM = re.compile(r"[\w.-]*[0-9]", re.A)
+
+
+def _rule1_match(name: str) -> Optional[_Groups]:
+    """等价于 Hydro 的 ``^(([\\w.-]*?)(?:(\\d*)[-_])?(\\d+))\\.(in|IN|txt|TXT|in\\.txt|IN\\.TXT)$``，
+    但线性时间：那条正则对"长数字串 + 不匹配的结尾"会二次方回溯。
+
+    stem 必须以数字结尾，所以扩展名最多一种取法；最短前缀落在"末尾数字串前若有 ``-``/``_``，
+    就从分隔符前那段数字的开头起"。"""
+    for ext in _RULE1_EXTS:
+        if not name.endswith("." + ext):
+            continue
+        stem = name[: -len(ext) - 1]
+        if not _RULE1_STEM.fullmatch(stem):
+            continue
+        r = len(stem)
+        while r > 0 and stem[r - 1] in "0123456789":
+            r -= 1
+        if r > 0 and stem[r - 1] in "-_":
+            q = r - 1
+            while q > 0 and stem[q - 1] in "0123456789":
+                q -= 1
+            return _Groups(stem, stem[:q], stem[q:r - 1], stem[r:], ext)
+        return _Groups(stem, stem[:r], None, stem[r:], ext)
+    return None
+
+
+class _Rule1:
+    match = staticmethod(_rule1_match)
+
+
 _MATCHERS = [
     # (正则, 输出候选, 序号, 子任务号, 计分方式)
-    (re.compile(r"^(([\w.-]*?)(?:(\d*)[-_])?(\d+))\.(in|IN|txt|TXT|in\.txt|IN\.TXT)$", re.A),
+    (_Rule1,
      _rule1_outputs, lambda m: int(m.group(4)), lambda m: int(m.group(3) or 1),
      lambda m: "min" if m.group(3) else "sum"),
     (re.compile(r"^(\D*)\.(in|IN)(\d+)$", re.A),

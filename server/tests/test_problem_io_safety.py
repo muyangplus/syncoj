@@ -101,3 +101,9 @@ def test_inner_zip_must_be_valid_testdata(tmp_path: Path) -> None:
 def test_ignored_junk_still_has_to_be_safe(tmp_path: Path) -> None:
     path = stage(tmp_path, _raw_zip(["syncoj-problems.json", "__MACOSX/../../evil"]))
     assert _code(SafeArchive, path) == "unsafe_path"
+
+
+def test_overlong_name_segment(tmp_path: Path) -> None:
+    path = stage(tmp_path, _raw_zip(["ok.txt", "d/" + "1" * 256 + ".in"]))
+    assert _code(SafeArchive, path) == "name_too_long"
+    SafeArchive(stage(tmp_path, _raw_zip(["d/" + "1" * 255]), "ok.zip")).close()

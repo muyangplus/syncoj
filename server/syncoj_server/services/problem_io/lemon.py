@@ -251,7 +251,11 @@ def _io(bundle: ProblemBundle, task: Dict[str, Any]) -> None:
         return
     bundle.io_mode = "file"
     if stdin != stdout:
-        bundle.warn(notice("mixed_io"))
+        # 混合 IO 只能二选一：按文件 IO 导入，原题读标准输入 / 写标准输出的程序在这里读不到、写不进
+        if stdin:
+            bundle.warn(notice("mixed_io", source="标准输入 + 文件输出", affected="读标准输入"))
+        else:
+            bundle.warn(notice("mixed_io", source="文件输入 + 标准输出", affected="写标准输出"))
     bundle.input_file = _str(task.get("inputFileName")) or None
     bundle.output_file = _str(task.get("outputFileName")) or None
 

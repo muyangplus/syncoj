@@ -312,7 +312,7 @@ syncoj-problems.json
 | `dependency_dropped` | 子任务依赖已丢弃，得分可能偏高 |
 | `max_as_bundle` | max 子任务按捆绑计分，得分可能偏低 |
 | `mul_as_bundle` | mul 子任务按捆绑计分，得分可能偏低 |
-| `mixed_io` | 输入与输出方式不一致，按文件 IO 导入 |
+| `mixed_io` | {source}已按文件 IO 导入，{affected}的程序全部判错 |
 | `strict_compare_relaxed` | 原为严格逐行比较，现忽略行末空白 |
 | `diff_compare_relaxed` | 原为 diff 比较，现忽略行末空白 |
 | `real_checker_generated` | 已生成实数比较 checker（误差 {eps}） |

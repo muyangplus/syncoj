@@ -325,12 +325,16 @@ def test_custom_io_names(tmp_path: Path) -> None:
     assert (bundle.ident, bundle.io_mode, bundle.input_file, bundle.output_file) == ("sum", "file", "data.txt", "ans.txt")
 
 
-@pytest.mark.parametrize("stdin, stdout", [(True, False), (False, True)])
-def test_mixed_io_becomes_file(tmp_path: Path, stdin: bool, stdout: bool) -> None:
+@pytest.mark.parametrize("stdin, stdout, message", [
+    (True, False, "标准输入 + 文件输出已按文件 IO 导入，读标准输入的程序全部判错"),
+    (False, True, "文件输入 + 标准输出已按文件 IO 导入，写标准输出的程序全部判错"),
+])
+def test_mixed_io_becomes_file(tmp_path: Path, stdin: bool, stdout: bool, message: str) -> None:
+    """混合 IO 仍按文件 IO 导入，提示写清哪种程序会全错。"""
     bundle = parse_one(tmp_path, lemon_task("sum", standardInputCheck=stdin, standardOutputCheck=stdout,
                                             inputFileName="in.txt"))
     assert bundle.io_mode == "file" and bundle.input_file == "in.txt"
-    assert codes(bundle.warnings) == ["mixed_io"]
+    assert [(n.code, n.message) for n in bundle.warnings] == [("mixed_io", message)]
 
 
 @pytest.mark.parametrize("task_type, code", [

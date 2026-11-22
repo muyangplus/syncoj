@@ -57,6 +57,15 @@ const counts = computed(() => {
   return out
 })
 const importing = computed(() => counts.value.create + counts.value.update)
+/** 本场次已有的题目标识（预览时取的快照） */
+const existingIdents = computed(() => new Set(preview.value?.existing_idents ?? []))
+
+/** 改标识后按是否已有同名题在新建 / 覆盖间切换；手选的跳过不动 */
+function setIdent(row: Row, value: string): void {
+  row.ident = value
+  if (row.action === 'skip') return
+  row.action = existingIdents.value.has(value.trim()) ? 'update' : 'create'
+}
 
 async function pick(file: UploadFile): Promise<void> {
   if (!file.raw || !props.contestId) return
@@ -151,7 +160,7 @@ function rowClass({ row }: { row: Row }): string {
           <template #reference>
             <el-tag type="warning" class="clickable">{{ preview.warnings.length }} 条提示</el-tag>
           </template>
-          <div v-for="w in preview.warnings" :key="w.code" class="notice">{{ w.message }}</div>
+          <div v-for="(w, i) in preview.warnings" :key="i" class="notice">{{ w.message }}</div>
         </el-popover>
       </div>
       <el-table :data="rows" max-height="460" :row-class-name="rowClass">
@@ -163,7 +172,12 @@ function rowClass({ row }: { row: Row }): string {
         </el-table-column>
         <el-table-column label="题目" width="150">
           <template #default="{ row }">
-            <el-input v-model="row.ident" maxlength="64" :disabled="row.action === 'skip'" />
+            <el-input
+              :model-value="row.ident"
+              maxlength="64"
+              :disabled="row.action === 'skip'"
+              @update:model-value="(value: string) => setIdent(row, value)"
+            />
           </template>
         </el-table-column>
         <el-table-column label="动作" width="100">
@@ -214,8 +228,8 @@ function rowClass({ row }: { row: Row }): string {
                   </el-tag>
                 </span>
               </template>
-              <div v-for="e in row.item.errors" :key="`e-${e.code}`" class="notice notice-error">{{ e.message }}</div>
-              <div v-for="w in row.item.warnings" :key="`w-${w.code}`" class="notice">{{ w.message }}</div>
+              <div v-for="(e, i) in row.item.errors" :key="`e-${i}`" class="notice notice-error">{{ e.message }}</div>
+              <div v-for="(w, i) in row.item.warnings" :key="`w-${i}`" class="notice">{{ w.message }}</div>
             </el-popover>
             <span v-else class="muted">—</span>
           </template>

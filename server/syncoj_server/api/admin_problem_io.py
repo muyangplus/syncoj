@@ -256,6 +256,7 @@ def judge_import_preview(
         format=parsed.result.format,
         problems=problems,
         warnings=_notices(parsed.result.warnings),
+        existing_idents=sorted(existing),
     )
 
 

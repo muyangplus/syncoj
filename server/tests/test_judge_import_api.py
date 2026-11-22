@@ -252,6 +252,17 @@ def test_attachment_header_drops_control_characters() -> None:
     assert "filename*=UTF-8''%E6%95%B0%E6%8D%AE.zip" in _attachment_header("数据.zip")
 
 
+def test_preview_lists_existing_idents(client: TestClient, contest: dict, admin_headers: dict) -> None:
+    """预览带回本场次已有的题目标识，界面改标识后据此在新建 / 覆盖之间切换。"""
+    response = client.post("%s/contests/%d/problems" % (ADMIN, contest["id"]),
+                           json=[{"ident": "zeta"}, {"ident": "alpha"}], headers=admin_headers)
+    assert response.status_code == 200, response.text
+    other = make_contest(client, admin_headers, "other-1")
+    client.post("%s/contests/%d/problems" % (ADMIN, other["id"]), json=[{"ident": "elsewhere"}], headers=admin_headers)
+    body = preview(client, contest, admin_headers, make_native_zip()).json()
+    assert body["existing_idents"] == ["alpha", "zeta"]
+
+
 def test_apply_streams_blobs_instead_of_bytes(client: TestClient, contest: dict, admin_headers: dict, app,
                                               monkeypatch) -> None:
     """应用时数据包流式入库（put_stream），不整包读成 bytes 再 put_bytes。原生包与外来格式都一样。"""

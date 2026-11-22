@@ -3748,6 +3748,8 @@ export interface components {
         };
         /** JudgeImportPreviewOut */
         JudgeImportPreviewOut: {
+            /** Existing Idents */
+            existing_idents?: string[];
             /** Format */
             format: string;
             /** Problems */

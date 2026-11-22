@@ -64,6 +64,24 @@ Agent 装机 → 见 [`install-agent.md`](install-agent.md)。
 syncoj-server genkey --out /etc/syncoj/release-key.pem   # 公钥默认同目录 .pub.json；--bits 默认 2048；--force 覆盖
 ```
 
+## 重置管理员密码
+
+在服务端机器上运行（`--data-root` 与 `serve` 用的一致；服务端不必停）：
+
+```bash
+.venv/bin/syncoj-server admin list                                   # 列出账号
+.venv/bin/syncoj-server admin reset-password                         # 重置 admin：终端里输两次新密码
+.venv/bin/syncoj-server admin reset-password --user <账号> --generate  # 随机生成新密码并打印一次
+```
+
+| 参数 | 含义 |
+|---|---|
+| `--user` | 账号，默认 `admin` |
+| `--password` | 直接给新密码（至少 8 个字符；会留在 shell 历史里） |
+| `--generate` | 随机生成；不在终端里运行（管道、脚本）时不给参数也是随机生成 |
+
+结果：该账号全部登录会话作废（浏览器需重新登录），被停用的账号重新启用，审计日志记一条 `admin_password_reset`。
+
 ## 机器怎么知道服务端在哪
 
 | 方式 | 触发 | 校验 |

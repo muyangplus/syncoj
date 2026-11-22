@@ -28,6 +28,7 @@ from .models import (
     BootstrapKey,
     Contest,
     ContestStatus,
+    EventLog,
     Player,
     utcnow,
 )
@@ -643,6 +644,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_info = sub.add_parser("info", help="打印配置与统计")
     p_info.set_defaults(func=_cmd_info)
 
+    p_admin = sub.add_parser("admin", help="管理员账号（列出、重置密码）")
+    admin_sub = p_admin.add_subparsers(dest="admin_action", required=True)
+    a_list = admin_sub.add_parser("list", help="列出管理员账号")
+    a_list.set_defaults(func=_cmd_admin)
+    a_reset = admin_sub.add_parser(
+        "reset-password",
+        help="重置密码：作废该账号全部登录会话；不给 --password 时在终端输入，非终端则随机生成并打印",
+    )
+    a_reset.add_argument("--user", default="admin", help="账号（默认 admin）")
+    a_reset.add_argument("--password", default=None,
+                         help="新密码（至少 8 个字符；会留在 shell 历史里，优先用交互输入）")
+    a_reset.add_argument("--generate", action="store_true", help="随机生成新密码并打印")
+    a_reset.set_defaults(func=_cmd_admin)
+
     p_db = sub.add_parser("db", help="数据库维护")
     db_sub = p_db.add_subparsers(dest="db_action", required=True)
 
@@ -868,6 +883,86 @@ def _expired(key) -> bool:
 
 def _fmt(value) -> str:
     return value.strftime("%Y-%m-%d %H:%M") if value else "—"
+
+
+#: 交互输入 / --password 给的新密码至少这么长（随机生成的固定 16 个字符）
+MIN_ADMIN_PASSWORD_LENGTH = 8
+
+
+def _read_new_password(args: argparse.Namespace) -> Tuple[Optional[str], bool]:
+    """新密码：``--password`` > 终端交互输入两次 > 随机生成。返回 ``(密码, 是否随机生成)``。
+
+    密码不合要求时打印原因并返回 ``(None, False)``。
+    """
+    if args.password is not None:
+        password = args.password
+    elif sys.stdin.isatty() and not args.generate:
+        import getpass
+
+        password = getpass.getpass("新密码：")
+        if password != getpass.getpass("再输一次："):
+            print("错误：两次输入不一致", file=sys.stderr)
+            return None, False
+    else:
+        return secrets.token_urlsafe(12), True
+    if len(password) < MIN_ADMIN_PASSWORD_LENGTH:
+        print("错误：密码至少 %d 个字符" % MIN_ADMIN_PASSWORD_LENGTH, file=sys.stderr)
+        return None, False
+    return password, False
+
+
+def _cmd_admin(args: argparse.Namespace) -> int:
+    """管理员账号：``list`` 列出账号；``reset-password`` 重置密码。
+
+    重置密码会作废该账号的全部登录会话，并重新启用被停用的账号。
+    """
+    settings = _build_settings(args)
+    if not settings.db_path.is_file():
+        print("错误：数据库不存在（%s），先运行 init" % settings.db_path, file=sys.stderr)
+        return 1
+    ctx = AppContext.create(settings)
+    try:
+        with ctx.db.session() as session:
+            if args.admin_action == "list":
+                rows = list(session.execute(select(Admin).order_by(Admin.id)).scalars())
+                print("%-20s %-6s %s" % ("账号", "启用", "最近登录"))
+                for row in rows:
+                    print("%-20s %-6s %s" % (
+                        row.username, "是" if row.is_active else "否",
+                        row.last_login_at.strftime("%Y-%m-%d %H:%M") if row.last_login_at else "—",
+                    ))
+                return 0
+
+            admin = session.execute(
+                select(Admin).where(Admin.username == args.user)
+            ).scalar_one_or_none()
+            if admin is None:
+                names = ", ".join(session.execute(select(Admin.username)).scalars()) or "（无）"
+                print("错误：没有管理员 %s（现有：%s）" % (args.user, names), file=sys.stderr)
+                return 1
+            password, generated = _read_new_password(args)
+            if password is None:
+                return 1
+            admin.password_hash = hash_password(password)
+            admin.is_active = True
+            revoked = 0
+            now = utcnow()
+            for item in admin.sessions:
+                if item.revoked_at is None:
+                    item.revoked_at = now
+                    revoked += 1
+            session.add(EventLog(
+                level="warning", category="admin_password_reset",
+                message="控制台重置了管理员 %s 的密码（作废会话 %d 个）" % (admin.username, revoked),
+            ))
+    finally:
+        ctx.db.dispose()
+    print("[+] 已重置管理员 %s 的密码，作废登录会话 %d 个" % (args.user, revoked))
+    if generated:
+        print()
+        print("    新密码: %s" % password)
+        print("    （只显示这一次）")
+    return 0
 
 
 def _cmd_db(args: argparse.Namespace) -> int:

@@ -446,3 +446,114 @@ def test_full_setup_from_command_line(cli_env, capsys) -> None:
     assert "bootstrap-key" in hint.getvalue() or "机器配对" in hint.getvalue()
     assert "enroll-code" not in hint.getvalue(), "旧注册码链路已经不存在了"
     assert "注册码" not in hint.getvalue()
+
+
+# --------------------------------------------------------------------------- #
+# 管理员：控制台重置密码
+# --------------------------------------------------------------------------- #
+
+
+def _admin_row(cli_env, username="admin"):
+    from syncoj_server.models import Admin, AdminSession
+
+    settings = Settings()
+    settings.data_root = cli_env["data_root"]
+    from syncoj_server.context import AppContext
+
+    ctx = AppContext.create(settings)
+    try:
+        with ctx.db.session() as session:
+            admin = session.execute(select(Admin).where(Admin.username == username)).scalar_one()
+            sessions = list(session.execute(
+                select(AdminSession).where(AdminSession.admin_id == admin.id)
+            ).scalars())
+            return admin.password_hash, admin.is_active, [s.revoked_at for s in sessions], ctx, admin.id
+    finally:
+        ctx.db.dispose()
+
+
+def _add_session(cli_env):
+    from datetime import timedelta
+
+    from syncoj_server.context import AppContext
+    from syncoj_server.models import Admin, AdminSession, utcnow
+
+    settings = Settings()
+    settings.data_root = cli_env["data_root"]
+    ctx = AppContext.create(settings)
+    try:
+        with ctx.db.session() as session:
+            admin = session.execute(select(Admin).where(Admin.username == "admin")).scalar_one()
+            admin.is_active = False
+            session.add(AdminSession(admin_id=admin.id, token_hash="x" * 64,
+                                     expires_at=utcnow() + timedelta(hours=1)))
+    finally:
+        ctx.db.dispose()
+
+
+def test_控制台重置密码_旧密码失效_会话作废_账号重新启用(cli_env, capsys) -> None:
+    from syncoj_server.security import verify_password
+
+    assert run_cli(cli_env, ["init", "--admin-password", "old-password"]) == 0
+    _add_session(cli_env)
+
+    assert run_cli(cli_env, ["admin", "reset-password", "--password", "new-password-1"]) == 0
+
+    password_hash, active, revoked, _ctx, _id = _admin_row(cli_env)
+    assert verify_password("new-password-1", password_hash)
+    assert not verify_password("old-password", password_hash)
+    assert active is True
+    assert revoked and all(item is not None for item in revoked)
+    assert "作废登录会话 1 个" in capsys.readouterr().out
+
+
+def test_控制台重置密码_不给密码就随机生成并打印(cli_env, capsys, monkeypatch) -> None:
+    from syncoj_server.security import verify_password
+
+    run_cli(cli_env, ["init", "--admin-password", "old-password"])
+    capsys.readouterr()
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+
+    assert run_cli(cli_env, ["admin", "reset-password"]) == 0
+
+    out = capsys.readouterr().out
+    generated = [line.split(":", 1)[1].strip() for line in out.splitlines() if "新密码:" in line][0]
+    assert verify_password(generated, _admin_row(cli_env)[0])
+
+
+def test_控制台重置密码_终端里输入两次(cli_env, monkeypatch) -> None:
+    from syncoj_server.security import verify_password
+
+    run_cli(cli_env, ["init", "--admin-password", "old-password"])
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    answers = iter(["typed-password", "typed-password"])
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": next(answers))
+
+    assert run_cli(cli_env, ["admin", "reset-password"]) == 0
+    assert verify_password("typed-password", _admin_row(cli_env)[0])
+
+
+def test_控制台重置密码_拒绝过短与两次不一致与不存在的账号(cli_env, monkeypatch, capsys) -> None:
+    from syncoj_server.security import verify_password
+
+    run_cli(cli_env, ["init", "--admin-password", "old-password"])
+    assert run_cli(cli_env, ["admin", "reset-password", "--password", "short"]) == 1
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    answers = iter(["typed-password", "other-password"])
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": next(answers))
+    assert run_cli(cli_env, ["admin", "reset-password"]) == 1
+    assert run_cli(cli_env, ["admin", "reset-password", "--user", "nobody", "--password", "x" * 10]) == 1
+    assert "现有：admin" in capsys.readouterr().err
+    assert verify_password("old-password", _admin_row(cli_env)[0]), "失败时密码不变"
+
+
+def test_控制台列出管理员(cli_env, capsys) -> None:
+    run_cli(cli_env, ["init", "--admin-password", "old-password"])
+    capsys.readouterr()
+    assert run_cli(cli_env, ["admin", "list"]) == 0
+    assert "admin" in capsys.readouterr().out
+
+
+def test_没有数据库时提示先init(cli_env, capsys) -> None:
+    assert run_cli(cli_env, ["admin", "list"]) == 1
+    assert "init" in capsys.readouterr().err

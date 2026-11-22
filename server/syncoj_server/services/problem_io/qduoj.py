@@ -17,13 +17,12 @@
 
 from __future__ import annotations
 
-import json
 import math
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from ...judging.testdata import MAX_CASES
-from .archive import ArchiveView
+from .archive import ArchiveView, load_json
 from .bundle import (
     DEFAULT_MEMORY_LIMIT_MB,
     DEFAULT_TIME_LIMIT_MS,
@@ -116,7 +115,7 @@ def _parse_problem(view: ArchiveView, folder: str, result: ImportResult) -> Prob
     path = folder + "/problem.json"
     bundle = ProblemBundle(key=folder, source_name=folder)
     try:
-        doc = json.loads(view.read(path).decode("utf-8-sig"))
+        doc = load_json(view.read(path))
     except (ValueError, UnicodeDecodeError) as exc:
         bundle.fail(notice("bad_manifest", path=view.full(path), reason=str(exc)[:200]))
         return bundle

@@ -223,6 +223,7 @@ syncoj-problems.json
 | 解压总量（按 `file_size`） | ≤ 2 GiB | `archive_too_large` |
 | 单成员压缩比 | > 1000 且 > 64 MiB → 拒绝 | `zip_bomb` |
 | 描述文件（json / yaml / cdf） | ≤ 16 MiB，按实际读到的字节截断 | `member_too_large` |
+| JSON 描述文件嵌套过深（解码器递归溢出） | 拒绝 | `bad_manifest` |
 | 压缩数据损坏 | 描述文件 → 整包错误；测试数据 → 该题错误 | `member_corrupt`、`testdata_invalid` |
 | FPS XML | ≤ 256 MiB | `member_too_large` |
 | YAML | 块映射 / 块序列 / 行内 `[..]` `{..}` / 标量 / 注释 / `---`；`& * ! \| > ? %` 拒绝；深度 ≤ 32；≤ 1 MiB | `yaml_unsupported`、`yaml_invalid` |

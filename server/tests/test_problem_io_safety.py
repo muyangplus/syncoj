@@ -177,3 +177,55 @@ def test_corrupt_native_inner_zip(tmp_path: Path) -> None:
     with problem_io.parse_archive(path) as parsed:
         (bundle,) = parsed.result.problems
         assert [e.code for e in bundle.errors] == ["testdata_invalid"]
+
+
+# 深层嵌套：C 实现的 json 解码器抛 RecursionError（不是 ValueError），要转成 bad_manifest
+DEEP_JSON = "[" * 200000 + "]" * 200000
+
+
+def test_deeply_nested_native_manifest(tmp_path: Path) -> None:
+    data = make_native_zip(extra={"syncoj-problems.json": DEEP_JSON})
+    assert _code(problem_io.parse_archive, stage(tmp_path, data)) == "bad_manifest"
+
+
+def test_deeply_nested_cdf(tmp_path: Path) -> None:
+    from problem_io_fixtures import make_lemon_zip
+
+    data = make_lemon_zip(cdf=DEEP_JSON.encode())
+    assert _code(problem_io.parse_archive, stage(tmp_path, data)) == "bad_manifest"
+
+
+def test_deeply_nested_hoj_json_fails_only_that_problem(tmp_path: Path) -> None:
+    from problem_io_fixtures import hoj_problem_json, make_hoj_zip
+
+    first = hoj_problem_json("P1000")
+    first["judgeExtraFile"] = DEEP_JSON  # 顶层也允许是 JSON 字符串
+    data = make_hoj_zip([first, hoj_problem_json("P1001")], extra={"problem_2.json": DEEP_JSON})
+    with problem_io.parse_archive(stage(tmp_path, data)) as parsed:
+        assert parsed.result.format == "hoj"
+        ok, bad = parsed.result.problems
+        assert not ok.errors
+        assert [e.code for e in bad.errors] == ["bad_manifest"]
+
+
+def test_deeply_nested_qduoj_json_fails_only_that_problem(tmp_path: Path) -> None:
+    from problem_io_fixtures import make_qduoj_zip, qduoj_problem_json
+
+    data = make_qduoj_zip([qduoj_problem_json("1001"), qduoj_problem_json("1002")],
+                          extra={"2/problem.json": DEEP_JSON})
+    with problem_io.parse_archive(stage(tmp_path, data)) as parsed:
+        assert parsed.result.format == "qduoj"
+        ok, bad = parsed.result.problems
+        assert not ok.errors
+        assert [e.code for e in bad.errors] == ["bad_manifest"]
+
+
+def test_deeply_nested_json_is_a_400(client, contest: dict, admin_headers: dict) -> None:
+    from problem_io_fixtures import make_lemon_zip
+
+    from test_judge_import_api import preview
+
+    for data in (make_native_zip(extra={"syncoj-problems.json": DEEP_JSON}), make_lemon_zip(cdf=DEEP_JSON.encode())):
+        response = preview(client, contest, admin_headers, data)
+        assert response.status_code == 400, response.text
+        assert response.json()["details"]["code_detail"] == "bad_manifest"

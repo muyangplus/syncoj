@@ -18,11 +18,10 @@
 
 from __future__ import annotations
 
-import json
 import re
 from typing import Callable, List, Optional, Tuple, Union
 
-from .archive import ArchiveView, SafeArchive, SingleFileArchive
+from .archive import ArchiveView, SafeArchive, SingleFileArchive, load_json
 from .notices import ProblemIoError
 
 __all__ = ["FORMAT_IDS", "detect", "views_of", "sniff_single"]
@@ -48,7 +47,7 @@ def _head(view: ArchiveView, name: str) -> bytes:
 
 def _json_keys(view: ArchiveView, name: str) -> set:
     try:
-        data = json.loads(view.read(name).decode("utf-8-sig"))
+        data = load_json(view.read(name))
     except (ValueError, UnicodeDecodeError, ProblemIoError):
         return set()
     return set(data) if isinstance(data, dict) else set()

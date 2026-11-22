@@ -19,7 +19,7 @@ import shutil
 from typing import Any, Dict, List, Optional, Tuple
 
 from ...judging.testdata import MAX_CASES
-from .archive import ArchiveView
+from .archive import ArchiveView, load_json
 from .build import unique_name
 from .bundle import (
     DEFAULT_MEMORY_LIMIT_MB,
@@ -105,7 +105,7 @@ def _extra_files(value: Any) -> Dict[str, str]:
         if not value.strip():
             return {}
         try:
-            value = json.loads(value)
+            value = load_json(value)
         except ValueError:
             return {}
     if not isinstance(value, dict):
@@ -391,7 +391,7 @@ def parse(view: ArchiveView) -> ImportResult:
     statement = False
     for folder, name in sorted(pairs, key=lambda pair: _natural(pair[0])):
         try:
-            doc = json.loads(view.read(name).decode("utf-8-sig"))
+            doc = load_json(view.read(name))
         except (ValueError, UnicodeDecodeError) as exc:
             bundle = ProblemBundle(key=folder, source_name=folder, ident=folder)
             bundle.fail(notice("bad_manifest", path=name, reason=str(exc)[:200]))

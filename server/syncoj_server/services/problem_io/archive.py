@@ -17,10 +17,11 @@
 
 from __future__ import annotations
 
+import json
 import zipfile
 import zlib
 from pathlib import Path
-from typing import IO, Dict, List, Optional, Sequence, Union
+from typing import IO, Any, Dict, List, Optional, Sequence, Union
 
 from ...judging.testdata import MAX_UNCOMPRESSED_BYTES, safe_member
 from .notices import ProblemIoError
@@ -40,6 +41,7 @@ __all__ = [
     "open_upload",
     "read_head",
     "human_size",
+    "load_json",
 ]
 
 MAX_MEMBERS = 20000
@@ -56,6 +58,19 @@ def human_size(size: int) -> str:
     if size >= 1 << 30:
         return "%d GB" % (size >> 30)
     return "%d MB" % (size >> 20)
+
+
+def load_json(data: Union[bytes, str]) -> Any:
+    """解析包里的 JSON 描述文件（bytes 按 UTF-8、可带 BOM）。
+
+    嵌套过深时 C 实现的解码器抛 ``RecursionError``（不是 ``ValueError`` 的子类），
+    这里转成 ``ValueError``，调用方照常报 ``bad_manifest``，接口不会 500。
+    """
+    text = data.decode("utf-8-sig") if isinstance(data, bytes) else data
+    try:
+        return json.loads(text)
+    except RecursionError:
+        raise ValueError("嵌套过深")
 
 
 def is_ignored(name: str) -> bool:

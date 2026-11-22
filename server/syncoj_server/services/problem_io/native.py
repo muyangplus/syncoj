@@ -20,7 +20,7 @@ import zipfile
 from typing import IO, Any, Dict, List, Optional
 
 from ...judging.testdata import TestdataError, parse_testdata
-from .archive import CORRUPT_ERRORS, ArchiveView
+from .archive import CORRUPT_ERRORS, ArchiveView, load_json
 from .build import MAX_TESTDATA_BYTES
 from .bundle import ExportProblem, FileRef, ImportResult, Notice, ProblemBundle
 from .exporting import OpenBlob
@@ -101,7 +101,7 @@ def _opt_int(value: Any) -> Optional[int]:
 
 def _load_manifest(view: ArchiveView) -> List[Any]:
     try:
-        data = json.loads(view.read(MANIFEST).decode("utf-8-sig"))
+        data = load_json(view.read(MANIFEST))
     except (ValueError, UnicodeDecodeError) as exc:
         raise ProblemIoError("bad_manifest", path=MANIFEST, reason=str(exc)[:200])
     except KeyError:

@@ -31,7 +31,7 @@ import shutil
 from typing import Any, Dict, List, Optional, Tuple
 
 from ...judging.testdata import MAX_CASES
-from .archive import ArchiveView
+from .archive import ArchiveView, load_json
 from .build import flat_case_names
 from .bundle import (
     BundleCase,
@@ -163,7 +163,7 @@ def _load_cdf(view: ArchiveView, name: str) -> Dict[str, Any]:
     if raw.startswith(CDF_MAGIC):
         raise ProblemIoError("cdf_binary")
     try:
-        doc = json.loads(raw.decode("utf-8-sig"))
+        doc = load_json(raw)
     except (ValueError, UnicodeDecodeError) as exc:
         raise ProblemIoError("bad_manifest", path=name, reason=str(exc)[:200])
     if not isinstance(doc, dict):

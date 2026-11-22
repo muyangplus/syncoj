@@ -25,7 +25,7 @@ from typing import IO, Any, Callable, Dict, List, Optional, Union
 
 from . import fps, hoj, hydro, lemon, native, qduoj
 from .archive import ArchiveView, SafeArchive, SingleFileArchive, open_upload
-from .bundle import ExportProblem, ImportResult, Notice, ProblemBundle
+from .bundle import MAX_PROBLEMS, ExportProblem, ImportResult, Notice, ProblemBundle
 from .detect import detect
 from .exporting import NullZip, OpenBlob
 from .idents import io_name_error, suggest_ident, valid_ident
@@ -45,8 +45,6 @@ __all__ = [
     "ProblemIoError",
 ]
 
-#: 一次导入最多多少道题（与 ``POST /contests/{id}/problems`` 一致）
-MAX_PROBLEMS = 200
 TIME_RANGE = (100, 60000)
 MEMORY_RANGE = (16, 4096)
 

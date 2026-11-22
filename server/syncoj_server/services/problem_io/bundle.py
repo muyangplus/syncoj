@@ -20,10 +20,14 @@ __all__ = [
     "ExportProblem",
     "DEFAULT_TIME_LIMIT_MS",
     "DEFAULT_MEMORY_LIMIT_MB",
+    "MAX_PROBLEMS",
 ]
 
 DEFAULT_TIME_LIMIT_MS = 1000
 DEFAULT_MEMORY_LIMIT_MB = 256
+#: 一次导入最多多少道题（与 ``POST /contests/{id}/problems`` 一致）。格式模块拿到题目目录列表
+#: 后就要查，别等全部解析完
+MAX_PROBLEMS = 200
 
 
 @dataclass

@@ -682,3 +682,33 @@ def test_auto_rule_is_linear() -> None:
     for name in ("1" * 200000 + ".inx", "1" * 200000 + "a1.in", "1_" * 100000 + ".inx"):
         hydro._rule1_match(name)
     assert time.monotonic() - start < 1.0
+
+
+def test_config_ini_count_over_limit_fails_before_building(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """config.ini 首行的测试点数超限：直接报 too_many_cases，不逐行建测试点。"""
+    made = []
+    original = hydro._RawSubtask
+    monkeypatch.setattr(hydro, "_RawSubtask", lambda *a, **k: made.append(1) or original(*a, **k))
+    ini = "600000\n" + "a|b|1|1|1\n" * 600000
+    bundle, _ = one(tmp_path, make_hydro_zip(config=ini, config_name="config.ini", data=data_for("1")))
+    assert codes(bundle.errors) == ["too_many_cases"]
+    assert "600000" in bundle.errors[0].message
+    assert made == [] and bundle.cases == []
+
+
+def test_yaml_cases_over_limit_fail_before_normalizing(tmp_path: Path) -> None:
+    cases = "".join("  - {input: a.in, output: a.out}\n" for _ in range(501))
+    bundle, _ = one(tmp_path, hydro_pkg("cases:\n" + cases, data=data_for("a")))
+    assert codes(bundle.errors) == ["too_many_cases"]
+    assert bundle.cases == [] and bundle.subtasks == []
+
+
+def test_too_many_problem_dirs_fail_before_parsing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from problem_io_fixtures import make_zip
+
+    parsed = []
+    monkeypatch.setattr(hydro, "_parse_problem", lambda *args: parsed.append(1))
+    data = make_zip({"%d/testdata/config.yaml" % i: "" for i in range(201)})
+    with pytest.raises(problem_io.ProblemIoError) as info:
+        problem_io.parse_archive(stage(tmp_path, data))
+    assert info.value.code == "too_many_problems" and parsed == []

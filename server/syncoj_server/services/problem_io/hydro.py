@@ -43,6 +43,7 @@ from .build import flat_case_names
 from .bundle import (
     DEFAULT_MEMORY_LIMIT_MB,
     DEFAULT_TIME_LIMIT_MS,
+    MAX_PROBLEMS,
     BundleCase,
     BundleSubtask,
     ExportProblem,
@@ -311,6 +312,8 @@ def _ini_subtasks(view: ArchiveView, rel: str) -> List[_RawSubtask]:
         count = int(lines[0].strip())
     except ValueError:
         raise _bad(view, rel, "第 1 行不是测试点数")
+    if count > MAX_CASES:
+        raise _ConfigError(notice("too_many_cases", count=count, limit=MAX_CASES))
     out = []
     for index in range(1, count + 1):
         line = lines[index] if index < len(lines) else ""
@@ -473,6 +476,9 @@ def _normalize(
     """``normalizeSubtasks`` + 映射到 SyncOJ。``bundle_types``：子任务类型 → 降级为捆绑时的警告代码
     （None = 不警告）；不在表里的类型拆成独立测试点。"""
     view = problem.view
+    count = sum(len(sub.cases) for sub in subtasks)
+    if count > MAX_CASES:
+        raise _ConfigError(notice("too_many_cases", count=count, limit=MAX_CASES))
     if all(isinstance(s.id, int) and not isinstance(s.id, bool) for s in subtasks):
         subtasks = sorted(subtasks, key=lambda s: s.id)
     scores = [_int_score(bundle, s.score) for s in subtasks]
@@ -728,6 +734,7 @@ def _parse_problem(view: ArchiveView, base: str, result: ImportResult) -> Proble
         bundle.fail(exc.notice)
     if len(bundle.cases) > MAX_CASES:
         bundle.fail(notice("too_many_cases", count=len(bundle.cases), limit=MAX_CASES))
+        bundle.cases, bundle.subtasks = [], []
     return bundle
 
 
@@ -743,7 +750,10 @@ def _ini_problem(bundle: ProblemBundle, problem: _Problem, subtasks: List[_RawSu
 def parse(view: ArchiveView) -> ImportResult:
     """把 ``view``（已剥外壳的视图）解析成 ``ImportResult(format="hydro")``。"""
     result = ImportResult(format="hydro")
-    for base in _problem_dirs(view):
+    dirs = _problem_dirs(view)
+    if len(dirs) > MAX_PROBLEMS:
+        raise ProblemIoError("too_many_problems", limit=MAX_PROBLEMS)
+    for base in dirs:
         result.problems.append(_parse_problem(view, base, result))
     return result
 

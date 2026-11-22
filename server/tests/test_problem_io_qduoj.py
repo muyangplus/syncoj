@@ -178,3 +178,16 @@ def test_preview_and_apply_through_api(client: TestClient, contest: dict, admin_
     assert out["created"] == 2
     assert [p["testdata"]["cases"] for p in out["problems"]] == [2, 3]
     assert all(p["judge_mode"] == "builtin" for p in out["problems"])
+
+
+def test_too_many_problem_folders_fail_before_parsing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from syncoj_server.services.problem_io import qduoj
+
+    from problem_io_fixtures import make_zip
+
+    parsed = []
+    monkeypatch.setattr(qduoj, "_parse_problem", lambda *args: parsed.append(1))
+    data = make_zip({"%d/problem.json" % i: json.dumps(qduoj_problem_json()) for i in range(1, 202)})
+    with pytest.raises(ProblemIoError) as info:
+        problem_io.parse_archive(stage(tmp_path, data), "qduoj")
+    assert info.value.code == "too_many_problems" and parsed == []

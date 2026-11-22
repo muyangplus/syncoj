@@ -27,6 +27,7 @@ from .archive import ArchiveView
 from .bundle import (
     DEFAULT_MEMORY_LIMIT_MB,
     DEFAULT_TIME_LIMIT_MS,
+    MAX_PROBLEMS,
     BundleCase,
     BundleSubtask,
     FileRef,
@@ -204,6 +205,8 @@ def parse(view: ArchiveView) -> ImportResult:
     folders = _problem_folders(view)
     if not folders:
         raise ProblemIoError("no_problems")
+    if len(folders) > MAX_PROBLEMS:
+        raise ProblemIoError("too_many_problems", limit=MAX_PROBLEMS)
     result = ImportResult(format="qduoj")
     for folder in folders:
         result.problems.append(_parse_problem(view, folder, result))

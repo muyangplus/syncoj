@@ -12,7 +12,7 @@ NOI 惯例：
   （testlib 风格：``checker <in> <out> <ans>``，退出码 0 为通过）。
 * 每个测试点前清空工作目录：程序不能跨测试点留东西。
 * 编译前先做源码预检（:mod:`.precheck`）：有拦截项就不编译、记 CE；预警写进 ``precheck_warnings``。
-* Windows（``winjob`` 后端，MinGW-w64）：产物带 ``.exe``、静态链接、主线程栈调大（:func:`platform_compile_argv`）。
+* Windows（``winjob`` 后端，MinGW-w64）：产物带 ``.exe``、静态链接、主线程栈调大、``-pipe``（:func:`platform_compile_argv`）。
 """
 
 from __future__ import annotations
@@ -127,7 +127,8 @@ def platform_compile_argv(
 ) -> List[str]:
     """Windows（MinGW-w64）上：``-o`` 的产物加 ``.exe``；``-static``（不依赖 MinGW 的 DLL，
     也不在 PATH 里找）；``-Wl,--stack`` 把主线程栈保留到 ``stack_bytes``（Linux 上栈不限，
-    默认 1 MB 的栈会让深递归在 Windows 上栈溢出）。Linux 上原样返回。"""
+    默认 1 MB 的栈会让深递归在 Windows 上栈溢出）；``-pipe``（编译各阶段走管道，少落临时文件）。
+    Linux 上原样返回。"""
     if not windows:
         return list(argv)
     result = []
@@ -135,7 +136,7 @@ def platform_compile_argv(
         if index > 0 and argv[index - 1] == "-o" and not item.lower().endswith(".exe"):
             item += ".exe"
         result.append(item)
-    return result + ["-static", "-Wl,--stack=%d" % stack_bytes]
+    return result + ["-pipe", "-static", "-Wl,--stack=%d" % stack_bytes]
 
 
 def worst(statuses: List[str]) -> str:

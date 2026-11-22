@@ -43,7 +43,8 @@ syncoj-server（服务端账号）         syncoj-judge worker（专用账号，
 * 计时：**CPU 时间**判 TLE；墙钟只作硬上限（时限的 2 倍 + 1 秒），防 sleep 卡死。内存取峰值常驻集，isolate 开 `--cgroups` 时取 cgroup 峰值。`rlimit` 后端经一层 shim 取选手程序自己的 rusage（Linux 的 `ru_maxrss` 跨 exec 保留，直接从 worker fork 会把 worker 的内存算到选手头上）。
 * 一个 worker 默认一次评一个任务；`--slots N` 并发评 N 个（各占一个 box，§12.10），或起多个 worker（各用不同 `--box-id`）。
 * 平台守卫：Linux 只认 `isolate` / `rlimit`，Windows 只认 `winjob`（默认），其余组合启动即报错。
-* `winjob`：自己调 `CreateProcessW`（`CREATE_SUSPENDED`）→ `AssignProcessToJobObject` → `ResumeThread`，程序进 Job 前不执行任何指令；否决 `subprocess.Popen` + 未公开的 `NtResumeProcess`（Popen 不给主线程句柄）。继承句柄用 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 限定为标准输入输出三个；限进程数时以 `DETACHED_PROCESS` 启动（否则 conhost.exe 占掉 Job 的活动进程名额），编译用不限进程数、限整个 Job CPU 与内存的 Job。CPU 取 Job 记账的用户 + 内核时间；内存取峰值提交量；墙钟超限 `TerminateJobObject`；运行中轮询工作目录增长判 OLE。崩溃（NTSTATUS / `abort()`）且峰值已达内存限制 90% 记 MLE（Job 挡住的分配不计入峰值）。编译加 `-static`（不依赖 MinGW 的 DLL）与 `-Wl,--stack=<内存限制>`（对齐 Linux 栈不限）。
+* `winjob`：自己调 `CreateProcessW`（`CREATE_SUSPENDED`）→ `AssignProcessToJobObject` → `ResumeThread`，程序进 Job 前不执行任何指令；否决 `subprocess.Popen` + 未公开的 `NtResumeProcess`（Popen 不给主线程句柄）。继承句柄用 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 限定为标准输入输出三个；限进程数时以 `DETACHED_PROCESS` 启动（否则 conhost.exe 占掉 Job 的活动进程名额），编译用不限进程数、限整个 Job CPU 与内存的 Job。CPU 取 Job 记账的用户 + 内核时间；内存取峰值提交量；墙钟超限 `TerminateJobObject`；运行中轮询工作目录增长判 OLE。崩溃（NTSTATUS / `abort()`）且峰值已达内存限制 90% 记 MLE（Job 挡住的分配不计入峰值）。编译加 `-static`（不依赖 MinGW 的 DLL）、`-Wl,--stack=<内存限制>`（对齐 Linux 栈不限）与 `-pipe`。
+  * 工作目录的根必须是纯 ASCII（MinGW 的 as / ld 用 ANSI API，中文用户名的 `%TEMP%` 会编译失败）：否则依次换到 `SYNCOJ_JUDGE_BOXES`、`%ProgramData%\SyncOJ\judge\boxes`、`%SystemDrive%\syncoj-judge-boxes`。
 
 ### 12.5 评测语义（NOI 惯例）
 

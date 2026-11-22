@@ -10,6 +10,9 @@
   → ``ResumeThread``。程序在进 Job 之前一条指令都没执行，没有逃逸窗口。没用
   ``subprocess.Popen``：它不暴露主线程句柄，只能靠未公开的 ``NtResumeProcess`` 恢复。
   继承的句柄用 ``PROC_THREAD_ATTRIBUTE_HANDLE_LIST`` 限定为 stdin / stdout / stderr 三个。
+* 工作目录的根必须是纯 ASCII 路径：MinGW 的 as / ld 用 ANSI API 打开文件，中文用户名的
+  ``%TEMP%`` 会让编译失败。不是 ASCII 时依次退到 ``SYNCOJ_JUDGE_BOXES``、
+  ``%ProgramData%\\SyncOJ\\judge\\boxes``、``%SystemDrive%\\syncoj-judge-boxes``（:func:`box_root_candidates`）。
 * 计时：Job 记账的用户态 + 内核态 CPU 时间判 TLE；墙钟到 ``wall_seconds`` 就 ``TerminateJobObject``。
   内存：Job 记的峰值提交量（``PeakProcessMemoryUsed`` / 编译时 ``PeakJobMemoryUsed``）。
   输出：运行中每 25 ms 看一次工作目录增长，超过 ``output_bytes`` 就杀掉判 OLE。
@@ -40,6 +43,8 @@ __all__ = [
     "resolve_program",
     "build_environment",
     "environment_block",
+    "ascii_safe",
+    "box_root_candidates",
 ]
 
 #: 常见的 NTSTATUS 退出码 → 可读名称（未处理异常时进程以异常码退出）
@@ -94,6 +99,35 @@ JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 JOB_OBJECT_UILIMIT_ALL = 0x000000FF
 
 COMPILERS = frozenset({"g++", "gcc", "c++", "cc"})
+
+#: 覆盖工作目录根的环境变量（必须是纯 ASCII 路径）
+BOXES_ENV = "SYNCOJ_JUDGE_BOXES"
+
+
+def ascii_safe(path: str) -> bool:
+    """MinGW 的 as / ld 用 ANSI API 开文件：只有纯 ASCII 路径在任何代码页下都安全。"""
+    try:
+        path.encode("ascii")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def box_root_candidates(base: Optional[str], environ: Mapping[str, str], tempdir: str) -> List[str]:
+    """工作目录的根，按优先级：``base``（没给则系统临时目录）→ ``SYNCOJ_JUDGE_BOXES`` →
+    ``%ProgramData%\\SyncOJ\\judge\\boxes`` → ``%SystemDrive%\\syncoj-judge-boxes``。只留纯 ASCII 的。"""
+    upper = {key.upper(): value for key, value in environ.items()}
+    items = [str(base) if base else tempdir]
+    if upper.get(BOXES_ENV):
+        items.append(upper[BOXES_ENV])
+    if upper.get("PROGRAMDATA"):
+        items.append(upper["PROGRAMDATA"].rstrip("\\/") + "\\SyncOJ\\judge\\boxes")
+    items.append((upper.get("SYSTEMDRIVE") or "C:").rstrip("\\/") + "\\syncoj-judge-boxes")
+    result: List[str] = []
+    for item in items:
+        if item and ascii_safe(item) and item not in result:
+            result.append(item)
+    return result
 
 
 def _is_crash(code: Optional[int]) -> bool:
@@ -366,7 +400,19 @@ class WinJobSandbox(Sandbox):
             raise SandboxError("winjob 后端不支持 --run-as：请直接以低权限专用账号运行评测机")
         api = _win32()
         api.k32.SetErrorMode(_ERROR_MODE)
-        self.workdir = Path(tempfile.mkdtemp(prefix="syncoj-judge-", dir=str(base) if base else None))
+        self.workdir = self._make_workdir(base)
+
+    @staticmethod
+    def _make_workdir(base: Optional[Path]) -> Path:
+        problems = []
+        candidates = box_root_candidates(str(base) if base else None, os.environ, tempfile.gettempdir())
+        for root in candidates:
+            try:
+                os.makedirs(root, exist_ok=True)
+                return Path(tempfile.mkdtemp(prefix="syncoj-judge-", dir=root))
+            except OSError as exc:
+                problems.append("%s（%s）" % (root, exc))
+        raise SandboxError("建不了纯 ASCII 路径的工作目录：%s" % ("；".join(problems) or "没有可用的候选目录"))
 
     # ------------------------------------------------------------------ #
 

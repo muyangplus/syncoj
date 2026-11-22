@@ -105,6 +105,23 @@ def test_环境_只留必需项_临时目录指向工作目录(tmp_path: Path) -
     assert sw.environment_block({"b": "2", "A": "1"}) == "A=1\0b=2\0\0"
 
 
+def test_工作目录根_非ASCII时退到ASCII目录() -> None:
+    env = {"ProgramData": r"C:\ProgramData", "SystemDrive": "D:"}
+    temp = r"C:\Users\张三\AppData\Local\Temp"
+    # 没给 base：系统临时目录含中文 → 跳过它
+    assert sw.box_root_candidates(None, env, temp) == [
+        r"C:\ProgramData\SyncOJ\judge\boxes", "D:\\syncoj-judge-boxes",
+    ]
+    # base 是 ASCII：排第一
+    assert sw.box_root_candidates(r"E:\boxes", env, temp)[0] == r"E:\boxes"
+    # base 含中文：跳过；环境变量覆盖排在 ProgramData 之前
+    roots = sw.box_root_candidates(r"C:\评测\boxes", dict(env, SYNCOJ_JUDGE_BOXES=r"F:\b"), temp)
+    assert roots == [r"F:\b", r"C:\ProgramData\SyncOJ\judge\boxes", "D:\\syncoj-judge-boxes"]
+    # 什么都没有时退到 C:\syncoj-judge-boxes；全都只留 ASCII
+    assert sw.box_root_candidates(None, {}, temp) == ["C:\\syncoj-judge-boxes"]
+    assert sw.ascii_safe(r"C:\Temp") and not sw.ascii_safe("C:\\Users\\Zoë")
+
+
 def test_非Windows上不能建winjob沙箱(tmp_path: Path) -> None:
     if sys.platform == "win32":
         pytest.skip("Windows 上能建")
@@ -119,7 +136,8 @@ def test_编译参数_Linux原样_Windows加exe静态链接与大栈() -> None:
     argv = ["g++", "-O2", "-std=c++14", "-o", "prog", "main.cpp", "-lm"]
     assert runner.platform_compile_argv(argv, windows=False) == argv
     assert runner.platform_compile_argv(argv, windows=True, stack_bytes=512 * MB) == [
-        "g++", "-O2", "-std=c++14", "-o", "prog.exe", "main.cpp", "-lm", "-static", "-Wl,--stack=%d" % (512 * MB),
+        "g++", "-O2", "-std=c++14", "-o", "prog.exe", "main.cpp", "-lm",
+        "-pipe", "-static", "-Wl,--stack=%d" % (512 * MB),
     ]
     assert runner.platform_compile_argv(["g++", "-o", "chk.exe", "c.cpp"], windows=True)[2] == "chk.exe"
     assert runner.exe_name("prog", windows=True) == "prog.exe"
@@ -170,17 +188,30 @@ def test_要求真跑时环境齐备() -> None:
 AB = "#include <cstdio>\nint main(){long long a,b;scanf(\"%lld%lld\",&a,&b);printf(\"%lld\\n\",a+b);}\n"
 
 
-def _judge(tmp_path: Path, code: str, **config):
+#: 本次测试建过的沙箱（检查工作目录的位置、清理与降权）
+CREATED: list = []
+
+
+def _judge(tmp_path: Path, code: str, checker: str = "", **config):
     data = tmp_path / "data.zip"
     with zipfile.ZipFile(str(data), "w") as archive:
         archive.writestr("1.in", "1 2\n")
         archive.writestr("1.ans", "3\n")
+        if checker:
+            archive.writestr("checker.cpp", checker)
     source = tmp_path / "ab.cpp"
     source.write_text(code, encoding="utf-8")
+    # tmp_path 带中文测试名（非 ASCII）：沙箱应自动换到 ASCII 目录，否则 MinGW 的 as 建不了临时文件
     boxes = tmp_path / "boxes"
     boxes.mkdir(exist_ok=True)
-    return runner.judge(source, "ab.cpp", data, runner.ProblemConfig(ident="ab", **config),
-                        lambda: sw.WinJobSandbox(base=boxes))
+
+    def factory():
+        box = sw.WinJobSandbox(base=boxes)
+        CREATED.append(box)
+        return box
+
+    del CREATED[:]
+    return runner.judge(source, "ab.cpp", data, runner.ProblemConfig(ident="ab", **config), factory)
 
 
 @windows
@@ -189,7 +220,9 @@ def test_win_端到端_AC(tmp_path: Path) -> None:
     outcome = _judge(tmp_path, AB)
     assert outcome.status == "AC", outcome
     assert outcome.score == 100 and outcome.isolated is False
-    assert not list((tmp_path / "boxes").iterdir())  # 工作目录已清理
+    (box,) = CREATED
+    assert not sw.ascii_safe(str(tmp_path)) and sw.ascii_safe(str(box.workdir))  # 退到了 ASCII 目录
+    assert not box.workdir.exists()  # 工作目录已清理
 
 
 @windows

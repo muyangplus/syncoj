@@ -366,7 +366,8 @@ syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
 
 - 前置：Python ≥ 3.8；MinGW-w64 的 `g++` 在 `PATH` 里（找不到记 SE「评测机上找不到 g++（MinGW-w64）」）。
 - 以低权限专用账号运行：选手程序以评测机账号运行，能读写该账号可访问的文件、能联网。
-- 编译追加 `-static -Wl,--stack=<内存限制>`，产物 `prog.exe`；checker 同样处理。
+- 工作目录的根须为纯 ASCII 路径（MinGW 限制），否则依次换到 `SYNCOJ_JUDGE_BOXES`、`%ProgramData%\SyncOJ\judge\boxes`、`%SystemDrive%\syncoj-judge-boxes`。
+- 编译追加 `-pipe -static -Wl,--stack=<内存限制>`，产物 `prog.exe`；checker 同样处理。
 - 与 Linux 评测环境的差异：
 
 | 项 | Linux | Windows（`winjob`） |

@@ -16,10 +16,10 @@ import json
 import shutil
 import tempfile
 import zipfile
-from typing import Any, Dict, List, Optional
+from typing import IO, Any, Dict, List, Optional
 
 from ...judging.testdata import TestdataError, parse_testdata
-from .archive import ArchiveView
+from .archive import CORRUPT_ERRORS, ArchiveView
 from .build import MAX_TESTDATA_BYTES
 from .bundle import ExportProblem, FileRef, ImportResult, Notice, ProblemBundle
 from .exporting import OpenBlob
@@ -118,6 +118,39 @@ def _load_manifest(view: ArchiveView) -> List[Any]:
     return problems
 
 
+def _verify_inner(
+    view: ArchiveView, bundle: ProblemBundle, path: str, meta: Dict[str, Any], spool: IO[bytes]
+) -> bool:
+    """把内层 zip 读进 ``spool``、核对 sha256、过 ``parse_testdata``。不通过时记错误并返回 False。"""
+    digest = hashlib.sha256()
+    size = 0
+    with view.open(path) as source:
+        while True:
+            chunk = source.read(256 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > MAX_TESTDATA_BYTES:
+                bundle.fail(notice("testdata_invalid", reason="超过 512 MB"))
+                return False
+            digest.update(chunk)
+            spool.write(chunk)
+    if digest.hexdigest() != str(meta.get("sha256") or "").lower():
+        bundle.fail(notice("sha_mismatch", path=path))
+        return False
+    spool.seek(0)
+    try:
+        with zipfile.ZipFile(spool) as inner:
+            parse_testdata(inner)
+    except zipfile.BadZipFile:
+        bundle.fail(notice("testdata_invalid", reason="不是合法的 zip"))
+        return False
+    except TestdataError as exc:
+        bundle.fail(notice("testdata_invalid", reason=str(exc)))
+        return False
+    return True
+
+
 def _check_testdata(view: ArchiveView, bundle: ProblemBundle, meta: Any) -> None:
     if not isinstance(meta, dict) or not isinstance(meta.get("path"), str):
         bundle.fail(notice("bad_manifest", path=MANIFEST, reason="testdata 缺少 path"))
@@ -126,36 +159,16 @@ def _check_testdata(view: ArchiveView, bundle: ProblemBundle, meta: Any) -> None
     if not view.exists(path):
         bundle.fail(notice("missing_file", path=path))
         return
-    digest = hashlib.sha256()
     spool = tempfile.SpooledTemporaryFile(max_size=32 * 1024 * 1024, mode="w+b")
     try:
-        size = 0
-        with view.open(path) as source:
-            while True:
-                chunk = source.read(256 * 1024)
-                if not chunk:
-                    break
-                size += len(chunk)
-                if size > MAX_TESTDATA_BYTES:
-                    bundle.fail(notice("testdata_invalid", reason="超过 512 MB"))
-                    return
-                digest.update(chunk)
-                spool.write(chunk)
-        if digest.hexdigest() != str(meta.get("sha256") or "").lower():
-            bundle.fail(notice("sha_mismatch", path=path))
-            return
-        spool.seek(0)
-        try:
-            with zipfile.ZipFile(spool) as inner:
-                parse_testdata(inner)
-        except zipfile.BadZipFile:
-            bundle.fail(notice("testdata_invalid", reason="不是合法的 zip"))
-            return
-        except TestdataError as exc:
-            bundle.fail(notice("testdata_invalid", reason=str(exc)))
-            return
+        ok = _verify_inner(view, bundle, path, meta, spool)
+    except CORRUPT_ERRORS:
+        bundle.fail(notice("testdata_invalid", reason="压缩数据已损坏"))
+        ok = False
     finally:
         spool.close()
+    if not ok:
+        return
     bundle.raw_testdata = FileRef(member=view.full(path))
     name = _opt_str(meta.get("name"))
     bundle.testdata_name = (name or "testdata.zip")[:255]

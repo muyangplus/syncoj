@@ -107,3 +107,40 @@ def test_overlong_name_segment(tmp_path: Path) -> None:
     path = stage(tmp_path, _raw_zip(["ok.txt", "d/" + "1" * 256 + ".in"]))
     assert _code(SafeArchive, path) == "name_too_long"
     SafeArchive(stage(tmp_path, _raw_zip(["d/" + "1" * 255]), "ok.zip")).close()
+
+
+def _big_text(seed: int) -> str:
+    return "".join("%d %d\n" % (i * seed, i) for i in range(4000))
+
+
+def test_corrupt_case_member_fails_only_that_problem(tmp_path: Path) -> None:
+    from problem_io_fixtures import corrupt_member, lemon_task, make_lemon_zip
+
+    from syncoj_server.services.problem_io.build import try_build
+
+    data = make_lemon_zip([lemon_task("game", 2), lemon_task("rect", 2)],
+                          extra={"data/game/game1.in": _big_text(7)})
+    path = stage(tmp_path, corrupt_member(data, "data/game/game1.in"))
+    with problem_io.parse_archive(path) as parsed:
+        game, rect = parsed.result.problems
+        assert try_build(game, parsed.archive) is None
+        assert [e.code for e in game.errors] == ["testdata_invalid"]
+        assert try_build(rect, parsed.archive) is not None
+
+
+def test_corrupt_descriptor_is_a_package_error(tmp_path: Path) -> None:
+    from problem_io_fixtures import corrupt_member, make_lemon_zip
+
+    data = make_lemon_zip(extra={"sample.cdf": '{"version": "1.0", "tasks": []%s}' % (" " * 20000)})
+    path = stage(tmp_path, corrupt_member(data, "sample.cdf"))
+    assert _code(problem_io.parse_archive, path) == "member_corrupt"
+
+
+def test_corrupt_native_inner_zip(tmp_path: Path) -> None:
+    from problem_io_fixtures import corrupt_member
+
+    data = make_native_zip([native_problem("sum", testdata=make_zip({"1.in": _big_text(3), "1.ans": "x"}))])
+    path = stage(tmp_path, corrupt_member(data, "sum/testdata.zip"))
+    with problem_io.parse_archive(path) as parsed:
+        (bundle,) = parsed.result.problems
+        assert [e.code for e in bundle.errors] == ["testdata_invalid"]

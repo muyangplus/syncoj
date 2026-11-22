@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import zipfile
+import zlib
 from pathlib import Path
 from typing import IO, Dict, List, Optional, Sequence, Union
 
@@ -27,6 +28,7 @@ __all__ = [
     "SingleFileArchive",
     "ArchiveView",
     "MAX_MEMBERS",
+    "CORRUPT_ERRORS",
     "MAX_NAME_BYTES",
     "MAX_UNCOMPRESSED_BYTES",
     "MAX_DESCRIPTOR_BYTES",
@@ -39,6 +41,8 @@ __all__ = [
 ]
 
 MAX_MEMBERS = 20000
+#: 读成员时压缩数据损坏会抛的异常（CRC 错、zlib 解不开、提前结束）
+CORRUPT_ERRORS = (zipfile.BadZipFile, zlib.error, EOFError, OSError)
 #: 路径每一段的上限（与 Linux 文件名上限相同）；按名字逐个处理的规则因此都有界
 MAX_NAME_BYTES = 255
 MAX_DESCRIPTOR_BYTES = 16 * 1024 * 1024
@@ -129,9 +133,12 @@ class SafeArchive:
         return self._zip.open(self._infos[name])
 
     def read(self, name: str, limit: int = MAX_DESCRIPTOR_BYTES) -> bytes:
-        """读一个成员，超过 ``limit`` 字节 → ``member_too_large``。"""
-        with self.open(name) as handle:
-            data = handle.read(limit + 1)
+        """读一个成员，超过 ``limit`` 字节 → ``member_too_large``；压缩数据损坏 → ``member_corrupt``。"""
+        try:
+            with self.open(name) as handle:
+                data = handle.read(limit + 1)
+        except CORRUPT_ERRORS:
+            raise ProblemIoError("member_corrupt", path=name)
         if len(data) > limit:
             raise ProblemIoError("member_too_large", path=name, limit=human_size(limit))
         return data

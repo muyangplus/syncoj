@@ -526,3 +526,15 @@ def make_fps_xml(items: Optional[List[str]] = None, *, version: str = "1.2", pro
 def make_fps_zip(items: Optional[List[str]] = None, *, name: str = "problem.xml", **kwargs: object) -> bytes:
     """HUSTOJ 勾选 zip 时的样子：同一份 XML 以 problem.xml 为名放进 zip。"""
     return make_zip({name: make_fps_xml(items)}, **kwargs)  # type: ignore[arg-type]
+
+
+def corrupt_member(data: bytes, name: str) -> bytes:
+    """把 zip 里 ``name`` 的压缩数据中间翻转一个字节（成员目录不动，读的时候才出错）。"""
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        info = zf.getinfo(name)
+    raw = bytearray(data)
+    name_len = int.from_bytes(raw[info.header_offset + 26:info.header_offset + 28], "little")
+    extra_len = int.from_bytes(raw[info.header_offset + 28:info.header_offset + 30], "little")
+    start = info.header_offset + 30 + name_len + extra_len
+    raw[start + info.compress_size // 2] ^= 0xFF
+    return bytes(raw)

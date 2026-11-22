@@ -19,7 +19,7 @@ import zipfile
 from typing import Dict, List, Optional, Tuple, Union
 
 from ...judging.testdata import MAX_UNCOMPRESSED_BYTES, TestdataError, parse_testdata
-from .archive import MAX_DESCRIPTOR_BYTES, SafeArchive, SingleFileArchive, human_size
+from .archive import CORRUPT_ERRORS, MAX_DESCRIPTOR_BYTES, SafeArchive, SingleFileArchive, human_size
 from .bundle import FileRef, ProblemBundle
 from .checkers import inject_testlib
 from .notices import ProblemIoError, notice
@@ -197,4 +197,7 @@ def try_build(bundle: ProblemBundle, archive: Archive) -> Optional[Tuple[bytes, 
         return data, summarize(data)
     except TestdataError as exc:
         bundle.fail(notice("testdata_invalid", reason=str(exc)))
+        return None
+    except CORRUPT_ERRORS:
+        bundle.fail(notice("testdata_invalid", reason="压缩数据已损坏"))
         return None

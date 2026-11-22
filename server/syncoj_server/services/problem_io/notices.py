@@ -27,6 +27,7 @@ MESSAGES: Dict[str, str] = {
     "archive_too_large": "解压后超过 {limit}",
     "zip_bomb": "{path} 压缩比异常",
     "member_too_large": "{path} 超过 {limit}",
+    "member_corrupt": "{path} 的压缩数据已损坏",
     "too_many_problems": "题目超过 {limit} 道",
     "no_problems": "包里没有题目",
     "format_unimplemented": "暂不支持{action} {format}",

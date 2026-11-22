@@ -1,16 +1,20 @@
-"""bundle → 数据包（build.py）与公共规整（finalize）。"""
+"""bundle → 数据包（build.py）、公共规整（finalize）与生成的 checker（checkers.py）。"""
 
 from __future__ import annotations
 
 import io
+import json
+import shutil
+import subprocess
 import zipfile
 from pathlib import Path
+from typing import Dict
 
 import pytest
 
 from syncoj_server.judging import testdata as testdata_mod
 from syncoj_server.judging.testdata import parse_testdata
-from syncoj_server.services.problem_io import finalize
+from syncoj_server.services.problem_io import checkers, finalize
 from syncoj_server.services.problem_io.archive import SafeArchive
 from syncoj_server.services.problem_io.build import build_testdata_zip, flat_case_names, try_build
 from syncoj_server.services.problem_io.bundle import (
@@ -23,6 +27,19 @@ from syncoj_server.services.problem_io.bundle import (
 from syncoj_server.services.problem_io.notices import MESSAGES, ProblemIoError, notice, register
 
 from problem_io_fixtures import make_zip, stage
+
+GXX = shutil.which("g++")
+needs_gxx = pytest.mark.skipif(GXX is None, reason="没有 g++")
+
+TESTLIB_CHECKER = """#include "testlib.h"
+int main(int argc, char* argv[]) {
+    registerTestlibCmd(argc, argv);
+    long long want = ans.readLong(), got = ouf.readLong();
+    if (want != got) quitf(_wa, "expected %lld, found %lld", want, got);
+    quitf(_ok, "ok");
+}
+"""
+
 
 def _case(name: str, inp: str = "1 2\n", ans: str = "3\n", score: int = 0) -> BundleCase:
     return BundleCase(name=name, input=FileRef(data=inp.encode()), answer=FileRef(data=ans.encode()), score=score)
@@ -100,6 +117,34 @@ def test_raw_testdata_is_returned_byte_for_byte() -> None:
     raw = make_zip({"1.in": "1", "1.ans": "1"})
     bundle = ProblemBundle(key="k", ident="x", raw_testdata=FileRef(data=raw))
     assert build_testdata_zip(bundle, None) == raw
+
+
+def test_testlib_is_injected_when_missing() -> None:
+    bundle = ProblemBundle(key="k", ident="x", cases=[_case("1", score=100)], checker=FileRef(data=TESTLIB_CHECKER.encode()))
+    _parsed, files = _parse(build_testdata_zip(bundle, None))
+    assert files["testlib.h"] == checkers.vendor_testlib()
+    assert [w.code for w in bundle.warnings] == ["testlib_injected"]
+    # 包里自带了就不注入
+    own = ProblemBundle(
+        key="k", ident="x", cases=[_case("1", score=100)], checker=FileRef(data=TESTLIB_CHECKER.encode()),
+        checker_support={"testlib.h": FileRef(data=b"// own\n")},
+    )
+    _parsed, files = _parse(build_testdata_zip(own, None))
+    assert files["testlib.h"] == b"// own\n" and own.warnings == []
+
+
+def test_missing_vendor_testlib_gives_a_notice(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(checkers, "VENDOR_DIR", tmp_path / "nowhere")
+    support: Dict[str, FileRef] = {}
+    got = checkers.inject_testlib(TESTLIB_CHECKER.encode(), support)
+    assert got is not None and got.code == "testlib_missing" and support == {}
+    assert checkers.inject_testlib(b"int main(){}", support) is None
+
+
+def test_vendor_testlib_and_license_ship_with_the_package() -> None:
+    data = checkers.vendor_testlib()
+    assert data is not None and b"_TESTLIB_H_" in data
+    assert (checkers.VENDOR_DIR / "LICENSE-testlib").read_text().startswith("The MIT License")
 
 
 # --------------------------------------------------------------------------- #
@@ -202,3 +247,83 @@ def test_messages_do_not_explain() -> None:
             assert word not in text, (code, text)
 
 
+# --------------------------------------------------------------------------- #
+# 生成的 checker：真编译真跑
+# --------------------------------------------------------------------------- #
+
+
+def _compile(tmp_path: Path, files: Dict[str, bytes]) -> Path:
+    for name, data in files.items():
+        (tmp_path / name).write_bytes(data)
+    exe = tmp_path / "chk"
+    subprocess.run(
+        [GXX, "-O2", "-std=c++14", "-o", str(exe), "checker.cpp", "-lm"],
+        cwd=str(tmp_path), check=True, capture_output=True, timeout=120,
+    )
+    return exe
+
+
+def _judge(exe: Path, tmp_path: Path, out: str, ans: str, inp: str = "") -> "tuple":
+    (tmp_path / "in.txt").write_text(inp)
+    (tmp_path / "out.txt").write_text(out)
+    (tmp_path / "ans.txt").write_text(ans)
+    proc = subprocess.run(
+        [str(exe), "in.txt", "out.txt", "ans.txt"], cwd=str(tmp_path), capture_output=True, timeout=30,
+    )
+    return proc.returncode, proc.stderr.decode()
+
+
+@needs_gxx
+def test_real_checker_accepts_absolute_or_relative_error(tmp_path: Path) -> None:
+    exe = _compile(tmp_path, {"checker.cpp": checkers.real_checker(1e-3)})
+    assert _judge(exe, tmp_path, "1.0009\n", "1\n")[0] == 0        # 绝对误差 ≤ eps
+    assert _judge(exe, tmp_path, "100.09\n", "100\n")[0] == 0      # 相对误差 ≤ eps
+    code, message = _judge(exe, tmp_path, "0.5015\n", "0.5\n")     # 两者都超
+    assert code == 1 and message.startswith("wrong answer")
+    assert _judge(exe, tmp_path, "1.0011\n", "1\n")[0] == 1
+    assert _judge(exe, tmp_path, "YES 3.14159", "YES\n3.1416\n")[0] == 0  # 非数字按字符串比
+    assert _judge(exe, tmp_path, "NO 3.14159", "YES 3.1416")[0] == 1
+    assert _judge(exe, tmp_path, "1 2", "1 2 3")[0] == 1           # 少输出
+    assert _judge(exe, tmp_path, "1 2 3", "1 2")[0] == 1           # 多输出
+    code, message = _judge(exe, tmp_path, "", "")
+    assert code == 0 and message.startswith("ok")
+
+
+@needs_gxx
+def test_hustoj_wrapper_swaps_answer_and_output(tmp_path: Path) -> None:
+    spj = b"""#include <stdio.h>
+#include <string.h>
+int main(int argc, char *argv[]) {
+    FILE *fstd = fopen(argv[2], "r"), *fuser = fopen(argv[3], "r");
+    char tag[16]; int want, got;
+    if (fscanf(fstd, "%15s %d", tag, &want) != 2 || strcmp(tag, "STD") != 0) return 2;
+    if (fscanf(fuser, "%d", &got) != 1) return 1;
+    return want == got ? 0 : 1;
+}
+"""
+    source, support = checkers.hustoj_wrapper(spj)
+    assert list(support) == [checkers.HUSTOJ_SOURCE_NAME]
+    exe = _compile(tmp_path, {"checker.cpp": source, "spj_src.h": support["spj_src.h"].data})
+    # 评测机按 (输入, 选手输出, 标准答案) 调用
+    assert _judge(exe, tmp_path, "5\n", "STD 5\n")[0] == 0
+    code, message = _judge(exe, tmp_path, "6\n", "STD 5\n")
+    assert code == 1 and message.startswith("wrong answer")
+
+
+@needs_gxx
+def test_injected_testlib_compiles(tmp_path: Path) -> None:
+    bundle = ProblemBundle(key="k", ident="x", cases=[_case("1", score=100)], checker=FileRef(data=TESTLIB_CHECKER.encode()))
+    _parsed, files = _parse(build_testdata_zip(bundle, None))
+    exe = _compile(tmp_path, {"checker.cpp": files["checker.cpp"], "testlib.h": files["testlib.h"]})
+    assert _judge(exe, tmp_path, "3\n", "3\n")[0] == 0
+    assert _judge(exe, tmp_path, "4\n", "3\n")[0] == 1
+
+
+def test_eps_literal() -> None:
+    assert checkers.format_eps(1e-6) == "1e-06"
+    assert checkers.format_eps(0.001) == "0.001"
+    assert b"static const double EPS = 1e-06;" in checkers.real_checker(1e-6)
+    with pytest.raises(ValueError):
+        checkers.format_eps(0)
+    assert json.dumps(checkers.checker_language_ok("SPJ.CC")) == "true"
+    assert not checkers.checker_language_ok("spj.py")

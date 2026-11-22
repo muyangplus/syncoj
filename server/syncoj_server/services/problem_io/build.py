@@ -4,7 +4,7 @@
 
     <name>.in / <name>.ans     # name 规整成 [A-Za-z0-9._-]，冲突加 -2、-3
     config.json                # cases（name + score）与 subtasks
-    checker.cpp + 支持文件      # 有 checker 时
+    checker.cpp + 支持文件      # 有 checker 时；用了 testlib 而缺 testlib.h 时补上
 
 native 有 ``raw_testdata`` 时原样返回内层 zip 的字节（sha256 不变），同样过一遍校验。
 """
@@ -21,6 +21,7 @@ from typing import Dict, List, Optional, Tuple, Union
 from ...judging.testdata import TestdataError, parse_testdata
 from .archive import MAX_DESCRIPTOR_BYTES, SafeArchive, SingleFileArchive
 from .bundle import FileRef, ProblemBundle
+from .checkers import inject_testlib
 from .notices import ProblemIoError, notice
 
 __all__ = [
@@ -91,7 +92,10 @@ def _copy_ref(ref: FileRef, archive: Archive, zf: zipfile.ZipFile, arcname: str)
 
 
 def build_testdata_zip(bundle: ProblemBundle, archive: Archive) -> bytes:
-    """写出数据包字节。结构不对抛 ``TestdataError``（信息给人看）。"""
+    """写出数据包字节。结构不对抛 ``TestdataError``（信息给人看）。
+
+    会往 ``bundle.warnings`` 里加 ``testlib_injected`` / ``testlib_missing``。
+    """
     if bundle.raw_testdata is not None:
         data = read_ref(bundle.raw_testdata, archive, MAX_TESTDATA_BYTES)
         summarize(data)
@@ -124,6 +128,9 @@ def build_testdata_zip(bundle: ProblemBundle, archive: Archive) -> bytes:
         if bundle.checker is not None:
             source = read_ref(bundle.checker, archive)
             support = dict(bundle.checker_support)
+            extra = inject_testlib(source, support)
+            if extra is not None:
+                bundle.warn(extra)
             zf.writestr("checker.cpp", source)
             for support_name, ref in sorted(support.items()):
                 base = support_name.replace("\\", "/").rsplit("/", 1)[-1]

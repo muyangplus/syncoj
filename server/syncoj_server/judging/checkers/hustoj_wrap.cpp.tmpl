@@ -1,0 +1,25 @@
+// SyncOJ 生成的 HUSTOJ spj 外壳。
+// 原 spj（spj_src.h）按 (输入, 标准答案, 选手输出) 取参数；评测机按 testlib 顺序
+// (输入, 选手输出, 标准答案) 调用，这里对调后两个参数再交给原 spj。
+// 原 spj 返回 0 = AC，其他 = WA。
+#include <cstdio>
+#define main __syncoj_spj_main
+#include "spj_src.h"
+#undef main
+
+int main(int argc, char** argv) {
+    if (argc < 4) {
+        std::fprintf(stderr, "FAIL usage: chk <input> <output> <answer>\n");
+        return 3;
+    }
+    char* swap = argv[2];
+    argv[2] = argv[3];
+    argv[3] = swap;
+    int code = __syncoj_spj_main(argc, argv);
+    if (code == 0) {
+        std::fprintf(stderr, "ok\n");
+        return 0;
+    }
+    std::fprintf(stderr, "wrong answer spj returned %d\n", code);
+    return 1;
+}

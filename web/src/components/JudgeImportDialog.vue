@@ -155,18 +155,18 @@ function rowClass({ row }: { row: Row }): string {
         </el-popover>
       </div>
       <el-table :data="rows" max-height="460" :row-class-name="rowClass">
-        <el-table-column label="来源" min-width="150">
+        <el-table-column label="来源" min-width="120">
           <template #default="{ row }">
             <div class="mono">{{ row.item.source_name }}</div>
             <div v-if="row.item.title" class="cell-sub">{{ row.item.title }}</div>
           </template>
         </el-table-column>
-        <el-table-column label="题目" width="160">
+        <el-table-column label="题目" width="150">
           <template #default="{ row }">
             <el-input v-model="row.ident" maxlength="64" :disabled="row.action === 'skip'" />
           </template>
         </el-table-column>
-        <el-table-column label="动作" width="110">
+        <el-table-column label="动作" width="100">
           <template #default="{ row }">
             <el-select v-model="row.action">
               <el-option label="新建" value="create" :disabled="!!row.item.errors?.length" />
@@ -175,17 +175,17 @@ function rowClass({ row }: { row: Row }): string {
             </el-select>
           </template>
         </el-table-column>
-        <el-table-column label="时限 / 内存" width="160">
+        <el-table-column label="时限 / 内存" width="150">
           <template #default="{ row }">
             <span class="nowrap">{{ row.item.time_limit_ms ?? 1000 }} ms / {{ row.item.memory_limit_mb ?? 256 }} MB</span>
           </template>
         </el-table-column>
-        <el-table-column label="输入输出" min-width="150">
+        <el-table-column label="输入输出" min-width="130">
           <template #default="{ row }">
             <span class="mono">{{ ioText(row.item) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="测试点 · 子任务 · 满分" width="170">
+        <el-table-column label="测试点 · 子任务 · 满分" width="150">
           <template #default="{ row }">
             <template v-if="row.item.cases">
               {{ row.item.cases }} · {{ row.item.subtasks }} · {{ row.item.total_score }}
@@ -193,13 +193,13 @@ function rowClass({ row }: { row: Row }): string {
             <span v-else class="muted">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="checker" width="100">
+        <el-table-column label="checker" width="90">
           <template #default="{ row }">
             <el-tag v-if="row.item.has_checker" type="primary" effect="plain">checker</el-tag>
             <span v-else class="muted">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="提示" width="120" fixed="right">
+        <el-table-column label="提示" width="160" fixed="right">
           <template #default="{ row }">
             <el-popover
               v-if="row.item.errors?.length || row.item.warnings?.length"
@@ -275,6 +275,7 @@ function rowClass({ row }: { row: Row }): string {
 .clickable {
   cursor: pointer;
   display: inline-flex;
+  flex-wrap: wrap;
   gap: 4px;
 }
 .notice {

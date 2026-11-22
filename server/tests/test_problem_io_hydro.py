@@ -388,10 +388,11 @@ def test_rcmp6_generates_real_checker(tmp_path: Path) -> None:
     assert checker == checkers.real_checker(1e-6) and support == []
 
 
-@pytest.mark.parametrize("name, eps", [("rcmp4", 1e-4), ("rcmp9", 1e-9), ("rcmp", 1e-6)])
-def test_other_real_checkers(tmp_path: Path, name: str, eps: float) -> None:
+@pytest.mark.parametrize("name, eps, relative", [("rcmp4", 1e-4, True), ("rcmp9", 1e-9, True), ("rcmp", 1.5e-6, False)])
+def test_other_real_checkers(tmp_path: Path, name: str, eps: float, relative: bool) -> None:
     bundle, _ = one(tmp_path, hydro_pkg("checker_type: testlib\nchecker: %s\n" % name))
-    assert bundle.checker.data == checkers.real_checker(eps)  # type: ignore[union-attr]
+    assert bundle.checker.data == checkers.real_checker(eps, relative)  # type: ignore[union-attr]
+    assert ("只比绝对误差" in bundle.warnings[0].message) is (not relative)
 
 
 @pytest.mark.parametrize("name", ["wcmp", "ncmp", "lcmp"])

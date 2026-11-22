@@ -73,7 +73,8 @@ HYDRO_TOTAL_TIME_MS = 60000
 
 #: 名字里不带点的 checker 是 Hydro 内置的 testlib checker；这几个与默认比较等价或更严
 _APPROX_CHECKERS = frozenset({"wcmp", "ncmp", "lcmp", "fcmp", "hcmp"})
-_REAL_CHECKERS = {"rcmp": 1e-6, "rcmp4": 1e-4, "rcmp6": 1e-6, "rcmp9": 1e-9}
+#: 名字 → (eps, 是否也认相对误差)。testlib 的 rcmp 是 1.5e-6、只比绝对误差；rcmpN 绝对或相对
+_REAL_CHECKERS = {"rcmp": (1.5e-6, False), "rcmp4": (1e-4, True), "rcmp6": (1e-6, True), "rcmp9": (1e-9, True)}
 
 _PROTOCOL_CHECKERS = frozenset({"hustoj", "lemon", "qduoj", "syzoj", "kattis"})
 _TYPE_ERRORS = {
@@ -580,9 +581,9 @@ def _checker(bundle: ProblemBundle, problem: _Problem, config: Dict[str, Any], p
     name = name.strip()
     if "." not in name:
         if name in _REAL_CHECKERS:
-            eps = _REAL_CHECKERS[name]
-            bundle.checker = FileRef(data=real_checker(eps))
-            bundle.warn(notice("real_checker_generated", eps="%g" % eps))
+            eps, relative = _REAL_CHECKERS[name]
+            bundle.checker = FileRef(data=real_checker(eps, relative))
+            bundle.warn(notice("real_checker_generated", eps="%g" % eps if relative else "%g，只比绝对误差" % eps))
         elif name in _APPROX_CHECKERS:
             bundle.warn(notice("builtin_checker_approx", name=name))
         else:

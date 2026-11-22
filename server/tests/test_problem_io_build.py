@@ -346,3 +346,12 @@ def test_repeated_references_count_towards_volume_limit(tmp_path: Path, monkeypa
         assert [e.code for e in bundle.errors] == ["testdata_invalid"]
         assert "超过" in bundle.errors[0].message
         assert copied == []
+
+
+@needs_gxx
+def test_real_checker_absolute_only_matches_testlib_rcmp(tmp_path: Path) -> None:
+    """testlib rcmp：EPS 1.5e-6，只比绝对误差。"""
+    exe = _compile(tmp_path, {"checker.cpp": checkers.real_checker(1.5e-6, relative=False)})
+    assert _judge(exe, tmp_path, "1.0000014\n", "1\n")[0] == 0     # (1e-6, 1.5e-6] 内仍通过
+    assert _judge(exe, tmp_path, "1.0000016\n", "1\n")[0] == 1
+    assert _judge(exe, tmp_path, "1000000.5\n", "1000000\n")[0] == 1  # 相对误差合格也不算

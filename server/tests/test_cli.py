@@ -491,7 +491,7 @@ def _add_session(cli_env):
         ctx.db.dispose()
 
 
-def test_控制台重置密码_旧密码失效_会话作废_账号重新启用(cli_env, capsys) -> None:
+def test_控制台重置密码_旧密码失效_会话保留_账号重新启用(cli_env, capsys) -> None:
     from syncoj_server.security import verify_password
 
     assert run_cli(cli_env, ["init", "--admin-password", "old-password"]) == 0
@@ -503,8 +503,8 @@ def test_控制台重置密码_旧密码失效_会话作废_账号重新启用(c
     assert verify_password("new-password-1", password_hash)
     assert not verify_password("old-password", password_hash)
     assert active is True
-    assert revoked and all(item is not None for item in revoked)
-    assert "作废登录会话 1 个" in capsys.readouterr().out
+    assert revoked == [None], "已登录的会话不作废"
+    assert "已重置管理员 admin 的密码" in capsys.readouterr().out
 
 
 def test_控制台重置密码_不给密码就随机生成并打印(cli_env, capsys, monkeypatch) -> None:

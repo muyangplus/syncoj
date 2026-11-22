@@ -80,7 +80,7 @@ syncoj-server genkey --out /etc/syncoj/release-key.pem   # 公钥默认同目录
 | `--password` | 直接给新密码（至少 8 个字符；会留在 shell 历史里） |
 | `--generate` | 随机生成；不在终端里运行（管道、脚本）时不给参数也是随机生成 |
 
-结果：该账号全部登录会话作废（浏览器需重新登录），被停用的账号重新启用，审计日志记一条 `admin_password_reset`。
+结果：只改密码，已登录的会话不受影响；被停用的账号重新启用；审计日志记一条 `admin_password_reset`。
 
 ## 机器怎么知道服务端在哪
 

@@ -650,7 +650,7 @@ def build_parser() -> argparse.ArgumentParser:
     a_list.set_defaults(func=_cmd_admin)
     a_reset = admin_sub.add_parser(
         "reset-password",
-        help="重置密码：作废该账号全部登录会话；不给 --password 时在终端输入，非终端则随机生成并打印",
+        help="重置密码：不给 --password 时在终端输入，非终端则随机生成并打印",
     )
     a_reset.add_argument("--user", default="admin", help="账号（默认 admin）")
     a_reset.add_argument("--password", default=None,
@@ -914,7 +914,7 @@ def _read_new_password(args: argparse.Namespace) -> Tuple[Optional[str], bool]:
 def _cmd_admin(args: argparse.Namespace) -> int:
     """管理员账号：``list`` 列出账号；``reset-password`` 重置密码。
 
-    重置密码会作废该账号的全部登录会话，并重新启用被停用的账号。
+    重置密码只改口令（并重新启用被停用的账号），已登录的会话照常有效：能用控制台的人本身就可信。
     """
     settings = _build_settings(args)
     if not settings.db_path.is_file():
@@ -945,19 +945,13 @@ def _cmd_admin(args: argparse.Namespace) -> int:
                 return 1
             admin.password_hash = hash_password(password)
             admin.is_active = True
-            revoked = 0
-            now = utcnow()
-            for item in admin.sessions:
-                if item.revoked_at is None:
-                    item.revoked_at = now
-                    revoked += 1
             session.add(EventLog(
                 level="warning", category="admin_password_reset",
-                message="控制台重置了管理员 %s 的密码（作废会话 %d 个）" % (admin.username, revoked),
+                message="控制台重置了管理员 %s 的密码" % admin.username,
             ))
     finally:
         ctx.db.dispose()
-    print("[+] 已重置管理员 %s 的密码，作废登录会话 %d 个" % (args.user, revoked))
+    print("[+] 已重置管理员 %s 的密码" % args.user)
     if generated:
         print()
         print("    新密码: %s" % password)

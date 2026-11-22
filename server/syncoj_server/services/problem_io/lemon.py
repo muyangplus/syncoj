@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -45,11 +46,15 @@ from .checkers import checker_language_ok, real_checker, uses_testlib
 from .detect import CDF_MAGIC
 from .exporting import OpenBlob, open_testdata
 from .idents import ident_from_io
-from .notices import ProblemIoError, notice
+from .notices import ProblemIoError, notice, register
 
 __all__ = ["LABEL", "parse", "export", "DEPENDENCE_FLAG", "EXPORT_CONTEST"]
 
 LABEL = "LemonLime"
+
+register({
+    "lemon_layout_mismatch": "代码路径 {patterns} 不是 <题目>.cpp 或 <题目>/<题目>.cpp，LemonLime 可能找不到选手代码",
+})
 
 DEPENDENCE_FLAG = "_lemon_SUbtaskDEPENDENCE_fLAg"
 #: 导出包的比赛目录名 / .cdf 主名（导出接口拿不到场次名，固定一个）
@@ -433,6 +438,7 @@ def _export_task(problem: ExportProblem, zf_in: Any, testdata: Any, zf: Any, roo
     if problem.compile_flags:
         notices.append(notice("flags_dropped", flags=problem.compile_flags))
 
+    sub_folder = _sub_folder_check(problem, notices)
     stdio = problem.io_mode != "file"
     return {
         "answerFileExtension": "out",
@@ -447,10 +453,28 @@ def _export_task(problem: ExportProblem, zf_in: Any, testdata: Any, zf: Any, roo
         "specialJudge": special,
         "standardInputCheck": stdio,
         "standardOutputCheck": stdio,
-        "subFolderCheck": True,
+        "subFolderCheck": sub_folder,
         "taskType": 0,
         "testCases": groups,
     }
+
+
+def _sub_folder_check(problem: ExportProblem, notices: List[Notice]) -> bool:
+    """按题目的代码路径模式决定 ``subFolderCheck``：LemonLime 为真时找 ``<选手>/<pid>/<pid>.cpp``，
+    为假时找 ``<选手>/<pid>.cpp``。SyncOJ 按模式的相对路径把代码落到 ``source/<场次>/<选手>/``。"""
+    from .. import matching
+
+    patterns = problem.file_patterns or [matching.DEFAULT_PATTERN]
+    expanded = [matching.expand_pattern(p, problem.ident, problem.title) for p in patterns]
+    ident = re.escape(problem.ident)
+    flat = [bool(re.match(r"^%s\.[^/*?\[]+$" % ident, p)) for p in expanded]
+    nested = [bool(re.match(r"^%s/%s\.[^/*?\[]+$" % (ident, ident), p)) for p in expanded]
+    if all(flat):
+        return False
+    if all(nested):
+        return True
+    notices.append(notice("lemon_layout_mismatch", patterns="、".join(patterns)))
+    return not all("/" not in p for p in expanded)
 
 
 def export(problems: List[ExportProblem], open_blob: OpenBlob, zf: Any) -> Dict[int, List[Notice]]:

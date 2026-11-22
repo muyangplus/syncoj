@@ -481,3 +481,22 @@ def test_too_many_cases_is_reported_at_parse(tmp_path: Path) -> None:
     assert codes(bundle.errors) == ["too_many_cases"]
     assert "501" in bundle.errors[0].message
     assert not bundle.cases
+
+
+@pytest.mark.parametrize("patterns, sub_folder, warned", [
+    (None, True, False),
+    (["{ident}/{ident}.cpp"], True, False),
+    (["sum/sum.cpp", "sum/sum.c"], True, False),
+    (["{ident}.cpp"], False, False),
+    (["sum.cpp"], False, False),
+    (["{ident}/*.cpp"], True, True),
+    (["src/{ident}.cpp"], True, True),
+    (["{ident}.cpp", "{ident}/{ident}.cpp"], True, True),
+])
+def test_export_sub_folder_check_follows_file_patterns(patterns, sub_folder: bool, warned: bool) -> None:
+    blobs = _blobs(PLAIN)
+    outcome = _export([_problem(1, "sum", PLAIN, file_patterns=patterns)], blobs)
+    with zipfile.ZipFile(outcome.spool) as zf:  # type: ignore[arg-type]
+        (task,) = json.loads(zf.read("contest/contest.cdf"))["tasks"]
+    assert task["subFolderCheck"] is sub_folder
+    assert ("lemon_layout_mismatch" in codes(outcome.notices[1])) is warned

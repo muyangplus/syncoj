@@ -343,7 +343,7 @@ def _enroll_response(
     这里的每一档都对应客户端一个不同的动作，混在一起就会出现
     "未配对的机器去扫代码"或者"配好的机器还在显示配对码"这类怪事。
     """
-    paired = agent.roster_entry_id is not None
+    paired = agent.is_paired
     payload = dict(
         token=raw_token,
         agent_id=agent.id,

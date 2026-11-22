@@ -16,7 +16,7 @@ from sqlalchemy import select
 from ..context import AppContext
 from ..errors import ApiError
 from ..judging.testdata import TestdataError, parse_testdata
-from ..models import Contest, EventLog, JudgeWorker, Player, Problem, utcnow
+from ..models import Contest, ContestStatus, EventLog, JudgeWorker, Player, Problem, utcnow
 from ..schemas import (
     BuiltinJudgeIn,
     BuiltinJudgeProgressOut,
@@ -178,6 +178,8 @@ def queue_builtin_judge(
         contest = session.get(Contest, contest_id)
         if contest is None:
             raise ApiError(404, "not_found", "场次不存在")
+        if contest.status == ContestStatus.ARCHIVED:
+            raise ApiError(409, "contest_archived", "场次已归档，取消归档后再评测")
         if builtin_judge.contest_in_progress(contest, now) and not payload.force:
             raise ApiError(409, "contest_in_progress", "场次还在进行：现在评测的是考到一半的代码")
         stmt = select(Problem).where(Problem.contest_id == contest_id)

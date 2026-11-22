@@ -37,6 +37,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
+from ..services import bindings as agent_bindings
 from ..services.player_no import player_no_problem
 from ..services.ratelimit import RateLimitExceeded
 from .. import keys
@@ -47,6 +48,7 @@ from ..models import (
     Admin,
     AdminSession,
     Agent,
+    AgentBinding,
     AgentDiagnostic,
     AgentRelease,
     Asset,
@@ -73,6 +75,7 @@ from ..schemas import (
     AnnounceStatusOut,
     GLOBAL_CONFIRM,
     AdminInfo,
+    AgentBindingOut,
     AgentRuntimeOut,
     ApplyRosterIn,
     ApplyRosterOut,
@@ -425,6 +428,9 @@ def create_contest(
 @router.get("/contests", response_model=Page[ContestOut])
 def list_contests(
     page: PageParams = Depends(),
+    archived: Optional[bool] = Query(
+        None, description="true 只列已归档的；false 只列未归档的；不传列全部"
+    ),
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> Page[ContestOut]:
@@ -435,7 +441,12 @@ def list_contests(
             ).all()
         )
         rosters = {row.id: row for row in session.execute(select(Roster)).scalars()}
-        contests = list(session.execute(select(Contest).order_by(Contest.id)).scalars())
+        stmt = select(Contest).order_by(Contest.id)
+        if archived is True:
+            stmt = stmt.where(Contest.status == ContestStatus.ARCHIVED)
+        elif archived is False:
+            stmt = stmt.where(Contest.status != ContestStatus.ARCHIVED)
+        contests = list(session.execute(stmt).scalars())
         result = []
         for contest in contests:
             online = sum(1 for a in ctx.registry.all(contest.id) if a.online)
@@ -481,6 +492,12 @@ def update_contest(
         if payload.status is not None:
             if payload.status not in ContestStatus.ALL:
                 raise HTTPException(status_code=400, detail="未知的场次状态: %s" % payload.status)
+            if payload.status == ContestStatus.ARCHIVED and contest.status != ContestStatus.ARCHIVED:
+                # 与「归档」按钮同一套规矩（api/admin_archive.py）
+                from .admin_archive import drop_queued_judge_tasks, require_archivable
+
+                require_archivable(contest)
+                drop_queued_judge_tasks(session, contest.id)
             contest.status = payload.status
 
         # 时间窗要拿**改完之后**的两个值一起校验：只 POST 了新结束时间的请求，
@@ -674,14 +691,14 @@ def update_roster(
 def _bound_player_nos(session, roster_id: int) -> List[str]:
     """这份名单里**被机器绑着**的人的考号（去重、按考号排序）。
 
-    机器绑的是名单条目（``agent.roster_entry_id``），而条目被删时那个外键是
-    ``ON DELETE SET NULL`` —— 于是那台机器回到"未配对"，下一次心跳显示新的配对码，
-    要教师**重新配一遍**。这件事必须先说出来：它是不可逆的**批量**解绑，而且完全静默
+    机器绑的是名单条目（``agent_binding``），而条目被删时绑定随之级联删除 ——
+    那台机器在这份名单里就没人了（只绑这一份的回到"未配对"，下一次心跳显示新的
+    配对码），要教师**重新配一遍**。这件事必须先说出来：它是不可逆的**批量**解绑，而且完全静默
     （端点的说明原来只写"不动任何场次的选手" —— 对场次确实没动，机器被解绑了）。
     """
     rows = session.execute(
         select(RosterEntry.player_no)
-        .join(Agent, Agent.roster_entry_id == RosterEntry.id)
+        .join(AgentBinding, AgentBinding.roster_entry_id == RosterEntry.id)
         .where(RosterEntry.roster_id == roster_id)
         .order_by(RosterEntry.player_no)
     ).scalars()
@@ -901,13 +918,26 @@ def delete_roster_entry(
             return SimpleAck(ok=True, detail="条目不存在")
         require_confirm(entry.player_no, confirm, "考号")
         player_no = entry.player_no
-        bound = session.execute(
-            select(func.count(Agent.id)).where(Agent.roster_entry_id == entry_id)
-        ).scalar_one()
+        holders = list(
+            session.execute(
+                select(AgentBinding.agent_id).where(AgentBinding.roster_entry_id == entry_id)
+            ).scalars()
+        )
+        # 只绑这一条的机器会回到"未配对"；还绑着别的名单的照常干活
+        orphaned = sum(
+            1
+            for agent_id in holders
+            if session.execute(
+                select(func.count(AgentBinding.id)).where(AgentBinding.agent_id == agent_id)
+            ).scalar_one()
+            == 1
+        )
         session.delete(entry)
     detail = "已从名单中移除 %s" % player_no
-    if bound:
-        detail += "（同时解除了 %d 台机器的配对，它们下次心跳会显示新的配对码）" % bound
+    if orphaned:
+        detail += "（同时解除了 %d 台机器的配对，它们下次心跳会显示新的配对码）" % orphaned
+    elif holders:
+        detail += "（同时解除了 %d 台机器在这份名单里的配对）" % len(holders)
     return SimpleAck(ok=True, detail=detail)
 
 
@@ -1041,13 +1071,13 @@ def list_pending_machines(
         # 这个集合会无限增长（每次重装 Agent 都是一条新行），所以真分页
         total = session.execute(
             select(func.count(Agent.id)).where(
-                Agent.roster_entry_id.is_(None), Agent.revoked_at.is_(None)
+                ~Agent.bindings.any(), Agent.revoked_at.is_(None)
             )
         ).scalar_one()
         agents = list(
             session.execute(
                 select(Agent)
-                .where(Agent.roster_entry_id.is_(None), Agent.revoked_at.is_(None))
+                .where(~Agent.bindings.any(), Agent.revoked_at.is_(None))
                 .order_by(Agent.last_seen_at.desc().nullslast(), Agent.id)
                 .limit(page.limit)
                 .offset(page.offset)
@@ -1123,13 +1153,14 @@ def list_clone_alerts(
                 .order_by(Agent.machine_fingerprint)
             ).scalars()
         )
+        paired_ids = {agent.id for agent in agents if agent.is_paired}
 
     grouped: Dict[str, List[str]] = {}
     bound: Dict[str, int] = {}
     for agent in agents:
         fingerprint = agent.machine_fingerprint or ""
         label = agent.hostname or agent.machine_id or "?"
-        if agent.roster_entry_id is None:
+        if agent.id not in paired_ids:
             label += "（待配对）"
         else:
             bound[fingerprint] = bound.get(fingerprint, 0) + 1
@@ -1236,14 +1267,27 @@ def _do_bind(
         # 否则哪天解绑之后服务端还会回一个早就作废的数字
         ctx.pair_codes.forget(agent.id)
 
-    name = outcome.entry.roster.name if outcome.entry.roster else ""
-    return BindResultOut(
-        agent_id=outcome.agent.id,
-        roster_entry_id=outcome.entry.id,
-        player_no=outcome.entry.player_no,
-        roster_name=name,
-        detail="已把机器配对给 %s%s。它下一轮心跳就会去找自己该在的场次"
+    return _bind_result(
+        session,
+        outcome.agent,
+        outcome.entry,
+        "已把机器配对给 %s%s。它下一轮心跳就会去找自己该在的场次"
         % (outcome.entry.player_no, "（%s）" % outcome.entry.name if outcome.entry.name else ""),
+    )
+
+
+def _bind_result(session, agent: Agent, entry: RosterEntry, detail: str) -> BindResultOut:
+    """配对 / 改派的回执，带上其他名单里的同名建议（§4.6 智能匹配）。"""
+    from .admin_bindings import machine_suggestions
+
+    name = entry.roster.name if entry.roster else ""
+    return BindResultOut(
+        agent_id=agent.id,
+        roster_entry_id=entry.id,
+        player_no=entry.player_no,
+        roster_name=name,
+        detail=detail,
+        suggestions=machine_suggestions(session, agent.id),
     )
 
 
@@ -1265,7 +1309,7 @@ def revoke_pending_machine(
     """
     with ctx.db.session() as session:
         agent = session.get(Agent, agent_id)
-        if agent is None or agent.roster_entry_id is not None:
+        if agent is None or agent.is_paired:
             return SimpleAck(ok=True, detail="这台机器不在待配对列表里")
         # 主机名可能是空的（Agent 读不到 hostname 时），退回 machine_id 作为标识 ——
         # 空字符串会让"原样输入"变成一个谁都不用输入的空操作
@@ -1296,7 +1340,7 @@ def clear_pending_machines(
         rows = list(
             session.execute(
                 select(Agent).where(
-                    Agent.roster_entry_id.is_(None), Agent.revoked_at.is_(None)
+                    ~Agent.bindings.any(), Agent.revoked_at.is_(None)
                 )
             ).scalars()
         )
@@ -1623,20 +1667,15 @@ def list_players(
         )
         # 两项统计都只算**这一页**的选手：曾经按全库分组再取用，
         # 机器、代码文件一多，翻一页选手列表就要扫一遍整张表。
-        page_nos = [player.player_no for player in players]
         page_ids = [player.id for player in players]
-        # 机器数是**跨场次**的：机器绑的是人（名单条目），不是这场比赛的选手记录。
-        # 所以按准考证号去数，而不是按 player_id —— 同一个人在别的场次绑的机器
-        # 也该算"他有机器"，否则每一场的列表都会显示成"未注册"。
-        machine_counts = {
-            player_no: count
-            for player_no, count in session.execute(
-                select(RosterEntry.player_no, func.count(Agent.id))
-                .join(Agent, Agent.roster_entry_id == RosterEntry.id)
-                .where(Agent.revoked_at.is_(None), RosterEntry.player_no.in_(page_nos))
-                .group_by(RosterEntry.player_no)
-            ).all()
-        } if page_nos else {}
+        # "他有没有机器"按**这一场**的取人规则算（场次所用名单里的那条绑定，
+        # 见 services/bindings.py）：与机器心跳时解析出的归属是同一个答案。
+        contest = session.get(Contest, contest_id)
+        with_machine = (
+            {player.id for _, _, player in agent_bindings.agents_in_contest(session, contest)}
+            if contest is not None and players
+            else set()
+        )
         file_counts = _counts_by(
             session,
             SourceFile.player_id,
@@ -1654,13 +1693,23 @@ def list_players(
         result.append(
             _player_out(
                 player,
-                has_agent=bool(machine_counts.get(player.player_no, 0)),
+                has_agent=player.id in with_machine,
                 online=bool(runtime and runtime.online),
                 file_count=file_counts.get(player.id, 0),
                 last_tick=runtime.last_tick_at if runtime else None,
             )
         )
     return page_of(result, total, page)
+
+
+def _machines_for_player(session, player: Player) -> int:
+    """这一场里落到这个选手身上的机器台数（同 ``/tick`` 的取人规则）。"""
+    contest = session.get(Contest, player.contest_id)
+    if contest is None:
+        return 0
+    return sum(
+        1 for _, _, row in agent_bindings.agents_in_contest(session, contest) if row.id == player.id
+    )
 
 
 def _player_out(
@@ -1730,11 +1779,7 @@ def update_player(
         player.group_name = payload.group_name
         session.flush()
 
-        machine_count = session.execute(
-            select(func.count(Agent.id))
-            .join(RosterEntry, Agent.roster_entry_id == RosterEntry.id)
-            .where(RosterEntry.player_no == player.player_no, Agent.revoked_at.is_(None))
-        ).scalar_one()
+        machine_count = _machines_for_player(session, player)
         file_count = session.execute(
             select(func.count(SourceFile.id)).where(
                 SourceFile.player_id == player_id, SourceFile.deleted_at.is_(None)
@@ -1783,13 +1828,7 @@ def delete_player(
             select(func.count(JudgeRun.id)).where(JudgeRun.player_id == player_id)
         ).scalar_one()
         # 只统计"有多少台机器绑到这个人身上"，用于回执 —— 但一台都不动
-        bound_machines = session.execute(
-            select(func.count(Agent.id))
-            .join(RosterEntry, Agent.roster_entry_id == RosterEntry.id)
-            .where(
-                RosterEntry.player_no == player.player_no, Agent.revoked_at.is_(None)
-            )
-        ).scalar_one()
+        bound_machines = _machines_for_player(session, player)
 
         hashes = list(session.execute(
             select(SourceFile.sha256).where(SourceFile.player_id == player_id).distinct()
@@ -1905,46 +1944,20 @@ def list_agents(
         if contest is None:
             raise HTTPException(status_code=404, detail="场次不存在")
 
-        players = {
-            row.player_no: row
-            for row in session.execute(
-                select(Player).where(Player.contest_id == contest_id)
-            ).scalars()
-        }
-        if not players:
-            return slice_page([], page)
-
-        # 机器绑的是"人"，而这个人算不算"这场比赛的人"取决于名单有没有被应用。
-        # 显式指定了别的场次的机器不在这里出现 —— 它已经明确说了自己归哪一场。
-        agents = list(
-            session.execute(
-                select(Agent)
-                .join(RosterEntry, Agent.roster_entry_id == RosterEntry.id)
-                .where(
-                    RosterEntry.player_no.in_(list(players.keys())),
-                    Agent.revoked_at.is_(None),
-                    or_(Agent.contest_id.is_(None), Agent.contest_id == contest_id),
-                )
-                .order_by(Agent.id)
-            ).scalars()
-        )
+        # 机器绑的是"人"，而这个人算不算"这场比赛的人"取决于场次所用的名单
+        # （services/bindings.py）。显式指定了别的场次的机器不在这里出现 ——
+        # 它已经明确说了自己归哪一场。
+        resolved = agent_bindings.agents_in_contest(session, contest)
         slug = contest.slug
-        no_by_entry = {
-            entry.id: entry.player_no
-            for entry in session.execute(
-                select(RosterEntry).where(RosterEntry.id.in_([a.roster_entry_id for a in agents]))
-            ).scalars()
-        }
+        all_bindings = agent_bindings.load_bindings(session, [agent.id for agent, _, _ in resolved])
 
     items = []
-    for agent in agents:
-        player = players.get(no_by_entry.get(agent.roster_entry_id, ""))
-        if player is None:  # pragma: no cover - 上面的 join 已经保证了
-            continue
+    for agent, _, player in resolved:
+        bound = [_binding_out(person) for person in all_bindings.get(agent.id, [])]
         runtime = ctx.registry.get(agent.id)
         if runtime is not None and runtime.contest_id == contest_id:
             # 心跳过：在线状态、扫描目录、磁盘余量、文件数都以注册表为准
-            items.append(AgentRuntimeOut(**runtime.to_public_dict()))
+            items.append(AgentRuntimeOut(**runtime.to_public_dict(), bindings=bound))
             continue
         items.append(
             AgentRuntimeOut(
@@ -1964,9 +1977,21 @@ def list_agents(
                 # 被挡掉的文件数同理：它也是"上一次心跳说着什么"，而教师往往正是
                 # 在机器刚掉线、代码没上来的时候来查这一行
                 scan_skipped=int(agent.scan_skipped or 0),
+                bindings=bound,
             )
         )
     return slice_page(items, page)
+
+
+def _binding_out(person) -> AgentBindingOut:
+    return AgentBindingOut(
+        roster_id=person.roster_id,
+        roster_name=person.roster_name,
+        roster_entry_id=person.entry_id,
+        player_no=person.player_no,
+        name=person.name,
+        seat=person.seat,
+    )
 
 
 @router.post("/agents/{agent_id}/rebind", response_model=SimpleAck)
@@ -1987,6 +2012,10 @@ def rebind_agent(
 
     目标条目**必须还没有机器**：两台机器绑同一个人，代码会往同一个目录里写，
     而且完全静默（成绩矩阵只是看起来"这个人交了两遍"）。
+
+    一台机器可以绑多份名单：改派只替换**目标所在那份名单**里的绑定（那份名单里
+    原来没绑就等于新绑一条），其他名单不动。同名建议见
+    ``GET /agents/{id}/binding-suggestions``。
     """
     with ctx.db.session() as session:
         agent = session.get(Agent, agent_id)
@@ -1999,39 +2028,23 @@ def rebind_agent(
         if entry is None:
             raise HTTPException(status_code=404, detail="名单条目不存在")
 
-        current = session.get(RosterEntry, agent.roster_entry_id) if agent.roster_entry_id else None
-        if current is not None and current.id == entry.id:
+        held = agent_bindings.binding_in_roster(session, agent_id, entry.roster_id)
+        if held is not None and held.roster_entry_id == entry.id:
             return SimpleAck(ok=True, detail="这台机器本来就属于 %s" % entry.player_no)
 
-        # 按考号判，不按名单条目判（理由见 machines_holding_player_no）
-        holders = enrollment.machines_holding_player_no(
-            session, entry.player_no, exclude_agent_id=agent_id
-        )
-        clash = holders[0] if holders else None
-        if clash is not None:
+        # 只动目标那份名单里的绑定；这台机器在其他名单里的绑定原样保留
+        try:
+            previous = agent_bindings.rebind(session, agent, entry)
+        except agent_bindings.BindingConflict as exc:
             raise ApiError(
-                409,
-                "roster_entry_taken",
-                "%s 已经有一台机器了（%s）。要换机器请先作废那一台，或者用它改派。"
-                % (entry.player_no, clash.machine_id[:16]),
-                {"player_no": entry.player_no, "machine_id": clash.machine_id},
+                exc.status_code,
+                exc.code,
+                exc.detail,
+                {"player_no": entry.player_no},
             )
-
-        old_no = current.player_no if current else "（未配对）"
-        agent.roster_entry_id = entry.id
-        agent.claimed_at = utcnow()
-        # 改派之后原来那台的配对码/场次指定都该作废，让它按新身份重新解析
-        agent.pair_code_hash = None
-        agent.pair_code_expires_at = None
+        old_no = previous.player_no if previous is not None else "（未绑定）"
+        # 改派之后场次指定作废，让它按新身份重新解析
         agent.contest_id = None
-        session.add(
-            EventLog(
-                level="warning",
-                category="agent_rebind",
-                message="机器改派：%s → %s（%s）"
-                % (old_no, entry.player_no, agent.machine_id[:16]),
-            )
-        )
         session.flush()
 
     # 内存里的在线状态也要跟着清掉：旧的 player_id/contest 已经不作数了，
@@ -2064,7 +2077,7 @@ def set_agent_contest(
         agent = session.get(Agent, agent_id)
         if agent is None:
             raise HTTPException(status_code=404, detail="这台机器不在台账里")
-        if agent.roster_entry_id is None and payload.contest_id is not None:
+        if not agent.is_paired and payload.contest_id is not None:
             raise HTTPException(
                 status_code=409, detail="这台机器还没有配对到人，先配对再指定场次"
             )
@@ -2076,6 +2089,8 @@ def set_agent_contest(
             contest = session.get(Contest, payload.contest_id)
             if contest is None:
                 raise HTTPException(status_code=404, detail="场次不存在")
+            if contest.is_archived:
+                raise ApiError(409, "contest_archived", "场次「%s」已归档" % contest.name)
             agent.contest_id = contest.id
             detail = "已指定场次「%s」" % contest.name
         session.flush()
@@ -2088,12 +2103,14 @@ def set_agent_contest(
 @router.delete("/agents/{agent_id}/bind", response_model=SimpleAck)
 def unbind_agent(
     agent_id: int,
+    roster_id: Optional[int] = Query(None, description="只解除这份名单里的绑定；不传 = 全部名单"),
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> SimpleAck:
     """解除机器与人的绑定（不是作废凭据）。
 
-    解绑之后机器回到"待配对"，并在下一次心跳里重新拿到一个配对码 ——
+    给了 ``roster_id`` 就只解除那份名单里的绑定，其他名单不动；不给则全部解除。
+    一条都不剩时机器回到"待配对"，并在下一次心跳里重新拿到一个配对码 ——
     这样它能被绑给别人，而不用重新注册（重新注册要读 root 只读的密钥，
     在考场上等于要重启）。
 
@@ -2103,33 +2120,22 @@ def unbind_agent(
         agent = session.get(Agent, agent_id)
         if agent is None:
             return SimpleAck(ok=True, detail="这台机器不在台账里")
-        if agent.roster_entry_id is None:
+        if not agent.is_paired:
             return SimpleAck(ok=True, detail="这台机器本来就没配对")
+        removed = agent_bindings.unbind(session, agent, roster_id)
+        paired = agent.is_paired
 
-        entry = session.get(RosterEntry, agent.roster_entry_id)
-        player_no = entry.player_no if entry else "?"
-        agent.roster_entry_id = None
-        agent.contest_id = None
-        agent.claimed_at = None
-        # 老配对码早就作废了，让下一轮注册/心跳重新生成一个
-        agent.pair_code_hash = None
-        agent.pair_code_expires_at = None
-        session.add(
-            EventLog(
-                level="warning",
-                category="agent_unbind",
-                message="解除机器配对：%s（%s）" % (player_no, agent.machine_id[:16]),
-            )
-        )
-        session.flush()
-
+    if not removed:
+        return SimpleAck(ok=True, detail="这台机器在这份名单里没有绑定")
     ctx.registry.forget(agent_id)
+    if paired:
+        return SimpleAck(ok=True, detail="已解除 %s 与这台机器的绑定" % "、".join(removed))
     # 解绑之后**必须**把缓存里的旧码忘掉：那台机器马上要重新配一次，
     # 留着旧码会让服务端继续回一个已经不该再用的数字，教师怎么输都不对
     ctx.pair_codes.forget(agent_id)
     return SimpleAck(
         ok=True,
-        detail="已解除 %s 与这台机器的绑定。它下一轮心跳会拿到新的配对码" % player_no,
+        detail="已解除 %s 与这台机器的绑定。它下一轮心跳会拿到新的配对码" % "、".join(removed),
     )
 
 
@@ -2157,8 +2163,11 @@ def revoke_agent(
             return SimpleAck(ok=True, detail="这台机器不在台账里")
         # 标识用机器名：教师是在列表里"指着那一行"删的，而列表上显示的就是它
         require_confirm(agent.hostname or agent.machine_id, confirm, "机器名")
-        entry = session.get(RosterEntry, agent.roster_entry_id) if agent.roster_entry_id else None
-        player_no = entry.player_no if entry else "（未配对）"
+        held = [
+            person.player_no
+            for person in agent_bindings.load_bindings(session, [agent.id]).get(agent.id, [])
+        ]
+        player_no = "、".join(held) if held else "（未配对）"
         machine_id = agent.machine_id
         session.delete(agent)
         session.add(

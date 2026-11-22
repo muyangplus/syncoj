@@ -15,11 +15,12 @@
 
 | 表 | 作用 |
 |---|---|
-| `contest` | 场次（draft/running/frozen/closed） |
+| `contest` | 场次（draft/running/frozen/closed/archived；归档见 §4.9） |
 | `player` | `(contest_id, player_no, name, seat)`。**不随机器出现自动创建**，教师应用名单才产生 |
 | `roster` / `roster_entry` | 全局可复用的名单（人）；机器永久绑 `roster_entry` |
 | `bootstrap_key` | 镜像内置的统一注册密钥（只存哈希、可吊销、带过期） |
-| `agent` | 每机 Token 哈希、`machine_uuid`、指纹、`roster_entry_id`、可选 `contest_id`、配对码哈希、吊销状态 |
+| `agent` | 每机 Token 哈希、`machine_uuid`、指纹、可选 `contest_id`、配对码哈希、吊销状态 |
+| `agent_binding` | 机器 ↔ 名单条目 `(agent_id, roster_entry_id, roster_id)`；唯一约束 `(agent_id, roster_id)` 与 `(roster_entry_id)`（一机可绑多份名单，见 §4.6） |
 | `agent_diagnostic` | 每台机器**最新一份**诊断包（解压后的 JSON 文本），新覆盖旧 |
 | `source_file` | 回收台账 `(contest, player, path, sha256, scanned_sha256, size, revision, first_seen, last_seen)`：`sha256` 是已存版本，`scanned_sha256` 是最近扫描到的，不等即待上传 |
 | `asset` | 内容寻址的下发文件 |
@@ -29,7 +30,8 @@
 | `agent_release` | Agent 版本与签名 |
 | `admin` / `admin_session` | 管理员账号与会话 |
 
-- 无 `enroll_code`（每选手注册码，已删除）与 `machine_claim` 表：未配对 = `agent.roster_entry_id IS NULL`。
+- 无 `enroll_code`（每选手注册码，已删除）与 `machine_claim` 表：未配对 = 这台机器在 `agent_binding` 里一行都没有。
+- `agent.roster_entry_id`（单值绑定）已由迁移 021 搬进 `agent_binding` 并删掉。否决保留为"主绑定"：两份真相，哪份说了算只能靠约定（[`ADR-0018`](../decisions/ADR-0018-multi-roster-binding.md)）。
 - 诊断包每台只留最新一份。否决存历史：按机器数 × 时间无限增长，旧现场几乎无用；需要旧包时自行导出。
 - `agent.diagnostics_requested_at`：「要一份诊断」的一次性标记，下一次心跳取走（响应 `diagnostics_request=true`）并清空。落库；否决只放内存：服务端在点击与心跳之间重启会静默丢失请求。
 
@@ -154,10 +156,15 @@ bootstrap.key  ──换凭据──▶  桌面「配对码.txt」 ──读码/
 1. **密钥只给 root 读**（`/etc/syncoj/bootstrap.key`，0600）；不放 chown 给选手的 `agent.ini`（泄露即无限注册）。
 2. **配对码六位数字**，只存哈希，限时 30 分钟（`pair_code_ttl_seconds`），**一次性**，绑定即作废；配对后认机器只靠 `machine_uuid`。否决更长的码：人工在屏幕与教师之间传递，越长越易抄错；"限时 + 一次性 + 管理员鉴权"已消除爆破空间。
    `claimed=false` 的机器**每次 tick 都回发此码**，明文在服务端内存留到过期或配对（库里只有哈希）；缓存规则见 [`../reference/protocol.md`](../reference/protocol.md) §3。
-3. **未配对不另立表**：`agent.roster_entry_id IS NULL`。
+3. **未配对不另立表**：机器在 `agent_binding` 里没有行。
 4. **未配对的凭据是有效凭据**（无归属）。否决按注册失败处理：Agent 会反复重注册、配对码不断更换。
-5. **一人一机、一机一人**，服务端双向强制（否则两台机器静默写同一目录）。覆盖已有绑定须走显式「改派」，再输一次配对码不能换人。
-6. **场次动态解析**：找"含此 `player_no` 且 `is_active`"的场次；0 个 →「还没有含你的场次」，多于 1 个 →「需要指定场次」，**不自动挑**。教师可在机器上钉 `Agent.contest_id` 覆盖。
+5. **一人一机；一台机器在一份名单里一人**，库里两条唯一约束强制（否则两台机器静默写同一目录）。一台机器可以同时绑多份名单（名单 A 的 1 号、名单 B 的 2 号）。覆盖某份名单里的已有绑定须走显式「改派」，再输一次配对码不能换人；配对 / 改派 / 解绑都只动那一份名单（解绑可选全部）。
+6. **场次动态解析**：机器进入场次 X 时用 **X 所用名单**（`default_roster_id`）里的那条绑定确定考号；机器在那份名单里没绑 = 不属于这一场（各名单的考号各自编号，不能跨名单按考号对）。场次没指定名单时退回按考号对应，但机器有多个考号都在场、或该考号被别的机器（任何名单）绑着时**不猜**。在全部进行中的场次里：0 个 →「还没有含你的场次」，多于 1 个 →「需要指定场次」，**不自动挑**。教师可在机器上钉 `Agent.contest_id` 覆盖（同样按场次名单取人；已归档的场次不算）。规则是纯函数 `services/bindings.pick_binding`，`/tick`、选手页、「选手状态」共用。
+
+**智能匹配（同名建议）**：配对 / 改派后，服务端在其他名单里找与这个人**同名**的条目作为建议返回（`BindResultOut.suggestions`、`GET /agents/{id}/binding-suggestions`），界面一键「同时绑定」。名单级「按姓名匹配机器」（`POST /rosters/{id}/match-machines/preview` → `/apply`）：对名单里每个未绑定的人，若**恰好一台**机器在别的名单里绑着同名者、且那台机器在本名单里还没绑，就列为一对；先预览（成对 / 冲突 / 跳过原因），确认后逐对重新校验再绑定。
+
+- 姓名比较：去首尾空白、NFKC 统一全半角后完全相等；空名不匹配。同名多人先用座位号、再用考号收窄，仍不唯一不建议；对方已有机器不建议。规则是纯函数 `services/name_match.py`。
+- 否决自动绑定（不经确认）：同名不等于同一人，绑错的后果是代码落进别人的目录。
 
 **快照还原自愈**：注册时带**硬件指纹**（SMBIOS UUID，还原后不变），服务端据此认回原机、保留配对。
 
@@ -184,7 +191,8 @@ bootstrap.key  ──换凭据──▶  桌面「配对码.txt」 ──读码/
 | 升级 Agent | **不用** | 升级包与凭据无关；验签公钥装机时随包带走 |
 | **换了人**（改派 / 解绑） | 要 | 唯一有意的重配 |
 | 全新机器 | 要 | `machine_uuid` 没见过 |
-| **名单条目被删** | 要 | 绑定落在 `roster_entry_id` 上，条目没了绑定就没了；护栏见 ../design/04-server.md §4.7 |
+| **名单条目被删** | 要（只那一份名单） | 绑定落在名单条目上，条目没了那条绑定就没了；护栏见 ../design/04-server.md §4.7 |
+| 新场次用的是**另一份**名单 | 不用逐台配 | 名单库对那份名单「按姓名匹配机器」，确认后批量绑定（§4.6 智能匹配） |
 
 **配对之后不下发任何密钥**：
 
@@ -199,11 +207,11 @@ bootstrap.key  ──换凭据──▶  桌面「配对码.txt」 ──读码/
 - 应用名单时 `prune` 默认关；**显式打开也不删已有代码或成绩的选手**，并在结果里列出。否决默认 prune：连带删提交不可逆且不报错。
 - **「默认名单」只是预设，选了不自动补人**。界面在选名单处给动作按钮「按这份名单补人」（只补不删），「选手状态」空状态里给同一按钮。`test_setting_the_default_roster_does_not_touch_players` 钉住：设/改默认名单后 `player_count` 仍为 0，显式应用后才变 1。
 
-**删名单会解绑机器，须拦截。** 机器绑 `agent.roster_entry_id`，条目随名单删除（`cascade="all, delete-orphan"`），外键 `ON DELETE SET NULL`：
+**删名单会解绑机器，须拦截。** 机器绑在名单条目上（`agent_binding`），条目随名单删除（`cascade="all, delete-orphan"`），绑定随条目级联删除：
 
 ```
-删一份名单  →  它的 roster_entry 全被删  →  绑在这些条目上的机器 roster_entry_id 变 NULL
-                                        →  那批机器回到"未配对"，重新显示配对码
+删一份名单  →  它的 roster_entry 全被删  →  这些条目上的 agent_binding 被级联删除
+                                        →  只绑这一份的机器回到"未配对"，重新显示配对码
 ```
 
 - `DELETE /rosters/{id}` 在名单里**有机器绑着的人**时**拒绝**，409 `roster_in_use`，给出台数、前几个考号和出路（先到「机器配对」改派或解绑）。否决"允许但警告"：不可逆的批量解绑，确认框会被习惯性点掉（同 ../design/05-api-and-frontend.md §5.4）。
@@ -238,3 +246,10 @@ raw.execute("PRAGMA foreign_keys=ON")
 - 老库升级：数据不少、关联表未被级联删除、跑第二遍是空操作、全新库与升级库结构一致。
 
 开发期：`syncoj-server db reset --yes` 重建空库（可选 `--keep-admin`），迁移不需兼容全部旧结构。
+
+### 4.9 场次归档
+
+- 状态 `archived`：数据（选手、代码台账、成绩、资产）一行不动，可查看、导出；**不参与任何自动流程**：机器动态解析不到它（与 `closed` 一样不收代码、不下发，钉在它上面的机器也安静等着）、成绩扫描跳过、不排自带评测（排队中的任务归档时标失败「场次已归档」）、到点自动结束不碰它。
+- 接口：`POST /contests/{id}/archive` / `unarchive`（取消归档回到 `closed`）；`PATCH` 改 `status=archived` 走同一套规矩。可逆，**不要名称确认**；`running` / `frozen` 回 409 `contest_running`（先结束）。`GET /contests?archived=false|true` 筛选。
+- 界面：侧栏「场次管理」下二级项「全部场次 / 已归档」；场次管理页与顶栏下拉默认不列已归档（下拉里「显示已归档」开关）。
+- 否决归档 = 删除或导出后删除：归档的意义是"收起来但随时能翻"，硬删走 §5.4 的另一条路。

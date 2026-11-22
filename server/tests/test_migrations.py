@@ -121,7 +121,7 @@ CREATE TABLE agent_release (
 #: 这份清单对不上，测试就红 —— 那正是我们要拦的时刻。
 MIGRATION_ADDED_COLUMNS = {
     "agent": {
-        "roster_entry_id",
+        #: ``roster_entry_id`` 曾经在这里（迁移 002 加、021 搬进 ``agent_binding`` 后删掉）
         "contest_id",
         "machine_uuid",
         "machine_fingerprint",
@@ -356,7 +356,9 @@ def test_legacy_upgrade_adds_the_new_columns(legacy_db: Path) -> None:
     agent_columns = {c["name"] for c in inspect(engine).get_columns("agent")}
     contest_columns = {c["name"] for c in inspect(engine).get_columns("contest")}
 
-    assert {"roster_entry_id", "contest_id", "machine_uuid", "pair_code_hash"} <= agent_columns
+    assert {"contest_id", "machine_uuid", "pair_code_hash"} <= agent_columns
+    # 单值绑定列已经搬进 agent_binding（迁移 021）
+    assert "roster_entry_id" not in agent_columns
     assert {"default_roster_id"} <= contest_columns
     # 上一轮加的列也要被基线补齐（它当年没留迁移记录）
     assert "file_patterns" in {c["name"] for c in inspect(engine).get_columns("problem")}
@@ -482,7 +484,7 @@ def test_release_survives_its_bootstrap_key_being_deleted(legacy_db: Path) -> No
 def test_legacy_upgrade_removes_the_retired_tables(legacy_db: Path) -> None:
     """注册码与待认领表整条链路都去掉了。
 
-    新模型里"未配对"只是 ``agent.roster_entry_id IS NULL``，不需要单独一张表；
+    新模型里"未配对"只是"机器在 ``agent_binding`` 里没有行"，不需要单独一张表；
     注册码被统一密钥 + 配对取代。
     """
     engine = make_engine(legacy_db)
@@ -628,6 +630,8 @@ def test_fresh_and_upgraded_databases_have_the_same_shape(
         #: 诊断包表（迁移 012）。每台机器只留最新一份，同样由 create_all 负责建；
         #: 放进这份清单是为了让它也受"全新库与升级库结构一致"的看守。
         "agent_diagnostic",
+        #: 机器 ↔ 名单绑定（迁移 021）：一台机器可以绑多份名单
+        "agent_binding",
     ]
     fresh_tables = set(inspect(fresh).get_table_names())
     for table in interesting:
@@ -784,3 +788,46 @@ def test_019_题目加输入输出文件名两列_老题目为空(workdir: Path)
     assert any(step.startswith("019 ") for step in applied)
     assert {"input_file", "output_file"} <= columns
     assert [tuple(row) for row in values] == [(None, None)]
+
+
+def test_021_单值绑定搬进_agent_binding_并删掉老列(workdir: Path) -> None:
+    """019 的库（``agent.roster_entry_id`` 单值绑定）升上来：绑定逐条搬进 ``agent_binding``
+    （``roster_id`` 取条目所在名单），老列被重建删掉，未配对的机器仍然没有绑定。"""
+    engine = make_engine(workdir / "v19.db")
+    with engine.begin() as conn:
+        for statement in (
+            "CREATE TABLE roster (id INTEGER PRIMARY KEY, name VARCHAR(200) NOT NULL UNIQUE,"
+            " note TEXT, created_at DATETIME NOT NULL)",
+            "CREATE TABLE roster_entry (id INTEGER PRIMARY KEY, roster_id INTEGER NOT NULL"
+            " REFERENCES roster(id) ON DELETE CASCADE, player_no VARCHAR(64) NOT NULL,"
+            " name VARCHAR(64), seat VARCHAR(32), group_name VARCHAR(64), created_at DATETIME NOT NULL)",
+            "CREATE TABLE agent (id INTEGER PRIMARY KEY, roster_entry_id INTEGER REFERENCES"
+            " roster_entry(id) ON DELETE SET NULL, contest_id INTEGER, token_hash VARCHAR(64) NOT NULL"
+            " UNIQUE, machine_id VARCHAR(128) NOT NULL, machine_uuid VARCHAR(64), hostname VARCHAR(128),"
+            " enrolled_at DATETIME NOT NULL, last_enrolled_at DATETIME NOT NULL, claimed_at DATETIME,"
+            " created_at DATETIME NOT NULL)",
+            "CREATE INDEX ix_agent_roster_entry ON agent (roster_entry_id)",
+            "INSERT INTO roster VALUES (1, '一班', NULL, '2026-01-01'), (2, '考场', NULL, '2026-01-01')",
+            "INSERT INTO roster_entry VALUES (10, 1, 'S001', '张三', NULL, NULL, '2026-01-01'),"
+            " (20, 2, 'K01', '李四', NULL, NULL, '2026-01-01')",
+            "INSERT INTO agent (id, roster_entry_id, token_hash, machine_id, enrolled_at,"
+            " last_enrolled_at, claimed_at, created_at) VALUES"
+            " (1, 10, 'h1', 'm1', '2026-01-01', '2026-01-01', '2026-01-02 08:00:00', '2026-01-01'),"
+            " (2, 20, 'h2', 'm2', '2026-01-01', '2026-01-01', NULL, '2026-01-01'),"
+            " (3, NULL, 'h3', 'm3', '2026-01-01', '2026-01-01', NULL, '2026-01-01')",
+            "PRAGMA user_version = 19",
+        ):
+            conn.execute(text(statement))
+
+    applied = migrations.migrate(engine)
+
+    assert any(step.startswith("021 ") for step in applied)
+    assert "roster_entry_id" not in {c["name"] for c in inspect(engine).get_columns("agent")}
+    moved = rows(engine, "SELECT agent_id, roster_entry_id, roster_id FROM agent_binding ORDER BY agent_id")
+    assert [tuple(row) for row in moved] == [(1, 10, 1), (2, 20, 2)]
+    assert str(rows(engine, "SELECT created_at FROM agent_binding WHERE agent_id = 1")[0][0]).startswith(
+        "2026-01-02"
+    ), "绑定时间沿用当时的配对时间"
+    assert rows(engine, "SELECT COUNT(*) FROM agent")[0][0] == 3, "重建不能丢机器"
+    assert migrations.migrate(engine) == [], "重跑是空操作"
+    engine.dispose()

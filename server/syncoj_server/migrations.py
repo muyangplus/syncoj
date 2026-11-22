@@ -313,8 +313,15 @@ def _bind_legacy_agents_to_roster(engine: Engine, bindings: List[Tuple[int, str]
                 {"no": player_no},
             ).fetchall()
             if len(candidates) == 1:
+                # 当年写的是 ``agent.roster_entry_id``；那一列在迁移 021 搬进了
+                # ``agent_binding``，而重建按**当前模型**建表 —— 所以这里直接写绑定表
                 conn.execute(
-                    text("UPDATE agent SET roster_entry_id = :rid WHERE id = :aid"),
+                    text(
+                        "INSERT OR IGNORE INTO agent_binding "
+                        "(agent_id, roster_entry_id, roster_id, created_at) "
+                        "SELECT :aid, e.id, e.roster_id, CURRENT_TIMESTAMP "
+                        "FROM roster_entry e WHERE e.id = :rid"
+                    ),
                     {"rid": candidates[0][0], "aid": agent_id},
                 )
                 bound += 1
@@ -656,6 +663,31 @@ def _migration_019_problem_io_files(engine: Engine) -> None:
         _add_column(engine, "problem", name, "VARCHAR(64)")
 
 
+def _migration_021_agent_binding(engine: Engine) -> None:
+    """机器可以同时绑多份名单：``agent.roster_entry_id`` 搬进 ``agent_binding`` 后删掉。
+
+    ``agent_binding`` 由 ``create_all`` 建；这里把老的单值绑定逐条搬过去
+    （``roster_id`` 取条目所在的名单），再按 :func:`_rebuild_table` 的配方重建
+    ``agent`` 去掉那一列。``INSERT OR IGNORE`` 让重跑是空操作；老库里"一人一机"
+    由应用层守着，搬过来不会撞 ``(roster_entry_id)`` 唯一约束。
+    """
+    if "agent" not in _tables(engine) or "roster_entry_id" not in _columns(engine, "agent"):
+        return
+    with engine.begin() as conn:
+        moved = conn.execute(
+            text(
+                "INSERT OR IGNORE INTO agent_binding "
+                "(agent_id, roster_entry_id, roster_id, created_at) "
+                "SELECT a.id, e.id, e.roster_id, COALESCE(a.claimed_at, CURRENT_TIMESTAMP) "
+                "FROM agent a JOIN roster_entry e ON e.id = a.roster_entry_id "
+                "WHERE a.roster_entry_id IS NOT NULL ORDER BY a.id"
+            )
+        ).rowcount
+    if moved:
+        log.info("迁移：%d 条机器绑定搬进 agent_binding", moved)
+    _rebuild_table(engine, "agent")
+
+
 MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
     (1, "统一密钥注册 + 名单库所需的结构", _migration_001_enrollment),
     (2, "机器永久绑定名单条目；去掉注册码链路", _migration_002_roster_binding),
@@ -735,6 +767,12 @@ MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
         19,
         "题目可自定义文件 IO 的输入/输出文件名",
         _migration_019_problem_io_files,
+    ),
+    # 020 留给并行分支（评测：source_version 表、场次 auto_judge 列），合并时按序排好
+    (
+        21,
+        "机器可以同时绑多份名单：绑定搬进 agent_binding",
+        _migration_021_agent_binding,
     ),
 ]
 

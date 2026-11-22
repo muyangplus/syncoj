@@ -32,6 +32,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..models import Agent, BootstrapKey, Contest, EventLog, Player, RosterEntry, utcnow
+from . import bindings
 from ..security import hash_bootstrap_key, hash_pair_code, hash_token
 from ..security import new_pair_code as _new_pair_code
 
@@ -43,7 +44,6 @@ __all__ = [
     "bind_machine",
     "enroll_machine",
     "find_unbound_by_pair_code",
-    "machines_holding_player_no",
     "unique_pair_code",
     "fingerprint_duplicates",
     "issue_pair_code",
@@ -149,7 +149,7 @@ def _unbound_with_codes(session: Session) -> List[Agent]:
     return list(
         session.execute(
             select(Agent).where(
-                Agent.roster_entry_id.is_(None),
+                ~Agent.bindings.any(),
                 Agent.pair_code_hash.isnot(None),
                 Agent.revoked_at.is_(None),
             )
@@ -192,26 +192,6 @@ def unique_pair_code(session: Session, now, length: int, attempts: int = 20) -> 
 # --------------------------------------------------------------------------- #
 # 指纹
 # --------------------------------------------------------------------------- #
-
-
-def machines_holding_player_no(
-    session: Session, player_no: str, exclude_agent_id: Optional[int] = None
-) -> List[Agent]:
-    """已经绑到**这个考号**（不论哪份名单里的条目）的未作废机器。
-
-    "一人一机"必须按考号判，不能按名单条目判：机器的身份解析按 ``player_no``
-    跨名单、跨场次找人（``api/deps.resolve_machine``），而班级名单和考场名单同时
-    含同一个人是常态。按条目判时，两台机器分别绑到两份名单里的 S001，tick 出来
-    都是 S001 —— 正是"两台机器往同一个 source/ 目录静默写代码"。
-    """
-    stmt = (
-        select(Agent)
-        .join(RosterEntry, Agent.roster_entry_id == RosterEntry.id)
-        .where(RosterEntry.player_no == player_no, Agent.revoked_at.is_(None))
-    )
-    if exclude_agent_id is not None:
-        stmt = stmt.where(Agent.id != exclude_agent_id)
-    return list(session.execute(stmt).scalars())
 
 
 def _machine_by_uuid(session: Session, machine_uuid: Optional[str]) -> Optional[Agent]:
@@ -391,7 +371,8 @@ def enroll_machine(
 
     # 还没配对的机器重新注册时换一个新码：教师手上那个可能早就过期了
     new_code = None
-    if agent.roster_entry_id is None:
+    paired = agent.is_paired
+    if not paired:
         new_code = raw_pair_code
         issue_pair_code(agent, now, new_code, pair_code_ttl_seconds)
 
@@ -402,9 +383,7 @@ def enroll_machine(
             message="机器重新注册（按 %s 认回，%s）"
             % (
                 matched_by or "machine_id",
-                "已配对给 %s" % agent.roster_entry_id
-                if agent.roster_entry_id is not None
-                else "尚未配对",
+                "已配对 %d 份名单" % len(agent.bindings) if paired else "尚未配对",
             ),
         )
     )
@@ -427,47 +406,17 @@ def bind_machine(
 ) -> BindOutcome:
     """把一台机器配对到名单里的某个人。**这是永久绑定。**
 
-    两条必须守住的规则：
+    一台机器可以同时绑多份名单（每份名单里一个人），所以这里只管 ``entry`` 所在的
+    那一份；规则（见 ``services/bindings.bind``）：
 
     1. **一个人只能有一台机器。** 两台机器绑同一个人，代码会往同一个目录里写，
        而且完全静默（成绩矩阵只是看起来"这个人交了两遍"）。
-    2. **一台机器只能属于一个人。** 覆盖已有绑定要显式「改派」，
+    2. **一台机器在一份名单里只能是一个人。** 覆盖已有绑定要显式「改派」，
        不能让"再输一次配对码"悄悄换掉一个人的身份 —— 那可能是教师在另一台
        机器上输错了数字。
     """
-    now = now or utcnow()
-
-    if agent.roster_entry_id is not None and agent.roster_entry_id != entry.id:
-        current = session.get(RosterEntry, agent.roster_entry_id)
-        raise BootstrapRejected(
-            "这台机器已经配对给 %s 了。要换人请用「改派」，"
-            "或者在列表里先解除绑定。" % (current.player_no if current else "?"),
-            status_code=409,
-            code="machine_already_bound",
-        )
-
-    taken = machines_holding_player_no(session, entry.player_no, exclude_agent_id=agent.id)
-    if taken:
-        raise BootstrapRejected(
-            "%s 已经有一台机器了（%s）。要换机器请先作废那一台，或用「改派」。"
-            % (entry.player_no, taken[0].machine_id[:16]),
-            status_code=409,
-            code="roster_entry_taken",
-        )
-
-    agent.roster_entry_id = entry.id
-    agent.claimed_at = now
-    # 配对码是一次性的：用过就作废，且只在绑定时用
-    agent.pair_code_hash = None
-    agent.pair_code_expires_at = None
-
-    session.add(
-        EventLog(
-            level="info",
-            category="bind",
-            message="机器配对：%s ← %s @ %s"
-            % (entry.player_no, agent.hostname or "未知主机", agent.machine_id[:16]),
-        )
-    )
-    session.flush()
+    try:
+        bindings.bind(session, agent, entry, now or utcnow())
+    except bindings.BindingConflict as exc:
+        raise BootstrapRejected(exc.detail, status_code=exc.status_code, code=exc.code)
     return BindOutcome(agent=agent, entry=entry)

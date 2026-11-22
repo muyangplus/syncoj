@@ -836,7 +836,7 @@ def _cmd_bootstrap_key(args: argparse.Namespace) -> int:
             agents = list(
                 session.execute(
                     select(Agent)
-                    .where(Agent.roster_entry_id.is_(None), Agent.revoked_at.is_(None))
+                    .where(~Agent.bindings.any(), Agent.revoked_at.is_(None))
                     .order_by(Agent.last_seen_at.desc().nullslast(), Agent.id)
                 ).scalars()
             )

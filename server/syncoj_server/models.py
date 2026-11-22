@@ -43,6 +43,7 @@ __all__ = [
     "Roster",
     "BootstrapKey",
     "Agent",
+    "AgentBinding",
     "AgentDiagnostic",
     "SourceFile",
     "Asset",
@@ -106,8 +107,12 @@ class ContestStatus:
     RUNNING = "running"
     FROZEN = "frozen"
     CLOSED = "closed"
+    #: 已归档：数据全部保留、可查看可导出，但**不再参与任何自动流程** —— 机器动态解析
+    #: 不到它（与 ``closed`` 一样不收代码、不下发）、成绩扫描跳过它、不排自带评测，
+    #: 场次下拉默认不显示。取消归档回到 ``closed``（§4.9）。
+    ARCHIVED = "archived"
 
-    ALL = (DRAFT, RUNNING, FROZEN, CLOSED)
+    ALL = (DRAFT, RUNNING, FROZEN, CLOSED, ARCHIVED)
 
 
 class DeployStatus:
@@ -180,8 +185,9 @@ class Contest(Base, TimestampMixin):
     note = Column(Text, nullable=True)
 
     #: 默认名单。建场次时从名单库挑一份，之后可以「一键应用」把名单落到选手表。
-    #: 只是**模板**，不参与鉴权也不参与成绩 —— 改了名单不会动已有选手，
-    #: 得显式应用一次。这样"名单调整"和"比赛数据"永远是两件分开的事。
+    #: 对**选手表**它只是模板 —— 改了名单不会动已有选手，得显式应用一次。
+    #: 但它决定**机器进这一场时用哪条绑定**：一台机器可以同时绑多份名单，
+    #: 场次用的是这份名单里的那条（§4.6）。没指定时退回按考号对应。
     default_roster_id = Column(Integer, ForeignKey("roster.id", ondelete="SET NULL"), nullable=True)
 
     players = relationship("Player", back_populates="contest", cascade="all, delete-orphan")
@@ -197,6 +203,10 @@ class Contest(Base, TimestampMixin):
         把封榜的场次排除掉，会让封榜瞬间所有机器都"找不到场次"而停摆。
         """
         return self.status in (ContestStatus.RUNNING, ContestStatus.FROZEN)
+
+    @property
+    def is_archived(self) -> bool:
+        return self.status == ContestStatus.ARCHIVED
 
 
 # --------------------------------------------------------------------------- #
@@ -280,7 +290,7 @@ class Player(Base, TimestampMixin):
     """某个场次的参赛者。
 
     它是**名单库条目在那个场次的物化**：``player_no`` 与名单条目一致。
-    机器绑的是名单里的人（``Agent.roster_entry_id``），所以同一个人换一场比赛
+    机器绑的是名单里的人（``AgentBinding``），所以同一个人换一场比赛
     不需要重新配对 —— 只要新场次应用了那份名单，他的机器自然就认得路。
     """
 
@@ -375,18 +385,14 @@ class Agent(Base, TimestampMixin):
     老模型里 ``agent.player_id`` 指向某个场次的 ``player``，于是"这台机器是谁的"
     会随场次变化，题库里每换一场就得重新发码、重新认领一次。
 
-    现在绑的是**名单库条目**（``roster_entry_id``）。名单条目代表一个学生，
-    与场次无关；某个场次有没有他，取决于那份名单有没有被应用到场次里。
-    所以今天绑的机器，明天换一场比赛照样能用 —— 这才是"永久配对"该有的样子。
+    现在绑的是**名单库条目**，而且**可以同时绑多份名单**（``agent_binding``，
+    每份名单里至多一人）：同一台机器可以是「班级名单」的 1 号，同时是「考场名单」
+    的 2 号。进入某个场次时用的是**该场次所用名单**里的那条绑定（见
+    ``services/bindings.py``），所以今天绑的机器，明天换一场比赛照样能用。
 
-    ``roster_entry_id`` 为空表示**还没配对**：机器已经注册上来、有凭据，
-    但服务端还不知道它是谁的。这个状态以前放在单独一张 ``machine_claim`` 表里，
-    目的是绕开"改 ``player_id`` 可空性要重建表"这件事；既然这次无论如何都要
-    重建 ``agent``（``player_id`` 整个不要了），就该把两种状态收进同一张表 ——
-    一张表、一次查询、一套状态机，比两张表少一半的分支。
-
-    ``registration_mode`` 一类的场次级开关也随之消失了：只剩一条注册路径，
-    没有"两种模式"可选，也就没有"选错了模式"这种事。
+    一条绑定都没有表示**还没配对**：机器已经注册上来、有凭据，但服务端还不知道
+    它是谁的。曾经是单值列 ``roster_entry_id``（迁移 021 搬进 ``agent_binding``
+    并删掉）；留着它当"主绑定"会出现两份真相，哪一份说了算只能靠约定。
     """
 
     __tablename__ = "agent"
@@ -394,10 +400,6 @@ class Agent(Base, TimestampMixin):
     id = Column(Integer, primary_key=True)
 
     # ---- 身份 ----
-    #: 绑定的名单条目（人）。为空 = 已注册但未配对
-    roster_entry_id = Column(
-        Integer, ForeignKey("roster_entry.id", ondelete="SET NULL"), nullable=True
-    )
     #: 显式指定的场次。为空 = **动态解析**：找一个"进行中且名单含此人"的场次。
     #: 一个考点同时跑多场比赛、同一个人两边都在时才需要显式指定
     contest_id = Column(Integer, ForeignKey("contest.id", ondelete="SET NULL"), nullable=True)
@@ -463,14 +465,59 @@ class Agent(Base, TimestampMixin):
     #: 完成配对的时间
     claimed_at = Column(DateTime, nullable=True)
 
-    roster_entry = relationship("RosterEntry")
     contest = relationship("Contest")
+    #: 这台机器在各份名单里的绑定（每份名单至多一条）。空 = 未配对
+    bindings = relationship(
+        "AgentBinding",
+        back_populates="agent",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="AgentBinding.id",
+    )
 
     __table_args__ = (
         UniqueConstraint("machine_uuid", name="uq_agent_uuid"),
         Index("ix_agent_machine", "machine_id"),
         Index("ix_agent_fingerprint", "machine_fingerprint"),
-        Index("ix_agent_roster_entry", "roster_entry_id"),
+    )
+
+    @property
+    def is_paired(self) -> bool:
+        """至少绑了一份名单里的一个人。"""
+        return bool(self.bindings)
+
+
+class AgentBinding(Base):
+    """机器 ↔ 某份名单里的某个人（§4.6）。
+
+    两条唯一约束就是"一人一机、一机一人"在多名单下的样子：
+
+    * ``(agent_id, roster_id)``：一台机器在**一份名单里**只对应一个人
+    * ``(roster_entry_id)``：一个人只对应一台机器
+
+    ``roster_id`` 是冗余（条目自己知道在哪份名单），留着它只为了让第一条约束能由
+    库来守 —— 靠应用层先查再写，并发配对时守不住。条目、名单、机器任一被删，
+    绑定随之级联删除（条目没了绑定就没了，与以前 ``SET NULL`` 的效果相同）。
+    """
+
+    __tablename__ = "agent_binding"
+
+    id = Column(Integer, primary_key=True)
+    agent_id = Column(Integer, ForeignKey("agent.id", ondelete="CASCADE"), nullable=False)
+    roster_entry_id = Column(
+        Integer, ForeignKey("roster_entry.id", ondelete="CASCADE"), nullable=False
+    )
+    roster_id = Column(Integer, ForeignKey("roster.id", ondelete="CASCADE"), nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+
+    agent = relationship("Agent", back_populates="bindings")
+    entry = relationship("RosterEntry")
+    roster = relationship("Roster")
+
+    __table_args__ = (
+        UniqueConstraint("agent_id", "roster_id", name="uq_agent_binding_roster"),
+        UniqueConstraint("roster_entry_id", name="uq_agent_binding_entry"),
+        Index("ix_agent_binding_roster", "roster_id"),
     )
 
 

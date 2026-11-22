@@ -1,4 +1,4 @@
-"""配对与机器身份：移除后能回来、一个考号只能有一台机器。"""
+"""配对与机器身份：移除后能回来、配对码查重。多名单绑定见 test_multi_roster_binding.py。"""
 
 from __future__ import annotations
 
@@ -53,28 +53,6 @@ def test_老库里已作废的行不再挡住同一台机器注册(client, admin
     again = enroll_machine(client, bootstrap_key, machine_uuid=first["machine_uuid"])
 
     assert again["agent_id"] in pending_ids(client, admin_headers)
-
-
-def test_两份名单里的同一个考号不能各绑一台机器(client, admin_headers, bootstrap_key, enrolled) -> None:
-    """审计 S2：一人一机曾按名单条目判。班级名单与考场名单同时含 S001 是常态，
-    两台机器分别绑到两份名单里的 S001，tick 出来都是 S001，往同一个 source/ 写。"""
-    from conftest import make_roster
-
-    other = make_roster(
-        client, admin_headers, name="考场名单",
-        entries=[{"player_no": "S001", "name": "同一个人"}],
-    )
-    entry_id = other["entries"][0]["id"]
-    second = enroll_machine(client, bootstrap_key, hostname="pc-2")
-
-    response = client.post(
-        "/api/v1/admin/machines/bind-by-code",
-        json={"pair_code": second["pair_code"], "roster_entry_id": entry_id},
-        headers=admin_headers,
-    )
-
-    assert response.status_code == 409, response.text
-    assert response.json()["code"] == "roster_entry_taken"
 
 
 def test_发码时不与仍有效的码重复(app, monkeypatch) -> None:

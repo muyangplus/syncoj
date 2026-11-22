@@ -5,7 +5,8 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
-import { judgingApi } from '@/api'
+import { JUDGE_EXPORT_FORMATS, judgeIoApi, judgingApi } from '@/api'
+import type { JudgeExportFormat } from '@/api'
 import type { ProblemOut } from '@/api/types'
 import { useMutation } from '@/composables/useMutation'
 
@@ -110,6 +111,24 @@ async function removeTestdata(): Promise<void> {
   }
 }
 
+async function downloadTestdata(): Promise<void> {
+  if (!current.value?.testdata) return
+  try {
+    await judgeIoApi.downloadTestdata(current.value.id, current.value.testdata.name || 'testdata.zip')
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  }
+}
+
+async function exportProblem(format: JudgeExportFormat): Promise<void> {
+  if (!current.value) return
+  try {
+    await judgeIoApi.exportProblem(current.value.id, format)
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  }
+}
+
 function formatSize(bytes: number): string {
   if (bytes >= 1 << 20) return `${(bytes / (1 << 20)).toFixed(1)} MB`
   return `${Math.max(1, Math.round(bytes / 1024))} KB`
@@ -166,10 +185,30 @@ function formatSize(bytes: number): string {
               </span>
             </template>
             <span v-else class="muted">无</span>
-            <div>
+            <div class="testdata-actions">
               <el-button :loading="uploading" @click="fileInput?.click()">
                 <el-icon><Upload /></el-icon>上传 zip
               </el-button>
+              <el-button v-if="current?.testdata" @click="downloadTestdata">
+                <el-icon><Download /></el-icon>下载
+              </el-button>
+              <el-dropdown trigger="click" @command="exportProblem">
+                <el-button>
+                  导出<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+                </el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item
+                      v-for="f in JUDGE_EXPORT_FORMATS"
+                      :key="f.value"
+                      :command="f.value"
+                      :disabled="f.value !== 'syncoj' && !current?.testdata"
+                    >
+                      {{ f.label }}
+                    </el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
               <el-button v-if="current?.testdata" type="danger" plain @click="removeTestdata">
                 删除
               </el-button>
@@ -191,6 +230,14 @@ function formatSize(bytes: number): string {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+.testdata-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.testdata-actions :deep(.el-button + .el-button) {
+  margin-left: 0;
 }
 .testdata .mono {
   color: var(--sj-text);

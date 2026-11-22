@@ -6,13 +6,16 @@ import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
-import { judgingApi, problemApi } from '@/api'
+import { JUDGE_EXPORT_FORMATS, judgingApi, problemApi } from '@/api'
+import type { JudgeExportFormat } from '@/api'
 import { ApiError } from '@/api/client'
 import type { BuiltinJudgeProgressOut, JudgeWorkerOut, ProblemOut } from '@/api/types'
 import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
 import PageShell from '@/components/PageShell.vue'
 import SectionCard from '@/components/SectionCard.vue'
 import ProblemJudgeDialog from '@/components/ProblemJudgeDialog.vue'
+import JudgeExportDialog from '@/components/JudgeExportDialog.vue'
+import JudgeImportDialog from '@/components/JudgeImportDialog.vue'
 import { usePolling } from '@/composables/usePolling'
 import { useContestStore } from '@/stores/contest'
 import { formatTime } from '@/utils/format'
@@ -91,6 +94,17 @@ function openSetting(row: ProblemOut): void {
 function ioLabel(row: ProblemOut): string {
   if (row.io_mode !== 'file') return '标准输入输出'
   return `${row.input_file || `${row.ident}.in`} / ${row.output_file || `${row.ident}.out`}`
+}
+
+// ---- 导入 / 导出题目配置 ----
+
+const importOpen = ref(false)
+const exportOpen = ref(false)
+const exportFormat = ref<JudgeExportFormat>('syncoj')
+
+function openExport(format: JudgeExportFormat): void {
+  exportFormat.value = format
+  exportOpen.value = true
 }
 
 // ---- 排任务 ----
@@ -205,6 +219,23 @@ async function confirmRemove(): Promise<void> {
     </template>
 
     <SectionCard title="题目" :meta="`自带评测 ${builtin.length} / ${problems.length} 道`" flush>
+      <template #extra>
+        <el-button :disabled="!contest.currentId" @click="importOpen = true">
+          <el-icon><Upload /></el-icon>导入题目配置
+        </el-button>
+        <el-dropdown trigger="click" :disabled="!problems.length" @command="openExport">
+          <el-button :disabled="!problems.length">
+            <el-icon><Download /></el-icon>导出<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item v-for="f in JUDGE_EXPORT_FORMATS" :key="f.value" :command="f.value">
+                {{ f.label }}
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+      </template>
     <el-table v-loading="loading" :data="problems">
       <el-table-column label="题目" width="160">
         <template #default="{ row }">
@@ -354,6 +385,13 @@ async function confirmRemove(): Promise<void> {
     </SectionCard>
 
     <ProblemJudgeDialog v-model="settingOpen" :problem="settingTarget" @saved="loadProblems" />
+    <JudgeImportDialog v-model="importOpen" :contest-id="contest.currentId" @imported="loadProblems" />
+    <JudgeExportDialog
+      v-model="exportOpen"
+      :contest-id="contest.currentId"
+      :problems="problems"
+      :format="exportFormat"
+    />
     <ConfirmByNameDialog
       v-model="removeOpen"
       title="吊销评测机？"

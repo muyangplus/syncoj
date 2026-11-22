@@ -925,6 +925,95 @@ class ProblemImportOut(_Base):
     errors: List[str] = Field(default_factory=list)
 
 
+# ---- 题目评测配置导入 / 导出 ----
+
+#: 导入接受的格式；auto = 自动识别
+JudgeImportFormat = Literal["auto", "syncoj", "hoj", "lemonlime", "hydro", "qduoj", "fps"]
+#: 能导出的格式
+JudgeExportFormat = Literal["syncoj", "hoj", "lemonlime", "hydro"]
+JudgeImportAction = Literal["create", "update", "skip"]
+
+
+class NoticeOut(_Base):
+    """导入 / 导出的一条警告或错误。``message`` 是给人看的中文。"""
+
+    code: str
+    message: str
+
+
+class JudgeImportItemOut(_Base):
+    key: str
+    source_name: str
+    #: 建议的题目标识（应用时可改）
+    ident: str
+    title: Optional[str] = None
+    exists: bool = False
+    existing_problem_id: Optional[int] = None
+    #: 默认动作：有错误 → skip；同名题已存在 → update；否则 create
+    action: JudgeImportAction = "create"
+    judge_mode: str = "builtin"
+    time_limit_ms: Optional[int] = None
+    memory_limit_mb: Optional[int] = None
+    io_mode: str = "stdio"
+    input_file: Optional[str] = None
+    output_file: Optional[str] = None
+    compile_flags: Optional[str] = None
+    cases: int = 0
+    subtasks: int = 0
+    total_score: int = 0
+    has_checker: bool = False
+    warnings: List[NoticeOut] = Field(default_factory=list)
+    errors: List[NoticeOut] = Field(default_factory=list)
+
+
+class JudgeImportPreviewOut(_Base):
+    token: str
+    #: 识别出的格式 id
+    format: str
+    problems: List[JudgeImportItemOut] = Field(default_factory=list)
+    #: 整包级提示
+    warnings: List[NoticeOut] = Field(default_factory=list)
+
+
+class JudgeImportApplyItem(_Base):
+    key: str = Field(min_length=1, max_length=200)
+    ident: str = Field(min_length=1, max_length=64)
+    action: JudgeImportAction
+
+
+class JudgeImportApplyIn(_Base):
+    token: str = Field(min_length=1, max_length=64)
+    items: List[JudgeImportApplyItem] = Field(default_factory=list, max_length=200)
+    #: 覆盖已有题目时是否把评测方式改为自带评测（新建的题一律自带评测；原生格式按包里的值）
+    set_builtin: bool = True
+
+
+class JudgeImportErrorOut(_Base):
+    key: str
+    message: str
+
+
+class JudgeImportOut(_Base):
+    created: int = 0
+    updated: int = 0
+    skipped: int = 0
+    problems: List[ProblemOut] = Field(default_factory=list)
+    errors: List[JudgeImportErrorOut] = Field(default_factory=list)
+
+
+class JudgeExportItemOut(_Base):
+    problem_id: int
+    ident: str
+    #: 是否写进包里（非原生格式跳过没有数据包的题）
+    included: bool
+    warnings: List[NoticeOut] = Field(default_factory=list)
+
+
+class JudgeExportPreviewOut(_Base):
+    format: str
+    problems: List[JudgeExportItemOut] = Field(default_factory=list)
+
+
 class ProblemMatchIn(_Base):
     """拿一条相对路径来试算归题结果。
 

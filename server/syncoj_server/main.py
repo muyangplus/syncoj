@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from . import __version__, errors
 from .api import admin as admin_api
 from .api import admin_judge as admin_judge_api
+from .api import admin_problem_io as admin_problem_io_api
 from .api import judge as judge_api
 from .api import agent as agent_api
 from .api import meta as meta_api
@@ -89,6 +90,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     app.include_router(meta_api.router)
     app.include_router(admin_api.router)
     app.include_router(admin_judge_api.router)
+    app.include_router(admin_problem_io_api.router)
     app.include_router(judge_api.router)
 
     _install_public_port_gate(app)

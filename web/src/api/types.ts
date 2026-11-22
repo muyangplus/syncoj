@@ -128,6 +128,16 @@ export type ContestStatus = 'draft' | 'running' | 'frozen' | 'closed'
 // ---- 自带评测（§12）----
 export type ProblemJudgeIn = S['ProblemJudgeIn']
 export type ProblemTestdataOut = S['ProblemTestdataOut']
+
+/** 题目评测配置导入 / 导出 */
+export type NoticeOut = S['NoticeOut']
+export type JudgeImportItemOut = S['JudgeImportItemOut']
+export type JudgeImportPreviewOut = S['JudgeImportPreviewOut']
+export type JudgeImportApplyIn = S['JudgeImportApplyIn']
+export type JudgeImportApplyItem = S['JudgeImportApplyItem']
+export type JudgeImportOut = S['JudgeImportOut']
+export type JudgeExportItemOut = S['JudgeExportItemOut']
+export type JudgeExportPreviewOut = S['JudgeExportPreviewOut']
 export type BuiltinJudgeIn = S['BuiltinJudgeIn']
 export type BuiltinJudgeQueuedOut = S['BuiltinJudgeQueuedOut']
 export type BuiltinJudgeProgressOut = S['BuiltinJudgeProgressOut']

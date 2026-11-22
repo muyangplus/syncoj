@@ -750,3 +750,53 @@ def test_match_requires_admin(client: TestClient, contest: dict) -> None:
         "/api/v1/admin/contests/%d/problems/match" % contest["id"], json={"path": "p1/a.cpp"}
     )
     assert response.status_code == 401
+
+
+# --------------------------------------------------------------------------- #
+# 文件 IO 的自定义输入/输出文件名
+# --------------------------------------------------------------------------- #
+
+
+def put_judge(client: TestClient, problem: dict, headers: dict, **extra):
+    body = {"judge_mode": "builtin", "io_mode": "file"}
+    body.update(extra)
+    return client.put("/api/v1/admin/problems/%d/judge" % problem["id"], json=body, headers=headers)
+
+
+def test_io_file_names_round_trip(client: TestClient, contest: dict, admin_headers: dict) -> None:
+    problem = add_problems(client, contest, admin_headers, [{"ident": "ab"}]).json()["problems"][0]
+    assert problem["input_file"] is None and problem["output_file"] is None
+
+    response = put_judge(client, problem, admin_headers, input_file="sum.in", output_file="sum.out")
+    assert response.status_code == 200, response.text
+    assert (response.json()["input_file"], response.json()["output_file"]) == ("sum.in", "sum.out")
+    listed = list_problems(client, contest, admin_headers)[0]
+    assert (listed["input_file"], listed["output_file"]) == ("sum.in", "sum.out")
+
+    # PUT 是整体覆盖：不传 / 留空 = 回到默认名
+    cleared = put_judge(client, problem, admin_headers, input_file="  ").json()
+    assert cleared["input_file"] is None and cleared["output_file"] is None
+
+
+@pytest.mark.parametrize("field", ["input_file", "output_file"])
+@pytest.mark.parametrize(
+    "name",
+    ["prog", "main.cpp", "chk", "in.txt", "ans.txt", "input.txt", "chk.err",
+     "../x.in", "a/b.in", ".hidden", "..", "a b.in", "题.in", "-x.in", "x" * 65],
+)
+def test_io_file_name_is_validated(
+    client: TestClient, contest: dict, admin_headers: dict, field: str, name: str
+) -> None:
+    problem = add_problems(client, contest, admin_headers, [{"ident": "ab"}]).json()["problems"][0]
+    response = put_judge(client, problem, admin_headers, **{field: name})
+    assert response.status_code in (400, 422), (name, response.text)
+    assert list_problems(client, contest, admin_headers)[0][field] is None
+
+
+def test_io_input_and_output_must_differ(client: TestClient, contest: dict, admin_headers: dict) -> None:
+    problem = add_problems(client, contest, admin_headers, [{"ident": "ab"}]).json()["problems"][0]
+    same = put_judge(client, problem, admin_headers, input_file="x.txt", output_file="x.txt")
+    assert same.status_code == 400 and same.json()["code"] == "validation_error"
+    # 只填一个时按生效名比：输入名撞上默认输出名 ab.out 也不行
+    clash = put_judge(client, problem, admin_headers, input_file="ab.out")
+    assert clash.status_code == 400

@@ -811,6 +811,9 @@ class ProblemOut(_Base):
     time_limit_ms: Optional[int] = None
     memory_limit_mb: Optional[int] = None
     io_mode: str = "stdio"
+    #: 文件 IO 的输入/输出文件名；空 = <ident>.in / <ident>.out
+    input_file: Optional[str] = None
+    output_file: Optional[str] = None
     compile_flags: Optional[str] = None
     testdata: Optional[ProblemTestdataOut] = None
 
@@ -822,6 +825,9 @@ class ProblemJudgeIn(_Base):
     time_limit_ms: Optional[int] = Field(default=None, ge=100, le=60000)
     memory_limit_mb: Optional[int] = Field(default=None, ge=16, le=4096)
     io_mode: Literal["stdio", "file"] = "stdio"
+    #: 文件 IO 的输入/输出文件名；不传或留空 = <ident>.in / <ident>.out
+    input_file: Optional[str] = Field(default=None, max_length=64)
+    output_file: Optional[str] = Field(default=None, max_length=64)
     compile_flags: Optional[str] = Field(default=None, max_length=200)
 
 
@@ -876,6 +882,8 @@ class JudgeProblemConfigOut(_Base):
     time_limit_ms: int
     memory_limit_mb: int
     io_mode: str
+    input_file: Optional[str] = None
+    output_file: Optional[str] = None
     compile_flags: Optional[str] = None
 
 

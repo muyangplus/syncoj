@@ -89,7 +89,8 @@ function openSetting(row: ProblemOut): void {
 }
 
 function ioLabel(row: ProblemOut): string {
-  return row.io_mode === 'file' ? `${row.ident}.in / ${row.ident}.out` : '标准输入输出'
+  if (row.io_mode !== 'file') return '标准输入输出'
+  return `${row.input_file || `${row.ident}.in`} / ${row.output_file || `${row.ident}.out`}`
 }
 
 // ---- 排任务 ----

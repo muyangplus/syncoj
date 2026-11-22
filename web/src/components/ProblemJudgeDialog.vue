@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 一道题的评测设置（§12）：外部评测器 / 自带评测、时限内存、IO 方式、编译参数、数据包。
+ * 一道题的评测设置（§12）：外部评测器 / 自带评测、时限内存、IO 方式与文件名、编译参数、数据包。
  */
 import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -25,6 +25,8 @@ const form = reactive({
   time_limit_ms: null as number | null,
   memory_limit_mb: null as number | null,
   io_mode: 'stdio' as 'stdio' | 'file',
+  input_file: '',
+  output_file: '',
   compile_flags: '',
 })
 const current = ref<ProblemOut | null>(null)
@@ -38,6 +40,8 @@ watch(
     form.time_limit_ms = problem.time_limit_ms ?? null
     form.memory_limit_mb = problem.memory_limit_mb ?? null
     form.io_mode = (problem.io_mode as 'stdio' | 'file') || 'stdio'
+    form.input_file = problem.input_file ?? ''
+    form.output_file = problem.output_file ?? ''
     form.compile_flags = problem.compile_flags ?? ''
   },
   { immediate: true },
@@ -55,6 +59,8 @@ const save = useMutation(
       time_limit_ms: form.time_limit_ms || null,
       memory_limit_mb: form.memory_limit_mb || null,
       io_mode: form.io_mode,
+      input_file: (form.io_mode === 'file' && form.input_file.trim()) || null,
+      output_file: (form.io_mode === 'file' && form.output_file.trim()) || null,
       compile_flags: form.compile_flags.trim() || null,
     }),
   {
@@ -134,9 +140,17 @@ function formatSize(bytes: number): string {
         <el-form-item label="输入输出">
           <el-radio-group v-model="form.io_mode">
             <el-radio value="stdio">标准输入输出</el-radio>
-            <el-radio value="file">文件（{{ current?.ident }}.in / {{ current?.ident }}.out）</el-radio>
+            <el-radio value="file">文件</el-radio>
           </el-radio-group>
         </el-form-item>
+        <template v-if="form.io_mode === 'file'">
+          <el-form-item label="输入文件">
+            <el-input v-model="form.input_file" :placeholder="`${current?.ident ?? ''}.in`" maxlength="64" clearable />
+          </el-form-item>
+          <el-form-item label="输出文件">
+            <el-input v-model="form.output_file" :placeholder="`${current?.ident ?? ''}.out`" maxlength="64" clearable />
+          </el-form-item>
+        </template>
         <el-form-item label="编译参数">
           <el-input v-model="form.compile_flags" placeholder="例如 -std=c++14 -O2" clearable />
         </el-form-item>

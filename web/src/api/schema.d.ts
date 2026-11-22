@@ -1578,7 +1578,7 @@ export interface paths {
         get?: never;
         /**
          * Set Problem Judge
-         * @description 题目的评测方式：外部评测器 / 自带评测，以及时限、内存、IO 方式、编译参数。
+         * @description 题目的评测方式：外部评测器 / 自带评测，以及时限、内存、IO 方式与文件名、编译参数。
          */
         put: operations["set_problem_judge_api_v1_admin_problems__problem_id__judge_put"];
         post?: never;
@@ -3505,10 +3505,14 @@ export interface components {
             compile_flags?: string | null;
             /** Ident */
             ident: string;
+            /** Input File */
+            input_file?: string | null;
             /** Io Mode */
             io_mode: string;
             /** Memory Limit Mb */
             memory_limit_mb: number;
+            /** Output File */
+            output_file?: string | null;
             /** Time Limit Ms */
             time_limit_ms: number;
         };
@@ -4371,6 +4375,8 @@ export interface components {
         ProblemJudgeIn: {
             /** Compile Flags */
             compile_flags?: string | null;
+            /** Input File */
+            input_file?: string | null;
             /**
              * Io Mode
              * @default stdio
@@ -4385,6 +4391,8 @@ export interface components {
             judge_mode: "external" | "builtin";
             /** Memory Limit Mb */
             memory_limit_mb?: number | null;
+            /** Output File */
+            output_file?: string | null;
             /** Time Limit Ms */
             time_limit_ms?: number | null;
         };
@@ -4423,6 +4431,8 @@ export interface components {
             id: number;
             /** Ident */
             ident: string;
+            /** Input File */
+            input_file?: string | null;
             /**
              * Io Mode
              * @default stdio
@@ -4442,6 +4452,8 @@ export interface components {
              * @default 0
              */
             order_index: number;
+            /** Output File */
+            output_file?: string | null;
             testdata?: components["schemas"]["ProblemTestdataOut"] | null;
             /** Time Limit Ms */
             time_limit_ms?: number | null;

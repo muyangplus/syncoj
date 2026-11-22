@@ -133,6 +133,17 @@ def test_文件IO忘了freopen判错并说明原因(tmp_path) -> None:
 
 
 @needs_gcc
+def test_文件IO用自定义文件名(tmp_path) -> None:
+    custom = AB.replace("int main(){", "int main(){freopen(\"sum.in\",\"r\",stdin);freopen(\"sum.txt\",\"w\",stdout);")
+    names = {"io_mode": "file", "input_file": "sum.in", "output_file": "sum.txt"}
+    assert judge(tmp_path, custom, ab_data(tmp_path), **names).status == "AC"
+    # 还按 ident 读写的程序读不到输入、也写不出指定的输出文件
+    by_ident = AB.replace("int main(){", "int main(){freopen(\"ab.in\",\"r\",stdin);freopen(\"ab.out\",\"w\",stdout);")
+    outcome = judge(tmp_path, by_ident, ab_data(tmp_path), **names)
+    assert outcome.status != "AC" and outcome.score == 0
+
+
+@needs_gcc
 def test_程序不能跨测试点留东西(tmp_path) -> None:
     sneaky = ("#include <cstdio>\nint main(){FILE*f=fopen(\"mark\",\"r\");if(f){puts(\"0\");return 0;}"
               "fopen(\"mark\",\"w\");long long a,b;scanf(\"%lld%lld\",&a,&b);printf(\"%lld\\n\",a+b);}")

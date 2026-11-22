@@ -238,6 +238,17 @@ def test_只能取自己任务的内容(client, admin_headers, contest, problem,
     assert other.status_code == 404
 
 
+def test_领到的任务带上输入输出文件名(client, admin_headers, contest, problem, enrolled, worker_token) -> None:
+    submit(client, enrolled, {"ab/ab.cpp": AB})
+    assert set_builtin(client, admin_headers, problem, io_mode="file",
+                       input_file="sum.in", output_file="sum.out").status_code == 200
+    upload(client, admin_headers, problem)
+    client.post("/api/v1/admin/contests/%d/judge/builtin" % contest["id"], json={"force": True}, headers=admin_headers)
+    task = client.post("/api/v1/judge/lease", headers={"Authorization": "Bearer " + worker_token}).json()
+    assert task["problem"]["io_mode"] == "file"
+    assert (task["problem"]["input_file"], task["problem"]["output_file"]) == ("sum.in", "sum.out")
+
+
 def test_评测机出错退回队列_三次后记失败(client, admin_headers, contest, problem, enrolled, worker_token) -> None:
     submit(client, enrolled, {"ab/ab.cpp": AB})
     set_builtin(client, admin_headers, problem)

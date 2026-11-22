@@ -4959,6 +4959,8 @@ def _problem_out(row: Problem, settings: Settings) -> ProblemOut:
         time_limit_ms=row.time_limit_ms,
         memory_limit_mb=row.memory_limit_mb,
         io_mode=row.io_mode or "stdio",
+        input_file=row.input_file or None,
+        output_file=row.output_file or None,
         compile_flags=row.compile_flags,
         testdata=_testdata_out(row),
     )

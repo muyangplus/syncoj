@@ -155,6 +155,8 @@ MIGRATION_ADDED_COLUMNS = {
         "file_patterns",
         "judge_mode", "time_limit_ms", "memory_limit_mb", "io_mode", "compile_flags",
         "testdata_sha256", "testdata_name", "testdata_size", "testdata_info",
+        #: 文件 IO 的自定义输入/输出文件名（迁移 019）
+        "input_file", "output_file",
     },
     "player": set(),
     #: ``agent_status`` 不在这里：它是迁移 017 删掉的整张表（见 test_017_…）。
@@ -760,3 +762,25 @@ def test_017_删掉只写不读的_agent_status(legacy_db: Path) -> None:
     assert "agent_status" not in tables
     assert rows(engine, "SELECT COUNT(*) FROM agent")[0][0] == 1, "删子表不能牵连父表"
     engine.dispose()
+
+
+def test_019_题目加输入输出文件名两列_老题目为空(workdir: Path) -> None:
+    """018 的题目表升上来多出两列，老题目两列都是 NULL（= 沿用 <ident>.in / .out）。"""
+    engine = make_engine(workdir / "v18.db")
+    with engine.begin() as conn:
+        conn.execute(text(
+            "CREATE TABLE problem (id INTEGER PRIMARY KEY, contest_id INTEGER, ident VARCHAR(64),"
+            " io_mode VARCHAR(16))"
+        ))
+        conn.execute(text("INSERT INTO problem (id, contest_id, ident, io_mode) VALUES (1, 1, 'sum', 'file')"))
+        conn.execute(text("PRAGMA user_version = 18"))
+
+    applied = migrations.migrate(engine)
+
+    columns = {c["name"] for c in inspect(engine).get_columns("problem")}
+    values = rows(engine, "SELECT input_file, output_file FROM problem WHERE id = 1")
+    assert migrations.current_version(engine) == migrations.LATEST_VERSION
+    engine.dispose()
+    assert any(step.startswith("019 ") for step in applied)
+    assert {"input_file", "output_file"} <= columns
+    assert [tuple(row) for row in values] == [(None, None)]

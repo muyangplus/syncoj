@@ -2345,6 +2345,17 @@
             "title": "Ident",
             "type": "string"
           },
+          "input_file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input File"
+          },
           "io_mode": {
             "title": "Io Mode",
             "type": "string"
@@ -2352,6 +2363,17 @@
           "memory_limit_mb": {
             "title": "Memory Limit Mb",
             "type": "integer"
+          },
+          "output_file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output File"
           },
           "time_limit_ms": {
             "title": "Time Limit Ms",
@@ -4075,6 +4097,18 @@
             ],
             "title": "Compile Flags"
           },
+          "input_file": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input File"
+          },
           "io_mode": {
             "default": "stdio",
             "enum": [
@@ -4105,6 +4139,18 @@
               }
             ],
             "title": "Memory Limit Mb"
+          },
+          "output_file": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output File"
           },
           "time_limit_ms": {
             "anyOf": [
@@ -4212,6 +4258,17 @@
             "title": "Ident",
             "type": "string"
           },
+          "input_file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input File"
+          },
           "io_mode": {
             "default": "stdio",
             "title": "Io Mode",
@@ -4248,6 +4305,17 @@
             "default": 0,
             "title": "Order Index",
             "type": "integer"
+          },
+          "output_file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output File"
           },
           "testdata": {
             "anyOf": [
@@ -9977,7 +10045,7 @@
     },
     "/api/v1/admin/problems/{problem_id}/judge": {
       "put": {
-        "description": "题目的评测方式：外部评测器 / 自带评测，以及时限、内存、IO 方式、编译参数。",
+        "description": "题目的评测方式：外部评测器 / 自带评测，以及时限、内存、IO 方式与文件名、编译参数。",
         "operationId": "set_problem_judge_api_v1_admin_problems__problem_id__judge_put",
         "parameters": [
           {

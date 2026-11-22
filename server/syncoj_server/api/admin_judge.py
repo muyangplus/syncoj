@@ -55,6 +55,28 @@ def _validate_flags(raw: Optional[str]) -> Optional[str]:
     return " ".join(tokens)
 
 
+#: 文件 IO 文件名：字母数字开头，只含字母数字 . _ -（不能带目录）
+_IO_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+#: 沙箱工作目录里 runner 自己要用的文件名（见 judging/runner.py），选手的输入/输出不能占用
+_RESERVED_IO_NAMES = frozenset({
+    "prog", "main.c", "main.cpp", "compile.out", "compile.err",
+    "chk", "checker.err", "chk.out", "chk.err",
+    "in.txt", "out.txt", "ans.txt", "input.txt", "output.txt",
+})
+
+
+def _validate_io_name(raw: Optional[str], label: str) -> Optional[str]:
+    """校验一个文件 IO 文件名；空 = 用默认名（返回 None）。"""
+    if raw is None or not raw.strip():
+        return None
+    name = raw.strip()
+    if not _IO_NAME_RE.match(name) or name in (".", ".."):
+        raise ApiError(400, "validation_error", "%s不合法：只能用字母、数字、. _ -，且以字母或数字开头" % label)
+    if name in _RESERVED_IO_NAMES:
+        raise ApiError(400, "validation_error", "%s不能叫 %s（评测机自己要用）" % (label, name))
+    return name
+
+
 def _load_problem(session, problem_id: int) -> Problem:
     row = session.get(Problem, problem_id)
     if row is None:
@@ -69,14 +91,20 @@ def set_problem_judge(
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> ProblemOut:
-    """题目的评测方式：外部评测器 / 自带评测，以及时限、内存、IO 方式、编译参数。"""
+    """题目的评测方式：外部评测器 / 自带评测，以及时限、内存、IO 方式与文件名、编译参数。"""
     flags = _validate_flags(payload.compile_flags)
+    input_file = _validate_io_name(payload.input_file, "输入文件名")
+    output_file = _validate_io_name(payload.output_file, "输出文件名")
     with ctx.db.session() as session:
         row = _load_problem(session, problem_id)
+        if (input_file or "%s.in" % row.ident) == (output_file or "%s.out" % row.ident):
+            raise ApiError(400, "validation_error", "输入文件名和输出文件名不能相同")
         row.judge_mode = payload.judge_mode
         row.time_limit_ms = payload.time_limit_ms
         row.memory_limit_mb = payload.memory_limit_mb
         row.io_mode = payload.io_mode
+        row.input_file = input_file
+        row.output_file = output_file
         row.compile_flags = flags
         session.flush()
         return _problem_out(row, ctx.settings)

@@ -307,7 +307,6 @@ function clearDetail(count: number): string {
               </el-button>
               <el-dropdown
                 trigger="click"
-                class="row-more"
                 @command="(command: string) => onRowCommand(command, row)"
               >
                 <el-button link type="primary" size="small">
@@ -381,10 +380,6 @@ function clearDetail(count: number): string {
 .online-text {
   color: var(--el-color-success);
   font-weight: 600;
-}
-.row-more {
-  margin-left: 12px;
-  vertical-align: middle;
 }
 .danger-text {
   color: var(--el-color-danger);

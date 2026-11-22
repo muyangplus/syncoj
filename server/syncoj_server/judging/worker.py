@@ -165,8 +165,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="syncoj-judge", description="SyncOJ 评测机（自带沙箱评测）")
     parser.add_argument("--server", required=True, help="服务端管理端口地址，如 http://10.0.0.5:8000")
     parser.add_argument("--token-file", required=True, help="管理端「评测机」签发的令牌（文件里只有这一行）")
-    parser.add_argument("--backend", choices=["isolate", "rlimit"], default="isolate",
-                        help="沙箱：isolate（推荐）/ rlimit（只给开发自测，不隔离网络与文件系统）")
+    parser.add_argument("--backend", choices=list(sb.BACKENDS), default=None,
+                        help="沙箱：isolate（Linux 默认、推荐）/ rlimit（只给开发自测，不隔离网络与文件系统）"
+                             " / winjob（Windows 默认，Job Object 限资源，不隔离网络与文件系统）")
     parser.add_argument("--run-as", default=None, help="rlimit 后端以 root 运行时，选手程序换成这个账号跑")
     parser.add_argument("--box-id", type=int, default=0, help="isolate 的 box 编号（同机多个 worker 要各不相同）")
     parser.add_argument("--isolate", default="isolate", help="isolate 可执行文件路径")
@@ -180,10 +181,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
-    if not sys.platform.startswith("linux"):
-        # isolate 与 rlimit 后端都依赖 Linux（命名空间 / fork + setrlimit）；Windows 上用 WSL2 或另一台 Linux
-        print("错误：syncoj-judge 只能在 Linux 上运行（当前 %s）；Windows 上请在 WSL2 或另一台 Linux 机器上运行"
-              % sys.platform, file=sys.stderr)
+    backend = args.backend or sb.default_backend(sys.platform)
+    problem = sb.backend_problem(backend, sys.platform, run_as=args.run_as)
+    if problem:
+        print("错误：" + problem, file=sys.stderr)
         return 2
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -194,11 +195,13 @@ def main(argv=None) -> int:
 
     def factory() -> sb.Sandbox:
         return sb.make_sandbox(
-            args.backend, run_as=args.run_as, box_id=args.box_id,
+            backend, run_as=args.run_as, box_id=args.box_id,
             isolate_binary=args.isolate, cgroups=args.cgroups,
         )
 
-    if args.backend == "rlimit":
+    if backend == "winjob":
+        log.warning("winjob 后端不隔离网络与文件系统：请以低权限专用账号运行评测机")
+    if backend == "rlimit":
         log.warning("rlimit 后端不隔离网络与文件系统：只用于开发自测，正式考试请用 isolate")
         if hasattr(os, "geteuid") and os.geteuid() == 0 and not args.run_as:
             print("rlimit 后端以 root 运行时必须给 --run-as <普通账号>", file=sys.stderr)

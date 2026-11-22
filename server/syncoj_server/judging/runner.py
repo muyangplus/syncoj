@@ -12,10 +12,12 @@ NOI 惯例：
   （testlib 风格：``checker <in> <out> <ans>``，退出码 0 为通过）。
 * 每个测试点前清空工作目录：程序不能跨测试点留东西。
 * 编译前先做源码预检（:mod:`.precheck`）：有拦截项就不编译、记 CE；预警写进 ``precheck_warnings``。
+* Windows（``winjob`` 后端，MinGW-w64）：产物带 ``.exe``、静态链接、主线程栈调大（:func:`platform_compile_argv`）。
 """
 
 from __future__ import annotations
 
+import sys
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,9 +25,13 @@ from typing import Callable, Dict, List, Optional
 
 from . import precheck as pc
 from . import sandbox as sb
+from .sandbox_win import describe_exit_code
 from .testdata import Testdata, parse_testdata
 
-__all__ = ["ProblemConfig", "judge", "io_file_names", "compare_text", "STATUS_ORDER", "LANGUAGES"]
+__all__ = [
+    "ProblemConfig", "judge", "io_file_names", "compare_text", "STATUS_ORDER", "LANGUAGES",
+    "exe_name", "platform_compile_argv",
+]
 
 AC, WA, CE = "AC", "WA", "CE"
 #: 整题状态取"最严重"的那个
@@ -47,6 +53,9 @@ CHECKER_LIMITS = sb.Limits(
     output_bytes=16 * 1024 * 1024, processes=1,
 )
 MAX_MESSAGE = 4000
+WINDOWS = sys.platform == "win32"
+#: Windows 上没有题目内存限制可参照时（checker）的主线程栈大小
+DEFAULT_STACK_BYTES = 256 * 1024 * 1024
 MAX_OUTPUT_COMPARE = 256 * 1024 * 1024
 
 
@@ -109,6 +118,26 @@ class JudgeOutcome:
         return document
 
 
+def exe_name(stem: str, windows: bool = WINDOWS) -> str:
+    return stem + ".exe" if windows else stem
+
+
+def platform_compile_argv(
+    argv: List[str], *, windows: bool = WINDOWS, stack_bytes: int = DEFAULT_STACK_BYTES,
+) -> List[str]:
+    """Windows（MinGW-w64）上：``-o`` 的产物加 ``.exe``；``-static``（不依赖 MinGW 的 DLL，
+    也不在 PATH 里找）；``-Wl,--stack`` 把主线程栈保留到 ``stack_bytes``（Linux 上栈不限，
+    默认 1 MB 的栈会让深递归在 Windows 上栈溢出）。Linux 上原样返回。"""
+    if not windows:
+        return list(argv)
+    result = []
+    for index, item in enumerate(argv):
+        if index > 0 and argv[index - 1] == "-o" and not item.lower().endswith(".exe"):
+            item += ".exe"
+        result.append(item)
+    return result + ["-static", "-Wl,--stack=%d" % stack_bytes]
+
+
 def worst(statuses: List[str]) -> str:
     present = set(statuses)
     for status in STATUS_ORDER:
@@ -156,7 +185,10 @@ def judge(
     if suffix not in LANGUAGES:
         return JudgeOutcome(0, 0, CE, compile_message="不支持的语言：%s（支持 C++ / C）" % source_name)
     language, main_name, compile_argv = LANGUAGES[suffix]
-    compile_argv = list(compile_argv) + (config.compile_flags.split() if config.compile_flags else [])
+    compile_argv = platform_compile_argv(
+        list(compile_argv) + (config.compile_flags.split() if config.compile_flags else []),
+        stack_bytes=config.memory_limit_mb * 1024 * 1024,
+    )
 
     with zipfile.ZipFile(str(testdata_zip)) as archive:
         data = parse_testdata(archive)
@@ -188,21 +220,22 @@ def _judge_in(box, archive, data: Testdata, source, main_name, compile_argv, lan
     box.put(main_name, source.read_bytes())
     result = box.run(compile_argv, COMPILE_LIMITS, stdout="compile.out", stderr="compile.err")
     compile_message = _truncate((_read(box, "compile.err", 1 << 20) or b"") + (_read(box, "compile.out", 1 << 20) or b""))
-    if result.status != sb.OK or not (box.workdir / "prog").is_file():
+    prog, chk = exe_name("prog"), exe_name("chk")
+    if result.status != sb.OK or not (box.workdir / prog).is_file():
         reason = {"TLE": "编译超时", "MLE": "编译超内存", "OLE": "编译输出过大"}.get(result.status, "")
         return JudgeOutcome(0, max_score, CE, language, (reason + "\n" + compile_message).strip(),
                             isolated=box.isolated)
 
-    keep = ["prog"]
+    keep = [prog]
     if data.checker:
         for member in [data.checker] + data.checker_support:
             box.put(Path(member).name, archive.read(member))
         checker_name = Path(data.checker).name
-        built = box.run(["g++", "-O2", "-std=c++14", "-o", "chk", checker_name, "-lm"],
+        built = box.run(platform_compile_argv(["g++", "-O2", "-std=c++14", "-o", "chk", checker_name, "-lm"]),
                         COMPILE_LIMITS, stderr="checker.err")
-        if built.status != sb.OK or not (box.workdir / "chk").is_file():
+        if built.status != sb.OK or not (box.workdir / chk).is_file():
             raise sb.SandboxError("checker 编译失败：%s" % _truncate(_read(box, "checker.err", 1 << 20) or b""))
-        keep.append("chk")
+        keep.append(chk)
 
     limits = sb.Limits(
         cpu_seconds=config.time_limit_ms / 1000.0,
@@ -220,7 +253,7 @@ def _judge_in(box, archive, data: Testdata, source, main_name, compile_argv, lan
         box.clean(keep)
         box.put(in_name, archive.read(case.input))
         run = box.run(
-            ["./prog"], limits,
+            ["./" + prog], limits,
             stdin=None if file_io else in_name,
             stdout=None if file_io else out_name,
         )
@@ -241,7 +274,7 @@ def _judge_in(box, archive, data: Testdata, source, main_name, compile_argv, lan
         elif run.status == "RE" and run.signal:
             item.message = "被信号 %d 终止" % run.signal
         elif run.status == "RE":
-            item.message = "退出码 %s" % run.exit_code
+            item.message = describe_exit_code(run.exit_code)
         if item.status == AC:
             item.score = case.score
         cases.append(item)
@@ -269,7 +302,7 @@ def _run_checker(box, archive, case, output: bytes, keep: List[str]):
     box.put("in.txt", archive.read(case.input))
     box.put("out.txt", output)
     box.put("ans.txt", archive.read(case.answer))
-    run = box.run(["./chk", "in.txt", "out.txt", "ans.txt"], CHECKER_LIMITS,
+    run = box.run(["./" + exe_name("chk"), "in.txt", "out.txt", "ans.txt"], CHECKER_LIMITS,
                   stdout="chk.out", stderr="chk.err")
     message = _truncate((_read(box, "chk.err", 1 << 16) or b"").strip())[:500]
     if run.status in (sb.TLE, sb.MLE, sb.OLE) or (run.signal is not None):

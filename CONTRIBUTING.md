@@ -43,6 +43,7 @@ python server/tools/parallel_tests.py --root server --pattern "tests/test_docs.p
 - 一次提交一件事（接口改动 + 文案改动 = 两次提交）。
 - 提交信息用中文，写清「改了什么、为什么」；写明破坏性改动与主动留下的代价。
 - 日常开发在 `dev` 分支（或从 `dev` 拉出的功能分支）；`main` 只经 PR 从 `dev` 合入，合并前 CI 全绿。
+- CI（`check.yml`）在推送到 `main` 以外的分支时跑；本仓库分支发起的 PR 不重复跑（用推送那次的结果），外部 fork 的 PR 照跑；合入 `main` 不跑，发版时 `release.yml` 对 `main` 的提交再跑一遍。
 
 ## 许可与漏洞
 

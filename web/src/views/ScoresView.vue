@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, reactive, ref } from 'vue'
+import { computed, nextTick, reactive, ref, watch } from 'vue'
 
 import { ElMessage, ElMessageBox } from 'element-plus'
 
@@ -11,16 +11,18 @@ import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
 import DataTable from '@/components/DataTable.vue'
 import FormDialog from '@/components/FormDialog.vue'
 import PageShell from '@/components/PageShell.vue'
+import SectionCard from '@/components/SectionCard.vue'
 import { useList } from '@/composables/useList'
 import { useMutation } from '@/composables/useMutation'
 import { useContestData } from '@/composables/useContestData'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 
 import { useContestStore } from '@/stores/contest'
 import { formatTime } from '@/utils/format'
 
 const contest = useContestStore()
 const router = useRouter()
+const route = useRoute()
 
 // --------------------------------------------------------------------------- //
 // 成绩矩阵
@@ -106,7 +108,7 @@ function scanSummary(report: JudgeScanOut): string {
 const rescan = useMutation(
   async () => {
     const contestId = contest.currentId
-    if (!contestId) throw new Error('还没有选场次')
+    if (!contestId) throw new Error('未选择场次')
     return scoreApi.rescan(contestId)
   },
   {
@@ -139,7 +141,7 @@ const clearKeepManual = ref(true)
 const clearRuns = useMutation(
   async () => {
     const contestId = contest.currentId
-    if (!contestId) throw new Error('还没有选场次')
+    if (!contestId) throw new Error('未选择场次')
     return scoreApi.clearRuns(contestId, contest.current?.slug ?? '', {
       keepManual: clearKeepManual.value,
     })
@@ -161,27 +163,24 @@ const clearRuns = useMutation(
 /**
  * 单元格外观。
  *
- * 这里的核心是**区分"0 分"和"没有成绩"** —— 后端刻意把两者分成不同的
- * parse_status，前端也必须分开呈现。都显示成 0 会让教师以为选手考砸了。
- *
- * 再往下一层：没有成绩时还要分清**交了没评测**和**根本没交**。两件事看起来
- * 都是"没有分"，但教师该做的事完全相反 —— 一个等着就行，一个得去座位上看。
+ * 核心是**区分"0 分"和"没有成绩"**，以及没有成绩时**交了没评测**与**根本没交**。
+ * `kind` 决定分数块的样式，`ratio` 是得分率（0~1，无满分时为 null）。
  */
+type CellKind = 'full' | 'high' | 'mid' | 'low' | 'zero' | 'plain' | 'pending' | 'missing' | 'unparsed' | 'noscore'
+
 function cellView(cell: ScoreCellOut | undefined): {
   text: string
-  type: 'success' | 'danger' | 'warning' | 'info' | 'primary'
+  sub: string
+  kind: CellKind
+  ratio: number | null
+  manual: boolean
   tooltip: string
 } {
   if (!cell || cell.parse_status === 'missing') {
     if (cell?.submitted) {
-      return {
-        text: '待评测',
-        type: 'primary',
-        tooltip:
-          '已收到这个题目的代码，还没等到评测结果。\n可以到下面「评测记录」里看，或直接点这一格手工录分。',
-      }
+      return { text: '待评测', sub: '', kind: 'pending', ratio: null, manual: false, tooltip: '已收到代码，待评测' }
     }
-    return { text: '—', type: 'info', tooltip: '没有收到这个题目的代码' }
+    return { text: '—', sub: '', kind: 'missing', ratio: null, manual: false, tooltip: '未交' }
   }
 
   const detail = cell.detail ?? ''
@@ -189,31 +188,40 @@ function cellView(cell: ScoreCellOut | undefined): {
   if (cell.parse_status === 'unparsed') {
     return {
       text: '未解析',
-      type: 'danger',
-      tooltip:
-        `收到了结果文件但无法解析，需要手工补录 —— 点这一格就能录，` +
-        `也可以到下面「评测记录」里按「补录」。\n原因：${detail || '（服务端没有给出原因）'}`,
+      sub: '',
+      kind: 'unparsed',
+      ratio: null,
+      manual: false,
+      tooltip: `未解析：${detail || '无原因'}`,
     }
   }
 
   if (cell.score === null || cell.score === undefined) {
-    return { text: '无分', type: 'warning', tooltip: detail || '结果中没有分数' }
+    return { text: '无分', sub: '', kind: 'noscore', ratio: null, manual: false, tooltip: detail || '无分数' }
   }
 
-  const full = cell.max_score !== null && cell.max_score !== undefined
-  const isFull = full && cell.score === cell.max_score
-  const isZero = cell.score === 0
+  const hasMax = cell.max_score !== null && cell.max_score !== undefined && cell.max_score > 0
+  const ratio = hasMax ? Math.max(0, Math.min(1, cell.score / (cell.max_score as number))) : null
+  let kind: CellKind
+  if (cell.score === 0) kind = 'zero'
+  else if (ratio === null) kind = 'plain'
+  else if (ratio >= 1) kind = 'full'
+  else if (ratio >= 0.6) kind = 'high'
+  else if (ratio >= 0.3) kind = 'mid'
+  else kind = 'low'
 
-  const parts = [`${cell.score}${full ? ` / ${cell.max_score}` : ''} 分`]
-  if (cell.status) parts.push(`状态：${cell.status}`)
-  if (cell.parse_status === 'manual') parts.push('（教师手工录入）')
-  else if (cell.submitted) parts.push('（已收到该题代码）')
+  const parts = [`${cell.score}${hasMax ? ` / ${cell.max_score}` : ''} 分`]
+  if (cell.status) parts.push(cell.status)
+  if (cell.parse_status === 'manual') parts.push('手工录入')
   if (detail) parts.push(detail)
 
   return {
-    text: full ? `${cell.score}/${cell.max_score}` : String(cell.score),
-    type: cell.parse_status === 'manual' ? 'primary' : isFull ? 'success' : isZero ? 'info' : 'warning',
-    tooltip: parts.join('\n'),
+    text: String(cell.score),
+    sub: cell.status || (hasMax ? `/ ${cell.max_score}` : ''),
+    kind,
+    ratio,
+    manual: cell.parse_status === 'manual',
+    tooltip: parts.join(' · '),
   }
 }
 
@@ -317,7 +325,7 @@ function openManual(
 const saveManual = useMutation(
   async () => {
     const contestId = contest.currentId
-    if (!contestId) throw new Error('还没有选场次')
+    if (!contestId) throw new Error('未选择场次')
     return scoreApi.setManual(contestId, {
       player_id: form.playerId,
       problem: form.problem,
@@ -328,7 +336,7 @@ const saveManual = useMutation(
   },
   {
     // `JudgeRunOut` 上没有服务端的回执，自己拼一句，并把"不会被覆盖"这个关键约定写出来
-    success: '已保存。',
+    success: '已保存',
     onDone: async () => {
       editing.value = false
       await Promise.all([reloadMatrix(), runs.reload()])
@@ -350,12 +358,12 @@ function askClear(): void {
 const clearScore = useMutation(
   async () => {
     const contestId = contest.currentId
-    if (!contestId) throw new Error('还没有选场次')
+    if (!contestId) throw new Error('未选择场次')
     // 第 4 个参数是考号：服务端拿它逐字比对 `confirm`
     return scoreApi.clear(contestId, form.playerId, form.problem, form.playerNo)
   },
   {
-    success: '已清除。结果文件还在的话，下一轮扫描会重新解析出这一格。',
+    success: '已清除',
     onDone: async () => {
       clearCellOpen.value = false
       editing.value = false
@@ -401,6 +409,19 @@ async function exportCsv(): Promise<void> {
   URL.revokeObjectURL(url)
 }
 
+/** 快捷操作 `?do=export`：矩阵就绪后导出一次，然后清掉 query。 */
+watch(
+  () => [route.query.do, view.value, error.value] as const,
+  ([action, data, failed]) => {
+    if (action !== 'export') return
+    if (!data && !failed && contest.currentId) return
+    if (data?.rows.length) void exportCsv()
+    else if (!failed) ElMessage.info('无成绩数据')
+    void router.replace({ query: { ...route.query, do: undefined } })
+  },
+  { immediate: true },
+)
+
 function runStatusType(parseStatus: string): 'success' | 'danger' | 'primary' | 'info' {
   if (parseStatus === 'ok') return 'success'
   if (parseStatus === 'unparsed') return 'danger'
@@ -417,6 +438,10 @@ function runStatusLabel(parseStatus: string): string {
   }
   return map[parseStatus] ?? parseStatus
 }
+
+const pendingTotal = computed(
+  () => unparsedCells.value.length + pendingCells.value.length + missingCells.value.length,
+)
 
 // --------------------------------------------------------------------------- //
 // 测试点明细（§12）
@@ -471,33 +496,41 @@ async function rejudge(run: JudgeRunDetailOut, force = false): Promise<void> {
 </script>
 
 <template>
-  <PageShell
-    title="成绩"
-    :error="error"
-    error-action="先重试；还不行就先别手工录分。"
-    retryable
-    @retry="reloadMatrix"
-  >
+  <PageShell title="成绩" :error="error" retryable @retry="reloadMatrix">
     <template #toolbar>
-      <el-button size="small" :loading="rescan.pending.value" @click="rescan.run(undefined)">
-        立即重扫
+      <el-button type="primary" :loading="rescan.pending.value" @click="rescan.run(undefined)">
+        <el-icon><Refresh /></el-icon>立即重扫
       </el-button>
-      <el-button size="small" @click="router.push({ name: 'judge' })">自带评测</el-button>
-      <el-button size="small" :disabled="!view?.rows.length" @click="exportCsv">导出 CSV</el-button>
-      <el-button size="small" :loading="loading" @click="reloadMatrix">刷新</el-button>
+      <el-button :disabled="!view?.rows.length" @click="exportCsv">
+        <el-icon><Download /></el-icon>导出 CSV
+      </el-button>
+      <el-button @click="router.push({ name: 'judge' })">
+        <el-icon><Cpu /></el-icon>自带评测
+      </el-button>
+      <el-dropdown trigger="click">
+        <el-button>
+          更多<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+        </el-button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item :disabled="loading" @click="reloadMatrix">
+              <el-icon><RefreshRight /></el-icon>刷新
+            </el-dropdown-item>
+            <el-dropdown-item divided @click="clearRunsOpen = true">
+              <span class="danger-item"><el-icon><Delete /></el-icon>清空成绩记录</span>
+            </el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
     </template>
 
-    <!--
-      重扫的回执必须留在页面上，不能只弹一句 toast：`errors` 里是"哪个目录读不了、
-      哪个目录名对不上人"，它一闪而过的话教师根本来不及看 —— 而那正是
-      "明明交了却没分数"的排查起点。
-    -->
+    <!-- 重扫回执常驻：errors 是"交了却没分数"的排查起点 -->
     <el-alert
       v-if="scanReport"
       :type="scanErrors.length ? 'error' : scanReport.unparsed ? 'warning' : 'success'"
       :closable="true"
       show-icon
-      style="margin-bottom: 12px"
+      class="scan-alert"
       @close="scanReport = null"
     >
       <template #title>上次重扫：{{ scanSummary(scanReport) }}</template>
@@ -508,261 +541,216 @@ async function rejudge(run: JudgeRunDetailOut, force = false): Promise<void> {
       </template>
     </el-alert>
 
-    <!-- 未解析项单独提示：这是"需要教师动手"的待办，不该混在矩阵里被忽略 -->
-    <el-alert
-      v-if="unparsedCells.length"
-      type="warning"
-      :closable="false"
-      show-icon
-      style="margin-bottom: 12px"
-    >
-      <template #title>
-        有 {{ unparsedCells.length }} 格收到了结果文件但解析不出来
-      </template>
-      <template #default>
-        <div class="unparsed-list">
-          <el-tag
-            v-for="item in unparsedCells.slice(0, 20)"
-            :key="`${item.row.player_id}-${item.cell.problem}`"
-            size="small"
-            type="danger"
-            effect="plain"
-            class="clickable"
-            @click="openManual(item.row, item.cell.problem, item.cell)"
-          >
-            {{ item.row.player_no }} / {{ item.cell.problem }}
-          </el-tag>
-          <span v-if="unparsedCells.length > 20" class="muted">
-            等 {{ unparsedCells.length }} 项，点击标签可手工补录
-          </span>
-          <el-button link type="primary" size="small" @click="showUnparsedRuns">
-            在评测记录里逐条看
-          </el-button>
-        </div>
-      </template>
-    </el-alert>
-
-    <!-- 交了但没出成绩：告诉教师"在跑，别急"，而不是让人以为漏收了 -->
-    <el-alert
-      v-if="pendingCells.length"
-      type="info"
-      :closable="false"
-      show-icon
-      style="margin-bottom: 12px"
-    >
-      <template #title>
-        有 {{ pendingCells.length }} 格已收到代码，正等评测结果
-      </template>
-      <template #default>
-        <div class="unparsed-list">
-          <el-tag
-            v-for="item in pendingCells.slice(0, 20)"
-            :key="`${item.row.player_id}-${item.cell.problem}`"
-            size="small"
-            type="primary"
-            effect="plain"
-          >
-            {{ item.row.player_no }} / {{ item.cell.problem }}
-          </el-tag>
-          <span v-if="pendingCells.length > 20" class="muted">
-            也可以直接点格子手工录分。
-          </span>
-        </div>
-      </template>
-    </el-alert>
-
-    <!-- 一题都没交：这才是需要人去催的名单 -->
-    <el-alert
-      v-if="missingCells.length"
-      type="warning"
-      :closable="false"
-      show-icon
-      style="margin-bottom: 12px"
-    >
-      <template #title>
-        有 {{ missingCells.length }} 格还没收到代码
-      </template>
-      <template #default>
-        <div class="unparsed-list">
-          <el-tag
-            v-for="item in missingCells.slice(0, 20)"
-            :key="`${item.row.player_id}-${item.cell.problem}`"
-            size="small"
-            type="warning"
-            effect="plain"
-          >
-            {{ item.row.player_no }} / {{ item.cell.problem }}
-          </el-tag>
-          <span v-if="missingCells.length > 20" class="muted">
-            可在「题目清单 → 路径试算」确认。
-          </span>
-        </div>
-      </template>
-    </el-alert>
-
-    <el-table
-      v-if="view && view.columns.length"
-      :data="view.rows"
-      v-loading="loading"
-      border
-      stripe
-      size="small"
-    >
-      <el-table-column label="选手" width="160" fixed>
-        <template #default="{ row }">
-          <div class="mono">{{ row.player_no }}</div>
-          <div class="cell-sub">{{ row.player_name || '—' }}</div>
-        </template>
-      </el-table-column>
-
-      <el-table-column label="总分" width="90" align="right" fixed>
-        <template #default="{ row }">
-          <strong>{{ row.total ?? 0 }}</strong>
-        </template>
-      </el-table-column>
-
-      <el-table-column
-        v-for="column in view.columns"
-        :key="column.ident"
-        width="130"
-        align="center"
-      >
-        <!-- 列头优先显示标题，副行显示标识（标识才是目录名与文件名） -->
-        <template #header>
-          <div>{{ column.title || column.ident }}</div>
-          <div v-if="column.title" class="cell-sub mono">{{ column.ident }}</div>
-          <!-- 结果里有、清单里没有的题目：标注出来提醒去补登记 -->
-          <el-tag
-            v-else-if="!column.declared"
-            size="small"
-            type="warning"
-            effect="plain"
-          >
-            未登记
-          </el-tag>
-        </template>
-        <template #default="{ row }">
-          <el-tooltip :content="cellView(cellOf(row, column.ident)).tooltip">
+    <SectionCard v-if="pendingTotal" title="待处理" :meta="`${pendingTotal} 格`">
+      <div class="todo-list">
+        <div v-if="unparsedCells.length" class="todo-row">
+          <div class="todo-label">
+            <span class="todo-dot unparsed" />未解析
+            <span class="todo-count">{{ unparsedCells.length }} 格</span>
+          </div>
+          <div class="todo-chips">
             <el-tag
-              :type="cellView(cellOf(row, column.ident)).type"
+              v-for="item in unparsedCells.slice(0, 20)"
+              :key="`${item.row.player_id}-${item.cell.problem}`"
               size="small"
+              type="danger"
               effect="plain"
               class="clickable"
-              @click="openCell(row, column.ident)"
+              @click="openManual(item.row, item.cell.problem, item.cell)"
             >
-              {{ cellView(cellOf(row, column.ident)).text }}
+              {{ item.row.player_no }} / {{ item.cell.problem }}
             </el-tag>
-          </el-tooltip>
-        </template>
-      </el-table-column>
+            <span v-if="unparsedCells.length > 20" class="muted">等 {{ unparsedCells.length }} 格</span>
+            <el-button link type="primary" @click="showUnparsedRuns">筛选评测记录</el-button>
+          </div>
+        </div>
 
-      <template #empty>
-        <div class="empty-block">还没有选手</div>
-      </template>
-    </el-table>
+        <div v-if="pendingCells.length" class="todo-row">
+          <div class="todo-label">
+            <span class="todo-dot pending" />待评测
+            <span class="todo-count">{{ pendingCells.length }} 格</span>
+          </div>
+          <div class="todo-chips">
+            <el-tag
+              v-for="item in pendingCells.slice(0, 20)"
+              :key="`${item.row.player_id}-${item.cell.problem}`"
+              size="small"
+              type="primary"
+              effect="plain"
+            >
+              {{ item.row.player_no }} / {{ item.cell.problem }}
+            </el-tag>
+            <span v-if="pendingCells.length > 20" class="muted">等 {{ pendingCells.length }} 格</span>
+          </div>
+        </div>
 
-    <el-card v-else shadow="never">
-      <div class="empty-block">
-        <p>先登记题目清单，或点右上角「立即重扫」。</p>
-        <el-button
-          type="primary"
-          size="small"
-          style="margin-top: 12px"
-          @click="router.push({ name: 'contests' })"
-        >
-          去场次管理登记题目
-        </el-button>
+        <div v-if="missingCells.length" class="todo-row">
+          <div class="todo-label">
+            <span class="todo-dot missing" />未交
+            <span class="todo-count">{{ missingCells.length }} 格</span>
+          </div>
+          <div class="todo-chips">
+            <el-tag
+              v-for="item in missingCells.slice(0, 20)"
+              :key="`${item.row.player_id}-${item.cell.problem}`"
+              size="small"
+              type="warning"
+              effect="plain"
+            >
+              {{ item.row.player_no }} / {{ item.cell.problem }}
+            </el-tag>
+            <span v-if="missingCells.length > 20" class="muted">等 {{ missingCells.length }} 格</span>
+          </div>
+        </div>
       </div>
-    </el-card>
+    </SectionCard>
 
-    <!--
-      评测记录：矩阵里每一格的来源。它必须能按 `parse_status` 过滤，
-      因为教师排错的第一步永远是"把未解析的都列出来"。
-    -->
-    <div ref="runsSection" style="margin-top: 24px">
-      <div class="list-head">
-        <h3 class="section-title">
-          评测记录
-          <span class="muted">（共 {{ runs.total.value }} 条）</span>
-        </h3>
-        <div class="toolbar">
-          <el-select v-model="parseFilter" size="small" style="width: 180px">
+    <SectionCard
+      title="成绩矩阵"
+      :meta="view && view.columns.length ? `${view.rows.length} 名选手 · ${view.columns.length} 道题` : ''"
+      flush
+    >
+      <template v-if="view && view.columns.length" #extra>
+        <div class="legend">
+          <span class="legend-item"><i class="swatch full" />满分</span>
+          <span class="legend-item"><i class="swatch mid" />部分分</span>
+          <span class="legend-item"><i class="swatch zero" />0 分</span>
+          <span class="legend-item"><i class="swatch pending" />待评测</span>
+          <span class="legend-item"><i class="swatch unparsed" />未解析</span>
+          <span class="legend-item"><i class="swatch missing" />未交</span>
+        </div>
+      </template>
+
+      <el-table v-if="view && view.columns.length" :data="view.rows" v-loading="loading" class="matrix">
+        <el-table-column label="选手" width="150" fixed>
+          <template #default="{ row }">
+            <div class="mono">{{ row.player_no }}</div>
+            <div class="cell-sub">{{ row.player_name || '—' }}</div>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="总分" width="84" align="right" fixed>
+          <template #default="{ row }">
+            <span class="total">{{ row.total ?? 0 }}</span>
+          </template>
+        </el-table-column>
+
+        <el-table-column v-for="column in view.columns" :key="column.ident" min-width="108" align="center">
+          <template #header>
+            <div>{{ column.title || column.ident }}</div>
+            <div v-if="column.title" class="cell-sub mono">{{ column.ident }}</div>
+            <el-tag v-else-if="!column.declared" size="small" type="warning" effect="plain">未登记</el-tag>
+          </template>
+          <template #default="{ row }">
+            <el-tooltip :content="cellView(cellOf(row, column.ident)).tooltip" :show-after="200">
+              <button
+                type="button"
+                class="score-block"
+                :class="`is-${cellView(cellOf(row, column.ident)).kind}`"
+                @click="openCell(row, column.ident)"
+              >
+                <span class="score-main">{{ cellView(cellOf(row, column.ident)).text }}</span>
+                <span v-if="cellView(cellOf(row, column.ident)).sub" class="score-sub">
+                  {{ cellView(cellOf(row, column.ident)).sub }}
+                </span>
+                <el-icon v-if="cellView(cellOf(row, column.ident)).manual" class="score-manual">
+                  <EditPen />
+                </el-icon>
+                <span
+                  v-if="cellView(cellOf(row, column.ident)).ratio !== null"
+                  class="score-bar"
+                  :style="{ width: `${(cellView(cellOf(row, column.ident)).ratio ?? 0) * 100}%` }"
+                />
+              </button>
+            </el-tooltip>
+          </template>
+        </el-table-column>
+
+        <template #empty>
+          <div class="empty-block">本场次无选手</div>
+        </template>
+      </el-table>
+
+      <div v-else v-loading="loading" class="empty-block">
+        <p>无成绩数据</p>
+        <el-button type="primary" plain @click="router.push({ name: 'contests' })">登记题目</el-button>
+      </div>
+    </SectionCard>
+
+    <div ref="runsSection" class="runs-anchor">
+      <SectionCard title="评测记录" :meta="`共 ${runs.total.value} 条`" flush>
+        <template #extra>
+          <el-select v-model="parseFilter" style="width: 140px">
             <el-option label="全部记录" value="" />
-            <el-option label="未解析（需要处理）" value="unparsed" />
+            <el-option label="未解析" value="unparsed" />
             <el-option label="已解析" value="ok" />
             <el-option label="手工录入" value="manual" />
           </el-select>
-          <el-button size="small" :loading="runs.loading.value" @click="runs.reload">刷新</el-button>
-          <!-- 不按 `runs.total` 置灰：那个数是**筛选后**的条数，而清空的范围是整个场次 -->
-          <el-button size="small" type="danger" plain @click="clearRunsOpen = true">
-            清空成绩记录
+          <el-button :loading="runs.loading.value" @click="runs.reload">
+            <el-icon><RefreshRight /></el-icon>刷新
           </el-button>
-        </div>
-      </div>
-
-      <p class="cell-sub">点「补录」可手工判分。</p>
-
-      <DataTable
-        :rows="runs.rows.value"
-        :row-key="(row: JudgeRunOut) => row.id"
-        :loading="runs.loading.value"
-        :total="runs.total.value"
-        :page="runs.page.value"
-        :page-size="runs.pageSize.value"
-        empty-text="没有匹配的评测记录"
-        @update:page="runs.setPage"
-        @update:pageSize="runs.setPageSize"
-      >
-        <template #columns>
-          <el-table-column label="选手" prop="player_no" width="110" />
-          <el-table-column label="题目" prop="problem" width="100" />
-          <el-table-column label="状态" width="100">
-            <template #default="{ row }">
-              <el-tag :type="runStatusType(row.parse_status)" size="small" effect="plain">
-                {{ runStatusLabel(row.parse_status) }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="得分" width="100" align="right">
-            <template #default="{ row }">
-              <span v-if="row.score === null || row.score === undefined" class="muted">—</span>
-              <span v-else>{{ row.score }}/{{ row.max_score ?? '?' }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="来源文件" min-width="220">
-            <template #default="{ row }">
-              <span v-if="row.source_path" class="mono">{{ row.source_path }}</span>
-              <span v-else class="muted">—</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="说明" min-width="200">
-            <template #default="{ row }">
-              <span :class="{ 'error-text': row.parse_status === 'unparsed' }">
-                {{ row.detail || '—' }}
-              </span>
-            </template>
-          </el-table-column>
-          <el-table-column label="更新时间" width="160">
-            <template #default="{ row }">
-              <span class="cell-sub">{{ formatTime(row.updated_at) }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="操作" width="110" fixed="right">
-            <template #default="{ row }">
-              <el-button v-if="row.has_cases" link type="primary" size="small" @click="openDetail(row.id)">
-                明细
-              </el-button>
-              <el-button link type="primary" size="small" @click="openManual(row, row.problem, row)">
-                {{ row.parse_status === 'unparsed' ? '补录' : '修正' }}
-              </el-button>
-            </template>
-          </el-table-column>
         </template>
 
-        <template #empty>
-          <p>一条都没有就先确认结果目录写对了，再点「立即重扫」。</p>
-        </template>
-      </DataTable>
+        <DataTable
+          :rows="runs.rows.value"
+          :row-key="(row: JudgeRunOut) => row.id"
+          :loading="runs.loading.value"
+          :total="runs.total.value"
+          :page="runs.page.value"
+          :page-size="runs.pageSize.value"
+          :filtered="!!parseFilter"
+          empty-text="无评测记录"
+          empty-filtered-text="无匹配的评测记录"
+          @update:page="runs.setPage"
+          @update:pageSize="runs.setPageSize"
+        >
+          <template #columns>
+            <el-table-column label="选手" prop="player_no" width="110" />
+            <el-table-column label="题目" prop="problem" width="100" />
+            <el-table-column label="状态" width="100">
+              <template #default="{ row }">
+                <el-tag :type="runStatusType(row.parse_status)" size="small" effect="light">
+                  {{ runStatusLabel(row.parse_status) }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="得分" width="100" align="right">
+              <template #default="{ row }">
+                <span v-if="row.score === null || row.score === undefined" class="muted">—</span>
+                <span v-else>{{ row.score }} / {{ row.max_score ?? '?' }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="来源文件" min-width="220">
+              <template #default="{ row }">
+                <span v-if="row.source_path" class="mono">{{ row.source_path }}</span>
+                <span v-else class="muted">—</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="信息" min-width="200">
+              <template #default="{ row }">
+                <span :class="{ 'error-text': row.parse_status === 'unparsed' }" class="run-detail">
+                  {{ row.detail || '—' }}
+                </span>
+              </template>
+            </el-table-column>
+            <el-table-column label="更新时间" width="170">
+              <template #default="{ row }">
+                <span class="cell-sub">{{ formatTime(row.updated_at) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="110" fixed="right">
+              <template #default="{ row }">
+                <el-button v-if="row.has_cases" link type="primary" size="small" @click="openDetail(row.id)">
+                  明细
+                </el-button>
+                <el-button link type="primary" size="small" @click="openManual(row, row.problem, row)">
+                  {{ row.parse_status === 'unparsed' ? '补录' : '修正' }}
+                </el-button>
+              </template>
+            </el-table-column>
+          </template>
+        </DataTable>
+      </SectionCard>
     </div>
 
     <FormDialog
@@ -772,7 +760,10 @@ async function rejudge(run: JudgeRunDetailOut, force = false): Promise<void> {
       :submitting="saveManual.pending.value"
       @submit="saveManual.run(undefined)"
     >
-      <el-form label-width="90px">
+      <el-alert v-if="manualUnparsed" type="warning" :closable="false" show-icon class="manual-alert">
+        <template #title>未解析：{{ manualSeed?.detail || '无原因' }}</template>
+      </el-alert>
+      <el-form label-width="72px">
         <el-form-item label="选手">
           <span class="mono">{{ form.playerNo }}</span>
         </el-form-item>
@@ -786,17 +777,9 @@ async function rejudge(run: JudgeRunDetailOut, force = false): Promise<void> {
           <el-input-number v-model="form.maxScore" :min="0" :max="100000" />
         </el-form-item>
         <el-form-item label="状态">
-          <el-input v-model="form.status" placeholder="例如 AC / WA / 未评测（可留空）" />
+          <el-input v-model="form.status" placeholder="例如 AC / WA" />
         </el-form-item>
       </el-form>
-
-      <!-- 从"未解析"进来时把解析器给的原因摆出来 —— 教师判分前需要知道它读的是什么文件 -->
-      <el-alert v-if="manualUnparsed" type="warning" :closable="false" show-icon style="margin-bottom: 10px">
-        <template #title>这一格是自动解析失败的，原因：{{ manualSeed?.detail || '（服务端没有给出原因）' }}</template>
-        <template #default>
-          可到下面「评测记录」按「未解析」筛出同类记录。
-        </template>
-      </el-alert>
 
       <template #footer-prepend>
         <el-button
@@ -806,56 +789,43 @@ async function rejudge(run: JudgeRunDetailOut, force = false): Promise<void> {
           :loading="clearScore.pending.value"
           @click="askClear"
         >
-          清除这一格
+          清除成绩
         </el-button>
       </template>
     </FormDialog>
 
-    <!--
-      清除某一格 = 硬删除一条评测记录。服务端要 `confirm` 逐字等于考号，
-      所以这里不是"是否确定"，而是把考号打一遍。
-    -->
+    <!-- 清除一格 = 硬删除一条评测记录；confirm 是考号 -->
     <ConfirmByNameDialog
       v-model="clearCellOpen"
-      title="清除这一格成绩"
+      title="清除成绩？"
       :expected="form.playerNo"
       :submitting="clearScore.pending.value"
       confirm-text="清除"
-      :detail="
-        `将删除 ${form.playerNo} 的「${form.problem}」这一格的成绩记录。` +
-        '手工录入的那份会被抹掉，随后自动扫描可以重新接管这一格。' +
-        '选手的代码与结果文件都不动 —— 删的只是这条成绩记录。'
-      "
+      :detail="`将删除 ${form.playerNo}「${form.problem}」的成绩记录（含手工录入），不可恢复；代码与结果文件不受影响。`"
       @confirm="clearScore.run(undefined)"
     />
 
-    <!--
-      清空成绩记录 = 范围删除。`confirm` 是**场次标识**，不是某一格的名字 ——
-      这个动作的范围是整个场次，不跟着记录区上面的状态筛选走，文案要写清楚，
-      否则教师会以为"筛了未解析就是只清未解析的"。
-    -->
+    <!-- 清空 = 整个场次的范围删除，不跟随记录区筛选；confirm 是场次标识 -->
     <ConfirmByNameDialog
       v-model="clearRunsOpen"
-      title="清空本场次成绩记录"
+      title="清空成绩记录？"
       :expected="contest.current?.slug ?? ''"
       :submitting="clearRuns.pending.value"
       confirm-text="清空"
-      :detail="
-        '将删除本场次的「全部」评测记录（不跟着记录区上面的状态筛选走），' +
-        '成绩矩阵随之一起空掉。默认保留手工录入的分数；要连手工分一起清，' +
-        '把下面那个勾去掉。'
-      "
+      detail="将删除本场次全部评测记录（不受筛选影响），不可恢复。"
       @confirm="clearRuns.run(undefined)"
     >
-      <el-checkbox v-model="clearKeepManual">保留手工录入的分数（推荐）</el-checkbox>
-      <el-alert v-if="!clearKeepManual" type="error" :closable="false" show-icon style="margin-top: 8px">
-        <template #title>手工录入的分数会被一起清掉</template>
-        <template #default>
-          那些分数是评测器给不出结果时教师亲自判的，重扫也恢复不出来 ——
-          清掉之后只能重新人工判一遍。
-        </template>
-      </el-alert>
+      <el-checkbox v-model="clearKeepManual">保留手工录入的分数</el-checkbox>
+      <el-alert
+        v-if="!clearKeepManual"
+        type="error"
+        :closable="false"
+        show-icon
+        class="manual-alert"
+        title="手工录入的分数将一并删除，重扫无法恢复。"
+      />
     </ConfirmByNameDialog>
+
     <JudgeRunDetailDialog
       v-model="detailOpen"
       :contest-id="contest.currentId"
@@ -871,12 +841,8 @@ async function rejudge(run: JudgeRunDetailOut, force = false): Promise<void> {
   cursor: pointer;
 }
 
-.unparsed-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
-  margin-top: 4px;
+.scan-alert {
+  margin-bottom: 16px;
 }
 
 .scan-errors {
@@ -886,27 +852,277 @@ async function rejudge(run: JudgeRunDetailOut, force = false): Promise<void> {
   overflow: auto;
 }
 
-.list-head {
+.danger-item {
+  display: inline-flex;
+  align-items: center;
+  color: var(--sj-danger);
+}
+
+/* ---- 待处理 ---- */
+
+.todo-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.todo-row {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.todo-label {
+  flex: none;
+  width: 120px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
+  gap: 6px;
+  font-weight: 600;
+  line-height: 24px;
 }
 
-.section-title {
-  font-size: 15px;
-  margin: 0 0 10px;
-}
-
-.muted {
-  font-size: 12px;
+.todo-count {
   font-weight: 400;
-  color: #909399;
+  font-size: 12.5px;
+  color: var(--sj-text-3);
 }
 
-.error-text {
-  color: #f56c6c;
+.todo-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.todo-dot.unparsed {
+  background: var(--sj-danger);
+}
+
+.todo-dot.pending {
+  background: var(--sj-primary);
+}
+
+.todo-dot.missing {
+  background: var(--sj-warning);
+}
+
+.todo-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+}
+
+/* ---- 图例 ---- */
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
   font-size: 12px;
+  color: var(--sj-text-3);
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  border: 1px solid transparent;
+}
+
+.swatch.full {
+  background: var(--sj-success-soft);
+  border-color: var(--sj-success);
+}
+
+.swatch.mid {
+  background: var(--sj-warning-soft);
+  border-color: var(--sj-warning);
+}
+
+.swatch.zero {
+  background: var(--sj-danger-soft);
+  border-color: var(--sj-danger);
+}
+
+.swatch.pending {
+  border: 1px dashed var(--sj-primary);
+}
+
+.swatch.unparsed {
+  border: 1px dashed var(--sj-danger);
+}
+
+.swatch.missing {
+  border: 1px dashed var(--sj-border-strong);
+}
+
+/* ---- 矩阵 ---- */
+
+.matrix .total {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--sj-text);
+}
+
+.score-block {
+  --block-fg: var(--sj-text-2);
+  --block-bg: var(--sj-info-soft);
+  --block-border: transparent;
+  position: relative;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  max-width: 92px;
+  min-height: 40px;
+  padding: 4px 6px 6px;
+  overflow: hidden;
+  border: 1px solid var(--block-border);
+  border-radius: var(--sj-radius-sm);
+  background: var(--block-bg);
+  color: var(--block-fg);
+  font: inherit;
+  line-height: 1.2;
+  cursor: pointer;
+  transition:
+    transform 0.12s ease,
+    box-shadow 0.12s ease;
+}
+
+.score-block:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--sj-shadow-lg);
+}
+
+.score-block:focus-visible {
+  outline: 2px solid var(--sj-primary);
+  outline-offset: 1px;
+}
+
+.score-main {
+  font-size: 15px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.score-sub {
+  margin-top: 1px;
+  font-size: 11px;
+  font-weight: 500;
+  opacity: 0.8;
+}
+
+.score-manual {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  font-size: 11px;
+  opacity: 0.75;
+}
+
+.score-bar {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 3px;
+  background: currentColor;
+  opacity: 0.55;
+}
+
+.score-block.is-full {
+  --block-fg: var(--sj-success);
+  --block-bg: var(--sj-success-soft);
+  --block-border: var(--sj-success);
+}
+
+.score-block.is-high {
+  --block-fg: var(--sj-primary);
+  --block-bg: var(--sj-primary-soft);
+}
+
+.score-block.is-mid {
+  --block-fg: var(--sj-warning);
+  --block-bg: var(--sj-warning-soft);
+}
+
+.score-block.is-low {
+  --block-fg: var(--sj-danger);
+  --block-bg: var(--sj-warning-soft);
+}
+
+.score-block.is-zero {
+  --block-fg: var(--sj-danger);
+  --block-bg: var(--sj-danger-soft);
+  --block-border: var(--sj-danger);
+}
+
+.score-block.is-plain {
+  --block-fg: var(--sj-text);
+}
+
+.score-block.is-pending,
+.score-block.is-unparsed,
+.score-block.is-noscore,
+.score-block.is-missing {
+  --block-bg: transparent;
+  border-style: dashed;
+}
+
+.score-block.is-pending .score-main,
+.score-block.is-unparsed .score-main,
+.score-block.is-noscore .score-main {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.score-block.is-pending {
+  --block-fg: var(--sj-primary);
+  --block-border: var(--sj-primary);
+  --block-bg: var(--sj-primary-soft);
+}
+
+.score-block.is-unparsed {
+  --block-fg: var(--sj-danger);
+  --block-border: var(--sj-danger);
+}
+
+.score-block.is-noscore {
+  --block-fg: var(--sj-warning);
+  --block-border: var(--sj-warning);
+}
+
+.score-block.is-missing {
+  --block-fg: var(--sj-text-3);
+  --block-border: var(--sj-border-strong);
+}
+
+/* ---- 评测记录 ---- */
+
+.runs-anchor {
+  margin-top: 16px;
+  scroll-margin-top: calc(var(--sj-topbar-h) + 16px);
+}
+
+.run-detail {
+  font-size: 12.5px;
+}
+
+.manual-alert {
+  margin-bottom: 14px;
+}
+
+.el-checkbox + .manual-alert {
+  margin: 8px 0 0;
 }
 </style>
+

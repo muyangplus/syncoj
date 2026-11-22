@@ -60,9 +60,6 @@ const paginated = () => props.total !== undefined && props.pageSize !== undefine
       :data="rows"
       :row-key="rowKey"
       v-loading="loading"
-      border
-      stripe
-      size="small"
       @selection-change="(picked: T[]) => emit('selection-change', picked)"
     >
       <el-table-column v-if="selectable" type="selection" reserve-selection width="44" />
@@ -72,13 +69,12 @@ const paginated = () => props.total !== undefined && props.pageSize !== undefine
         <div class="empty-block">
           <slot name="empty">
             <p class="empty-text">
-              {{ (filtered && emptyFilteredText) || emptyText || '没有数据' }}
+              {{ (filtered && emptyFilteredText) || emptyText || '无数据' }}
             </p>
             <el-button
               v-if="emptyActionText && !(filtered && emptyFilteredText)"
               type="primary"
               plain
-              size="small"
               @click="emit('empty-action')"
             >
               {{ emptyActionText }}
@@ -90,7 +86,6 @@ const paginated = () => props.total !== undefined && props.pageSize !== undefine
 
     <div v-if="paginated()" class="pager">
       <el-pagination
-        size="small"
         background
         layout="total, sizes, prev, pager, next, jumper"
         :total="total ?? 0"
@@ -108,10 +103,16 @@ const paginated = () => props.total !== undefined && props.pageSize !== undefine
 .pager {
   display: flex;
   justify-content: flex-end;
-  margin-top: 12px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--sj-border);
+}
+
+.empty-block {
+  padding: 32px 0;
 }
 
 .empty-text {
   margin: 0 0 12px;
+  color: var(--sj-text-3);
 }
 </style>

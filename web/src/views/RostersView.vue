@@ -14,6 +14,7 @@ import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
 import DataTable from '@/components/DataTable.vue'
 import FormDialog from '@/components/FormDialog.vue'
 import PageShell from '@/components/PageShell.vue'
+import SectionCard from '@/components/SectionCard.vue'
 import { useList } from '@/composables/useList'
 import { useMutation } from '@/composables/useMutation'
 import { useContestStore } from '@/stores/contest'
@@ -156,7 +157,7 @@ const saveRoster = useMutation(
   {
     // `RosterOut` 没有 `detail` 字段（它不是 SimpleAck），所以这里自己写一句。
     // 重点是"改名/改备注都不会动任何场次里的选手"—— 这句话不说，教师不敢改。
-    success: () => (editingRoster.value ? '已保存（不影响已经应用过的场次）' : '已新建名单'),
+    success: () => (editingRoster.value ? '已保存' : '已新建名单'),
     onDone: async (roster) => {
       formOpen.value = false
       // 新建的那份立刻选中：接下来一定是往里面导入人
@@ -208,12 +209,10 @@ function askRemoveRoster(): void {
  * 这句是这个按钮敢按下去的全部理由：教师最怕的是"删了名单，某场比赛的选手跟着
  * 没了"。不过度用强调符号 —— 弹窗是纯文本，`**` 只会原样显示出来。
  */
-const deleteRosterDetail = computed(() =>
-  [
-    '删掉的只是这份名单本身和它记录的人。',
-    '各场次里的选手不受影响 —— 他们的成绩、代码、下发目标都还挂在自己身上；' +
-      '用过这份名单的场次只是不再指向它。',
-  ].join('\n'),
+const deleteRosterDetail = computed(
+  () =>
+    `将删除名单「${deleteTarget.value?.name ?? ''}」及其 ${deleteTarget.value?.entry_count ?? 0} 条记录，不可恢复；` +
+    '各场次选手不受影响。',
 )
 
 // --------------------------------------------------------------------------- //
@@ -244,7 +243,7 @@ const saveEntry = useMutation(
     const entry = entryTarget.value
     if (!entry) throw new Error('没有选中条目')
     const playerNo = entryNo.value.trim()
-    if (!playerNo) throw new Error('选手编号不能为空')
+    if (!playerNo) throw new Error('考号不能为空')
     const payload: RosterEntryIn = {
       player_no: playerNo,
       name: entryName.value.trim() || null,
@@ -256,7 +255,7 @@ const saveEntry = useMutation(
   {
     // 接口回的是 `RosterEntryOut`（没有 detail），编不出比"已保存"更有信息量的话，
     // 但必须提一句"已经应用过的场次不会跟着变"—— 否则教师会以为改名单等于改比赛
-    success: () => '已保存（已经应用过的场次需要重新「应用」才会变）',
+    success: () => '已保存',
     onDone: async () => {
       entryOpen.value = false
       entryTarget.value = null
@@ -306,11 +305,9 @@ async function batchRemoveEntries(): Promise<void> {
   if (!picked.length) return
   try {
     await ElMessageBox.confirm(
-      `从名单「${selectedName.value}」里删除选中的 ${picked.length} 条？\n\n` +
-        '只删名单里的记录，已经应用到场次的选手不受影响。\n' +
-        '失败的会汇总告诉你，不会静默跳过。',
-      '删除选中的条目',
-      { type: 'warning', confirmButtonText: `删除 ${picked.length} 条`, cancelButtonText: '取消' },
+      `将从名单「${selectedName.value}」删除 ${picked.length} 条记录，不可恢复；各场次选手不受影响。`,
+      `删除 ${picked.length} 条？`,
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
     )
   } catch {
     return
@@ -339,7 +336,7 @@ async function batchRemoveEntries(): Promise<void> {
 
   const done = picked.length - failures.length
   if (failures.length) {
-    ElMessage.warning(`删除了 ${done} 条，${failures.length} 条没删掉`)
+    ElMessage.warning(`已删除 ${done} 条，失败 ${failures.length} 条`)
     for (const message of failures.slice(0, 5)) ElMessage.error(message)
   } else {
     ElMessage.success(`已删除 ${done} 条`)
@@ -428,9 +425,9 @@ const parsed = computed<ParsedRow[]>(() => {
     // 这里做的是"提交前的体检"，真正决定收不收的是服务端。长度上限与服务端
     // 逐条校验的一致（编号 64、姓名 64、座位 32、分组 64）
     if (!playerNo) {
-      row.error = '缺少选手编号'
+      row.error = '缺少考号'
     } else if (playerNo.length > 64) {
-      row.error = '编号超过 64 字符'
+      row.error = '考号超过 64 字符'
     } else if (name.length > 64) {
       row.error = '姓名超过 64 字符'
     } else if (seat.length > 32) {
@@ -458,7 +455,7 @@ function showImportErrors(result: { errors?: string[] }): void {
 const importEntries = useMutation(
   async () => {
     const rosterId = selectedRosterId.value
-    if (rosterId === null) throw new Error('先选一份名单')
+    if (rosterId === null) throw new Error('未选择名单')
     const payload: RosterEntryIn[] = validRows.value.map((row) => ({
       player_no: row.player_no,
       name: row.name || null,
@@ -504,28 +501,24 @@ async function applyToContest(prune: boolean): Promise<void> {
   if (!roster) return
   const contestId = contest.currentId
   if (!contestId) {
-    ElMessage.warning('请先在顶栏选择一个场次')
+    ElMessage.warning('未选择场次')
     return
   }
   if (!entries.total.value) {
-    ElMessage.warning('这份名单还是空的，先导入人再应用')
+    ElMessage.warning('名单为空')
     return
   }
 
   const target = contest.current
+  const head = `名单「${roster.name}」→ 场次「${target?.name ?? ''}」：补入缺少的选手，更新已有选手。`
   const confirmText = prune
-    ? `把名单「${roster.name}」应用到「${target?.name ?? ''}」？\n\n` +
-      '名单里有而场次里没有的会补上，已有的更新；' +
-      '场次里多出来、且不在名单里的会被移除。\n' +
-      '**但已经交过代码或有成绩的选手一律保留**，结果里会列出来。'
-    : `把名单「${roster.name}」应用到「${target?.name ?? ''}」？\n\n` +
-      '名单里有而场次里没有的补上，已有的更新姓名座位；' +
-      '场次里多出来的选手保持不动。'
+    ? head + '不在名单中的选手将被删除，不可恢复；有代码或成绩的选手保留。'
+    : head
 
   try {
-    await ElMessageBox.confirm(confirmText, '应用名单', {
+    await ElMessageBox.confirm(confirmText, prune ? '应用并清理？' : '应用名单？', {
       type: prune ? 'warning' : 'info',
-      confirmButtonText: '应用',
+      confirmButtonText: prune ? '应用并清理' : '应用',
       cancelButtonText: '取消',
     })
   } catch {
@@ -554,31 +547,65 @@ async function applyToContest(prune: boolean): Promise<void> {
 watch(selectedRosterId, () => {
   keyword.value = ''
 })
+
+function onRosterCommand(command: string): void {
+  if (command === 'prune') void applyToContest(true)
+  else if (command === 'delete') askRemoveRoster()
+}
 </script>
 
 <template>
-  <PageShell
-    title="名单库"
-    :error="rosters.error.value"
-    error-action="先重试；还不行就先别新建名单。"
-    retryable
-    @retry="rosters.reload"
-  >
+  <PageShell title="名单库" :error="rosters.error.value" retryable @retry="rosters.reload">
     <template #toolbar>
-      <el-button size="small" :loading="rosters.loading.value" @click="rosters.reload">刷新</el-button>
-      <el-button size="small" type="primary" @click="openCreate">新建名单</el-button>
+      <el-button :loading="rosters.loading.value" @click="rosters.reload">
+        <el-icon><Refresh /></el-icon>刷新
+      </el-button>
+      <el-button type="primary" @click="openCreate">
+        <el-icon><Plus /></el-icon>新建名单
+      </el-button>
     </template>
 
-    <!--
-      名单还没选出来之前不整页判空：`rosters.rows` 为空可能是"真的没有名单"，
-      也可能是"加载失败"（后者由 PageShell 的红条说）。两种情况的下一步都是新建。
-    -->
-    <el-card shadow="never" style="margin-bottom: 12px">
+    <SectionCard title="名单" :meta="`${rosters.rows.value.length} 份`">
+      <template #extra>
+        <template v-if="selectedRoster">
+          <el-button
+            type="primary"
+            plain
+            :loading="applying"
+            :disabled="!contest.currentId || !entries.total.value"
+            @click="applyToContest(false)"
+          >
+            应用到「{{ contest.current?.name ?? '未选场次' }}」
+          </el-button>
+          <el-button @click="openEdit(selectedRoster)">
+            <el-icon><Edit /></el-icon>编辑
+          </el-button>
+          <el-dropdown trigger="click" @command="(command: string) => onRosterCommand(command)">
+            <el-button>
+              更多<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item
+                  command="prune"
+                  :disabled="applying || !contest.currentId || !entries.total.value"
+                >
+                  <span class="danger-text">应用并清理</span>
+                </el-dropdown-item>
+                <el-dropdown-item command="delete" divided>
+                  <span class="danger-text">删除名单</span>
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+        </template>
+      </template>
+
       <div class="picker">
         <el-select
           v-model="selectedRosterId"
           placeholder="选择名单"
-          style="width: 260px"
+          style="width: 280px"
           :loading="rosters.loading.value"
           :disabled="!rosters.rows.value.length"
         >
@@ -589,154 +616,126 @@ watch(selectedRosterId, () => {
             :value="roster.id"
           />
         </el-select>
-
-        <template v-if="selectedRoster">
-          <el-button size="small" @click="openEdit(selectedRoster)">编辑</el-button>
-          <el-button size="small" type="danger" plain @click="askRemoveRoster">删除名单</el-button>
-          <div class="spacer" />
-          <el-button size="small" type="primary" @click="openImport">粘贴导入</el-button>
-          <el-tooltip content="名单里有而场次里没有的补上；场次里多出来的保持不动。">
-            <el-button
-              size="small"
-              type="success"
-              plain
-              :loading="applying"
-              :disabled="!contest.currentId || !entries.total.value"
-              @click="applyToContest(false)"
-            >
-              应用到「{{ contest.current?.name ?? '未选场次' }}」
-            </el-button>
-          </el-tooltip>
-          <el-tooltip
-            content="名单里没有的选手会被移除；交过代码或有成绩的会保留。"
-          >
-            <el-button
-              size="small"
-              plain
-              :loading="applying"
-              :disabled="!contest.currentId || !entries.total.value"
-              @click="applyToContest(true)"
-            >
-              应用并清理
-            </el-button>
-          </el-tooltip>
-        </template>
-      </div>
-
-      <div v-if="selectedRoster" class="meta">
-        <span class="muted">
-          共 {{ selectedRoster.entry_count }} 人
-          <template v-if="selectedRoster.note"> · 备注：{{ selectedRoster.note }}</template>
+        <span v-if="selectedRoster" class="muted">
+          {{ selectedRoster.entry_count }} 人
+          <template v-if="selectedRoster.note"> · {{ selectedRoster.note }}</template>
+        </span>
+        <span v-else-if="!rosters.loading.value && !rosters.rows.value.length" class="muted">
+          无名单
         </span>
       </div>
-    </el-card>
+    </SectionCard>
 
-    <div class="list-head">
-      <h3 class="section-title">
-        名单条目
-        <span v-if="selectedRoster" class="muted">（{{ selectedRoster.name }}）</span>
-      </h3>
-      <div class="toolbar">
+    <SectionCard
+      title="名单条目"
+      :meta="selectedRoster ? `${selectedRoster.name} · ${entries.total.value ?? 0} 人` : ''"
+      flush
+    >
+      <template #extra>
         <el-input
           v-model="keyword"
-          size="small"
-          placeholder="按编号/姓名/座位筛选"
+          placeholder="筛选考号 / 姓名 / 座位"
           clearable
           style="width: 200px"
-        />
+        >
+          <template #prefix><el-icon><Search /></el-icon></template>
+        </el-input>
         <el-button
           v-if="entries.hasSelection.value"
-          size="small"
           type="danger"
           plain
           :loading="batchRemoving"
           @click="batchRemoveEntries"
         >
-          删除选中（{{ entries.selectedKeys.value.length }}）
+          删除选中（{{ entries.selectedKeys.value.length }} 条）
         </el-button>
-        <el-button
-          size="small"
-          type="danger"
-          plain
-          :disabled="!entries.total.value"
-          @click="askClearEntries"
-        >
-          清空条目
+        <el-button type="primary" plain :disabled="!selectedRoster" @click="openImport">
+          <el-icon><Upload /></el-icon>粘贴导入
         </el-button>
-      </div>
-    </div>
-
-    <!-- 条目拉取失败单独说一句：它是第二个数据源，PageShell 只挂名单库那一条 -->
-    <el-alert
-      v-if="entries.error.value"
-      type="error"
-      :closable="false"
-      show-icon
-      :title="`名单条目加载失败：${entries.error.value}`"
-      style="margin-bottom: 12px"
-    />
-
-    <!--
-      条目列表同样走 DataTable + useList：分页、加载中、空状态、跨页勾选都在
-      数据层里，页面只写列。`selectable` 打开批量删除，`row-key` 保证勾选在
-      每次重拉之后还在（按对象引用比对的写法会让勾选每轮消失）。
-    -->
-    <DataTable
-      :rows="visibleEntries"
-      :row-key="(row: RosterEntryOut) => row.id"
-      :loading="entries.loading.value"
-      :total="entries.total.value"
-      :page="entries.page.value"
-      :page-size="entries.pageSize.value"
-      selectable
-      :empty-text="selectedRoster ? '这份名单还是空的' : '还没选名单'"
-      @update:page="entries.setPage"
-      @update:pageSize="entries.setPageSize"
-      @selection-change="entries.onSelectionChange"
-    >
-      <template #columns>
-        <el-table-column label="选手编号" width="160">
-          <template #default="{ row }">
-            <span class="mono">{{ row.player_no }}</span>
+        <el-dropdown trigger="click" @command="askClearEntries">
+          <el-button :disabled="!entries.total.value">
+            更多<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="clear">
+                <span class="danger-text">清空条目</span>
+              </el-dropdown-item>
+            </el-dropdown-menu>
           </template>
-        </el-table-column>
-
-        <el-table-column label="姓名" width="140">
-          <template #default="{ row }">{{ row.name || '—' }}</template>
-        </el-table-column>
-
-        <el-table-column label="座位" width="110">
-          <template #default="{ row }">{{ row.seat || '—' }}</template>
-        </el-table-column>
-
-        <el-table-column label="分组" min-width="120">
-          <template #default="{ row }">{{ row.group_name || '—' }}</template>
-        </el-table-column>
-
-        <el-table-column label="操作" width="130" fixed="right">
-          <template #default="{ row }">
-            <el-button link type="primary" size="small" @click="openEntry(row)">编辑</el-button>
-            <el-button link type="danger" size="small" @click="askRemoveEntry(row)">删除</el-button>
-          </template>
-        </el-table-column>
+        </el-dropdown>
       </template>
 
-      <template #empty>
-        <template v-if="selectedRoster">
-          <p v-if="keyword.trim()">这份名单里没有匹配「{{ keyword.trim() }}」的人。</p>
+      <el-alert
+        v-if="entries.error.value"
+        type="error"
+        :closable="false"
+        show-icon
+        :title="`名单条目加载失败：${entries.error.value}`"
+        style="margin: 12px 20px"
+      />
+
+      <DataTable
+        :rows="visibleEntries"
+        :row-key="(row: RosterEntryOut) => row.id"
+        :loading="entries.loading.value"
+        :total="entries.total.value"
+        :page="entries.page.value"
+        :page-size="entries.pageSize.value"
+        selectable
+        :empty-text="selectedRoster ? '名单为空' : '未选择名单'"
+        @update:page="entries.setPage"
+        @update:pageSize="entries.setPageSize"
+        @selection-change="entries.onSelectionChange"
+      >
+        <template #columns>
+          <el-table-column label="考号" width="160">
+            <template #default="{ row }">
+              <span class="mono">{{ row.player_no }}</span>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="姓名" width="140">
+            <template #default="{ row }">{{ row.name || '—' }}</template>
+          </el-table-column>
+
+          <el-table-column label="座位" width="110">
+            <template #default="{ row }">{{ row.seat || '—' }}</template>
+          </el-table-column>
+
+          <el-table-column label="分组" min-width="120">
+            <template #default="{ row }">{{ row.group_name || '—' }}</template>
+          </el-table-column>
+
+          <el-table-column label="操作" width="130" fixed="right">
+            <template #default="{ row }">
+              <el-button link type="primary" size="small" @click="openEntry(row)">编辑</el-button>
+              <el-button link type="danger" size="small" @click="askRemoveEntry(row)">删除</el-button>
+            </template>
+          </el-table-column>
+        </template>
+
+        <template #empty>
+          <template v-if="selectedRoster">
+            <p v-if="keyword.trim()">无匹配「{{ keyword.trim() }}」的条目</p>
+            <template v-else>
+              <p>名单为空</p>
+              <el-button type="primary" @click="openImport">
+                <el-icon><Upload /></el-icon>粘贴导入
+              </el-button>
+            </template>
+          </template>
           <template v-else>
-            <p>「{{ selectedRoster.name }}」还是空的，粘贴导入就能一次录完。</p>
-            <el-button type="primary" size="small" @click="openImport">粘贴导入</el-button>
+            <p>无名单</p>
+            <el-button type="primary" @click="openCreate">
+              <el-icon><Plus /></el-icon>新建名单
+            </el-button>
           </template>
         </template>
-        <template v-else>
-          <p>还没有名单。</p>
-          <el-button type="primary" size="small" @click="openCreate">新建第一份名单</el-button>
-        </template>
-      </template>
-    </DataTable>
+      </DataTable>
+    </SectionCard>
 
-    <!-- 新建 / 编辑名单：名称与备注是同一次 PATCH，所以放在同一个表单里 -->
+    <!-- 新建 / 编辑名单 -->
     <FormDialog
       v-model="formOpen"
       :title="formTitle"
@@ -747,19 +746,15 @@ watch(selectedRosterId, () => {
     >
       <el-form label-width="72px">
         <el-form-item label="名称">
-          <el-input v-model="formName" maxlength="200" placeholder="比如「高一(1)班」" />
+          <el-input v-model="formName" maxlength="200" placeholder="例如 高一(1)班" />
         </el-form-item>
         <el-form-item label="备注">
-          <el-input
-            v-model="formNote"
-            maxlength="500"
-            placeholder="可选。名单库里有好几份同类名单时用它区分"
-          />
+          <el-input v-model="formNote" maxlength="500" placeholder="例如 2025 届" />
         </el-form-item>
       </el-form>
     </FormDialog>
 
-    <!-- 编辑单条：编号、姓名、座位、分组都在这里改，不用删了重加 -->
+    <!-- 编辑单条 -->
     <FormDialog
       v-model="entryOpen"
       title="编辑名单条目"
@@ -769,31 +764,29 @@ watch(selectedRosterId, () => {
       @submit="saveEntry.run(undefined)"
     >
       <el-form label-width="72px">
-        <el-form-item label="选手编号">
-          <el-input v-model="entryNo" maxlength="64" placeholder="比如 S001" />
+        <el-form-item label="考号">
+          <el-input v-model="entryNo" maxlength="64" placeholder="例如 S001" />
         </el-form-item>
         <el-form-item label="姓名">
-          <el-input v-model="entryName" maxlength="64" placeholder="可留空" />
+          <el-input v-model="entryName" maxlength="64" placeholder="例如 张三" />
         </el-form-item>
         <el-form-item label="座位">
-          <el-input v-model="entrySeat" maxlength="32" placeholder="可留空" />
+          <el-input v-model="entrySeat" maxlength="32" placeholder="例如 A1" />
         </el-form-item>
         <el-form-item label="分组">
-          <el-input v-model="entryGroup" maxlength="64" placeholder="可留空" />
+          <el-input v-model="entryGroup" maxlength="64" placeholder="例如 A组" />
         </el-form-item>
       </el-form>
     </FormDialog>
 
-    <!-- 粘贴导入：解析结果先给教师看一眼，有问题的行会被跳过 -->
+    <!-- 粘贴导入 -->
     <el-dialog
       v-model="importVisible"
       title="粘贴导入名单"
       width="720px"
       :close-on-click-modal="false"
     >
-      <el-alert type="info" :closable="false" show-icon style="margin-bottom: 12px">
-        <template #title>每行一名选手，用逗号、制表符或空格分隔</template>
-      </el-alert>
+      <div class="format">格式 <span class="mono">考号,姓名,座位,分组</span></div>
 
       <el-input
         v-model="raw"
@@ -804,26 +797,18 @@ watch(selectedRosterId, () => {
 
       <div v-if="parsed.length" class="preview">
         <div class="preview-head">
-          <span>解析预览</span>
+          <span>预览</span>
           <span>
-            <el-tag type="success" size="small" effect="plain">
-              {{ validRows.length }} 条可导入
-            </el-tag>
-            <el-tag
-              v-if="invalidRows.length"
-              type="danger"
-              size="small"
-              effect="plain"
-              style="margin-left: 6px"
-            >
-              {{ invalidRows.length }} 条有问题
+            <el-tag type="success" effect="plain">{{ validRows.length }} 条可导入</el-tag>
+            <el-tag v-if="invalidRows.length" type="danger" effect="plain" style="margin-left: 6px">
+              {{ invalidRows.length }} 条跳过
             </el-tag>
           </span>
         </div>
 
-        <el-table :data="parsed" size="small" border max-height="220">
+        <el-table :data="parsed" max-height="240">
           <el-table-column label="行" prop="line" width="55" align="right" />
-          <el-table-column label="编号" prop="player_no" width="110">
+          <el-table-column label="考号" prop="player_no" width="110">
             <template #default="{ row }">
               <span class="mono">{{ row.player_no || '—' }}</span>
             </template>
@@ -837,10 +822,10 @@ watch(selectedRosterId, () => {
           <el-table-column label="分组" prop="group_name" width="100">
             <template #default="{ row }">{{ row.group_name || '—' }}</template>
           </el-table-column>
-          <el-table-column label="问题" min-width="140">
+          <el-table-column label="校验" min-width="140">
             <template #default="{ row }">
-              <span v-if="row.error" class="error-text">{{ row.error }}</span>
-              <span v-else class="muted">正常</span>
+              <el-tag v-if="row.error" type="danger" effect="light">{{ row.error }}</el-tag>
+              <el-tag v-else type="success" effect="plain">正常</el-tag>
             </template>
           </el-table-column>
         </el-table>
@@ -859,12 +844,8 @@ watch(selectedRosterId, () => {
       </template>
     </el-dialog>
 
-    <!--
-      应用回执单独一屏。toast 会几十秒后消失，而这里每一项都有意义：
-      尤其是 protected ——「有几个人因为已经有提交而被保住了」正是教师必须
-      看到、又最容易被一句"应用成功"盖掉的信息。
-    -->
-    <el-dialog v-model="reportOpen" title="应用名单的结果" width="560px">
+    <!-- 应用回执 -->
+    <el-dialog v-model="reportOpen" title="应用结果" width="560px">
       <template v-if="applyReport">
         <p class="report-line">
           名单「{{ applyReport.roster_name || selectedName }}」→ 场次「{{ contest.current?.name }}」
@@ -881,7 +862,7 @@ watch(selectedRosterId, () => {
           </el-col>
           <el-col :span="6">
             <div class="stat-value">{{ applyReport.kept }}</div>
-            <div class="stat-label">保留（不在名单里）</div>
+            <div class="stat-label">保留</div>
           </el-col>
           <el-col :span="6">
             <div class="stat-value" :class="{ warn: applyReport.pruned > 0 }">
@@ -898,9 +879,7 @@ watch(selectedRosterId, () => {
           show-icon
           style="margin-top: 14px"
         >
-          <template #title>
-            有 {{ applyReport.protected.length }} 人因为已经有代码或成绩被保住，没有被移除
-          </template>
+          <template #title>{{ applyReport.protected.length }} 人有代码或成绩，未移除</template>
           <template #default>
             <div class="mono">{{ applyReport.protected.join('、') }}</div>
           </template>
@@ -908,53 +887,45 @@ watch(selectedRosterId, () => {
       </template>
 
       <template #footer>
-        <el-button type="primary" @click="reportOpen = false">知道了</el-button>
+        <el-button type="primary" @click="reportOpen = false">关闭</el-button>
       </template>
     </el-dialog>
 
-    <!--
-      删除名单 = 结构性数据的硬删除，必须打一遍名单名称。弹窗里那句"什么不会被
-      删"是这个按钮敢按下去的**全部理由**：教师最怕的是删了模板、比赛里的选手
-      跟着没了，而实际不会。
-    -->
+    <!-- 删除名单：名单名称逐字确认 -->
     <ConfirmByNameDialog
       v-model="deleteOpen"
-      title="删除名单"
+      :title="`删除名单「${deleteTarget?.name ?? ''}」？`"
       :expected="deleteTarget?.name ?? ''"
       :submitting="removeRoster.pending.value"
-      confirm-text="删除名单"
+      confirm-text="删除"
       :detail="deleteRosterDetail"
       @confirm="removeRoster.run(undefined)"
     />
 
-    <!--
-      删除单条：要打的是**考号**。它是机器配对、代码目录和成绩矩阵的依据，
-      删错一条的后果不是"少一行"，所以这里同样是打名字而不是"是否确定"。
-    -->
+    <!-- 删除单条：考号逐字确认 -->
     <ConfirmByNameDialog
       v-model="entryDeleteOpen"
-      title="删除名单条目"
+      :title="`删除条目「${entryDeleteTarget?.player_no ?? ''}」？`"
       :expected="entryDeleteTarget?.player_no ?? ''"
       :submitting="removeEntry.pending.value"
       confirm-text="删除"
       :detail="
-        `从名单「${selectedName}」里删掉 ${entryDeleteTarget?.player_no ?? ''}` +
-        `${entryDeleteTarget?.name ? ` ${entryDeleteTarget.name}` : ''}。` +
-        '只删这一条，各场次里的选手不受影响。'
+        `将从名单「${selectedName}」删除 ${entryDeleteTarget?.player_no ?? ''}` +
+        `${entryDeleteTarget?.name ? ` ${entryDeleteTarget.name}` : ''}，不可恢复；各场次选手不受影响。`
       "
       @confirm="removeEntry.run(undefined)"
     />
 
-    <!-- 清空条目 = 范围删除，确认内容同样是名单名称 -->
+    <!-- 清空条目：名单名称逐字确认 -->
     <ConfirmByNameDialog
       v-model="clearOpen"
-      title="清空名单条目"
+      title="清空名单条目？"
       :expected="selectedName"
       :submitting="clearEntries.pending.value"
       confirm-text="清空"
       :detail="
-        `将清空名单「${selectedName}」里的全部 ${entries.total.value} 条记录，名单本身保留；` +
-        '各场次里的选手不受影响。'
+        `将删除名单「${selectedName}」的全部 ${entries.total.value} 条记录，不可恢复；` +
+        '名单本身与各场次选手保留。'
       "
       @confirm="clearEntries.run(undefined)"
     />
@@ -965,29 +936,8 @@ watch(selectedRosterId, () => {
 .picker {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
-}
-
-.spacer {
-  flex: 1;
-}
-
-.meta {
-  margin-top: 8px;
-}
-
-.list-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
   gap: 12px;
-  flex-wrap: wrap;
-}
-
-.section-title {
-  font-size: 15px;
-  margin: 8px 0;
+  align-items: center;
 }
 
 .report-line {
@@ -1002,14 +952,20 @@ watch(selectedRosterId, () => {
 }
 
 .stat-value.warn {
-  color: #e6a23c;
+  color: var(--el-color-warning);
 }
 
 .stat-label {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   margin-top: 2px;
   line-height: 1.3;
+}
+
+.format {
+  margin-bottom: 8px;
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
 }
 
 .preview {
@@ -1025,12 +981,12 @@ watch(selectedRosterId, () => {
   font-weight: 600;
 }
 
-.error-text {
-  color: #f56c6c;
+.muted {
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
 }
 
-.muted {
-  color: #909399;
-  font-size: 12px;
+.danger-text {
+  color: var(--el-color-danger);
 }
 </style>

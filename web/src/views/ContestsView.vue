@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 
 import { contestApi, playerApi } from '@/api'
 import type { ContestOut } from '@/api/types'
@@ -10,6 +10,7 @@ import ContestCreateDialog from '@/components/ContestCreateDialog.vue'
 import ContestSettingsDialog from '@/components/ContestSettingsDialog.vue'
 import DataTable from '@/components/DataTable.vue'
 import PageShell from '@/components/PageShell.vue'
+import SectionCard from '@/components/SectionCard.vue'
 import ProblemManageDialog from '@/components/ProblemManageDialog.vue'
 import { useList } from '@/composables/useList'
 import { useMutation } from '@/composables/useMutation'
@@ -18,6 +19,7 @@ import { contestStatusLabel, contestStatusType, formatTime } from '@/utils/forma
 
 const contest = useContestStore()
 const router = useRouter()
+const route = useRoute()
 
 /**
  * 本页表格自己取数，不动 store 里那份。
@@ -61,9 +63,25 @@ const settingsTarget = ref<ContestOut | null>(null)
 const problemVisible = ref(false)
 const problemContestId = ref<number | null>(null)
 
+// 快捷操作入口：`?do=new` 打开新建场次弹窗
+watch(
+  () => route.query.do,
+  (action) => {
+    if (action !== 'new') return
+    createVisible.value = true
+    void router.replace({ query: { ...route.query, do: undefined } })
+  },
+  { immediate: true },
+)
+
 function openSettings(row: ContestOut): void {
   settingsTarget.value = row
   settingsVisible.value = true
+}
+
+function onRowCommand(command: string, row: ContestOut): void {
+  if (command === 'clear') askClear(row)
+  else if (command === 'delete') askDelete(row)
 }
 
 function useContest(id: number): void {
@@ -137,8 +155,8 @@ const deleteImpact = computed(() => {
   const row = deleteTarget.value
   if (!row) return []
   return [
-    `这场有 ${row.player_count} 名选手`,
-    `此刻有 ${row.online_count} 台机器在线`,
+    `选手 ${row.player_count} 名`,
+    `在线机器 ${row.online_count} 台`,
   ]
 })
 const clearKeep = ref(true)
@@ -167,165 +185,157 @@ function askClear(row: ContestOut): void {
 
 /** 确认文案里要写出真实人数 —— "清空"两个字答不了"要清掉几个人"。 */
 function clearDetail(count: number): string {
-  const base = `这场共有 ${count} 名选手。`
   if (clearKeep.value) {
-    return base + '有代码或成绩的会被保留，其余的删掉。'
+    return `将删除 ${count} 名选手中无代码、无成绩的选手，不可恢复。`
   }
-  return base + '连有提交的一起删：他们的代码台账与成绩会一并消失，无法恢复。'
+  return `将删除全部 ${count} 名选手及其代码台账与成绩，不可恢复。`
 }
 </script>
 
 <template>
-  <PageShell
-    title="场次管理"
-    :error="list.error.value"
-    error-action="先重试；还不行就检查服务端或重新登录。"
-    retryable
-    @retry="refreshAll"
-  >
+  <PageShell title="场次管理" :error="list.error.value" retryable @retry="refreshAll">
     <template #toolbar>
-      <el-button size="small" :loading="list.loading.value" @click="refreshAll">
-        刷新
+      <el-button :loading="list.loading.value" @click="refreshAll">
+        <el-icon><Refresh /></el-icon>刷新
       </el-button>
-      <el-button size="small" type="primary" @click="createVisible = true">
-        新建场次
+      <el-button type="primary" @click="createVisible = true">
+        <el-icon><Plus /></el-icon>新建场次
       </el-button>
     </template>
 
-    <DataTable
-      :rows="list.rows.value"
-      :row-key="(row: ContestOut) => row.id"
-      :loading="list.loading.value"
-      :total="list.total.value"
-      :page="list.page.value"
-      :page-size="list.pageSize.value"
-      empty-text="还没有任何场次"
-      @update:page="list.setPage"
-      @update:pageSize="list.setPageSize"
-    >
-      <template #columns>
-        <el-table-column label="当前" width="70" align="center">
-          <template #default="{ row }">
-            <el-tag v-if="row.id === contest.currentId" type="primary" size="small">
-              使用中
-            </el-tag>
-            <el-button v-else link type="primary" size="small" @click="useContest(row.id)">
-              切换
-            </el-button>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="名称" min-width="200">
-          <template #default="{ row }">
-            <div>{{ row.name }}</div>
-            <div class="cell-sub">
-              标识 <span class="mono">{{ row.slug }}</span>
-            </div>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="状态" width="100">
-          <template #default="{ row }">
-            <el-tag :type="contestStatusType(row.status)" size="small" effect="plain">
-              {{ contestStatusLabel(row.status) }}
-            </el-tag>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="考试时间" width="170">
-          <template #default="{ row }">
-            <!-- 原始值留在 tooltip 里：表里给的是摘要，而教师核对时看的是准确时刻 -->
-            <el-tooltip :content="`${row.starts_at ?? '不限'} → ${row.ends_at ?? '不限'}`">
-              <span :class="{ muted: !row.starts_at && !row.ends_at }">
-                {{ windowLabel(row) }}
-              </span>
-            </el-tooltip>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="选手" width="90" align="right">
-          <template #default="{ row }">
-            <span :class="{ muted: !row.player_count }">{{ row.player_count }}</span>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="在线" width="90" align="right">
-          <template #default="{ row }">
-            <span :class="{ 'online-text': row.online_count > 0 }">
-              {{ row.online_count }} / {{ row.player_count }}
-            </span>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="默认名单" width="140">
-          <template #default="{ row }">
-            <span v-if="row.default_roster_name">{{ row.default_roster_name }}</span>
-            <span v-else class="muted">未指定</span>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="创建时间" width="160">
-          <template #default="{ row }">
-            <!-- 表里只给到分钟，精确到秒的原始值留在 tooltip 里 -->
-            <el-tooltip :content="row.created_at">
-              <span class="cell-sub">{{ formatTime(row.created_at) }}</span>
-            </el-tooltip>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="下一步" min-width="180">
-          <template #default="{ row }">
-            <span v-if="row.player_count === 0" class="cell-sub">
-              还没导入选手 —— 在「名单库」应用一份，或到「选手状态」页导入
-            </span>
-            <span v-else-if="row.online_count === 0" class="cell-sub">
-              还没有考试机上线 —— 到「机器配对」看看有没有待认领的机器
-            </span>
-            <span v-else class="cell-sub">运行中</span>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="操作" width="270" fixed="right">
-          <template #default="{ row }">
-            <el-button link type="primary" size="small" @click="openProblems(row.id)">
-              题目
-            </el-button>
-            <el-button link type="primary" size="small" @click="openSettings(row)">
-              设置
-            </el-button>
-            <el-button
-              link
-              type="primary"
-              size="small"
-              @click="useContest(row.id); openPlayers()"
-            >
-              进入
-            </el-button>
-            <el-button
-              link
-              type="warning"
-              size="small"
-              :disabled="row.player_count === 0"
-              @click="askClear(row)"
-            >
-              清空选手
-            </el-button>
-            <el-tooltip content="删除整场 —— 连选手、代码台账与成绩一起删">
-              <el-button link type="danger" size="small" @click="askDelete(row)">
-                删除
+    <SectionCard title="场次" :meta="`${list.total.value ?? 0} 场`" flush>
+      <DataTable
+        :rows="list.rows.value"
+        :row-key="(row: ContestOut) => row.id"
+        :loading="list.loading.value"
+        :total="list.total.value"
+        :page="list.page.value"
+        :page-size="list.pageSize.value"
+        empty-text="无场次"
+        @update:page="list.setPage"
+        @update:pageSize="list.setPageSize"
+      >
+        <template #columns>
+          <el-table-column label="当前" width="80" align="center">
+            <template #default="{ row }">
+              <el-tag v-if="row.id === contest.currentId" type="primary" effect="light">使用中</el-tag>
+              <el-button v-else link type="primary" size="small" @click="useContest(row.id)">
+                切换
               </el-button>
-            </el-tooltip>
-          </template>
-        </el-table-column>
-      </template>
+            </template>
+          </el-table-column>
 
-      <template #empty>
-        <p>还没有任何场次</p>
-        <el-button type="primary" style="margin-top: 12px" @click="createVisible = true">
-          新建第一个场次
-        </el-button>
-      </template>
-    </DataTable>
+          <el-table-column label="名称" min-width="200">
+            <template #default="{ row }">
+              <div>{{ row.name }}</div>
+              <div class="cell-sub">
+                标识 <span class="mono">{{ row.slug }}</span>
+              </div>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="状态" width="100">
+            <template #default="{ row }">
+              <el-tag :type="contestStatusType(row.status)" effect="plain">
+                {{ contestStatusLabel(row.status) }}
+              </el-tag>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="考试时间" width="180">
+            <template #default="{ row }">
+              <el-tooltip :content="`${row.starts_at ?? '不限'} → ${row.ends_at ?? '不限'}`">
+                <span :class="{ muted: !row.starts_at && !row.ends_at }">
+                  {{ windowLabel(row) }}
+                </span>
+              </el-tooltip>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="选手" width="90" align="right">
+            <template #default="{ row }">
+              <span :class="{ muted: !row.player_count }">{{ row.player_count }} 名</span>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="在线" width="100" align="right">
+            <template #default="{ row }">
+              <span :class="{ 'online-text': row.online_count > 0 }">
+                {{ row.online_count }} / {{ row.player_count }}
+              </span>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="默认名单" width="140">
+            <template #default="{ row }">
+              <span v-if="row.default_roster_name">{{ row.default_roster_name }}</span>
+              <span v-else class="muted">未指定</span>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="创建时间" width="170">
+            <template #default="{ row }">
+              <el-tooltip :content="row.created_at">
+                <span class="cell-sub">{{ formatTime(row.created_at) }}</span>
+              </el-tooltip>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="就绪" width="120">
+            <template #default="{ row }">
+              <el-tag v-if="row.player_count === 0" type="warning" effect="plain">无选手</el-tag>
+              <el-tag v-else-if="row.online_count === 0" type="info" effect="plain">无机器在线</el-tag>
+              <el-tag v-else type="success" effect="light">运行中</el-tag>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="操作" width="220" fixed="right">
+            <template #default="{ row }">
+              <el-button link type="primary" size="small" @click="openProblems(row.id)">
+                题目
+              </el-button>
+              <el-button link type="primary" size="small" @click="openSettings(row)">
+                设置
+              </el-button>
+              <el-button
+                link
+                type="primary"
+                size="small"
+                @click="useContest(row.id); openPlayers()"
+              >
+                进入
+              </el-button>
+              <el-dropdown
+                trigger="click"
+                class="row-more"
+                @command="(command: string) => onRowCommand(command, row)"
+              >
+                <el-button link type="primary" size="small">
+                  更多<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+                </el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="clear" :disabled="row.player_count === 0">
+                      <span class="danger-text">清空选手</span>
+                    </el-dropdown-item>
+                    <el-dropdown-item command="delete">
+                      <span class="danger-text">删除场次</span>
+                    </el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+            </template>
+          </el-table-column>
+        </template>
+
+        <template #empty>
+          <p>无场次</p>
+          <el-button type="primary" style="margin-top: 12px" @click="createVisible = true">
+            <el-icon><Plus /></el-icon>新建场次
+          </el-button>
+        </template>
+      </DataTable>
+    </SectionCard>
 
     <ContestCreateDialog v-model="createVisible" @created="refreshAll" />
     <ContestSettingsDialog
@@ -340,50 +350,43 @@ function clearDetail(count: number): string {
       @changed="refreshAll"
     />
 
-    <!--
-      删除整个场次。警报里那句"机器不受影响"是给教师吃的定心丸：机器绑的是
-      名单里的**人**，不是这场比赛的记录，所以删完不用重新配 50 台机器。
-    -->
+    <!-- 删除整场：标识逐字确认 -->
     <ConfirmByNameDialog
       v-model="deleteOpen"
-      title="删除场次"
+      :title="`删除场次「${deleteTarget?.name ?? ''}」？`"
       :expected="deleteTarget?.slug ?? ''"
       :submitting="removeContest.pending.value"
-      confirm-text="删除场次"
+      confirm-text="删除"
       :impact="deleteImpact"
-      :detail="
-        `场次「${deleteTarget?.name ?? ''}」连同选手、代码台账、下发任务、成绩、资产一起删掉，无法恢复。` +
-        '机器不受影响，换一场比赛照样能用，不需要重新配对。'
-      "
+      detail="将删除本场次及其选手、代码台账、下发任务、成绩、资产，不可恢复；机器与配对保留。"
       @confirm="removeContest.run(undefined)"
     />
 
-    <!--
-      清空选手 = 范围删除，`confirm` 是场次标识。默认保护有提交的选手，
-      那个复选框存在的意义就是让"连提交一起清"变成一次显式选择。
-    -->
+    <!-- 清空选手：默认保留有提交的选手 -->
     <ConfirmByNameDialog
       v-model="clearOpen"
-      title="清空选手名单"
+      title="清空选手？"
       :expected="clearTarget?.slug ?? ''"
       :submitting="clearPlayers.pending.value"
       confirm-text="清空"
       :detail="clearDetail(clearTarget?.player_count ?? 0)"
       @confirm="clearPlayers.run(undefined)"
     >
-      <div style="margin-bottom: 4px">
-        <el-checkbox v-model="clearKeep">保留有代码或成绩的选手（推荐先留着）</el-checkbox>
-      </div>
-      <el-alert v-if="!clearKeep" type="error" :closable="false" show-icon>
-        <template #title>有提交的选手也会被删，代码与成绩一起消失、无法恢复</template>
-      </el-alert>
+      <el-checkbox v-model="clearKeep">保留有代码或成绩的选手</el-checkbox>
     </ConfirmByNameDialog>
   </PageShell>
 </template>
 
 <style scoped>
 .online-text {
-  color: #67c23a;
+  color: var(--el-color-success);
   font-weight: 600;
+}
+.row-more {
+  margin-left: 12px;
+  vertical-align: middle;
+}
+.danger-text {
+  color: var(--el-color-danger);
 }
 </style>

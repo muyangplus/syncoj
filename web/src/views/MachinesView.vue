@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 import { bootstrapKeyApi, machineApi, settingsApi } from '@/api'
 import { GLOBAL_CONFIRM } from '@/api/endpoints'
 import type {
+  AnnounceStatusOut,
   BootstrapKeyIssuedOut,
   BootstrapKeyOut,
   CloneAlertOut,
@@ -16,14 +18,18 @@ import DataTable from '@/components/DataTable.vue'
 import DiagnosticsDialog from '@/components/DiagnosticsDialog.vue'
 import FormDialog from '@/components/FormDialog.vue'
 import PageShell from '@/components/PageShell.vue'
+import SectionCard from '@/components/SectionCard.vue'
 import RosterPersonPicker from '@/components/RosterPersonPicker.vue'
 import { useList } from '@/composables/useList'
 import { useMutation } from '@/composables/useMutation'
+import { usePolling } from '@/composables/usePolling'
 import { describeError } from '@/api/crud'
 import { useContestStore } from '@/stores/contest'
 import { formatSince, formatTime } from '@/utils/format'
 
 const contest = useContestStore()
+const route = useRoute()
+const router = useRouter()
 
 // --------------------------------------------------------------------------- //
 // 待配对的机器
@@ -79,7 +85,7 @@ const bindFromRow = useMutation(
   () => {
     const row = bindTarget.value
     if (!row) throw new Error('没有选中机器')
-    if (!bindEntryId.value) throw new Error('请先选一个人')
+    if (!bindEntryId.value) throw new Error('请选择选手')
     // 走"按机器 id 配对"这条路：教师是点了这一行才进来的，"此刻站在这台机器前面"
     // 由这一次点击表达。要更强的证明就走工具栏的「按码配对」—— 那个必须输码。
     return machineApi.bind(row.id, bindEntryId.value)
@@ -87,7 +93,7 @@ const bindFromRow = useMutation(
   {
     // 服务端的回执带着绑到了谁，比界面自己编一句"配对成功"有用
     success: (result) =>
-      `已把 ${result.player_no} 配给 ${result.roster_name || '名单里的人'}`,
+      `已配对：${result.player_no}${result.roster_name ? ` · ${result.roster_name}` : ''}`,
     onDone: async () => {
       bindOpen.value = false
       bindTarget.value = null
@@ -101,18 +107,28 @@ const bindFromRow = useMutation(
 // --------------------------------------------------------------------------- //
 
 const byCodeOpen = ref(false)
+
+// 弹窗只挂载一次：每次打开重拉名单与条目，看得到新建的名单
+const bindPicker = ref<InstanceType<typeof RosterPersonPicker> | null>(null)
+const codePicker = ref<InstanceType<typeof RosterPersonPicker> | null>(null)
+watch(bindOpen, (open) => {
+  if (open) void bindPicker.value?.reload()
+})
+watch(byCodeOpen, (open) => {
+  if (open) void codePicker.value?.reload()
+})
 const pairCode = ref('')
 const pairEntryId = ref<number | null>(null)
 
 const bindByCode = useMutation(
   async () => {
     const code = pairCode.value.trim()
-    if (!code) throw new Error('请输入机器上显示的配对码')
-    if (!pairEntryId.value) throw new Error('请先选一个人')
+    if (!code) throw new Error('请输入配对码')
+    if (!pairEntryId.value) throw new Error('请选择选手')
     return machineApi.bindByCode(code, pairEntryId.value)
   },
   {
-    success: (result) => `已把机器配给 ${result.player_no || '名单里的人'}`,
+    success: (result) => `已配对：${result.player_no || '—'}`,
     onDone: async () => {
       pairCode.value = ''
       pairEntryId.value = null
@@ -149,6 +165,16 @@ const runtimeForm = ref<RuntimeSettingsOut>({
   tick_active_seconds: 2,
   offline_after_seconds: 90,
 })
+
+async function loadRuntime(): Promise<void> {
+  try {
+    runtime.value = await settingsApi.runtime()
+  } catch {
+    // 区块里的当前值读不到不影响页面；打开对话框时再报错
+  }
+}
+
+onMounted(() => void loadRuntime())
 
 async function openRuntime(): Promise<void> {
   runtimeOpen.value = true
@@ -209,16 +235,30 @@ const clearPendingOpen = ref(false)
 
 // 「召集机器」：服务端立即在局域网里喊一次自己的地址（§11）
 const announcing = ref(false)
+const announceState = ref<AnnounceStatusOut | null>(null)
+const announceLoadError = ref<string | null>(null)
+
+async function loadAnnounce(): Promise<void> {
+  try {
+    announceState.value = await machineApi.announceStatus()
+    announceLoadError.value = null
+  } catch (err) {
+    announceLoadError.value = describeError(err)
+  }
+}
+
+usePolling(loadAnnounce, { interval: 15000, immediate: true })
 
 async function announceNow(): Promise<void> {
   announcing.value = true
   try {
-    await machineApi.announce()
+    announceState.value = await machineApi.announce()
     // 后台任务每秒处理一次请求：稍等再读现状
     await new Promise((resolve) => setTimeout(resolve, 1500))
     const status = await machineApi.announceStatus()
-    if (status.last_error) ElMessage.warning(`没有喊出去：${status.last_error}`)
-    else ElMessage.success(`已在局域网通告 ${status.last_url ?? ''}`)
+    announceState.value = status
+    if (status.last_error) ElMessage.warning(status.last_error)
+    else ElMessage.success(`已召集：${status.last_url ?? ''}`)
   } catch (err) {
     ElMessage.error((err as Error).message)
   } finally {
@@ -228,11 +268,28 @@ async function announceNow(): Promise<void> {
 
 function askClearPending(): void {
   if (!pending.total.value) {
-    ElMessage.info('待配对列表本来就是空的')
+    ElMessage.info('无待配对机器')
     return
   }
   clearPendingOpen.value = true
 }
+
+function onMore(command: string): void {
+  if (command === 'runtime') void openRuntime()
+  else if (command === 'settings') settingsOpen.value = true
+  else if (command === 'clear') askClearPending()
+}
+
+// 快捷操作入口：`?do=bind` 打开按码配对
+watch(
+  () => route.query.do,
+  (action) => {
+    if (action !== 'bind') return
+    byCodeOpen.value = true
+    void router.replace({ query: { ...route.query, do: undefined } })
+  },
+  { immediate: true },
+)
 
 // --------------------------------------------------------------------------- //
 // 诊断包（这台机器**最新一份**现场）
@@ -286,10 +343,8 @@ const revokeKey = useMutation((key: BootstrapKeyOut) => bootstrapKeyApi.revoke(k
 async function askRevokeKey(key: BootstrapKeyOut): Promise<void> {
   try {
     await ElMessageBox.confirm(
-      `吊销「${key.label || '#' + key.id}」？\n\n` +
-        '已经注册好的机器不受影响（它们手里是各自的 token，不是这把密钥），' +
-        '但之后没人能再用它注册。',
-      '吊销统一密钥',
+      `「${key.label || '#' + key.id}」吊销后不能再用于注册机器，不可恢复；已注册的机器不受影响。`,
+      '吊销统一密钥？',
       { type: 'warning', confirmButtonText: '吊销', cancelButtonText: '取消' },
     )
   } catch {
@@ -313,11 +368,8 @@ const deleteKey = useMutation((key: BootstrapKeyOut) => bootstrapKeyApi.remove(k
 async function askDeleteKey(key: BootstrapKeyOut): Promise<void> {
   try {
     await ElMessageBox.confirm(
-      `彻底删掉「${key.label || '#' + key.id}」？\n\n` +
-        '「吊销」与「删除」不是一回事：吊销会**留痕**（用过几次、最后什么时候用的都还在），' +
-        '密钥疑似泄漏时该用吊销；删除是抹掉记录，只在「签错了、一次都没用过」时才合适。\n' +
-        '用过的密钥服务端会直接拒绝删除。',
-      '删除统一密钥',
+      `将删除「${key.label || '#' + key.id}」的记录，不可恢复。`,
+      '删除统一密钥？',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
     )
   } catch {
@@ -333,7 +385,7 @@ async function copyText(value: string | undefined, what: string): Promise<void> 
     ElMessage.success(`已复制${what}`)
   } catch {
     // 非 HTTPS 或浏览器策略下剪贴板不可用，提示手工复制而不是静默失败
-    ElMessage.warning('浏览器不允许自动复制，请手工选中复制')
+    ElMessage.warning('复制失败，请手动复制')
   }
 }
 
@@ -350,8 +402,8 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
   const seconds = row.pair_code_expires_in
   if (seconds === null || seconds === undefined) return { expired: false, text: '—' }
   if (seconds <= 0) return { expired: true, text: '已过期' }
-  if (seconds < 120) return { expired: false, text: `还有 ${seconds} 秒` }
-  return { expired: false, text: `还有 ${Math.round(seconds / 60)} 分钟` }
+  if (seconds < 120) return { expired: false, text: `剩 ${seconds} 秒` }
+  return { expired: false, text: `剩 ${Math.round(seconds / 60)} 分钟` }
 }
 </script>
 
@@ -359,254 +411,277 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
   <PageShell
     title="机器配对"
     :error="pending.error.value"
-    error-action="先重试；还不行就先别动密钥。"
     retryable
     @retry="pending.reload"
   >
     <template #toolbar>
-      <el-button size="small" :loading="pending.loading.value" @click="pending.reload">
-        刷新
+      <el-button type="primary" @click="byCodeOpen = true">
+        <el-icon><Key /></el-icon>按码配对
       </el-button>
-      <!-- 手里有码、但列表里找不到那台机器时的入口（次要路径，所以是普通按钮） -->
-      <el-button size="small" @click="byCodeOpen = true">按码配对</el-button>
-      <el-button size="small" :loading="announcing" @click="announceNow">召集机器</el-button>
-      <el-button size="small" @click="openRuntime">运行参数</el-button>
-      <el-button size="small" @click="settingsOpen = true">装机设置</el-button>
+      <el-button :loading="pending.loading.value" @click="pending.reload">
+        <el-icon><Refresh /></el-icon>刷新
+      </el-button>
+      <el-dropdown trigger="click" @command="onMore">
+        <el-button>
+          更多<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+        </el-button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item command="runtime" :icon="'Timer'">运行参数</el-dropdown-item>
+            <el-dropdown-item command="settings" :icon="'Setting'">装机设置</el-dropdown-item>
+            <el-dropdown-item
+              command="clear"
+              divided
+              class="danger-item"
+              :disabled="!pending.total.value"
+            >
+              清空待配对列表
+            </el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
     </template>
 
-    <!--
-      克隆镜像告警：多台机器共用同一个硬件指纹，是"镜像在跑过之后才克隆"的信号。
+    <SectionCard title="召集机器">
+      <template #extra>
+        <el-button type="primary" :loading="announcing" @click="announceNow">
+          <el-icon><Promotion /></el-icon>立即召集
+        </el-button>
+      </template>
+      <el-alert
+        v-if="announceLoadError"
+        type="error"
+        :closable="false"
+        show-icon
+        :title="announceLoadError"
+        style="margin-bottom: 12px"
+      />
+      <el-alert
+        v-if="announceState?.last_error"
+        type="warning"
+        :closable="false"
+        show-icon
+        :title="announceState.last_error"
+        style="margin-bottom: 12px"
+      />
+      <el-descriptions :column="3" class="kv">
+        <el-descriptions-item label="周期广播">
+          <el-tag v-if="announceState?.enabled" type="success" effect="light">开启</el-tag>
+          <el-tag v-else-if="announceState" type="info" effect="plain">关闭</el-tag>
+          <span v-else class="muted">—</span>
+        </el-descriptions-item>
+        <el-descriptions-item label="广播地址">
+          <span class="mono">{{ announceState?.last_url || '—' }}</span>
+          <span v-if="announceState" class="muted"> · UDP {{ announceState.port }}</span>
+        </el-descriptions-item>
+        <el-descriptions-item label="上次广播">
+          {{ announceState?.last_sent_at ? formatTime(announceState.last_sent_at) : '从未' }}
+        </el-descriptions-item>
+      </el-descriptions>
+    </SectionCard>
 
-      但严重程度取决于**有没有人已经被绑上去**：一份镜像装遍整间机房时撞指纹是必然
-      也是正常的，那时一台都还没配对，没有任何人的身份可被冒领 —— 对着教师喊"可能
-      混进了别人的凭据"是错的。真的有人挂在这个指纹上时才是警告，因为快照还原那条
-      "按指纹认回原机器"会认错机器，而错的那一头就是某个学生的成绩。
-    -->
     <el-alert
       v-for="alert in alerts"
       :key="alert.fingerprint"
       :type="alert.bound_count > 0 ? 'warning' : 'info'"
       :closable="false"
       show-icon
-      style="margin-bottom: 12px"
+      class="clone-alert"
     >
       <template #title>
         <template v-if="alert.bound_count > 0">
-          疑似克隆镜像：{{ alert.machine_count }} 台机器共用同一个硬件指纹，
-          其中 {{ alert.bound_count }} 台已经配给了人
+          疑似克隆镜像：{{ alert.machine_count }} 台机器共用同一硬件指纹，其中
+          {{ alert.bound_count }} 台已配对
         </template>
         <template v-else>
-          {{ alert.machine_count }} 台机器共用同一个硬件指纹（都还没配对）
+          {{ alert.machine_count }} 台机器共用同一硬件指纹（均未配对）
         </template>
       </template>
       <template #default>
-        <span class="mono">{{ alert.fingerprint }}</span><br />
+        <span class="mono">{{ alert.fingerprint }}</span>
       </template>
     </el-alert>
 
-    <!--
-      这里只留一句说明，不再放常驻表单：教师到现场先要看的是"有哪几台机器等我认领"，
-      而表单要求他先选人、再回想是哪台机器 —— 顺序反了。配对动作在表格每一行里。
-    -->
-    <div class="list-head">
-      <h3 class="section-title">
-        待配对的机器
-        <span class="muted">（{{ pending.total.value }} 台）</span>
-      </h3>
-      <div class="toolbar">
-        <el-button
-          size="small"
-          type="danger"
-          plain
-          :disabled="!pending.total.value"
-          :loading="clearPending.pending.value"
-          @click="askClearPending"
-        >
-          清空列表
-        </el-button>
-      </div>
-    </div>
+    <SectionCard title="待配对的机器" :meta="`${pending.total.value} 台`" flush>
+      <DataTable
+        :rows="pending.rows.value"
+        :row-key="(row: PendingMachineOut) => row.id"
+        :loading="pending.loading.value"
+        :total="pending.total.value"
+        :page="pending.page.value"
+        :page-size="pending.pageSize.value"
+        empty-text="无待配对机器"
+        @update:page="pending.setPage"
+        @update:pageSize="pending.setPageSize"
+      >
+        <template #columns>
+          <el-table-column label="主机名" width="150">
+            <template #default="{ row }">
+              <span>{{ row.hostname || '—' }}</span>
+            </template>
+          </el-table-column>
 
-    <DataTable
-      :rows="pending.rows.value"
-      :row-key="(row: PendingMachineOut) => row.id"
-      :loading="pending.loading.value"
-      :total="pending.total.value"
-      :page="pending.page.value"
-      :page-size="pending.pageSize.value"
-      empty-text="没有待配对的机器"
-      @update:page="pending.setPage"
-      @update:pageSize="pending.setPageSize"
-    >
-      <template #columns>
-        <el-table-column label="主机名" width="150">
-          <template #default="{ row }">
-            <span>{{ row.hostname || '—' }}</span>
-          </template>
-        </el-table-column>
+          <el-table-column label="机器码" width="170">
+            <template #default="{ row }">
+              <el-tooltip :content="row.machine_id">
+                <span class="mono muted">{{ row.machine_id.slice(0, 18) }}</span>
+              </el-tooltip>
+            </template>
+          </el-table-column>
 
-        <el-table-column label="机器码" width="170">
-          <template #default="{ row }">
-            <el-tooltip :content="row.machine_id">
-              <span class="mono muted">{{ row.machine_id.slice(0, 18) }}</span>
-            </el-tooltip>
-          </template>
-        </el-table-column>
+          <el-table-column label="最后心跳" width="160">
+            <template #default="{ row }">
+              <div>{{ formatSince(row.seconds_since_seen, '从未') }}</div>
+              <div class="cell-sub">{{ formatTime(row.last_seen_at) }}</div>
+            </template>
+          </el-table-column>
 
-        <el-table-column label="最后心跳" width="150">
-          <template #default="{ row }">
-            <div>{{ formatSince(row.seconds_since_seen, '从未') }}</div>
-            <div class="cell-sub">{{ formatTime(row.last_seen_at) }}</div>
-          </template>
-        </el-table-column>
+          <el-table-column label="配对码" width="120">
+            <template #default="{ row }">
+              <el-tag v-if="pairCodeLeft(row).expired" type="danger" effect="plain">已过期</el-tag>
+              <span v-else class="cell-sub">{{ pairCodeLeft(row).text }}</span>
+            </template>
+          </el-table-column>
 
-        <el-table-column label="配对码" width="120">
-          <template #default="{ row }">
-            <el-tag v-if="pairCodeLeft(row).expired" type="danger" size="small" effect="plain">
-              已过期
-            </el-tag>
-            <span v-else class="cell-sub">{{ pairCodeLeft(row).text }}</span>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="指纹" width="110">
-          <template #default="{ row }">
-            <el-tooltip
-              v-if="row.fingerprint_peers > 1"
-              :content="`同一个硬件指纹上还有 ${row.fingerprint_peers - 1} 台机器 —— 疑似克隆镜像`"
-            >
-              <el-tag type="warning" size="small" effect="plain">
+          <el-table-column label="指纹" width="110">
+            <template #default="{ row }">
+              <el-tag v-if="row.fingerprint_peers > 1" type="warning" effect="plain">
                 {{ row.fingerprint_peers }} 台共用
               </el-tag>
-            </el-tooltip>
-            <span v-else class="muted">唯一</span>
-          </template>
-        </el-table-column>
+              <span v-else class="muted">唯一</span>
+            </template>
+          </el-table-column>
 
-        <el-table-column label="客户端" min-width="140">
-          <template #default="{ row }">
-            <span class="cell-sub">版本 {{ row.agent_version || '未知' }}</span>
-          </template>
-        </el-table-column>
+          <el-table-column label="Agent 版本" min-width="140">
+            <template #default="{ row }">
+              <span class="cell-sub">{{ row.agent_version || '未知' }}</span>
+            </template>
+          </el-table-column>
 
-        <el-table-column label="操作" width="210" fixed="right">
-          <template #default="{ row }">
-            <el-button link type="primary" size="small" @click="askBind(row)">
-              配给…
+          <el-table-column label="操作" width="200" fixed="right">
+            <template #default="{ row }">
+              <el-button link type="primary" size="small" @click="askBind(row)">配对</el-button>
+              <el-button link type="primary" size="small" @click="askDiagnostics(row)">
+                诊断
+              </el-button>
+              <el-button link type="danger" size="small" @click="askRevoke(row)">移除</el-button>
+            </template>
+          </el-table-column>
+        </template>
+
+        <template #empty>
+          <el-empty description="无待配对机器" :image-size="64">
+            <el-button @click="settingsOpen = true">装机设置</el-button>
+          </el-empty>
+        </template>
+      </DataTable>
+    </SectionCard>
+
+    <SectionCard title="机房设置">
+      <div class="setting-grid">
+        <div class="setting-item">
+          <div class="setting-head">
+            <span class="setting-name">装机设置</span>
+            <el-button @click="settingsOpen = true">
+              <el-icon><Setting /></el-icon>管理统一密钥
             </el-button>
-            <el-button link type="primary" size="small" @click="askDiagnostics(row)">
-              诊断
+          </div>
+          <div class="cell-sub">统一注册密钥 {{ keys.total.value }} 把</div>
+        </div>
+        <div class="setting-item">
+          <div class="setting-head">
+            <span class="setting-name">运行参数</span>
+            <el-button @click="openRuntime">
+              <el-icon><Timer /></el-icon>修改运行参数
             </el-button>
-            <el-button link type="danger" size="small" @click="askRevoke(row)">移除</el-button>
-          </template>
-        </el-table-column>
-      </template>
+          </div>
+          <div v-if="runtime" class="cell-sub">
+            空闲心跳 {{ runtime.tick_idle_seconds }} 秒 · 有活心跳
+            {{ runtime.tick_active_seconds }} 秒 · 离线判定 {{ runtime.offline_after_seconds }} 秒
+          </div>
+          <div v-else class="cell-sub">—</div>
+        </div>
+      </div>
+    </SectionCard>
 
-      <template #empty>
-        <p>现在没有机器等认领。</p>
-        <!--
-          空状态必须给出"两种可能"，而不是只写"机器开机后会自动出现在这里"——
-          那句在"镜像里忘了放密钥"时是误导：教师会一直等，而机器永远不会出现。
-        -->
-        <p class="cell-sub">
-          一直没出现，查两件事：镜像里有没有统一密钥、它连不连得上服务端。
-        </p>
-        <el-button type="primary" size="small" style="margin-top: 12px" @click="settingsOpen = true">
-          去装机设置
-        </el-button>
-      </template>
-    </DataTable>
-
-    <!--
-      ② 装机设置：统一注册密钥收进抽屉。
-      一间机房**一次**的动作，不该和"每天要做的配对"同等地摆在页面上 —— 第一版把
-      两者平铺在同一页，教师的第一反应就是"这里有两套密钥体系？"。
-    -->
     <el-drawer v-model="settingsOpen" title="装机设置：统一注册密钥" size="880px">
-      <el-button type="primary" size="small" style="margin-bottom: 12px" @click="issueOpen = true">
-        签发一把
+      <el-button type="primary" style="margin-bottom: 12px" @click="issueOpen = true">
+        <el-icon><Plus /></el-icon>签发统一密钥
       </el-button>
 
       <DataTable
-      :rows="keys.rows.value"
-      :row-key="(row: BootstrapKeyOut) => row.id"
-      :loading="keys.loading.value"
-      :total="keys.total.value"
-      :page="keys.page.value"
-      :page-size="keys.pageSize.value"
-      empty-text="还没有统一密钥"
-    >
-      <template #columns>
-        <el-table-column label="用途" min-width="160">
-          <template #default="{ row }">{{ row.label || '—' }}</template>
-        </el-table-column>
-        <el-table-column label="状态" width="90">
-          <template #default="{ row }">
-            <el-tag :type="keyState(row).type" size="small" effect="plain">
-              {{ keyState(row).label }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="用过" width="80" align="right">
-          <template #default="{ row }">{{ row.use_count }}</template>
-        </el-table-column>
-        <el-table-column label="最后使用" width="150">
-          <template #default="{ row }">
-            <span class="cell-sub">{{ formatTime(row.last_used_at) }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="签发时间" width="150">
-          <template #default="{ row }">
-            <span class="cell-sub">{{ formatTime(row.created_at) }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="有效期" width="110">
-          <template #default="{ row }">
-            <span class="cell-sub">{{ row.expires_at ? formatTime(row.expires_at) : '长期' }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="备注" min-width="140">
-          <template #default="{ row }">
-            <span class="cell-sub">{{ row.note || '—' }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" width="120" fixed="right">
-          <template #default="{ row }">
-            <el-button
-              link
-              type="danger"
-              size="small"
-              :disabled="!!row.revoked_at"
-              @click="askRevokeKey(row)"
-            >
-              吊销
-            </el-button>
-            <!-- 删除只对"签错了、一次都没用过"才有意义：用过的钥匙不能因为
-                 记录被删就当它没存在过，服务端也会拒 -->
-            <el-button
-              link
-              type="info"
-              size="small"
-              :disabled="!!row.use_count"
-              @click="askDeleteKey(row)"
-            >
-              删除
-            </el-button>
-          </template>
-        </el-table-column>
-      </template>
+        :rows="keys.rows.value"
+        :row-key="(row: BootstrapKeyOut) => row.id"
+        :loading="keys.loading.value"
+        :total="keys.total.value"
+        :page="keys.page.value"
+        :page-size="keys.pageSize.value"
+        empty-text="无统一密钥"
+      >
+        <template #columns>
+          <el-table-column label="用途" min-width="160">
+            <template #default="{ row }">{{ row.label || '—' }}</template>
+          </el-table-column>
+          <el-table-column label="状态" width="90">
+            <template #default="{ row }">
+              <el-tag :type="keyState(row).type" effect="plain">{{ keyState(row).label }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="使用次数" width="90" align="right">
+            <template #default="{ row }">{{ row.use_count }}</template>
+          </el-table-column>
+          <el-table-column label="最后使用" width="160">
+            <template #default="{ row }">
+              <span class="cell-sub">{{ formatTime(row.last_used_at) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="签发时间" width="160">
+            <template #default="{ row }">
+              <span class="cell-sub">{{ formatTime(row.created_at) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="有效期至" width="160">
+            <template #default="{ row }">
+              <span class="cell-sub">{{ row.expires_at ? formatTime(row.expires_at) : '长期' }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="备注" min-width="140">
+            <template #default="{ row }">
+              <span class="cell-sub">{{ row.note || '—' }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="120" fixed="right">
+            <template #default="{ row }">
+              <el-button
+                link
+                type="danger"
+                size="small"
+                :disabled="!!row.revoked_at"
+                @click="askRevokeKey(row)"
+              >
+                吊销
+              </el-button>
+              <el-button
+                link
+                type="danger"
+                size="small"
+                :disabled="!!row.use_count"
+                @click="askDeleteKey(row)"
+              >
+                删除
+              </el-button>
+            </template>
+          </el-table-column>
+        </template>
 
-      <template #empty>
-        <p>装机时用 <code>--bootstrap-key</code> 传给安装器。</p>
-        <el-button type="primary" size="small" @click="issueOpen = true">签发一把</el-button>
-      </template>
+        <template #empty>
+          <el-empty description="无统一密钥" :image-size="64">
+            <el-button type="primary" @click="issueOpen = true">签发统一密钥</el-button>
+          </el-empty>
+        </template>
       </DataTable>
     </el-drawer>
 
-    <!--
-      运行参数：心跳节奏与离线判定。三项都**整间机房生效**，所以对话框顶部先写清
-      影响面 —— 教师改之前得知道这一下动的是所有机器。
-    -->
     <FormDialog
       v-model="runtimeOpen"
       title="运行参数"
@@ -622,13 +697,16 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
         :title="runtimeError"
         style="margin-bottom: 12px"
       />
-      <el-alert type="warning" :closable="false" show-icon style="margin-bottom: 12px">
-        <template #title>整间机房生效</template>
-        <template #default>改完下一轮心跳就按新节奏走，不用重启服务端。</template>
-      </el-alert>
+      <el-alert
+        type="warning"
+        :closable="false"
+        show-icon
+        title="对全部机器生效"
+        style="margin-bottom: 12px"
+      />
 
-      <el-form label-width="140px" v-loading="runtimeLoading">
-        <el-form-item label="空闲心跳 / 本地扫描">
+      <el-form v-loading="runtimeLoading" label-width="140px">
+        <el-form-item label="空闲心跳 / 扫描">
           <el-input-number
             v-model="runtimeForm.tick_idle_seconds"
             :min="5"
@@ -636,8 +714,7 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
             :controls="false"
             style="width: 110px"
           />
-          <span class="cell-sub" style="margin-left: 8px">秒</span>
-          <div class="cell-sub">没有活干时的心跳周期；本地扫描与它同周期。</div>
+          <span class="unit">秒</span>
         </el-form-item>
         <el-form-item label="有活心跳">
           <el-input-number
@@ -647,8 +724,7 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
             :controls="false"
             style="width: 110px"
           />
-          <span class="cell-sub" style="margin-left: 8px">秒</span>
-          <div class="cell-sub">有待上传或待下发时用这个周期。</div>
+          <span class="unit">秒</span>
         </el-form-item>
         <el-form-item label="离线判定">
           <el-input-number
@@ -658,8 +734,7 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
             :controls="false"
             style="width: 110px"
           />
-          <span class="cell-sub" style="margin-left: 8px">秒</span>
-          <div class="cell-sub">超过这个秒数没有心跳，机器在列表里显示为离线。</div>
+          <span class="unit">秒</span>
         </el-form-item>
       </el-form>
 
@@ -669,31 +744,23 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
       </p>
     </FormDialog>
 
-    <!-- 移除待配对机器：机器是结构性数据，按约定要打一遍主机名 -->
     <ConfirmByNameDialog
       v-model="revokeOpen"
-      title="移除待配对的机器"
+      title="移除机器？"
       :expected="revokeTarget?.hostname || revokeTarget?.machine_id || ''"
       :submitting="revoke.pending.value"
       confirm-text="移除"
-      :detail="
-        '这台机器会从待配对列表里消失、凭据作废；下次开机它还会用镜像里的统一密钥重新注册上来，' +
-        '要挡住得先吊销那把密钥。'
-      "
+      detail="将移除这台机器并作废其凭据，不可恢复；机器下次开机会用统一密钥重新注册。"
       @confirm="revoke.run(undefined)"
     />
 
-    <!-- 清空待配对机器：范围是"全部"，所以打的是固定字面量 all -->
     <ConfirmByNameDialog
       v-model="clearPendingOpen"
-      title="清空待配对列表"
+      title="清空待配对列表？"
       :expected="GLOBAL_CONFIRM"
       :submitting="clearPending.pending.value"
       confirm-text="清空"
-      :detail="
-        `会把当前 ${pending.total.value} 台待配对机器全部移除、凭据作废；` +
-        '它们下次开机还会用镜像里的统一密钥重新注册上来。'
-      "
+      :detail="`将移除 ${pending.total.value} 台待配对机器并作废其凭据，不可恢复；机器下次开机会用统一密钥重新注册。`"
       @confirm="clearPending.run(undefined)"
     />
 
@@ -705,51 +772,55 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
       @submit="issueKey.run(undefined)"
     >
       <el-form label-width="90px">
-        <el-form-item label="用途备注">
-          <el-input v-model="issueLabel" placeholder="比如「2025 机房镜像」" maxlength="200" />
+        <el-form-item label="用途">
+          <el-input v-model="issueLabel" placeholder="例如 2025 机房镜像" maxlength="200" />
         </el-form-item>
         <el-form-item label="有效天数">
-          <el-input-number v-model="issueDays" :min="1" :max="3650" :controls="false" />
-          <span class="cell-sub" style="margin-left: 8px">留空表示长期有效</span>
+          <el-input-number
+            v-model="issueDays"
+            :min="1"
+            :max="3650"
+            :controls="false"
+            placeholder="留空为长期"
+          />
+          <span class="unit">天</span>
         </el-form-item>
       </el-form>
-      <el-alert type="warning" :closable="false" show-icon title="明文只会显示这一次">
-        丢了就重新签发一把，然后把旧的吊销。
-      </el-alert>
     </FormDialog>
 
-    <el-dialog v-model="keyDialog" title="统一密钥（只显示这一次）" width="640px">
-      <el-alert type="warning" :closable="false" show-icon style="margin-bottom: 12px">
-        <template #title>现在抄下来 —— 关掉这个窗口就再也看不到明文了</template>
-        <template #default>丢了就重新签发一把，然后把旧的吊销。</template>
-      </el-alert>
+    <el-dialog v-model="keyDialog" title="统一密钥" width="640px">
+      <el-alert
+        type="warning"
+        :closable="false"
+        show-icon
+        title="明文只显示这一次"
+        style="margin-bottom: 12px"
+      />
 
       <div class="key-box mono">{{ issuedKey?.key }}</div>
 
       <div class="cell-sub" style="margin-top: 12px">
-        装机时这样用（它会被写成 <code>/etc/syncoj/bootstrap.key</code>，0600、属主 root）：
+        装机命令
         <pre class="cmd">python3 install.py --bundle ./syncoj-agent-x.tar.gz \
     --server https://10.0.0.1:8443 \
     --bootstrap-key-file /etc/syncoj/bootstrap.key</pre>
       </div>
 
       <template #footer>
-        <el-button @click="copyText(issuedKey?.key, '密钥')">复制</el-button>
-        <el-button type="primary" @click="keyDialog = false">我已抄好</el-button>
+        <el-button @click="copyText(issuedKey?.key, '密钥')">
+          <el-icon><CopyDocument /></el-icon>复制密钥
+        </el-button>
+        <el-button type="primary" @click="keyDialog = false">完成</el-button>
       </template>
     </el-dialog>
-    <!--
-      **主路径**：从某台机器那一行点进来。这里只要选人 —— "教师此刻站在这台机器前面"
-      已经由"点了那一行"表达；要更强的证明就走工具栏的「按码配对」（那个必须输码）。
-    -->
-    <el-dialog v-model="bindOpen" title="把机器配给谁" width="580px">
+
+    <el-dialog v-model="bindOpen" title="配对机器" width="580px">
       <p class="cell-sub" style="margin-top: 0">
-        机器：<span class="mono">{{ bindTarget?.hostname || bindTarget?.machine_id || '—' }}</span>
-        <template v-if="bindTarget">
-          · 配对码{{ pairCodeLeft(bindTarget).text }}
-        </template>
+        机器 <span class="mono">{{ bindTarget?.hostname || bindTarget?.machine_id || '—' }}</span>
+        <template v-if="bindTarget"> · 配对码{{ pairCodeLeft(bindTarget).text }}</template>
       </p>
       <RosterPersonPicker
+        ref="bindPicker"
         v-model="bindEntryId"
         :default-roster-id="contest.current?.default_roster_id ?? null"
       />
@@ -766,13 +837,12 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
       </template>
     </el-dialog>
 
-    <!-- **次要路径**：手里有码、但列表里找不到那台机器时（比如机器换过名字） -->
-    <el-dialog v-model="byCodeOpen" title="按配对码配对" width="580px">
+    <el-dialog v-model="byCodeOpen" title="按码配对" width="580px">
       <div class="pair-row">
         <span class="field-label">配对码</span>
         <el-input
           v-model="pairCode"
-          placeholder="机器桌面上「配对码.txt」里的 6 位数字"
+          placeholder="例如 382915"
           style="width: 230px"
           class="mono-input"
           maxlength="6"
@@ -780,6 +850,7 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
         />
       </div>
       <RosterPersonPicker
+        ref="codePicker"
         v-model="pairEntryId"
         :default-roster-id="contest.current?.default_roster_id ?? null"
       />
@@ -810,23 +881,30 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
   flex-wrap: wrap;
   gap: 10px;
   align-items: center;
+  margin-bottom: 12px;
 }
 
 .field-label {
   font-size: 13px;
-  color: #606266;
+  color: var(--sj-text-2);
 }
 
 .mono-input :deep(input) {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--sj-mono);
   letter-spacing: 2px;
+}
+
+.unit {
+  margin-left: 8px;
+  color: var(--sj-text-3);
 }
 
 .key-box {
   padding: 14px;
-  border: 1px dashed #e6a23c;
-  border-radius: 4px;
-  background: #fdf6ec;
+  border: 1px dashed var(--sj-warning);
+  border-radius: var(--sj-radius-sm);
+  background: var(--sj-warning-soft);
+  color: var(--sj-text);
   font-size: 16px;
   word-break: break-all;
   user-select: all;
@@ -835,32 +913,57 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
 .cmd {
   margin: 8px 0 0;
   padding: 10px;
-  background: #f5f7fa;
-  border-radius: 4px;
+  color: var(--sj-text);
+  background: var(--sj-surface-2);
+  border: 1px solid var(--sj-border);
+  border-radius: var(--sj-radius-sm);
   font-size: 12px;
   white-space: pre-wrap;
 }
 
-.section-title {
-  font-size: 15px;
-  margin: 22px 0 10px;
+.clone-alert {
+  margin-top: 16px;
 }
 
-.list-head {
+.clone-alert + .section-card,
+.section-card + .clone-alert {
+  margin-top: 16px;
+}
+
+.kv :deep(.el-descriptions__body) {
+  background: transparent;
+}
+
+.setting-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.setting-item {
+  padding: 14px 16px;
+  border: 1px solid var(--sj-border);
+  border-radius: var(--sj-radius-sm);
+  background: var(--sj-surface-2);
+}
+
+.setting-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  flex-wrap: wrap;
+  margin-bottom: 6px;
 }
 
-.list-head .section-title {
-  margin-bottom: 10px;
+.setting-name {
+  font-weight: 600;
 }
 
 .muted {
-  font-size: 12px;
-  font-weight: 400;
-  color: #909399;
+  color: var(--sj-text-3);
+}
+
+.danger-item {
+  color: var(--el-color-danger);
 }
 </style>

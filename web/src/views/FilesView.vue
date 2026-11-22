@@ -9,6 +9,8 @@ import type { PlayerOut, SourceFileOut } from '@/api/types'
 import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
 import DataTable from '@/components/DataTable.vue'
 import PageShell from '@/components/PageShell.vue'
+import SectionCard from '@/components/SectionCard.vue'
+import StatCard from '@/components/StatCard.vue'
 import { useList } from '@/composables/useList'
 import { useMutation } from '@/composables/useMutation'
 import { useContestStore } from '@/stores/contest'
@@ -75,7 +77,7 @@ async function copyText(text: string): Promise<void> {
     ElMessage.success('已复制')
   } catch {
     // 非 HTTPS 或浏览器策略下剪贴板不可用，提示手工复制而不是静默失败
-    ElMessage.warning('浏览器不允许自动复制，请手工选中复制')
+    ElMessage.warning('复制失败，请手工选取')
   }
 }
 
@@ -165,12 +167,11 @@ async function view(row: SourceFileOut): Promise<void> {
   viewerError.value = null
 
   if (row.size > VIEW_LIMIT_BYTES) {
-    viewerError.value = `这份文件 ${formatBytes(row.size)}（${row.size} 字节），太大了，不适合在浏览器里直接看。请用「下载」。`
+    viewerError.value = `文件过大（${row.size} 字节），超过 ${formatBytes(VIEW_LIMIT_BYTES)} 预览上限`
     return
   }
   if (!row.content_stored) {
-    viewerError.value =
-      '这条台账只有索引，内容从未成功上传过（Agent 上报了它，但上传没完成）。'
+    viewerError.value = '缺内容：未完成上传'
     return
   }
 
@@ -202,9 +203,8 @@ const removeFile = useMutation((row: SourceFileOut) => fileApi.remove(row.id), {
 async function askRemove(row: SourceFileOut): Promise<void> {
   try {
     await ElMessageBox.confirm(
-      `把 ${row.player_no} 的 ${row.rel_path} 从台账里删掉？\n\n` +
-        '台账记录直接删掉，不留墓碑；文件还在机器上，下一轮扫描会被重新收上来。',
-      '删除台账记录',
+      `将删除 ${row.player_no} 的 ${row.rel_path} 台账记录，不可恢复；机器上仍有该文件时，下一轮扫描会重新回收。`,
+      '删除台账记录？',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
     )
   } catch {
@@ -219,7 +219,7 @@ const clearPurge = ref(false)
 const clearFiles = useMutation(
   () => {
     const contestId = contest.currentId
-    if (!contestId) throw new Error('还没有选场次')
+    if (!contestId) throw new Error('未选择场次')
     return fileApi.clear(contestId, contest.current?.slug ?? '', {
       purge: clearPurge.value,
       playerId: playerFilter.value ?? undefined,
@@ -257,7 +257,7 @@ async function exportZip(): Promise<void> {
           : problemFilter.value,
       includeDeleted: true,
     })
-    ElMessage.success('导出已开始，压缩包会出现在下载目录里')
+    ElMessage.success('已开始导出')
   } catch (err) {
     ElMessage.error((err as Error).message)
   } finally {
@@ -269,312 +269,263 @@ async function exportZip(): Promise<void> {
 const scopeLabel = computed(() => {
   const parts: string[] = []
   const player = players.value.find((item) => item.id === playerFilter.value)
-  if (player) parts.push(`选手 ${player.player_no}`)
-  if (clearPurge.value) parts.push('含未消失的记录')
-  else parts.push('只清已消失的墓碑记录')
+  parts.push(player ? `选手 ${player.player_no}` : '全部选手')
+  if (clearPurge.value) parts.push('全部记录')
+  else parts.push('已消失的记录')
   return parts.join(' · ')
 })
 </script>
 
 <template>
-  <PageShell
-    title="代码台账"
-    :error="list.error.value"
-    error-action="先重试；还不行就检查服务端。"
-    retryable
-    @retry="list.reload"
-  >
+  <PageShell title="代码台账" :error="list.error.value" retryable @retry="list.reload">
     <template #toolbar>
-      <el-select
-        v-model="playerFilter"
-        size="small"
-        placeholder="全部选手"
-        clearable
-        filterable
-        style="width: 160px"
-      >
-        <el-option
-          v-for="player in players"
-          :key="player.id"
-          :label="`${player.player_no}${player.name ? ' ' + player.name : ''}`"
-          :value="player.id"
-        />
-      </el-select>
-        <el-select v-model="sortMode" size="small" style="width: 118px">
+      <el-button :loading="list.loading.value" @click="list.reload">
+        <el-icon><Refresh /></el-icon>刷新
+      </el-button>
+      <el-button type="primary" :loading="exporting" :disabled="!list.total.value" @click="exportZip">
+        <el-icon><Download /></el-icon>导出 zip
+      </el-button>
+      <el-dropdown trigger="click">
+        <el-button>
+          更多<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+        </el-button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item @click="clearOpen = true">
+              <span class="danger-item">清理台账</span>
+            </el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
+    </template>
+
+    <div class="stats">
+      <StatCard label="台账记录" :value="`${list.total.value} 条`" icon="Document" />
+      <StatCard
+        label="本页条数"
+        :value="`${rows.length} 条`"
+        :sub="filtered ? '已筛选' : undefined"
+        icon="List"
+        tone="info"
+      />
+      <StatCard
+        label="本页字节"
+        :value="pageBytes.toLocaleString()"
+        :sub="formatBytes(pageBytes)"
+        icon="Coin"
+        tone="success"
+      />
+      <StatCard
+        label="本页未归类"
+        :value="`${looseCount} 个`"
+        icon="Warning"
+        :tone="looseCount > 0 ? 'warning' : 'info'"
+      />
+    </div>
+
+    <SectionCard title="文件" :meta="`共 ${list.total.value} 条`" flush>
+      <template #extra>
+        <el-select
+          v-model="playerFilter"
+          placeholder="全部选手"
+          clearable
+          filterable
+          style="width: 160px"
+        >
+          <el-option
+            v-for="player in players"
+            :key="player.id"
+            :label="`${player.player_no}${player.name ? ' ' + player.name : ''}`"
+            :value="player.id"
+          />
+        </el-select>
+        <el-select v-model="problemFilter" style="width: 130px">
+          <el-option label="全部归属" value="all" />
+          <el-option label="已归题" value="matched" />
+          <el-option label="未归类" value="loose" :disabled="!problems.loose" />
+          <el-option v-for="ident in problems.matched" :key="ident" :label="ident" :value="ident" />
+        </el-select>
+        <el-select v-model="sortMode" style="width: 118px">
           <el-option label="最近更新" value="recent" />
           <el-option label="按路径" value="path" />
         </el-select>
-      <el-checkbox v-model="includeDeleted" size="small">含已删除</el-checkbox>
-      <el-select v-model="problemFilter" size="small" style="width: 150px">
-        <el-option label="全部归属" value="all" />
-        <el-option label="已归题" value="matched" />
-        <el-option label="未归类" value="loose" :disabled="!problems.loose" />
-        <el-option v-for="ident in problems.matched" :key="ident" :label="ident" :value="ident" />
-      </el-select>
-      <el-input
-        v-model="keyword"
-        size="small"
-        placeholder="本页内搜索路径或选手"
-        clearable
-        style="width: 200px"
-      />
-      <el-button size="small" :loading="list.loading.value" @click="list.reload">刷新</el-button>
-      <el-button
-        size="small"
-        type="primary"
-        :loading="exporting"
-        :disabled="!list.total.value"
-        @click="exportZip"
+        <el-input
+          v-model="keyword"
+          placeholder="本页搜索路径 / 考号"
+          clearable
+          style="width: 190px"
+        >
+          <template #prefix><el-icon><Search /></el-icon></template>
+        </el-input>
+        <el-checkbox v-model="includeDeleted">含已删除</el-checkbox>
+      </template>
+
+      <DataTable
+        :rows="rows"
+        :row-key="(row: SourceFileOut) => row.id"
+        :loading="list.loading.value"
+        :total="list.total.value"
+        :page="list.page.value"
+        :page-size="list.pageSize.value"
+        empty-text="无代码"
+        @update:page="list.setPage"
+        @update:pageSize="list.setPageSize"
       >
-        导出归档 zip
-      </el-button>
-      <el-button size="small" type="danger" plain @click="clearOpen = true">清理台账</el-button>
-    </template>
+        <template #columns>
+          <el-table-column label="考号" width="110" prop="player_no" />
 
-    <el-row :gutter="12">
-      <el-col :span="6">
-        <el-card shadow="never">
-          <div class="stat-value">{{ list.total.value }}</div>
-          <div class="stat-label">台账记录（全部）</div>
-        </el-card>
-      </el-col>
-      <el-col :span="6">
-        <el-card shadow="never">
-          <div class="stat-value">{{ rows.length }}</div>
-          <div class="stat-label">{{ filtered ? '本页筛选后条数' : '本页条数' }}</div>
-        </el-card>
-      </el-col>
-      <el-col :span="6">
-        <el-card shadow="never">
-          <!-- 精确字节数放在卡片上：教师核对"是不是收全了"时看的就是它 -->
-          <el-tooltip :content="`约 ${formatBytes(pageBytes)}`">
-            <div class="stat-value mono">{{ pageBytes.toLocaleString() }}</div>
-          </el-tooltip>
-          <div class="stat-label">本页字节合计</div>
-        </el-card>
-      </el-col>
-      <el-col :span="6">
-        <el-card shadow="never">
-          <div class="stat-value" :class="{ warn: looseCount > 0 }">{{ looseCount }}</div>
-          <div class="stat-label">本页未归类</div>
-        </el-card>
-      </el-col>
-    </el-row>
+          <el-table-column label="路径" min-width="220">
+            <template #default="{ row }">
+              <span class="mono" :class="{ deleted: row.deleted_at }">{{ row.rel_path }}</span>
+            </template>
+          </el-table-column>
 
-    <!-- 归题情况单独说清楚：它只影响"算哪道题"，不影响文件本身收没收上来 -->
-    <div class="problem-summary">
-      <el-tag v-if="problems.matched.length" size="small" type="info" effect="plain">
-        本页已归题：{{ problems.matched.join('　') }}
-      </el-tag>
-      <el-tag v-if="problems.loose" size="small" type="warning" effect="plain">
-        本页有文件没归到任何题目
-      </el-tag>
-    </div>
+          <el-table-column label="归属" width="100">
+            <template #default="{ row }">
+              <el-tag v-if="row.problem" effect="plain">{{ row.problem }}</el-tag>
+              <el-tag v-else type="warning" effect="plain">未归类</el-tag>
+            </template>
+          </el-table-column>
 
-    <DataTable
-      :rows="rows"
-      :row-key="(row: SourceFileOut) => row.id"
-      :loading="list.loading.value"
-      :total="list.total.value"
-      :page="list.page.value"
-      :page-size="list.pageSize.value"
-      empty-text="还没有回收任何代码"
-      @update:page="list.setPage"
-      @update:pageSize="list.setPageSize"
-    >
-      <template #columns>
-        <el-table-column label="选手" width="110" prop="player_no" />
+          <!-- 精确字节数用于核对，可读形式放 tooltip -->
+          <el-table-column label="字节数" width="100" align="right">
+            <template #default="{ row }">
+              <el-tooltip :content="formatBytes(row.size)">
+                <span class="mono">{{ row.size }}</span>
+              </el-tooltip>
+            </template>
+          </el-table-column>
 
-        <el-table-column label="路径" min-width="220">
-          <template #default="{ row }">
-            <span class="mono" :class="{ deleted: row.deleted_at }">{{ row.rel_path }}</span>
-          </template>
-        </el-table-column>
+          <el-table-column label="修订" width="70" align="right">
+            <template #default="{ row }">
+              <span>#{{ row.revision }}</span>
+            </template>
+          </el-table-column>
 
-        <el-table-column label="归属" width="100">
-          <template #default="{ row }">
-            <el-tag v-if="row.problem" size="small" effect="plain">{{ row.problem }}</el-tag>
-            <el-tag v-else size="small" type="warning" effect="plain">未归类</el-tag>
-          </template>
-        </el-table-column>
+          <el-table-column label="内容哈希" width="130">
+            <template #default="{ row }">
+              <el-tooltip :content="row.sha256">
+                <span class="mono muted">{{ row.sha256.slice(0, 12) }}…</span>
+              </el-tooltip>
+            </template>
+          </el-table-column>
 
-        <!--
-          **精确字节数**，不是"1.2 KB"。
+          <el-table-column label="首次回收" width="160">
+            <template #default="{ row }">
+              <span class="cell-sub">{{ formatTime(row.first_seen_at) }}</span>
+            </template>
+          </el-table-column>
 
-          这一列存在的意义就是核对："我手上这份 main.cpp 是 1043 字节，
-          台账里这条也是 1043，那就是它。" 而"1.2 KB"在 1043 与 1180 之间
-          给不出任何区别 —— 而那正是传坏、传成旧版本时的差别。
-          人类可读的形式放到 tooltip 里，它是辅助，不是判据。
-        -->
-        <el-table-column label="字节数" width="100" align="right">
-          <template #default="{ row }">
-            <el-tooltip :content="formatBytes(row.size)">
-              <span class="mono">{{ row.size }}</span>
-            </el-tooltip>
-          </template>
-        </el-table-column>
+          <el-table-column label="最近出现" width="160">
+            <template #default="{ row }">
+              <span class="cell-sub">{{ formatTime(row.last_seen_at) }}</span>
+            </template>
+          </el-table-column>
 
-        <el-table-column label="修订" width="70" align="right">
-          <template #default="{ row }">
-            <span>#{{ row.revision }}</span>
-          </template>
-        </el-table-column>
+          <el-table-column label="状态" width="100">
+            <template #default="{ row }">
+              <el-tag v-if="row.deleted_at" type="danger" effect="plain">已消失</el-tag>
+              <el-tag v-else-if="row.content_stored" type="success" effect="light">已归档</el-tag>
+              <el-tag v-else type="warning" effect="plain">缺内容</el-tag>
+            </template>
+          </el-table-column>
 
-        <el-table-column label="内容哈希" width="130">
-          <template #default="{ row }">
-            <el-tooltip :content="row.sha256">
-              <span class="mono muted">{{ row.sha256.slice(0, 12) }}…</span>
-            </el-tooltip>
-          </template>
-        </el-table-column>
+          <el-table-column label="操作" width="160" fixed="right">
+            <template #default="{ row }">
+              <el-button link type="primary" size="small" @click="view(row)">查看</el-button>
+              <el-button
+                link
+                type="primary"
+                size="small"
+                :loading="downloadFile.pending.value"
+                @click="downloadFile.run(row)"
+              >
+                下载
+              </el-button>
+              <el-button link type="danger" size="small" @click="askRemove(row)">删除</el-button>
+            </template>
+          </el-table-column>
+        </template>
 
-        <el-table-column label="首次回收" width="150">
-          <template #default="{ row }">
-            <span class="cell-sub">{{ formatTime(row.first_seen_at) }}</span>
-          </template>
-        </el-table-column>
+        <template #empty>
+          <div>无代码</div>
+          <el-button link type="primary" style="margin-top: 8px" @click="router.push({ name: 'overview' })">
+            查看选手状态
+          </el-button>
+        </template>
+      </DataTable>
+    </SectionCard>
 
-        <el-table-column label="最近出现" width="150">
-          <template #default="{ row }">
-            <span class="cell-sub">{{ formatTime(row.last_seen_at) }}</span>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="状态" width="100">
-          <template #default="{ row }">
-            <el-tag v-if="row.deleted_at" type="danger" size="small" effect="plain">
-              已消失
-            </el-tag>
-            <el-tag v-else-if="row.content_stored" type="success" size="small" effect="plain">
-              已归档
-            </el-tag>
-            <!-- 有台账记录但内容不在：说明只上报了索引，内容从未成功上传 -->
-            <el-tag v-else type="warning" size="small" effect="plain">缺内容</el-tag>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="操作" width="150" fixed="right">
-          <template #default="{ row }">
-            <el-button link type="primary" size="small" @click="view(row)">查看</el-button>
-            <el-button
-              link
-              type="primary"
-              size="small"
-              :loading="downloadFile.pending.value"
-              @click="downloadFile.run(row)"
-            >
-              下载
-            </el-button>
-            <el-button link type="danger" size="small" @click="askRemove(row)">删除</el-button>
-          </template>
-        </el-table-column>
-      </template>
-
-      <template #empty>
-        <p>还没有回收任何代码。</p>
-        <el-button type="primary" size="small" style="margin-top: 12px" @click="router.push({ name: 'overview' })">
-          去看选手状态
-        </el-button>
-      </template>
-    </DataTable>
-
-    <!-- 看代码正文 -->
     <el-dialog v-model="viewerOpen" :title="viewerTitle" width="760px">
-      <el-alert
-        v-if="viewerError"
-        type="warning"
-        :closable="false"
-        show-icon
-        :title="viewerError"
-      />
-      <div v-loading="viewerLoading" class="viewer">
+      <el-alert v-if="viewerError" type="warning" :closable="false" show-icon :title="viewerError" />
+      <div v-else v-loading="viewerLoading" class="viewer">
         <pre class="viewer-text">{{ viewerText }}</pre>
       </div>
       <template #footer>
         <el-button @click="viewerOpen = false">关闭</el-button>
-        <el-button type="primary" @click="copyText(viewerText)">复制全文</el-button>
+        <el-button type="primary" :disabled="!viewerText" @click="copyText(viewerText)">复制全文</el-button>
       </template>
     </el-dialog>
 
-    <!--
-      清理台账 = 范围删除，服务端是硬删（不留墓碑）；"连没消失的
-      一起删"是另一档风险（机器还在报的文件下一轮就会回来），要显式勾选。
-      `confirm` 是场次标识，服务端会逐字校验。
-    -->
+    <!-- 清理台账：服务端硬删；confirm 为场次标识 -->
     <ConfirmByNameDialog
       v-model="clearOpen"
-      title="清理代码台账"
+      title="清理代码台账？"
       :expected="contest.current?.slug ?? ''"
       :submitting="clearFiles.pending.value"
       confirm-text="清理"
-      :impact="[
-        `当前范围共 ${list.total.value} 条记录`,
-        clearPurge ? '连还在的记录一起清理（已勾选）' : '只清「已消失」的墓碑记录',
-      ]"
-      :detail="`将清理：${scopeLabel}。`"
+      :impact="[`当前范围 ${list.total.value} 条记录`, `清理：${scopeLabel}`]"
+      detail="将删除台账记录，不可恢复；不会删除机器上的文件。"
       @confirm="clearFiles.run(undefined)"
     >
-      <div style="margin-bottom: 4px">
-        <el-checkbox v-model="clearPurge">
-          连未消失的记录一起清理（比赛结束后清场用）
-        </el-checkbox>
-      </div>
-      <el-alert v-if="clearPurge" type="error" :closable="false" show-icon>
-        <template #title>注意：机器还在报的文件下一轮就会被重新收上来</template>
-        <template #default>
-          它不会删掉学生机器上的文件。
-        </template>
-      </el-alert>
+      <el-checkbox v-model="clearPurge">连同未消失的记录</el-checkbox>
+      <el-alert
+        v-if="clearPurge"
+        type="error"
+        :closable="false"
+        show-icon
+        style="margin-top: 8px"
+        title="机器上仍存在的文件会在下一轮扫描重新回收。"
+      />
     </ConfirmByNameDialog>
   </PageShell>
 </template>
 
 <style scoped>
-.stat-value {
-  font-size: 20px;
-  font-weight: 600;
-  line-height: 1.2;
+.stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+  margin-bottom: 16px;
 }
 
-.stat-value.warn {
-  color: #e6a23c;
-}
-
-.stat-label {
-  font-size: 12px;
-  color: #909399;
-  margin-top: 2px;
+@media (max-width: 900px) {
+  .stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .mono.deleted {
-  color: #c0c4cc;
+  color: var(--sj-text-3);
   text-decoration: line-through;
 }
 
-.problem-summary {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
-  margin-top: 12px;
-}
-
-.muted {
-  color: #909399;
-  font-size: 12px;
+.danger-item {
+  color: var(--sj-danger);
 }
 
 .viewer {
   max-height: 60vh;
   overflow: auto;
-  background: #f5f7fa;
-  border-radius: 4px;
+  background: var(--sj-surface-2);
+  border: 1px solid var(--sj-border);
+  border-radius: var(--sj-radius-sm);
   padding: 12px;
 }
 
 .viewer-text {
   margin: 0;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--sj-mono);
   font-size: 12px;
   white-space: pre-wrap;
   word-break: break-all;

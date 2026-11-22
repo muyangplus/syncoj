@@ -69,50 +69,75 @@ function submit(): void {
     width="480px"
     @update:model-value="(value: boolean) => emit('update:modelValue', value)"
   >
-    <el-alert type="warning" :closable="false" show-icon>
-      <template #title>这个操作不可撤销</template>
-      <template #default>
+    <div class="consequence">
+      <el-icon class="consequence-icon"><WarningFilled /></el-icon>
+      <div>
         <div v-if="detail">{{ detail }}</div>
         <ul v-if="impact?.length" class="impact">
           <li v-for="line in impact" :key="line">{{ line }}</li>
         </ul>
-        <div style="margin-top: 6px">
-          请把
-          <strong class="mono">{{ expected }}</strong>
-          原样打一遍以确认。
-        </div>
-      </template>
-    </el-alert>
+      </div>
+    </div>
 
+    <div class="type-label">
+      输入 <strong class="mono">{{ expected }}</strong> 确认
+    </div>
     <el-input
       v-model="typed"
       class="mono-input"
-      :placeholder="placeholder ?? `输入 ${expected}`"
+      :placeholder="placeholder ?? expected"
       clearable
-      style="margin-top: 14px"
       @keyup.enter="submit"
     />
 
-    <!-- 少数清空入口需要额外的选项（比如"连未消失的一起清"） -->
-    <div v-if="$slots.default" style="margin-top: 12px">
+    <div v-if="$slots.default" class="extra">
       <slot />
     </div>
 
     <template #footer>
       <el-button @click="close">取消</el-button>
       <el-button type="danger" :disabled="!matches" :loading="submitting" @click="submit">
-        {{ confirmText ?? '确认删除' }}
+        {{ confirmText ?? '删除' }}
       </el-button>
     </template>
   </el-dialog>
 </template>
 
 <style scoped>
-.mono-input :deep(input) {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+.consequence {
+  display: flex;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: var(--sj-radius-sm);
+  background: var(--sj-danger-soft);
+  color: var(--sj-text);
+  line-height: 1.6;
 }
 
-/* 影响面单独成块：它和上面那句"不可撤销"是两件事，揉在一起会被一起略过 */
+.consequence-icon {
+  flex: none;
+  margin-top: 3px;
+  color: var(--sj-danger);
+}
+
+.type-label {
+  margin: 16px 0 8px;
+  font-size: 13px;
+  color: var(--sj-text-2);
+}
+
+.type-label strong {
+  color: var(--sj-text);
+}
+
+.mono-input :deep(input) {
+  font-family: var(--sj-mono);
+}
+
+.extra {
+  margin-top: 14px;
+}
+
 .impact {
   margin: 6px 0 0;
   padding-left: 18px;

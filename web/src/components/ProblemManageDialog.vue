@@ -8,8 +8,10 @@ import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
 import DataTable from '@/components/DataTable.vue'
 import FormDialog from '@/components/FormDialog.vue'
 import ProblemJudgeDialog from '@/components/ProblemJudgeDialog.vue'
+import SectionCard from '@/components/SectionCard.vue'
 import { useList } from '@/composables/useList'
 import { useMutation } from '@/composables/useMutation'
+import { useContestStore } from '@/stores/contest'
 import { parsePasteLines } from '@/utils/paste'
 
 const props = defineProps<{
@@ -127,7 +129,7 @@ const invalidRows = computed(() => parsed.value.filter((row) => row.error))
 const importProblems = useMutation(
   async () => {
     const contestId = props.contestId
-    if (!contestId) throw new Error('还没有选场次')
+    if (!contestId) throw new Error('未选择场次')
     const payload: ProblemUpsert[] = validRows.value.map((row) => ({
       ident: row.ident,
       title: row.title || null,
@@ -265,9 +267,9 @@ const probing = ref(false)
 const probe = useMutation(
   async () => {
     const contestId = props.contestId
-    if (!contestId) throw new Error('还没有选场次')
+    if (!contestId) throw new Error('未选择场次')
     const path = probePath.value.trim()
-    if (!path) throw new Error('先填一条相对路径')
+    if (!path) throw new Error('路径不能为空')
     return problemApi.match(contestId, path)
   },
   {
@@ -295,6 +297,28 @@ async function runProbe(): Promise<void> {
 
 const problemCount = computed(() => problems.total.value)
 
+// 清空题目：范围删除，场次标识逐字确认
+const contestStore = useContestStore()
+const contestSlug = computed(
+  () => contestStore.contests.find((item) => item.id === props.contestId)?.slug ?? '',
+)
+const clearOpen = ref(false)
+
+const clearProblems = useMutation(
+  () => {
+    const contestId = props.contestId
+    if (!contestId) throw new Error('未选择场次')
+    return problemApi.clear(contestId, contestSlug.value)
+  },
+  {
+    onDone: async () => {
+      clearOpen.value = false
+      await problems.reload()
+      emit('changed')
+    },
+  },
+)
+
 // 评测设置（§12）
 const judgeOpen = ref(false)
 const judgeTarget = ref<ProblemOut | null>(null)
@@ -307,113 +331,107 @@ function openJudge(row: ProblemOut): void {
 
 <template>
   <el-dialog v-model="visible" title="题目清单" width="920px" :close-on-click-modal="false">
-    <el-alert type="info" :closable="false" show-icon style="margin-bottom: 12px">
-      <template #title>题目标识同时是目录名、代码文件名与成绩矩阵的列名</template>
-    </el-alert>
-
-    <div class="list-head">
-      <div class="add-title">
-        已登记 {{ problemCount }} 道
-      </div>
-      <div class="toolbar">
-        <el-button size="small" :loading="problems.loading.value" @click="problems.reload">
-          刷新
+    <SectionCard title="题目" :meta="`${problemCount ?? 0} 道`" flush>
+      <template #extra>
+        <el-button :loading="problems.loading.value" @click="problems.reload">
+          <el-icon><Refresh /></el-icon>刷新
         </el-button>
-      </div>
-    </div>
-
-    <!--
-      清单也用 DataTable：加载中、空状态、分页都在数据层里。这里不开批量选择
-      —— 批量删除整份清单是场次设置里的动作（`problemApi.clear`），
-      它要打的是**场次标识**，不是某几道题的名字。
-    -->
-    <DataTable
-      :rows="problems.rows.value"
-      :row-key="(row: ProblemOut) => row.id"
-      :loading="problems.loading.value"
-      :total="problems.total.value"
-      :page="problems.page.value"
-      :page-size="problems.pageSize.value"
-      empty-text="还没有登记任何题目"
-      style="margin-bottom: 16px"
-      @update:page="problems.setPage"
-      @update:pageSize="problems.setPageSize"
-    >
-      <template #columns>
-        <el-table-column label="顺序" width="80" align="right">
-          <template #default="{ row }">
-            <span class="mono">{{ row.order_index }}</span>
+        <el-dropdown trigger="click" @command="clearOpen = true">
+          <el-button :disabled="!problemCount || !contestSlug">
+            更多<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="clear">
+                <span class="danger-text">清空题目</span>
+              </el-dropdown-item>
+            </el-dropdown-menu>
           </template>
-        </el-table-column>
-
-        <el-table-column label="标识" width="130">
-          <template #default="{ row }">
-            <span class="mono">{{ row.ident }}</span>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="标题" width="160">
-          <template #default="{ row }">{{ row.title || '—' }}</template>
-        </el-table-column>
-
-        <el-table-column label="代码路径" min-width="220">
-          <template #default="{ row }">
-            <el-tag
-              v-for="pattern in row.file_patterns"
-              :key="pattern"
-              size="small"
-              effect="plain"
-              class="pattern-tag"
-            >
-              {{ pattern }}
-            </el-tag>
-            <!-- 空 = 服务端默认 `{ident}/{ident}.cpp`。这里写出来，教师才知道"没配"也是一种配置 -->
-            <span v-if="!row.file_patterns?.length" class="muted">默认（{ident}/{ident}.cpp）</span>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="评测" width="170">
-          <template #default="{ row }">
-            <template v-if="row.judge_mode === 'builtin'">
-              自带 · {{ row.time_limit_ms ?? 1000 }}ms / {{ row.memory_limit_mb ?? 256 }}MB
-              <span v-if="row.testdata" class="muted"> · {{ row.testdata.cases }} 点</span>
-              <el-tag v-else size="small" type="danger" effect="plain">无数据</el-tag>
+        </el-dropdown>
+      </template>
+      <DataTable
+        :rows="problems.rows.value"
+        :row-key="(row: ProblemOut) => row.id"
+        :loading="problems.loading.value"
+        :total="problems.total.value"
+        :page="problems.page.value"
+        :page-size="problems.pageSize.value"
+        empty-text="无题目"
+        @update:page="problems.setPage"
+        @update:pageSize="problems.setPageSize"
+      >
+        <template #columns>
+          <el-table-column label="顺序" width="80" align="right">
+            <template #default="{ row }">
+              <span class="mono">{{ row.order_index }}</span>
             </template>
-            <span v-else class="muted">外部评测器</span>
-          </template>
-        </el-table-column>
+          </el-table-column>
 
-        <el-table-column label="操作" width="170" fixed="right">
-          <template #default="{ row }">
-            <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
-            <el-button link type="primary" size="small" @click="openJudge(row)">评测设置</el-button>
-            <el-button link type="danger" size="small" @click="askRemove(row)">删除</el-button>
-          </template>
-        </el-table-column>
-      </template>
+          <el-table-column label="标识" width="130">
+            <template #default="{ row }">
+              <span class="mono">{{ row.ident }}</span>
+            </template>
+          </el-table-column>
 
-      <template #empty>
-        <p>还没有登记任何题目，在下面「批量登记」里粘贴清单即可。</p>
-      </template>
-    </DataTable>
+          <el-table-column label="标题" width="160">
+            <template #default="{ row }">{{ row.title || '—' }}</template>
+          </el-table-column>
 
-    <div class="probe-section">
-      <div class="add-title">路径试算（确认模式配对了没有）</div>
+          <el-table-column label="代码路径" min-width="220">
+            <template #default="{ row }">
+              <el-tag
+                v-for="pattern in row.file_patterns"
+                :key="pattern"
+                effect="plain"
+                class="pattern-tag"
+              >
+                {{ pattern }}
+              </el-tag>
+              <span v-if="!row.file_patterns?.length" class="muted">默认 {ident}/{ident}.cpp</span>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="评测" width="190">
+            <template #default="{ row }">
+              <template v-if="row.judge_mode === 'builtin'">
+                自带 · {{ row.time_limit_ms ?? 1000 }} ms / {{ row.memory_limit_mb ?? 256 }} MB
+                <span v-if="row.testdata" class="muted"> · {{ row.testdata.cases }} 个测试点</span>
+                <el-tag v-else type="danger" effect="plain">缺数据包</el-tag>
+              </template>
+              <span v-else class="muted">外部评测器</span>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="操作" width="180" fixed="right">
+            <template #default="{ row }">
+              <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
+              <el-button link type="primary" size="small" @click="openJudge(row)">评测设置</el-button>
+              <el-button link type="danger" size="small" @click="askRemove(row)">删除</el-button>
+            </template>
+          </el-table-column>
+        </template>
+
+        <template #empty>
+          <p>无题目</p>
+        </template>
+      </DataTable>
+    </SectionCard>
+
+    <SectionCard title="路径试算">
       <div class="probe-row">
         <el-input
           v-model="probePath"
-          size="small"
-          placeholder="p1/p1.cpp"
+          placeholder="例如 p1/p1.cpp"
           style="max-width: 380px"
           @keyup.enter="runProbe"
         />
-        <el-button size="small" :loading="probing" @click="runProbe">试算</el-button>
+        <el-button :loading="probing" @click="runProbe">试算</el-button>
         <template v-if="probeResult">
-          <el-tag v-if="probeResult.problem" type="success" size="small">
-            归到「{{ probeResult.problem }}」
+          <el-tag v-if="probeResult.problem" type="success" effect="light">
+            归属「{{ probeResult.problem }}」
           </el-tag>
-          <el-tag v-else type="warning" size="small">没有任何题目认领这条路径</el-tag>
-          <!-- 模板和展开结果都显示：教师写的是 {ident}/**，实际匹配的是 p1/** -->
+          <el-tag v-else type="warning" effect="light">无匹配题目</el-tag>
+          <!-- 模板与展开结果都显示 -->
           <span v-if="probeResult.expanded?.length" class="muted mono">
             命中：{{ (probeResult.patterns ?? []).join('  |  ') }}
             <template v-if="probeResult.patterns?.[0] !== probeResult.expanded[0]">
@@ -422,12 +440,9 @@ function openJudge(row: ProblemOut): void {
           </span>
         </template>
       </div>
-    </div>
+    </SectionCard>
 
-    <div class="add-section">
-      <div class="add-title">
-        批量登记（每行一道：<code>标识,标题,代码路径</code>，后两列可省略）
-      </div>
+    <SectionCard title="批量登记" meta="标识,标题,代码路径">
       <el-input
         v-model="raw"
         type="textarea"
@@ -436,23 +451,12 @@ function openJudge(row: ProblemOut): void {
       />
 
       <div v-if="parsed.length" class="preview">
-        <el-tag type="success" size="small" effect="plain">
-          {{ validRows.length }} 道可登记
-        </el-tag>
-        <el-tag
-          v-if="invalidRows.length"
-          type="danger"
-          size="small"
-          effect="plain"
-          style="margin-left: 6px"
-        >
-          {{ invalidRows.length }} 道有问题（会被跳过）
+        <el-tag type="success" effect="plain">{{ validRows.length }} 道可登记</el-tag>
+        <el-tag v-if="invalidRows.length" type="danger" effect="plain">
+          {{ invalidRows.length }} 道跳过
         </el-tag>
         <span v-for="row in invalidRows.slice(0, 5)" :key="row.line" class="bad-line">
           第 {{ row.line }} 行：{{ row.error }}
-        </span>
-        <span v-if="validRows.some((row) => row.patterns.length)" class="muted">
-          其余题目用服务端默认值。
         </span>
       </div>
 
@@ -465,9 +469,9 @@ function openJudge(row: ProblemOut): void {
       >
         登记 {{ validRows.length }} 道
       </el-button>
-    </div>
+    </SectionCard>
 
-    <!-- 编辑单条：标识（会同步成目录名与矩阵列名）、标题、顺序、代码路径 -->
+    <!-- 编辑单条 -->
     <FormDialog
       v-model="editOpen"
       :title="`编辑题目「${editTarget?.ident ?? ''}」`"
@@ -478,10 +482,10 @@ function openJudge(row: ProblemOut): void {
     >
       <el-form label-width="86px">
         <el-form-item label="题目标识">
-          <el-input v-model="editIdent" maxlength="64" placeholder="比如 p1" />
+          <el-input v-model="editIdent" maxlength="64" placeholder="例如 p1" />
         </el-form-item>
         <el-form-item label="标题">
-          <el-input v-model="editTitle" maxlength="200" placeholder="显示标题，可留空" />
+          <el-input v-model="editTitle" maxlength="200" placeholder="例如 签到题" />
         </el-form-item>
         <el-form-item label="顺序">
           <el-input-number v-model="editOrder" :min="0" :max="9999" controls-position="right" />
@@ -491,50 +495,41 @@ function openJudge(row: ProblemOut): void {
             v-model="editPatterns"
             type="textarea"
             :rows="4"
-            placeholder="一行一个模式，留空用默认值 {ident}/**"
+            placeholder="每行一个，例如 {ident}/**"
           />
         </el-form-item>
       </el-form>
     </FormDialog>
 
-    <!--
-      删除题目 = 结构性数据的硬删除，确认内容是**题目标识**（服务端逐字校验）。
-      弹窗里那句"成绩保留"是关键：不写的话教师会以为删登记等于删成绩。
-    -->
+    <!-- 删除题目：题目标识逐字确认 -->
     <ConfirmByNameDialog
       v-model="deleteOpen"
-      title="删除题目"
+      :title="`删除题目「${deleteTarget?.ident ?? ''}」？`"
       :expected="deleteTarget?.ident ?? ''"
       :submitting="removeProblem.pending.value"
-      confirm-text="删除题目"
-      :detail="
-        `从清单里删除题目「${deleteTarget?.ident ?? ''}」。` +
-        '已经收到的评测成绩**不会**被删掉 —— 它们会以「未登记」的形式继续显示在成绩矩阵里。'
-      "
+      confirm-text="删除"
+      detail="将从清单删除该题，不可恢复；已有成绩保留，在成绩矩阵中显示为未登记。"
       @confirm="removeProblem.run(undefined)"
+    />
+    <ConfirmByNameDialog
+      v-model="clearOpen"
+      title="清空题目？"
+      :expected="contestSlug"
+      :submitting="clearProblems.pending.value"
+      confirm-text="清空"
+      :detail="`将删除本场次全部 ${problemCount ?? 0} 道题目，不可恢复；已有成绩保留。`"
+      @confirm="clearProblems.run(undefined)"
     />
     <ProblemJudgeDialog v-model="judgeOpen" :problem="judgeTarget" @saved="problems.reload" />
   </el-dialog>
 </template>
 
 <style scoped>
-.add-section {
-  border-top: 1px solid #ebeef5;
-  padding-top: 14px;
-}
-
-.probe-section {
-  border-top: 1px solid #ebeef5;
-  padding-top: 12px;
-  margin-bottom: 12px;
-}
-
 .probe-row {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
-  margin-bottom: 6px;
 }
 
 .pattern-tag {
@@ -542,26 +537,8 @@ function openJudge(row: ProblemOut): void {
 }
 
 .muted {
-  color: #909399;
+  color: var(--el-text-color-secondary);
   font-size: 12px;
-}
-
-.add-title {
-  font-size: 13px;
-  font-weight: 600;
-  margin-bottom: 8px;
-}
-
-.list-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.list-head .add-title {
-  margin-bottom: 0;
 }
 
 .preview {
@@ -572,8 +549,12 @@ function openJudge(row: ProblemOut): void {
   align-items: center;
 }
 
+.danger-text {
+  color: var(--el-color-danger);
+}
+
 .bad-line {
   font-size: 12px;
-  color: #f56c6c;
+  color: var(--el-color-danger);
 }
 </style>

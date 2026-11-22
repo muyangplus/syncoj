@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 
 import { agentApi, authApi, playerApi, rosterApi, scoreApi } from '@/api'
@@ -10,6 +10,8 @@ import DataTable from '@/components/DataTable.vue'
 import DiagnosticsDialog from '@/components/DiagnosticsDialog.vue'
 import FormDialog from '@/components/FormDialog.vue'
 import PageShell from '@/components/PageShell.vue'
+import SectionCard from '@/components/SectionCard.vue'
+import StatCard from '@/components/StatCard.vue'
 import PlayerImportDialog from '@/components/PlayerImportDialog.vue'
 import RosterPersonPicker from '@/components/RosterPersonPicker.vue'
 import { useList } from '@/composables/useList'
@@ -138,11 +140,11 @@ const rows = computed(() => {
  * 那一行必须在按下之前就变成红字含义的句子，而不是按完才从结果里看出来。
  */
 const clearPlayersImpact = computed(() => [
-  `本场次 ${list.total.value} 名选手会被清空`,
+  `将删除本场次 ${list.total.value} 名选手，不可恢复`,
   clearKeepWithSubmissions.value
-    ? '已有代码或成绩的选手会保留（保护开着）'
-    : '已有代码或成绩的选手也会被删掉（保护已关闭）',
-  '机器不受影响 —— 它们绑的是名单库里的人',
+    ? '有代码或成绩的选手保留'
+    : '有代码或成绩的选手一并删除',
+  '机器不受影响',
 ])
 
 /** 删除单个选手的影响面。有几分提交是按成绩矩阵算出来的，不是猜的。 */
@@ -152,9 +154,9 @@ const deletePlayerImpact = computed(() => {
   const progress = progressByPlayer.value.get(player.id)
   const submitted = progress ? progress.submitted + progress.pending : 0
   return [
-    `${player.player_no} 在本场次的代码台账与成绩会一起删`,
-    submitted ? `他已有 ${submitted} 道题的提交` : '他还没有提交过代码',
-    '机器不受影响 —— 要作废机器请在「机器」那一列里单独做',
+    `将删除 ${player.player_no} 在本场次的代码台账与成绩，不可恢复`,
+    submitted ? `已提交 ${submitted} 道题` : '无提交',
+    '机器不受影响',
   ]
 })
 
@@ -162,7 +164,8 @@ const summary = computed(() => {
   const total = list.total.value
   const online = agents.value.filter((agent) => agent.online).length
   const withFiles = list.rows.value.filter((player) => player.file_count > 0).length
-  return { total, online, offline: Math.max(0, total - online), withFiles }
+  const complete = progress.value.filter((row) => row.total > 0 && row.missing === 0).length
+  return { total, online, offline: Math.max(0, total - online), withFiles, complete }
 })
 
 /**
@@ -195,7 +198,7 @@ const rosterReceipt = ref('')
 const fillFromDefaultRoster = useMutation(
   (rosterId: number) => {
     const id = contest.currentId
-    if (id === null) throw new Error('还没有选中场次')
+    if (id === null) throw new Error('未选择场次')
     return rosterApi.applyToContest(id, { roster_id: rosterId, prune: false })
   },
   {
@@ -204,7 +207,7 @@ const fillFromDefaultRoster = useMutation(
       if (report.created) bits.push(`新建 ${report.created} 人`)
       if (report.updated) bits.push(`更新 ${report.updated} 人`)
       if (report.kept) bits.push(`保留 ${report.kept} 人`)
-      rosterReceipt.value = bits.length ? `已补人：${bits.join('、')}` : '名单与场次一致，没有改动'
+      rosterReceipt.value = bits.length ? `已补人：${bits.join('、')}` : '无改动'
       return rosterReceipt.value
     },
     onDone: () => list.reload(),
@@ -276,7 +279,7 @@ const clearKeepWithSubmissions = ref(true)
 
 const clearPlayers = useMutation(() => {
   const contestId = contest.currentId
-  if (!contestId) throw new Error('还没有选场次')
+  if (!contestId) throw new Error('未选择场次')
   return playerApi.clear(
     contestId,
     contest.current?.slug ?? '',
@@ -314,9 +317,8 @@ const unbind = useMutation(() => {
 async function askUnbind(agent: AgentRuntimeOut): Promise<void> {
   try {
     await ElMessageBox.confirm(
-      `把 ${agent.player_no} 的这台机器解除绑定？\n\n` +
-        '机器会回到「待配对」列表，凭据仍然有效；要换人请用「改派」。',
-      '解除绑定',
+      `${agent.player_no} 的机器将回到待配对列表，凭据保留。`,
+      '解除绑定？',
       { type: 'warning', confirmButtonText: '解除绑定', cancelButtonText: '取消' },
     )
   } catch {
@@ -331,6 +333,11 @@ async function askUnbind(agent: AgentRuntimeOut): Promise<void> {
 const rebindOpen = ref(false)
 const rebindTarget = ref<AgentRuntimeOut | null>(null)
 const rebindEntryId = ref<number | null>(null)
+// 弹窗只挂载一次：每次打开重拉名单与条目
+const rebindPicker = ref<InstanceType<typeof RosterPersonPicker> | null>(null)
+watch(rebindOpen, (open) => {
+  if (open) void rebindPicker.value?.reload()
+})
 
 function askRebind(agent: AgentRuntimeOut): void {
   rebindTarget.value = agent
@@ -341,7 +348,7 @@ function askRebind(agent: AgentRuntimeOut): void {
 const rebind = useMutation(() => {
   const target = rebindTarget.value
   if (!target) throw new Error('没有选中机器')
-  if (!rebindEntryId.value) throw new Error('请选择要改派给谁')
+  if (!rebindEntryId.value) throw new Error('请选择选手')
   return agentApi.rebind(target.agent_id, rebindEntryId.value)
 }, {
   onDone: async () => {
@@ -451,15 +458,10 @@ function handleCommand(
   <PageShell
     title="选手状态"
     :error="list.error.value"
-    error-action="先重试；还不行就检查服务端。"
     retryable
     @retry="list.reload"
   >
     <template #sub>
-      <!--
-        这一行是**服务端级**的：它数的是整个库里所有场次的机器。与下面那排
-        "本场次"的卡片口径不同，所以必须分开写，不能让两个数字混在一处。
-      -->
       <p v-if="health" class="cell-sub">
         <span class="status-dot" :class="health.ok ? 'online' : 'offline'" />
         服务端{{ health.ok ? '正常' : '异常' }} · 全库机器 {{ health.agents_online }} /
@@ -468,248 +470,245 @@ function handleCommand(
     </template>
 
     <template #toolbar>
-      <el-input
-        v-model="keyword"
-        size="small"
-        placeholder="本页内搜编号或姓名"
-        clearable
-        style="width: 180px"
-      />
-      <el-select v-model="sortMode" size="small" style="width: 118px">
-        <el-option label="离线优先" value="offline" />
-        <el-option label="落后优先" value="behind" />
-        <el-option label="按考号" value="no" />
-      </el-select>
-      <el-checkbox v-model="onlyOffline" size="small">只看离线</el-checkbox>
-      <el-button size="small" :loading="list.loading.value" @click="list.reload">刷新</el-button>
-      <el-button size="small" type="primary" @click="importVisible = true">导入选手</el-button>
-      <el-button
-        size="small"
-        type="danger"
-        plain
-        :disabled="!list.total.value"
-        @click="clearOpen = true"
-      >
-        清空选手
+      <el-button type="primary" @click="importVisible = true">
+        <el-icon><Plus /></el-icon>导入选手
       </el-button>
+      <el-button :loading="list.loading.value" @click="list.reload">
+        <el-icon><Refresh /></el-icon>刷新
+      </el-button>
+      <el-dropdown trigger="click" @command="(command: string) => command === 'clear' && (clearOpen = true)">
+        <el-button>
+          更多<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+        </el-button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item command="clear" class="danger-item" :disabled="!list.total.value">
+              清空选手
+            </el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
     </template>
 
-    <el-row :gutter="12" class="stats">
-      <el-col :span="6">
-        <el-card shadow="never">
-          <div class="stat-value">
-            {{ summary.online }}<span class="stat-unit">/{{ summary.total }}</span>
-          </div>
-          <div class="stat-label">在线选手</div>
-        </el-card>
-      </el-col>
-      <el-col :span="6">
-        <el-card shadow="never">
-          <div class="stat-value warn">{{ summary.offline }}</div>
-          <div class="stat-label">当前离线</div>
-        </el-card>
-      </el-col>
-      <el-col :span="6">
-        <el-card shadow="never">
-          <div class="stat-value">{{ summary.withFiles }}</div>
-          <div class="stat-label">本页已回收代码</div>
-        </el-card>
-      </el-col>
-      <el-col :span="6">
-        <el-card shadow="never">
-          <div class="stat-value">{{ agents.length }}</div>
-          <div class="stat-label">已配对机器</div>
-        </el-card>
-      </el-col>
-    </el-row>
+    <div class="stats">
+      <StatCard
+        label="在线"
+        :value="`${summary.online} / ${summary.total}`"
+        sub="选手"
+        icon="Connection"
+        tone="success"
+        :progress="summary.total ? (summary.online / summary.total) * 100 : 0"
+        @click="onlyOffline = false"
+      />
+      <StatCard
+        label="离线"
+        :value="summary.offline"
+        sub="选手"
+        icon="Warning"
+        :tone="summary.offline ? 'warning' : 'info'"
+        @click="onlyOffline = true"
+      />
+      <StatCard
+        label="已交齐"
+        :value="summary.complete"
+        :sub="`本页 · 已回收代码 ${summary.withFiles} 人`"
+        icon="CircleCheck"
+        tone="primary"
+        @click="sortMode = 'behind'"
+      />
+      <StatCard
+        label="已配对机器"
+        :value="agents.length"
+        sub="台"
+        icon="Monitor"
+        tone="info"
+      />
+    </div>
 
-    <DataTable
-      :rows="rows"
-      :row-key="tableRowKey"
-      :loading="list.loading.value"
-      :total="list.total.value"
-      :page="list.page.value"
-      :page-size="list.pageSize.value"
-      style="margin-top: 12px"
-      @update:page="list.setPage"
-      @update:pageSize="list.setPageSize"
-    >
-      <template #columns>
-        <el-table-column label="选手" width="150">
-          <template #default="{ row }">
-            <div class="mono">{{ row.player.player_no }}</div>
-            <div class="cell-sub">{{ row.player.name || '—' }}</div>
-          </template>
-        </el-table-column>
+    <SectionCard title="选手" :meta="`${list.total.value} 人`" flush>
+      <template #extra>
+        <el-input
+          v-model="keyword"
+          placeholder="考号或姓名（本页）"
+          clearable
+          style="width: 190px"
+        >
+          <template #prefix><el-icon><Search /></el-icon></template>
+        </el-input>
+        <el-select v-model="sortMode" style="width: 118px">
+          <el-option label="离线优先" value="offline" />
+          <el-option label="落后优先" value="behind" />
+          <el-option label="按考号" value="no" />
+        </el-select>
+        <el-checkbox v-model="onlyOffline">只看离线</el-checkbox>
+      </template>
 
-        <el-table-column label="状态" width="100">
-          <template #default="{ row }">
-            <span>
-              <span class="status-dot" :class="row.player.online ? 'online' : 'offline'" />
-              <el-tag :type="row.player.online ? 'success' : 'info'" size="small" effect="plain">
+      <DataTable
+        :rows="rows"
+        :row-key="tableRowKey"
+        :loading="list.loading.value"
+        :total="list.total.value"
+        :page="list.page.value"
+        :page-size="list.pageSize.value"
+        @update:page="list.setPage"
+        @update:pageSize="list.setPageSize"
+      >
+        <template #columns>
+          <el-table-column label="选手" width="150">
+            <template #default="{ row }">
+              <div class="mono">{{ row.player.player_no }}</div>
+              <div class="cell-sub">{{ row.player.name || '—' }}</div>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="状态" width="90">
+            <template #default="{ row }">
+              <el-tag :type="row.player.online ? 'success' : 'info'" effect="light">
                 {{ row.player.online ? '在线' : '离线' }}
               </el-tag>
-            </span>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="座位" width="90">
-          <template #default="{ row }">
-            <span class="cell-sub">{{ row.player.seat || '—' }}</span>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="最后心跳" width="150">
-          <template #default="{ row }">
-            <div>{{ formatSince(row.agent?.seconds_since_tick, '从未') }}</div>
-            <div class="cell-sub">{{ formatTime(row.player.last_tick_at) }}</div>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="代码文件" width="90" align="right">
-          <template #default="{ row }">
-            <span :class="{ muted: row.player.file_count === 0 }">{{ row.player.file_count }}</span>
-          </template>
-        </el-table-column>
-
-        <!-- 巡检要看的是"谁的座位该去看一眼"：交了几个文件答不了这个问题 -->
-        <el-table-column label="交题进度" width="150">
-          <template #default="{ row }">
-            <el-tooltip
-              v-if="row.progress"
-              :content="
-                `已出成绩 ${row.progress.submitted} 题 · ` +
-                `已交待评测 ${row.progress.pending} 题 · ` +
-                `未交 ${row.progress.missing} 题`
-              "
-            >
-              <span>
-                <el-tag v-if="row.progress.missing > 0" size="small" type="warning" effect="plain">
-                  未交 {{ row.progress.missing }}
-                </el-tag>
-                <el-tag v-else size="small" type="success" effect="plain">已交齐</el-tag>
-                <span class="cell-sub mono">
-                  {{ row.progress.submitted + row.progress.pending }}/{{ row.progress.total }}
-                </span>
-              </span>
-            </el-tooltip>
-            <span v-else class="muted">—</span>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="机器" min-width="200">
-          <template #default="{ row }">
-            <template v-if="row.agent">
-              <div class="mono">{{ row.agent.hostname || '—' }}</div>
-              <div class="cell-sub">
-                版本 {{ row.agent.agent_version || '未知' }}
-                <span v-if="row.agent.scan_root"> · {{ row.agent.scan_root }}</span>
-              </div>
             </template>
-            <span v-else class="muted">未配对</span>
-          </template>
-        </el-table-column>
+          </el-table-column>
 
-        <el-table-column label="机器码" width="150">
-          <template #default="{ row }">
-            <span class="mono muted">{{ row.agent?.machine_id?.slice(0, 16) || '—' }}</span>
-          </template>
-        </el-table-column>
+          <el-table-column label="座位" width="90">
+            <template #default="{ row }">
+              <span class="cell-sub">{{ row.player.seat || '—' }}</span>
+            </template>
+          </el-table-column>
 
-        <el-table-column label="磁盘剩余" width="100" align="right">
-          <template #default="{ row }">
-            <span class="cell-sub">{{ formatBytes(row.agent?.disk_free ?? null) }}</span>
-          </template>
-        </el-table-column>
+          <el-table-column label="最后心跳" width="160">
+            <template #default="{ row }">
+              <div>{{ formatSince(row.agent?.seconds_since_tick, '从未') }}</div>
+              <div class="cell-sub">{{ formatTime(row.player.last_tick_at) }}</div>
+            </template>
+          </el-table-column>
 
-        <el-table-column label="异常" min-width="160">
-          <template #default="{ row }">
-            <el-tooltip v-if="row.agent?.last_error" :content="row.agent.last_error">
-              <span class="error-text">{{ row.agent.last_error }}</span>
-            </el-tooltip>
-            <!--
-              「选手目录还没建」：机器在跑、但扫描根不存在 —— 那种情况下扫出来
-              零个文件，与"选手还没开始写"长得一模一样。只写事实与下一步。
-            -->
-            <div v-if="row.agent?.scan_missing?.length" class="scan-missing">
-              选手目录还没建：
-              <span class="mono">{{ row.agent.scan_missing.join('、') }}</span>
-            </div>
-            <!--
-              「有 N 个文件不符合题目预设」：教师看到的是"这个学生一份代码都没交"，
-              而它跟"文件存错了地方、名字不对"长得一模一样。只写事实与下一步。
-            -->
-            <div v-if="row.agent?.scan_skipped" class="scan-missing">
-              有 {{ row.agent.scan_skipped }} 个文件不符合题目预设，已跳过
-            </div>
-            <span
-              v-if="
-                !row.agent?.last_error &&
-                !row.agent?.scan_missing?.length &&
-                !row.agent?.scan_skipped
-              "
-              class="muted"
-            >
-              —
-            </span>
-          </template>
-        </el-table-column>
+          <el-table-column label="代码文件" width="90" align="right">
+            <template #default="{ row }">
+              <span :class="{ muted: row.player.file_count === 0 }">{{ row.player.file_count }}</span>
+            </template>
+          </el-table-column>
 
-        <el-table-column label="操作" width="150" fixed="right">
-          <template #default="{ row }">
-            <el-button link type="primary" size="small" @click="askEdit(row.player)">
-              编辑
-            </el-button>
-            <el-button link type="danger" size="small" @click="askDelete(row.player)">
-              删除
-            </el-button>
-            <el-dropdown
-              v-if="row.agent"
-              trigger="click"
-              @command="(command: string) => handleCommand(command, row)"
-            >
-              <el-button link type="primary" size="small">机器<el-icon><ArrowDown /></el-icon></el-button>
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item command="rebind">改派给另一个人</el-dropdown-item>
-                  <!-- 命令名必须与 handleCommand 里那一串完全一致：这里从前写的是
-                       `setContest`，而处理分支判的是 `contest`，于是这个菜单项点了
-                       没有任何反应（点下去像"界面坏了"，而控制台一个字都不报）。 -->
-                  <el-dropdown-item command="contest">指定场次</el-dropdown-item>
-                  <el-dropdown-item command="unbind" divided>解除绑定</el-dropdown-item>
-                  <el-dropdown-item command="revoke">作废这台机器</el-dropdown-item>
-                  <el-dropdown-item command="uninstall">卸载 Agent</el-dropdown-item>
-                  <el-dropdown-item command="diagnostics">诊断</el-dropdown-item>
-                </el-dropdown-menu>
+          <el-table-column label="交题进度" width="150">
+            <template #default="{ row }">
+              <el-tooltip
+                v-if="row.progress"
+                :content="
+                  `已出成绩 ${row.progress.submitted} 题 · ` +
+                  `待评测 ${row.progress.pending} 题 · ` +
+                  `未交 ${row.progress.missing} 题`
+                "
+              >
+                <span>
+                  <el-tag v-if="row.progress.missing > 0" type="warning" effect="plain">
+                    未交 {{ row.progress.missing }}
+                  </el-tag>
+                  <el-tag v-else type="success" effect="plain">已交齐</el-tag>
+                  <span class="cell-sub mono">
+                    {{ row.progress.submitted + row.progress.pending }}/{{ row.progress.total }}
+                  </span>
+                </span>
+              </el-tooltip>
+              <span v-else class="muted">—</span>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="机器" min-width="200">
+            <template #default="{ row }">
+              <template v-if="row.agent">
+                <div class="mono">{{ row.agent.hostname || '—' }}</div>
+                <div class="cell-sub">
+                  Agent {{ row.agent.agent_version || '未知' }}
+                  <span v-if="row.agent.scan_root"> · {{ row.agent.scan_root }}</span>
+                </div>
               </template>
-            </el-dropdown>
-          </template>
-        </el-table-column>
-      </template>
+              <span v-else class="muted">未配对</span>
+            </template>
+          </el-table-column>
 
-      <template #empty>
-        <template v-if="!list.rows.value.length">
-          <p>本场次还没有选手</p>
-          <div class="empty-actions">
-            <!--
-              有默认名单时，直接把「补人」摆在这里 —— 教师正是在这一页发现"人是空的"，
-              让他为此再跑一趟「名单库」就是多出来的那一步。
-            -->
-            <el-button
-              v-if="contest.current?.default_roster_id"
-              type="primary"
-              size="small"
-              :loading="fillFromDefaultRoster.pending.value"
-              @click="fillFromDefaultRoster.run(contest.current?.default_roster_id as number)"
-            >
-              按默认名单「{{ contest.current?.default_roster_name }}」补人
-            </el-button>
-            <el-button size="small" @click="importVisible = true">导入选手</el-button>
-          </div>
+          <el-table-column label="机器码" width="150">
+            <template #default="{ row }">
+              <span class="mono muted">{{ row.agent?.machine_id?.slice(0, 16) || '—' }}</span>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="磁盘剩余" width="100" align="right">
+            <template #default="{ row }">
+              <span class="cell-sub">{{ formatBytes(row.agent?.disk_free ?? null) }}</span>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="异常" min-width="160">
+            <template #default="{ row }">
+              <el-tooltip v-if="row.agent?.last_error" :content="row.agent.last_error">
+                <span class="error-text">{{ row.agent.last_error }}</span>
+              </el-tooltip>
+              <div v-if="row.agent?.scan_missing?.length" class="scan-missing">
+                缺选手目录：<span class="mono">{{ row.agent.scan_missing.join('、') }}</span>
+              </div>
+              <div v-if="row.agent?.scan_skipped" class="scan-missing">
+                已跳过 {{ row.agent.scan_skipped }} 个不符合题目预设的文件
+              </div>
+              <span
+                v-if="
+                  !row.agent?.last_error &&
+                  !row.agent?.scan_missing?.length &&
+                  !row.agent?.scan_skipped
+                "
+                class="muted"
+              >
+                —
+              </span>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="操作" width="160" fixed="right">
+            <template #default="{ row }">
+              <el-button link type="primary" size="small" @click="askEdit(row.player)">编辑</el-button>
+              <el-button link type="danger" size="small" @click="askDelete(row.player)">删除</el-button>
+              <el-dropdown
+                v-if="row.agent"
+                trigger="click"
+                @command="(command: string) => handleCommand(command, row)"
+              >
+                <el-button link type="primary" size="small">
+                  机器<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+                </el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="diagnostics">诊断</el-dropdown-item>
+                    <el-dropdown-item command="rebind">改派</el-dropdown-item>
+                    <!-- 命令名必须与 handleCommand 里的分支一致 -->
+                    <el-dropdown-item command="contest">指定场次</el-dropdown-item>
+                    <el-dropdown-item command="unbind" divided>解除绑定</el-dropdown-item>
+                    <el-dropdown-item command="revoke" class="danger-item">作废机器</el-dropdown-item>
+                    <el-dropdown-item command="uninstall" class="danger-item">卸载 Agent</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+            </template>
+          </el-table-column>
         </template>
-        <template v-else>本页没有匹配的选手</template>
-      </template>
-    </DataTable>
+
+        <template #empty>
+          <template v-if="!list.rows.value.length">
+            <el-empty description="本场次无选手" :image-size="64">
+              <div class="empty-actions">
+                <el-button
+                  v-if="contest.current?.default_roster_id"
+                  type="primary"
+                  :loading="fillFromDefaultRoster.pending.value"
+                  @click="fillFromDefaultRoster.run(contest.current?.default_roster_id as number)"
+                >
+                  按默认名单「{{ contest.current?.default_roster_name }}」补人
+                </el-button>
+                <el-button @click="importVisible = true">导入选手</el-button>
+              </div>
+            </el-empty>
+          </template>
+          <template v-else>本页无匹配选手</template>
+        </template>
+      </DataTable>
+    </SectionCard>
 
     <PlayerImportDialog
       v-model="importVisible"
@@ -717,7 +716,6 @@ function handleCommand(
       @imported="() => list.reload()"
     />
 
-    <!-- 编辑选手 -->
     <FormDialog
       v-model="editOpen"
       title="编辑选手"
@@ -726,67 +724,70 @@ function handleCommand(
     >
       <el-form label-width="90px">
         <el-form-item label="考号">
-          <el-input v-model="editForm.player_no" maxlength="64" />
+          <el-input v-model="editForm.player_no" maxlength="64" placeholder="例如 S001" />
         </el-form-item>
         <el-form-item label="姓名">
           <el-input v-model="editForm.name" maxlength="64" />
         </el-form-item>
         <el-form-item label="座位">
-          <el-input v-model="editForm.seat" maxlength="32" />
+          <el-input v-model="editForm.seat" maxlength="32" placeholder="例如 A-12" />
         </el-form-item>
         <el-form-item label="分组">
           <el-input v-model="editForm.group_name" maxlength="64" />
         </el-form-item>
       </el-form>
-      <el-alert type="info" :closable="false" show-icon>
-        <template #title>改了考号，磁盘上的旧目录不会改名</template>
-      </el-alert>
+      <el-alert
+        type="info"
+        :closable="false"
+        show-icon
+        title="修改考号不会重命名磁盘上的旧目录"
+      />
     </FormDialog>
 
-    <!-- 删除选手：硬删除，打考号 -->
     <ConfirmByNameDialog
       v-model="deleteOpen"
-      title="删除选手"
+      title="删除选手？"
       :expected="deleteTarget?.player_no ?? ''"
       :submitting="deletePlayer.pending.value"
+      confirm-text="删除"
       :impact="deletePlayerImpact"
       @confirm="deletePlayer.run(undefined)"
     />
 
-    <!-- 清空选手：范围删除，打场次标识 -->
     <ConfirmByNameDialog
       v-model="clearOpen"
-      title="清空本场次的选手"
+      title="清空选手？"
       :expected="contest.current?.slug ?? ''"
       :submitting="clearPlayers.pending.value"
       confirm-text="清空"
       :impact="clearPlayersImpact"
       @confirm="clearPlayers.run(undefined)"
     >
-      <el-checkbox v-model="clearKeepWithSubmissions">
-        保留已经有代码或成绩的选手（推荐）
-      </el-checkbox>
-      <el-alert v-if="!clearKeepWithSubmissions" type="error" :closable="false" show-icon>
-        <template #title>关掉保护会把提交一起删掉，而且不可逆</template>
-      </el-alert>
+      <el-checkbox v-model="clearKeepWithSubmissions">保留有代码或成绩的选手</el-checkbox>
+      <el-alert
+        v-if="!clearKeepWithSubmissions"
+        type="error"
+        :closable="false"
+        show-icon
+        title="提交将一并删除，不可恢复"
+      />
     </ConfirmByNameDialog>
 
-    <!-- 改派：机器换人 -->
     <FormDialog
       v-model="rebindOpen"
-      title="改派给另一个人"
+      title="改派机器"
       :submitting="rebind.pending.value"
       :disabled="!rebindEntryId"
       confirm-text="改派"
       @submit="rebind.run(undefined)"
     >
       <RosterPersonPicker
+        ref="rebindPicker"
         v-model="rebindEntryId"
         :default-roster-id="contest.current?.default_roster_id ?? null"
       />
     </FormDialog>
 
-    <!-- 指定场次：只在"同一个人同时在多场进行中的比赛里"才需要 -->
     <FormDialog
       v-model="contestOpen"
       title="指定场次"
@@ -806,43 +807,26 @@ function handleCommand(
           </el-select>
         </el-form-item>
       </el-form>
-      <el-alert
-        type="info"
-        :closable="false"
-        show-icon
-        title="留空 = 自动匹配。"
-      />
     </FormDialog>
 
-    <!-- 作废机器：硬删除，打主机名 -->
     <ConfirmByNameDialog
       v-model="revokeOpen"
-      title="作废这台机器"
+      title="作废机器？"
       :expected="revokeTarget?.hostname || revokeTarget?.machine_id || ''"
       :submitting="revokeAgent.pending.value"
       confirm-text="作废"
-      detail="凭据作废（下一轮心跳 401），要重新注册并配对；只想换人请用「改派」。"
+      detail="将作废这台机器的凭据，不可恢复；需重新注册并配对。"
       @confirm="revokeAgent.run(undefined)"
     />
 
-    <!--
-      卸载 Agent：不可逆，所以和「作废」一样打一遍机器名。
-
-      这里只写**后果**与"没执行怎么办"，不解释机制：这台机器下次心跳才动手，
-      届时程序、单元、注册密钥都会被删掉；授权 15 分钟内有效，机器一直没执行
-      就重新点一次。
-    -->
     <ConfirmByNameDialog
       v-model="uninstallOpen"
-      title="卸载这台机器上的 Agent"
+      title="卸载 Agent？"
       :expected="uninstallTarget?.hostname || uninstallTarget?.machine_id || ''"
       :submitting="uninstallAgent.pending.value"
       confirm-text="卸载"
-      detail="这台机器下次心跳才会执行卸载，届时机器上的程序、单元、注册密钥都会被删掉。"
-      :impact="[
-        '授权 15 分钟内有效。',
-        '机器一直没执行（比如没网、没开机），重新点一次即可。',
-      ]"
+      detail="机器下次心跳时将删除程序、服务单元与注册密钥，不可恢复。"
+      :impact="['授权 15 分钟内有效']"
       @confirm="uninstallAgent.run(undefined)"
     />
 
@@ -855,41 +839,27 @@ function handleCommand(
 </template>
 
 <style scoped>
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
 .empty-actions {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
-.stats {
-  margin-bottom: 4px;
-}
-
-.stat-value {
-  font-size: 22px;
-  font-weight: 600;
-  line-height: 1.2;
-}
-
-.stat-value.warn {
-  color: #e6a23c;
-}
-
-.stat-unit {
-  font-size: 14px;
-  color: #909399;
-  font-weight: 400;
-}
-
-.stat-label {
-  font-size: 12px;
-  color: #909399;
-  margin-top: 2px;
+.muted {
+  color: var(--sj-text-3);
 }
 
 .error-text {
-  color: #f56c6c;
+  color: var(--sj-danger);
   font-size: 12px;
   display: inline-block;
   max-width: 100%;
@@ -899,11 +869,14 @@ function handleCommand(
   vertical-align: middle;
 }
 
-/* 「选手目录还没建」：事实 + 下一步，用中性色而不是红色 —— 它是个待办，不是故障 */
 .scan-missing {
-  color: #e6a23c;
+  color: var(--sj-warning);
   font-size: 12px;
   line-height: 1.5;
   word-break: break-all;
+}
+
+.danger-item {
+  color: var(--el-color-danger);
 }
 </style>

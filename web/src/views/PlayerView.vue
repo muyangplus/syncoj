@@ -126,7 +126,7 @@ function submitFallback(): void {
   const contest = fallback.contest.trim()
   const playerNo = fallback.player_no.trim()
   if (!contest || !playerNo) {
-    fallbackError.value = '场次和考号都要填。'
+    fallbackError.value = '请填写场次与考号'
     return
   }
   fallbackError.value = ''
@@ -285,21 +285,21 @@ function windowText(iso: string | null | undefined): string {
  * 选手关心的不是匹配方式，而是"这确实是我"。手动查询时不必特意说明。
  */
 const matchedLabel = computed(() =>
-  context.value?.matched_by === 'machine' ? '（按本机自动识别的）' : '',
+  context.value?.matched_by === 'machine' ? '本机自动识别' : '',
 )
 
 /** 失败时给下一步动作，而不是只把错误原样摊开。 */
 const failureHint = computed(() => {
   if (!failure.value) return ''
   if (!failure.value.machine) {
-    return '点「重试」；一直不行就找监考老师。'
+    return '重试无效请举手联系监考老师。'
   }
   // **不要在兜底提示里替服务端下诊断。** 这里原来是"这台机器还没匹配到你的场次"，
   // 而上面那条告警可能是"还没注册上来"或"没配对"——同一台机器被说了两遍、还说岔了。
   // 具体原因由服务端的 detail 说（它才知道），这里只给下一步动作。
   return failure.value.auto
-    ? '这件事得监考老师处理（原因见上面那句话）；也可以用下面的兜底方式自己查。'
-    : '核对场次和考号；还是找不到就问监考老师。'
+    ? '请举手联系监考老师，或在下方手动查询。'
+    : '请核对场次与考号。'
 })
 
 /**
@@ -331,18 +331,17 @@ function assetState(status: string): { label: string; type: 'success' | 'info' |
   <div class="player-page">
     <div class="player-container">
       <header class="page-head">
-        <div>
+        <div class="brand">
+          <span class="brand-mark">S</span>
           <h1 class="page-heading">考生须知</h1>
         </div>
-        <!--
-          「重新检测」放右上角、做成文字按钮：它是给"Agent 刚起来 / 老师刚配对完"
-          这类时序问题用的补充动作，不是选手的第一选择，所以不该抢视线。
-        -->
-        <el-button link size="small" :loading="loading" @click="detect">重新检测</el-button>
+        <el-button text :loading="loading" @click="detect">
+          <el-icon><Refresh /></el-icon>重新检测
+        </el-button>
       </header>
 
       <div class="result-area" :class="{ 'result-loading': loading }" v-loading="loading">
-        <!-- 失败：服务端那句话 + 下一步该找谁 -->
+        <!-- 失败：服务端原话 + 下一步动作；重试只给网络 / 服务端故障 -->
         <el-alert
           v-if="failure"
           :type="failure.machine ? 'warning' : 'error'"
@@ -353,28 +352,17 @@ function assetState(status: string): { label: string; type: 'success' | 'info' |
           <template #title>{{ failure.message }}</template>
           <div class="alert-body">
             {{ failureHint }}
-            <!--
-              重试只挂给网络 / 服务端故障：机器配不上时选手按多少次都没用，
-              那种情况的主按钮是下面那张兜底表单里的「查看」。
-            -->
-            <el-button v-if="!failure.machine" link type="primary" size="small" @click="retry">
-              重试
-            </el-button>
+            <el-button v-if="!failure.machine" link type="primary" @click="retry">重试</el-button>
           </div>
         </el-alert>
 
-        <!--
-          兜底表单：只在"服务端认不出这台机器"时露面。
-          它是给教师的笔记本、或 Agent 没起来的机器留的一条路 —— 正常考场机器
-          上选手永远看不到它，所以成功时页面里没有任何输入框。
-        -->
-        <el-card v-if="fallbackOpen" shadow="never" class="block">
-          <h2 class="block-title">手动查（兜底）</h2>
+        <!-- 兜底表单：只在服务端认不出这台机器时出现 -->
+        <section v-if="fallbackOpen" class="panel block">
+          <h2 class="block-title">手动查询</h2>
           <div class="query-row">
             <el-input
               v-model="fallback.contest"
               class="query-input"
-              size="large"
               placeholder="例如 2025-mock"
               clearable
               @keyup.enter="submitFallback"
@@ -384,91 +372,87 @@ function assetState(status: string): { label: string; type: 'success' | 'info' |
             <el-input
               v-model="fallback.player_no"
               class="query-input mono-input"
-              size="large"
               placeholder="例如 S001"
               clearable
               @keyup.enter="submitFallback"
             >
               <template #prepend>考号</template>
             </el-input>
-            <el-button type="primary" size="large" :loading="loading" @click="submitFallback">
-              查看
+            <el-button type="primary" :loading="loading" @click="submitFallback">
+              <el-icon><Search /></el-icon>查看
             </el-button>
           </div>
           <p v-if="fallbackError" class="form-error">{{ fallbackError }}</p>
-        </el-card>
+        </section>
 
         <template v-if="context">
-          <!--
-            顺序按"先知道自己在哪一场，再看老师说了什么"排：场次卡（标题、状态、
-            时间窗）在最上面，**考场公告紧跟其后**，然后是下发的文件。
-
-            公告放在场次标题**下面**而不是页面最顶上：公告是"这一场"的话，先有场次
-            再有公告才读得通；反过来会出现"到这一页先看到一段话，却不知道是哪场考试"
-            的观感。
-
-            正文按 **Markdown 渲染**（服务端给的是原文）：教师一定会用 `##`、`-`、
-            `**` 这些写法，原样显示出来就是一堆符号。渲染之前一律过消毒，见
-            `@/utils/markdown`。没有下发公告时整块不出现 —— 不留一个空框占地方。
-          -->
-          <el-card shadow="never" class="block">
-            <div class="ident-row">
-              <div class="ident-main">
+          <!-- 顺序：场次卡 → 考场公告 → 下发文件 -->
+          <section class="panel block contest-card">
+            <div class="contest-main">
+              <div class="contest-title-row">
                 <span class="ident-name">{{ context.contest.name }}</span>
-                <el-tag
-                  :type="contestStatusType(context.contest.status)"
-                  size="small"
-                  effect="plain"
-                >
+                <el-tag :type="contestStatusType(context.contest.status)" effect="light">
                   {{ contestStatusLabel(context.contest.status) }}
                 </el-tag>
-                <span v-if="matchedLabel" class="muted ident-source">{{ matchedLabel }}</span>
+                <el-tag v-if="matchedLabel" type="info" effect="plain" size="small">{{ matchedLabel }}</el-tag>
               </div>
-              <div class="ident-items">
-                <span>考号 <strong class="mono">{{ context.player.player_no }}</strong></span>
-                <span>姓名 <strong>{{ context.player.name || '—' }}</strong></span>
-                <span>座位 <strong>{{ context.player.seat || '—' }}</strong></span>
-                <span v-if="context.player.group_name">
-                  分组 <strong>{{ context.player.group_name }}</strong>
+
+              <dl class="ident-items">
+                <div>
+                  <dt>考号</dt>
+                  <dd class="mono">{{ context.player.player_no }}</dd>
+                </div>
+                <div>
+                  <dt>姓名</dt>
+                  <dd>{{ context.player.name || '—' }}</dd>
+                </div>
+                <div>
+                  <dt>座位</dt>
+                  <dd>{{ context.player.seat || '—' }}</dd>
+                </div>
+                <div v-if="context.player.group_name">
+                  <dt>分组</dt>
+                  <dd>{{ context.player.group_name }}</dd>
+                </div>
+              </dl>
+
+              <div class="time-meta">
+                <span v-if="hasWindow">
+                  开考 <strong class="mono">{{ windowText(context.contest.starts_at) }}</strong>
+                  · 结束 <strong class="mono">{{ windowText(context.contest.ends_at) }}</strong>
                 </span>
+                <span v-if="serverClock">
+                  服务端时间 <strong class="mono">{{ serverClock }}</strong>
+                </span>
+                <span v-if="clockSkew" class="skew">{{ clockSkew }}</span>
               </div>
             </div>
-            <p v-if="hasWindow" class="cell-sub">
-              开考 <strong class="mono">{{ windowText(context.contest.starts_at) }}</strong>
-              · 结束 <strong class="mono">{{ windowText(context.contest.ends_at) }}</strong>
-            </p>
-            <!-- 倒计时：基准是服务端时间，选手改本机时钟骗不到它 -->
-            <p v-if="countdown" class="countdown">
+
+            <!-- 倒计时：基准是服务端时间，改本机时钟无效 -->
+            <div v-if="countdown" class="countdown" :class="{ ended: !countdown.label }">
               <span v-if="countdown.label" class="countdown-label">{{ countdown.label }}</span>
               <span class="countdown-value mono">{{ countdown.text }}</span>
-            </p>
-            <p v-if="serverClock" class="cell-sub">
-              服务端时间 <strong class="mono">{{ serverClock }}</strong><template v-if="clockSkew"> · {{ clockSkew }}</template>
-            </p>
-          </el-card>
+            </div>
+          </section>
 
-          <!-- 考场公告：紧跟场次卡，见上面那段注释 -->
-          <el-card v-if="notice" shadow="never" class="block">
-            <div class="notice-head">
+          <section v-if="notice" class="panel block">
+            <div class="panel-head">
               <h2 class="block-title">考场公告</h2>
-              <span class="muted">来自 {{ notice.filename }}</span>
+              <span class="muted">{{ notice.filename }}</span>
             </div>
             <div class="notice-text md" v-html="noticeHtml"></div>
-          </el-card>
+          </section>
 
-          <el-card shadow="never" class="block">
-            <div class="assets-head">
-              <h2 class="block-title">下发给你的文件</h2>
+          <section class="panel block panel-flush">
+            <div class="panel-head padded">
+              <h2 class="block-title">下发文件</h2>
               <span class="muted">{{ assets.length }} 个</span>
             </div>
 
-            <el-table v-if="assets.length" :data="assets" size="small" border stripe>
+            <el-table v-if="assets.length" :data="assets">
               <el-table-column label="文件名" min-width="220">
                 <template #default="{ row }">
-                  <!--
-                    sha256 不单独占一列：只有核对完整性时才用得上，而它太宽，
-                    占一列会把文件名和落点挤到看不见。挂在文件名的悬浮提示里。
-                  -->
+                  <!-- sha256 太宽不占列，挂在文件名的悬浮提示里 -->
                   <el-tooltip placement="top" popper-class="player-hash-popper">
                     <template #content>
                       <div class="hash-label">SHA256</div>
@@ -479,42 +463,34 @@ function assetState(status: string): { label: string; type: 'success' | 'info' |
                 </template>
               </el-table-column>
 
-              <el-table-column label="放到哪" min-width="200">
+              <el-table-column label="存放位置" min-width="200">
                 <template #default="{ row }">
                   <span v-if="row.dest_dir" class="mono dir">{{ row.dest_dir }}</span>
                   <span v-else class="muted">—</span>
                 </template>
               </el-table-column>
 
-              <el-table-column label="大小" width="90" align="right">
+              <el-table-column label="大小" width="100" align="right">
                 <template #default="{ row }">{{ formatBytes(row.size) }}</template>
               </el-table-column>
 
-              <el-table-column label="状态" width="90" align="center">
+              <el-table-column label="状态" width="100" align="center">
                 <template #default="{ row }">
-                  <el-tag :type="assetState(row.status).type" size="small" effect="plain">
+                  <el-tag :type="assetState(row.status).type" size="small" effect="light">
                     {{ assetState(row.status).label }}
                   </el-tag>
                 </template>
               </el-table-column>
 
-              <el-table-column label="完成时间" width="160">
+              <el-table-column label="完成时间" width="170">
                 <template #default="{ row }">
                   <span class="cell-sub">{{ formatTime(row.finished_at) }}</span>
                 </template>
               </el-table-column>
             </el-table>
 
-            <!--
-              空表最容易出的问题是"它看起来像坏了"：选手不知道该等还是该问。
-              所以这里明确说"就是没有下发"，而不是留一个空表格。
-            -->
-            <el-empty
-              v-else
-              :image-size="72"
-              description="这场还没有给你下发任何文件"
-            />
-          </el-card>
+            <el-empty v-else :image-size="72" description="无下发文件" />
+          </section>
         </template>
       </div>
     </div>
@@ -524,8 +500,11 @@ function assetState(status: string): { label: string; type: 'success' | 'info' |
 <style scoped>
 .player-page {
   min-height: 100%;
-  padding: 24px 16px 48px;
-  background: var(--syncoj-bg);
+  padding: 28px 16px 48px;
+  background:
+    radial-gradient(60% 30% at 50% 0%, var(--sj-primary-soft) 0%, transparent 70%),
+    var(--sj-bg);
+  color: var(--sj-text);
 }
 
 .player-container {
@@ -535,24 +514,73 @@ function assetState(status: string): { label: string; type: 'success' | 'info' |
 
 .page-head {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
 }
 
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* 与 AppLayout 侧栏的品牌方块一致 */
+.brand-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  flex: none;
+  border-radius: 10px;
+  background: var(--sj-brand-gradient);
+  color: var(--el-color-white);
+  font-weight: 700;
+  font-size: 17px;
+}
+
 .page-heading {
   margin: 0;
-  font-size: 20px;
+  font-size: 21px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
 }
 
-.page-heading-sub {
-  margin: 6px 0 0;
-  font-size: 13px;
-  color: #606266;
+.panel {
+  padding: 18px 20px;
+  background: var(--sj-surface);
+  border: 1px solid var(--sj-border);
+  border-radius: var(--sj-radius);
+  box-shadow: var(--sj-shadow);
 }
 
-/* 考场机器常见 1366×768：两个框加按钮放不下时换行，而不是把按钮挤出去 */
+.panel-flush {
+  padding: 0;
+  overflow: hidden;
+}
+
+.panel-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.panel-head.padded {
+  margin: 0;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--sj-border);
+}
+
+.block-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+/* 考场机器常见 1366×768：放不下时换行，而不是把按钮挤出去 */
 .query-row {
   display: flex;
   flex-wrap: wrap;
@@ -566,9 +594,9 @@ function assetState(status: string): { label: string; type: 'success' | 'info' |
   max-width: 320px;
 }
 
-/* 考号要跟准考证逐个字符核，等宽字体下更不容易看错 */
+/* 考号要跟准考证逐字核对，等宽更不易看错 */
 .mono-input :deep(input) {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--sj-mono);
   letter-spacing: 1px;
 }
 
@@ -576,35 +604,122 @@ function assetState(status: string): { label: string; type: 'success' | 'info' |
   position: relative;
 }
 
-/* 加载遮罩要有落脚点：结果区为空时元素高度为 0，转圈会看不见 */
+/* 结果区为空时给加载遮罩一个落脚点 */
 .result-loading {
   min-height: 80px;
 }
 
 .block {
-  margin-top: 14px;
+  margin-top: 16px;
 }
 
 .alert-body {
   line-height: 1.7;
 }
 
+/* ---- 场次卡 ---- */
+
+.contest-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px 24px;
+  flex-wrap: wrap;
+}
+
+.contest-main {
+  min-width: 0;
+  flex: 1 1 420px;
+}
+
+.contest-title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ident-name {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.ident-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 28px;
+  margin: 14px 0 0;
+}
+
+.ident-items dt {
+  font-size: 12px;
+  color: var(--sj-text-3);
+}
+
+.ident-items dd {
+  margin: 2px 0 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--sj-text);
+}
+
+.time-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin-top: 14px;
+  font-size: 13px;
+  color: var(--sj-text-2);
+}
+
+.time-meta strong {
+  color: var(--sj-text);
+}
+
+.skew {
+  color: var(--sj-warning);
+}
+
+/* 倒计时：场上最需要一眼看到的数 */
+.countdown {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-width: 200px;
+  padding: 14px 22px;
+  border-radius: var(--sj-radius);
+  background: var(--sj-primary-soft);
+  color: var(--sj-primary);
+}
+
+.countdown.ended {
+  background: var(--sj-info-soft);
+  color: var(--sj-text-2);
+}
+
+.countdown-label {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.countdown-value {
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  line-height: 1.25;
+}
+
+/* ---- 公告（Markdown，已消毒） ---- */
+
 .notice-text {
   font-size: 15px;
   line-height: 1.8;
-  /* 老师多半是一行一条地写，保留换行，别压成一整段 */
+  color: var(--sj-text);
   white-space: pre-wrap;
 }
 
-/*
- * 渲染出来的 Markdown 段落。
- *
- * 只补 element-plus 不提供的那些：标题要**比正文明显但不抢**、列表要有缩进、
- * 行内代码与代码块要一眼看出是代码。刻意不引一份 markdown 主题 —— 那会连
- * 正文的字体、行距、颜色一起改掉，与这一页其余部分对不上。
- */
 .notice-text.md {
-  /* 渲染成 HTML 之后由元素自己管换行，再 pre-wrap 会把标签间的空白也显示出来 */
   white-space: normal;
 }
 
@@ -638,18 +753,19 @@ function assetState(status: string): { label: string; type: 'success' | 'info' |
 
 .notice-text.md :deep(code) {
   padding: 1px 4px;
-  border-radius: 3px;
-  background: var(--el-fill-color-light);
-  font-family: var(--syncoj-mono, monospace);
+  border-radius: 4px;
+  background: var(--sj-surface-2);
+  font-family: var(--sj-mono);
   font-size: 0.92em;
 }
 
 .notice-text.md :deep(pre) {
   margin: 8px 0;
-  padding: 8px 10px;
+  padding: 10px 12px;
   overflow-x: auto;
-  border-radius: 4px;
-  background: var(--el-fill-color-light);
+  border-radius: var(--sj-radius-sm);
+  background: var(--sj-surface-2);
+  border: 1px solid var(--sj-border);
 }
 
 .notice-text.md :deep(pre code) {
@@ -660,8 +776,8 @@ function assetState(status: string): { label: string; type: 'success' | 'info' |
 .notice-text.md :deep(blockquote) {
   margin: 8px 0;
   padding-left: 10px;
-  border-left: 3px solid var(--el-border-color);
-  color: var(--el-text-color-secondary);
+  border-left: 3px solid var(--sj-border-strong);
+  color: var(--sj-text-2);
 }
 
 .notice-text.md :deep(table) {
@@ -672,103 +788,33 @@ function assetState(status: string): { label: string; type: 'success' | 'info' |
 .notice-text.md :deep(th),
 .notice-text.md :deep(td) {
   padding: 4px 10px;
-  border: 1px solid var(--el-border-color-lighter);
+  border: 1px solid var(--sj-border);
 }
 
 .notice-text.md :deep(hr) {
   margin: 12px 0;
   border: none;
-  border-top: 1px solid var(--el-border-color-lighter);
+  border-top: 1px solid var(--sj-border);
 }
 
 .notice-text.md :deep(a) {
-  color: var(--el-color-primary);
+  color: var(--sj-primary);
 }
 
-/* 公告里贴一张截图（教师常用）时别把版面撑破 */
 .notice-text.md :deep(img) {
   max-width: 100%;
-}
-
-.ident-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px 20px;
-}
-
-/* 倒计时：场上最需要一眼看到的那个数，所以字号明显大于旁边的说明文字 */
-.countdown {
-  margin: 6px 0 0;
-}
-
-.countdown-label {
-  font-size: 13px;
-  color: #606266;
-  margin-right: 6px;
-}
-
-.countdown-value {
-  font-size: 20px;
-  font-weight: 600;
-  letter-spacing: 1px;
-}
-
-.ident-name {
-  font-size: 16px;
-  font-weight: 600;
-  margin-right: 8px;
-}
-
-.ident-source {
-  font-size: 12px;
-  margin-left: 8px;
-}
-
-.ident-items {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 18px;
-  font-size: 13px;
-  color: #606266;
-}
-
-.ident-items strong {
-  font-weight: 600;
-  color: #303133;
-}
-
-.block-title {
-  margin: 0;
-  font-size: 15px;
-}
-
-.assets-head {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-
-/* 公告标题行：标题 + 来源小字，和文件清单的标题行同一种排法 */
-.notice-head {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin-bottom: 10px;
 }
 
 .form-error {
   margin: 10px 0 0;
   font-size: 13px;
-  color: #f56c6c;
+  color: var(--sj-danger);
 }
 
-/* 长文件名/长路径换行显示，而不是把表格撑宽到需要横向滚动 */
+/* 长文件名/长路径换行，不撑出横向滚动 */
 .file-name {
   word-break: break-all;
-  border-bottom: 1px dashed #c0c4cc;
+  border-bottom: 1px dashed var(--sj-border-strong);
   cursor: help;
 }
 
@@ -777,10 +823,7 @@ function assetState(status: string): { label: string; type: 'success' | 'info' |
 }
 </style>
 
-<!--
-  el-tooltip 的浮层被 teleport 到 body 下，scoped 样式（带 data-v 属性选择器）够不着它，
-  所以这条必须是全局的。类名带 `player-` 前缀，避免影响别的页面。
--->
+<!-- tooltip 浮层被 teleport 到 body，scoped 够不着，所以全局（带 player- 前缀） -->
 <style>
 .player-hash-popper {
   max-width: 340px;
@@ -788,15 +831,14 @@ function assetState(status: string): { label: string; type: 'success' | 'info' |
 
 .player-hash-popper .hash-label {
   font-size: 12px;
-  color: #c0c4cc;
+  opacity: 0.7;
   margin-bottom: 4px;
 }
 
 .player-hash-popper .hash-value {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--sj-mono);
   font-size: 12px;
   line-height: 1.5;
-  /* 64 位十六进制中间没有空格，不强制断行就会撑破浮层 */
   word-break: break-all;
 }
 </style>

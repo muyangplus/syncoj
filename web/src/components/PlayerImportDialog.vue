@@ -55,9 +55,9 @@ const parsed = computed<ParsedRow[]>(() => {
     }
 
     if (!playerNo) {
-      row.error = '缺少选手编号'
+      row.error = '缺少考号'
     } else if (playerNo.length > 64) {
-      row.error = '编号超过 64 字符'
+      row.error = '考号超过 64 字符'
     } else if (seen.has(playerNo)) {
       row.error = '本次粘贴中重复'
     } else {
@@ -88,8 +88,8 @@ watch(visible, (open) => {
  */
 const importPlayers = useMutation(
   (payload: PlayerUpsert[]) => {
-    if (!props.contestId) throw new Error('请先选择场次')
-    if (!payload.length) throw new Error('没有可导入的选手')
+    if (!props.contestId) throw new Error('未选择场次')
+    if (!payload.length) throw new Error('无可导入的选手')
     return playerApi.import(props.contestId, payload)
   },
   {
@@ -125,9 +125,7 @@ function submit(): void {
     :confirm-text="`导入 ${validRows.length} 名`"
     @submit="submit"
   >
-    <el-alert type="info" :closable="false" show-icon style="margin-bottom: 12px">
-      <template #title>每行一名选手：<code>编号,姓名,座位,分组</code></template>
-    </el-alert>
+    <div class="format">格式 <span class="mono">考号,姓名,座位,分组</span></div>
 
     <el-input
       v-model="raw"
@@ -138,26 +136,18 @@ function submit(): void {
 
     <div v-if="parsed.length" class="preview">
       <div class="preview-head">
-        <span>解析预览</span>
+        <span>预览</span>
         <span>
-          <el-tag type="success" size="small" effect="plain">
-            {{ validRows.length }} 条可导入
-          </el-tag>
-          <el-tag
-            v-if="invalidRows.length"
-            type="danger"
-            size="small"
-            effect="plain"
-            style="margin-left: 6px"
-          >
-            {{ invalidRows.length }} 条有问题
+          <el-tag type="success" effect="plain">{{ validRows.length }} 条可导入</el-tag>
+          <el-tag v-if="invalidRows.length" type="danger" effect="plain" style="margin-left: 6px">
+            {{ invalidRows.length }} 条跳过
           </el-tag>
         </span>
       </div>
 
-      <el-table :data="parsed" size="small" border max-height="220">
+      <el-table :data="parsed" max-height="240">
         <el-table-column label="行" prop="line" width="55" align="right" />
-        <el-table-column label="编号" prop="player_no" width="110">
+        <el-table-column label="考号" prop="player_no" width="110">
           <template #default="{ row }">
             <span class="mono">{{ row.player_no || '—' }}</span>
           </template>
@@ -171,10 +161,10 @@ function submit(): void {
         <el-table-column label="分组" prop="group_name" width="100">
           <template #default="{ row }">{{ row.group_name || '—' }}</template>
         </el-table-column>
-        <el-table-column label="问题" min-width="140">
+        <el-table-column label="校验" min-width="140">
           <template #default="{ row }">
-            <span v-if="row.error" class="error-text">{{ row.error }}</span>
-            <span v-else class="muted">正常</span>
+            <el-tag v-if="row.error" type="danger" effect="light">{{ row.error }}</el-tag>
+            <el-tag v-else type="success" effect="plain">正常</el-tag>
           </template>
         </el-table-column>
       </el-table>
@@ -196,7 +186,9 @@ function submit(): void {
   font-weight: 600;
 }
 
-.error-text {
-  color: #f56c6c;
+.format {
+  margin-bottom: 8px;
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
 }
 </style>

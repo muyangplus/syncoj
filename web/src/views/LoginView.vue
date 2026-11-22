@@ -47,10 +47,11 @@ onMounted(() => {
 
 <template>
   <div class="login-page">
-    <el-card class="login-card" shadow="always">
+    <div class="login-card">
       <div class="brand">
+        <span class="brand-mark">S</span>
         <div class="brand-title">SyncOJ</div>
-        <div class="brand-sub">在线同步评测 · 管理台</div>
+        <div class="brand-sub">考场同步评测 · 管理台</div>
       </div>
 
       <el-form
@@ -58,78 +59,97 @@ onMounted(() => {
         :model="form"
         :rules="rules"
         label-position="top"
+        class="login-form"
         @submit.prevent="submit"
       >
         <el-form-item label="用户名" prop="username">
-          <el-input v-model="form.username" size="large" placeholder="admin" />
+          <el-input v-model="form.username" placeholder="例如 admin" autocomplete="username">
+            <template #prefix><el-icon><User /></el-icon></template>
+          </el-input>
         </el-form-item>
         <el-form-item label="口令" prop="password">
           <el-input
             v-model="form.password"
             type="password"
-            size="large"
             show-password
-            placeholder="请输入口令"
+            autocomplete="current-password"
             @keyup.enter="submit"
-          />
+          >
+            <template #prefix><el-icon><Lock /></el-icon></template>
+          </el-input>
         </el-form-item>
-        <el-button
-          type="primary"
-          size="large"
-          style="width: 100%"
-          :loading="loading"
-          @click="submit"
-        >
-          登录
-        </el-button>
+        <el-button type="primary" class="submit" :loading="loading" @click="submit">登录</el-button>
       </el-form>
-    </el-card>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .login-page {
-  height: 100%;
+  min-height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, #1f2d3d 0%, #2c405a 100%);
+  padding: 24px 16px;
+  background:
+    radial-gradient(60% 50% at 50% 0%, var(--sj-primary-soft) 0%, transparent 70%),
+    var(--sj-bg);
 }
 
 .login-card {
-  width: 360px;
-  border-radius: 8px;
+  width: 100%;
+  max-width: 380px;
+  padding: 32px 32px 28px;
+  background: var(--sj-surface);
+  border: 1px solid var(--sj-border);
+  border-radius: 16px;
+  box-shadow: var(--sj-shadow-lg);
 }
 
 .brand {
-  text-align: center;
-  margin-bottom: 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-bottom: 24px;
+}
+
+/* 与 AppLayout 侧栏的品牌方块一致 */
+.brand-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  margin-bottom: 14px;
+  border-radius: 13px;
+  background: var(--sj-brand-gradient);
+  color: var(--el-color-white);
+  font-weight: 700;
+  font-size: 22px;
+  box-shadow: var(--sj-shadow-lg);
 }
 
 .brand-title {
-  font-size: 26px;
+  font-size: 22px;
   font-weight: 700;
-  letter-spacing: 1px;
-  color: #1f2d3d;
+  letter-spacing: -0.01em;
+  color: var(--sj-text);
 }
 
 .brand-sub {
-  font-size: 12px;
-  color: #909399;
-  margin-top: 4px;
+  margin-top: 2px;
+  font-size: 12.5px;
+  color: var(--sj-text-3);
 }
 
-.hint {
-  margin: 16px 0 0;
-  font-size: 12px;
-  color: #909399;
-  line-height: 1.6;
+.login-form :deep(.el-input__wrapper) {
+  padding-top: 3px;
+  padding-bottom: 3px;
 }
 
-.hint code {
-  background: #f5f7fa;
-  padding: 1px 4px;
-  border-radius: 3px;
-  font-size: 11px;
+.submit {
+  width: 100%;
+  height: 40px;
+  margin-top: 6px;
 }
 </style>

@@ -7,6 +7,7 @@ import type { EventOut } from '@/api/types'
 import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
 import DataTable from '@/components/DataTable.vue'
 import PageShell from '@/components/PageShell.vue'
+import SectionCard from '@/components/SectionCard.vue'
 import { useList } from '@/composables/useList'
 import { useMutation } from '@/composables/useMutation'
 import { useContestStore } from '@/stores/contest'
@@ -184,15 +185,14 @@ const clearLevel = ref<'info' | ''>('info')
 
 const clearScopeLabel = computed(() => {
   if (clearScope.value === 'contest') {
-    return contest.current ? `当前场次 ${contest.current.slug}` : '当前场次（还没选场次）'
+    return contest.current ? `场次 ${contest.current.slug}` : '当前场次（未选择）'
   }
-  return '全部场次（含不属于任何场次的全局告警）'
+  return '全部场次（含全局事件）'
 })
 
 const clearScopeText = computed(() => {
-  const levelText =
-    clearLevel.value === 'info' ? '只清「信息」级' : '清「警告」与「错误」级（含信息级）'
-  const daysText = clearDays.value > 0 ? `早于 ${clearDays.value} 天` : '不限天数'
+  const levelText = clearLevel.value === 'info' ? '仅信息级' : '全部级别'
+  const daysText = clearDays.value > 0 ? `早于 ${clearDays.value} 天` : '不限时间'
   return `${clearScopeLabel.value} · ${levelText} · ${daysText}`
 })
 
@@ -217,8 +217,8 @@ const clearConfirmName = computed(() =>
 
 const clearConfirmPlaceholder = computed(() =>
   clearScope.value === 'contest'
-    ? `输入场次标识 ${contest.current?.slug ?? ''}`
-    : `全部场次要输入 ${GLOBAL_CONFIRM}`,
+    ? `输入 ${contest.current?.slug ?? ''}`
+    : `输入 ${GLOBAL_CONFIRM}`,
 )
 
 const clearEvents = useMutation(
@@ -240,187 +240,165 @@ const clearEvents = useMutation(
 
 /** 当前筛选下有多少条 —— 确认文案里写真实数字，而不是只说"全部"。 */
 const clearCountHint = computed(() => {
-  if (list.error.value) return '当前筛选范围的条数读不到（列表加载出错）'
-  return `当前筛选范围共 ${list.total.value} 条；实际清掉哪些，由下面选的范围决定`
+  if (list.error.value) return '列表当前筛选：条数未知'
+  return `列表当前筛选：${list.total.value} 条`
 })
 </script>
 
 <template>
-  <PageShell
-    title="审计日志"
-    :error="list.error.value"
-    error-action="先重试；还不行就检查服务端。"
-    retryable
-    @retry="list.reload"
-  >
+  <PageShell title="审计日志" :error="list.error.value" retryable @retry="list.reload">
     <template #toolbar>
-      <el-radio-group v-model="scope" size="small">
-        <el-radio-button value="all">全部</el-radio-button>
-        <el-radio-button value="contest">当前场次</el-radio-button>
-      </el-radio-group>
-      <el-select v-model="level" size="small" placeholder="全部级别" clearable style="width: 120px">
-        <el-option
-          v-for="item in LEVELS"
-          :key="item"
-          :label="eventLevelLabel(item)"
-          :value="item"
-        />
-      </el-select>
-      <el-select
-        v-model="category"
-        size="small"
-        placeholder="全部分类"
-        clearable
-        style="width: 150px"
-      >
-        <el-option
-          v-for="item in CATEGORIES"
-          :key="item"
-          :label="eventCategoryLabel(item)"
-          :value="item"
-        />
-      </el-select>
-      <el-input
-        v-model="keyword"
-        size="small"
-        placeholder="本页内搜索内容或分类"
-        clearable
-        style="width: 200px"
-      />
-      <el-button size="small" :loading="list.loading.value" @click="list.reload">刷新</el-button>
-      <el-button size="small" type="danger" plain @click="openClear">清空日志</el-button>
+      <el-button :loading="list.loading.value" @click="list.reload">
+        <el-icon><Refresh /></el-icon>刷新
+      </el-button>
+      <el-dropdown trigger="click">
+        <el-button>
+          更多<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+        </el-button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item @click="openClear">
+              <span class="danger-item">清空日志</span>
+            </el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
     </template>
 
-    <DataTable
-      :rows="rows"
-      :row-key="(row: EventOut) => row.id"
-      :loading="list.loading.value"
-      :total="list.total.value"
-      :page="list.page.value"
-      :page-size="list.pageSize.value"
-      empty-text="这个范围里还没有审计事件"
-      @update:page="list.setPage"
-      @update:pageSize="list.setPageSize"
-    >
-      <template #columns>
-        <!--
-          展开行而不是弹窗：先扫一眼"这条事件带了什么字段"是很常见的动作，
-          每次都要点一下、看一下、关掉，比直接铺在行下难用得多。
-        -->
-        <el-table-column type="expand">
-          <template #default="{ row }">
-            <div class="meta-block">
-              <div v-if="!row.meta" class="muted">这条事件没有附带细节字段。</div>
-              <pre v-else class="meta-pre">{{ metaText(row.meta) }}</pre>
-            </div>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="时间" width="170">
-          <template #default="{ row }">
-            <span class="cell-sub">{{ formatTime(row.ts) }}</span>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="级别" width="80">
-          <template #default="{ row }">
-            <el-tag :type="levelType(row.level)" size="small" effect="plain">
-              {{ eventLevelLabel(row.level) }}
-            </el-tag>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="分类" width="130">
-          <template #default="{ row }">
-            <!-- 未知分类照原样显示：服务端新加一类时，它不该在界面上消失 -->
-            <el-tooltip :content="row.category">
-              <span>{{ eventCategoryLabel(row.category) }}</span>
-            </el-tooltip>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="选手" width="100">
-          <template #default="{ row }">
-            <span class="mono">{{ row.player_no || '—' }}</span>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="内容" min-width="320">
-          <template #default="{ row }">
-            <div>{{ row.message }}</div>
-            <el-tooltip v-if="row.meta" :content="'展开可看完整字段'">
-              <span class="muted mono">{{ metaSummary(row.meta) }}</span>
-            </el-tooltip>
-          </template>
-        </el-table-column>
+    <SectionCard title="事件" :meta="`共 ${list.total.value} 条`" flush>
+      <template #extra>
+        <el-radio-group v-model="scope">
+          <el-radio-button value="all">全部</el-radio-button>
+          <el-radio-button value="contest">当前场次</el-radio-button>
+        </el-radio-group>
+        <el-select v-model="level" placeholder="全部级别" clearable style="width: 120px">
+          <el-option
+            v-for="item in LEVELS"
+            :key="item"
+            :label="eventLevelLabel(item)"
+            :value="item"
+          />
+        </el-select>
+        <el-select v-model="category" placeholder="全部分类" filterable clearable style="width: 150px">
+          <el-option
+            v-for="item in CATEGORIES"
+            :key="item"
+            :label="eventCategoryLabel(item)"
+            :value="item"
+          />
+        </el-select>
+        <el-input v-model="keyword" placeholder="本页搜索内容 / 分类" clearable style="width: 190px">
+          <template #prefix><el-icon><Search /></el-icon></template>
+        </el-input>
       </template>
-    </DataTable>
 
-    <!--
-      清空日志是硬删除，而且**有**二次确认 —— 但服务端要的不是某个对象的名字，
-      是**范围**的名字：指定场次就输该场次的标识，全局清空输 `all`
-      （`GLOBAL_CONFIRM`）。所以对话框里除了"打一遍名字"，还要把范围本身
-      （哪些场次、哪个级别、早于几天）摆在同一屏上，三件事一个都不能含糊。
-    -->
+      <DataTable
+        :rows="rows"
+        :row-key="(row: EventOut) => row.id"
+        :loading="list.loading.value"
+        :total="list.total.value"
+        :page="list.page.value"
+        :page-size="list.pageSize.value"
+        empty-text="无审计事件"
+        @update:page="list.setPage"
+        @update:pageSize="list.setPageSize"
+      >
+        <template #columns>
+          <el-table-column type="expand">
+            <template #default="{ row }">
+              <div class="meta-block">
+                <div v-if="!row.meta" class="muted">无附加字段</div>
+                <pre v-else class="meta-pre">{{ metaText(row.meta) }}</pre>
+              </div>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="时间" width="170">
+            <template #default="{ row }">
+              <span class="cell-sub">{{ formatTime(row.ts) }}</span>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="级别" width="90">
+            <template #default="{ row }">
+              <el-tag :type="levelType(row.level)" effect="light">
+                {{ eventLevelLabel(row.level) }}
+              </el-tag>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="分类" width="140">
+            <template #default="{ row }">
+              <el-tooltip :content="row.category">
+                <span>{{ eventCategoryLabel(row.category) }}</span>
+              </el-tooltip>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="考号" width="100">
+            <template #default="{ row }">
+              <span class="mono">{{ row.player_no || '—' }}</span>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="内容" min-width="320">
+            <template #default="{ row }">
+              <div>{{ row.message }}</div>
+              <span v-if="row.meta" class="cell-sub mono">{{ metaSummary(row.meta) }}</span>
+            </template>
+          </el-table-column>
+        </template>
+      </DataTable>
+    </SectionCard>
+
+    <!-- 清空日志：服务端硬删；confirm 为范围名（场次标识或 GLOBAL_CONFIRM） -->
     <ConfirmByNameDialog
       v-model="clearOpen"
-      title="清空审计日志"
+      title="清空审计日志？"
       :expected="clearConfirmName"
       :placeholder="clearConfirmPlaceholder"
       :submitting="clearEvents.pending.value"
-      :detail="`即将清空：${clearScopeText}。${clearCountHint}。`"
+      :impact="[`清空：${clearScopeText}`, clearCountHint]"
+      detail="将删除范围内的审计日志，不可恢复。"
       confirm-text="清空"
       @confirm="clearEvents.run(undefined)"
     >
-      <el-form label-width="90px">
-        <el-form-item label="场次范围">
-          <el-radio-group v-model="clearScope" size="small">
+      <el-form label-width="80px">
+        <el-form-item label="场次">
+          <el-radio-group v-model="clearScope">
             <el-radio value="all">全部场次</el-radio>
             <el-radio value="contest" :disabled="!contest.currentId">当前场次</el-radio>
           </el-radio-group>
         </el-form-item>
 
-        <el-form-item label="级别范围">
-          <el-radio-group v-model="clearLevel" size="small">
-            <el-radio value="info">只清「信息」级</el-radio>
-            <el-radio value="">连警告与错误一起清</el-radio>
+        <el-form-item label="级别">
+          <el-radio-group v-model="clearLevel">
+            <el-radio value="info">仅信息</el-radio>
+            <el-radio value="">全部级别</el-radio>
           </el-radio-group>
         </el-form-item>
 
-        <el-form-item label="时间范围">
-          <el-radio-group v-model="clearDays" size="small">
+        <el-form-item label="时间">
+          <el-radio-group v-model="clearDays">
             <el-radio :value="1">早于 1 天</el-radio>
             <el-radio :value="7">早于 7 天</el-radio>
             <el-radio :value="30">早于 30 天</el-radio>
-            <el-radio :value="0">不限天数</el-radio>
+            <el-radio :value="0">不限</el-radio>
           </el-radio-group>
         </el-form-item>
       </el-form>
 
-      <!-- 两档危险范围各自给一块显眼的说明，而不是只靠上面那行灰字 -->
       <el-alert
         v-if="clearDays === 0"
         type="error"
         :closable="false"
         show-icon
-        style="margin-top: 4px"
-        title="不限天数会连最老的日志一起删掉"
+        :title="
+          clearIsTotal
+            ? '将删除全部审计日志，仅留下本次清理记录。'
+            : '将删除该范围内所有时间的日志。'
+        "
       />
-
-      <el-alert
-        v-if="clearIsTotal"
-        type="error"
-        :closable="false"
-        show-icon
-        style="margin-top: 8px"
-        title="这是最彻底的一档：全部场次 + 不限天数"
-      >
-        <template #default>
-          执行后只会留下一条「某人在某时清理了审计日志」的记录。
-        </template>
-      </el-alert>
-
-      <div v-else class="clear-scope mono">{{ clearScopeText }}</div>
     </ConfirmByNameDialog>
   </PageShell>
 </template>
@@ -428,33 +406,23 @@ const clearCountHint = computed(() => {
 <style scoped>
 .meta-block {
   padding: 8px 12px;
-  background: #f5f7fa;
-  border-radius: 4px;
+  background: var(--sj-surface-2);
+  border: 1px solid var(--sj-border);
+  border-radius: var(--sj-radius-sm);
 }
 
 .meta-pre {
   margin: 0;
   max-height: 360px;
   overflow: auto;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--sj-mono);
   font-size: 12px;
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-all;
 }
 
-.muted {
-  color: #909399;
-  font-size: 12px;
-}
-
-.clear-scope {
-  margin-top: 12px;
-  padding: 8px 12px;
-  background: #fef0f0;
-  border: 1px solid #fde2e2;
-  border-radius: 4px;
-  color: #f56c6c;
-  font-size: 12px;
+.danger-item {
+  color: var(--sj-danger);
 }
 </style>

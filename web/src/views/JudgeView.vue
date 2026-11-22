@@ -168,7 +168,7 @@ async function copyCommand(): Promise<void> {
     await navigator.clipboard.writeText(command.value)
     ElMessage.success('已复制')
   } catch {
-    ElMessage.warning('复制失败，请手工选取')
+    ElMessage.warning('复制失败')
   }
 }
 
@@ -195,11 +195,15 @@ async function confirmRemove(): Promise<void> {
 <template>
   <PageShell title="评测" :error="error" retryable @retry="reload">
     <template #toolbar>
-      <el-button size="small" @click="router.push({ name: 'scores' })">查看成绩</el-button>
-      <el-button size="small" :loading="loading" @click="reload">刷新</el-button>
+      <el-button @click="router.push({ name: 'scores' })">
+        <el-icon><Trophy /></el-icon>查看成绩
+      </el-button>
+      <el-button :loading="loading" @click="reload">
+        <el-icon><Refresh /></el-icon>刷新
+      </el-button>
     </template>
 
-    <SectionCard title="题目" :meta="`${builtin.length} / ${problems.length} 道自带评测`" flush>
+    <SectionCard title="题目" :meta="`自带评测 ${builtin.length} / ${problems.length} 道`" flush>
     <el-table v-loading="loading" :data="problems">
       <el-table-column label="题目" width="160">
         <template #default="{ row }">
@@ -257,14 +261,14 @@ async function confirmRemove(): Promise<void> {
       </el-table-column>
       <template #empty>
         <div class="empty-block">
-          本场次没有题目。
+          本场次无题目
           <el-button link type="primary" @click="router.push({ name: 'contests' })">登记题目</el-button>
         </div>
       </template>
     </el-table>
     </SectionCard>
 
-    <SectionCard title="任务" :meta="progress?.total ? `共 ${progress.total}` : ''">
+    <SectionCard title="任务" :meta="progress?.total ? `共 ${progress.total} 个` : ''">
       <template #extra>
       <el-select v-model="target" style="width: 200px">
         <el-option label="全部自带评测题目" value="*" />
@@ -290,19 +294,19 @@ async function confirmRemove(): Promise<void> {
         <el-table-column prop="player_no" label="考号" width="120" />
         <el-table-column prop="problem" label="题目" width="120" />
         <el-table-column prop="error" label="失败原因" />
-        <el-table-column label="操作" width="90">
+        <el-table-column label="操作" width="90" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="queue(row.problem)">重测本题</el-button>
           </template>
         </el-table-column>
       </el-table>
     </template>
-    <div v-else-if="!builtin.length" class="muted">无自带评测题目：在上方题目「设置」中切换评测方式。</div>
-    <div v-else-if="!ready.length" class="muted">自带评测题目均缺数据包：在上方题目「设置」中上传。</div>
+    <div v-else-if="!builtin.length" class="muted">无自带评测题目</div>
+    <div v-else-if="!ready.length" class="muted">自带评测题目均缺数据包</div>
     <div v-else class="muted">无评测任务</div>
     </SectionCard>
 
-    <SectionCard title="评测机" :meta="`${workers.filter(workerOnline).length} 在线 / 共 ${workers.length}`" flush>
+    <SectionCard title="评测机" :meta="`在线 ${workers.filter(workerOnline).length} 台 / 共 ${workers.length} 台`" flush>
       <template #extra>
         <el-button type="primary" plain @click="createWorker">
           <el-icon><Plus /></el-icon>添加评测机
@@ -318,7 +322,9 @@ async function confirmRemove(): Promise<void> {
       @close="issued = null"
     >
       <pre class="command">{{ command }}</pre>
-      <el-button size="small" @click="copyCommand">复制命令</el-button>
+      <el-button @click="copyCommand">
+        <el-icon><DocumentCopy /></el-icon>复制命令
+      </el-button>
     </el-alert>
     <el-table :data="workers">
       <el-table-column prop="name" label="名称" min-width="160" />
@@ -349,10 +355,10 @@ async function confirmRemove(): Promise<void> {
     <ProblemJudgeDialog v-model="settingOpen" :problem="settingTarget" @saved="loadProblems" />
     <ConfirmByNameDialog
       v-model="removeOpen"
-      title="吊销评测机"
+      title="吊销评测机？"
       :expected="removing?.name ?? ''"
       confirm-text="吊销"
-      detail="该评测机未交回的任务在 15 分钟后重新排队。"
+      detail="令牌立即失效；该评测机未交回的任务 15 分钟后重新排队。"
       @confirm="confirmRemove"
     />
   </PageShell>

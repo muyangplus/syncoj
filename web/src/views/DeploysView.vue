@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 import { assetApi, deployApi, playerApi } from '@/api'
@@ -8,12 +9,15 @@ import type { AssetOut, AssetZipPasswordOut, DeployTaskOut, PlayerOut } from '@/
 import DataTable from '@/components/DataTable.vue'
 import FormDialog from '@/components/FormDialog.vue'
 import PageShell from '@/components/PageShell.vue'
+import SectionCard from '@/components/SectionCard.vue'
 import { useList } from '@/composables/useList'
 import { useMutation } from '@/composables/useMutation'
 import { useContestStore } from '@/stores/contest'
 import { formatBytes, formatTime, percent } from '@/utils/format'
 
 const contest = useContestStore()
+const route = useRoute()
+const router = useRouter()
 
 // --------------------------------------------------------------------------- //
 // 两份列表
@@ -128,7 +132,7 @@ const uploadZipPassword = ref('')
 const upload = useMutation(
   async (file: File) => {
     const contestId = contest.currentId
-    if (!contestId) throw new Error('还没有选场次')
+    if (!contestId) throw new Error('未选择场次')
     // 带走这一份快照：提交过程中教师可能又改了勾选，而回执说的是这次**实际**
     // 发生的事（服务端只认收到的字段）
     const packaged = uploadPackage.value
@@ -141,8 +145,8 @@ const upload = useMutation(
   {
     success: ({ asset, packaged }) =>
       packaged
-        ? `已打包成「${asset.filename}」（${formatBytes(asset.size)}）。密码在 password.txt 里，记得把它也下发一次`
-        : `已上传 ${asset.filename}（${formatBytes(asset.size)}）`,
+        ? `已打包为「${asset.filename}」（${formatBytes(asset.size)}），密码已写入 password.txt`
+        : `已上传「${asset.filename}」（${formatBytes(asset.size)}）`,
     onDone: () => assets.reload(),
   },
 )
@@ -205,7 +209,7 @@ const textLoading = ref(false)
 const textIsNotice = computed(() => textForm.filename.trim() === NOTICE_FILENAME)
 
 const textTitle = computed(() => {
-  if (textMode.value === 'edit') return `编辑 ${textTarget.value?.filename ?? '文件'}`
+  if (textMode.value === 'edit') return `编辑「${textTarget.value?.filename ?? '文件'}」`
   return textIsNotice.value ? '写考场公告' : '新建文本文件'
 })
 
@@ -293,7 +297,7 @@ const textDirty = computed(() => {
 const saveText = useMutation(
   async () => {
     const contestId = contest.currentId
-    if (!contestId) throw new Error('还没有选场次')
+    if (!contestId) throw new Error('未选择场次')
     const asset = textTarget.value
     if (!asset) throw new Error('没有选中文件')
     const name = textForm.filename.trim()
@@ -318,7 +322,7 @@ const saveText = useMutation(
     // 这个数与服务端的 `_TEXT_MAX_BYTES` 对齐 —— 它比「新建文本文件」的
     // 200000 字符上限宽，保证在界面上新建出来的正文都还能改。
     if (new TextEncoder().encode(textForm.content).length > 1024 * 1024) {
-      throw new Error('正文超过 1 MB 的上限，请改完在本地重新上传')
+      throw new Error('正文超过 1 MB')
     }
     const saved = await assetApi.saveText(contestId, asset.id, textForm.content)
     return {
@@ -333,12 +337,12 @@ const saveText = useMutation(
       // 只是改了名：这句要写清"已经落地的那份不受影响"，否则教师会以为改名能
       // 修正发出去的文件
       if (!contentSaved) {
-        return `已改名为「${asset.filename}」。内容没动，已经落到机器上的那份不受影响；还没下完的任务会按新名字落地`
+        return `已改名为「${asset.filename}」`
       }
       const verb = renamed ? '已改名并保存' : '已保存'
       // 只有真重排了才提台数：硬报"重新排队给 0 台机器"会让教师以为出错了
       return requeued > 0
-        ? `${verb}「${asset.filename}」，并重新排队给 ${requeued} 台机器`
+        ? `${verb}「${asset.filename}」，重新下发 ${requeued} 台`
         : `${verb}「${asset.filename}」`
     },
     onDone: async () => {
@@ -356,7 +360,7 @@ const createText = useMutation(
     // 同名资产（而不是改掉原来那条），界面上看起来一切正常。
     if (textMode.value === 'edit') throw new Error('这是一条已有的文件，请走保存')
     const contestId = contest.currentId
-    if (!contestId) throw new Error('还没有选场次')
+    if (!contestId) throw new Error('未选择场次')
     const filename = textForm.filename.trim()
     if (!filename) throw new Error('文件名不能为空')
     // 提交前先拍一份快照。服务端对"同场次 + 同名 + 同内容"返回的是**已存在的
@@ -377,11 +381,11 @@ const createText = useMutation(
   },
   {
     success: ({ asset, reused, truncated }) => {
-      if (reused) return `已存在同名同内容的资产「${asset.filename}」，没有重复创建`
+      if (reused) return `已存在同名同内容的「${asset.filename}」`
       // 列表没看全时不敢断言"新建"：命中更早那一页上的旧资产同样是合法的。
       // 两种情况的最终状态完全一样（不会造出两份），差的只是收据的措辞。
       const verb = truncated ? '已保存' : '已新建'
-      return `${verb}文本文件「${asset.filename}」（${formatBytes(asset.size)}）`
+      return `${verb}「${asset.filename}」（${formatBytes(asset.size)}）`
     },
     onDone: async () => {
       textDialog.value = false
@@ -512,15 +516,15 @@ const zipCanSubmit = computed(() => {
 const saveZipPassword = useMutation(
   async () => {
     const contestId = contest.currentId
-    if (!contestId) throw new Error('还没有选场次')
+    if (!contestId) throw new Error('未选择场次')
     const asset = zipTarget.value
     const status = zipStatus.value
     if (!asset || !status) throw new Error('没有选中文件')
     if (!zipForm.generate && !zipForm.password) {
-      throw new Error('请填一个新密码，或者点「生成随机密码」')
+      throw new Error('请填写新密码或生成随机密码')
     }
     if (status.encrypted && !zipForm.oldPassword) {
-      throw new Error('这个包已经有密码了，请先填旧密码（在之前那份 password.txt 里）')
+      throw new Error('请填写旧密码')
     }
     const saved = await assetApi.setZipPassword(contestId, asset.id, {
       password: zipForm.generate ? undefined : zipForm.password,
@@ -535,13 +539,12 @@ const saveZipPassword = useMutation(
     success: ({ saved, before }) => {
       const head =
         saved.packaged && saved.asset.filename !== before
-          ? `已打包成「${saved.asset.filename}」：文件名已从「${before}」改成「${saved.asset.filename}」；`
-          : `已重新打包「${saved.asset.filename}」：`
+          ? `已打包「${before}」为「${saved.asset.filename}」`
+          : `已重新打包「${saved.asset.filename}」`
       return (
-        head +
-        `包已重新排队给 ${saved.requeued} 台机器。` +
-        `新密码是 ${saved.password}（请自己抄下来）。` +
-        `接着再去下发「${saved.password_asset.filename}」。`
+        `${head}，重新下发 ${saved.requeued} 台；` +
+        `新密码：${saved.password}；` +
+        `「${saved.password_asset.filename}」需另行下发`
       )
     },
     onDone: async () => {
@@ -571,9 +574,8 @@ const removeAsset = useMutation((asset: AssetOut) => assetApi.remove(asset.id), 
 async function askRemoveAsset(asset: AssetOut): Promise<void> {
   try {
     await ElMessageBox.confirm(
-        '引用它的下发任务与逐选手进度会一起被删掉。\n' +
-        '已经落到选手机器上的文件不会撤回。',
-      '删除可下发文件',
+      '引用它的下发任务与逐选手进度将一并删除，不可恢复；已落到机器上的文件不会撤回。',
+      `删除「${asset.filename}」？`,
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
     )
   } catch {
@@ -621,7 +623,7 @@ const form = reactive({
  */
 const destPreview = computed(() => {
   const probe = players.value[0]?.player_no ?? 'S001'
-  return form.destDir.trim().replace(/\{player_no\}/g, probe) || '（桌面根目录）'
+  return `桌面/${form.destDir.trim().replace(/\{player_no\}/g, probe)}`.replace(/\/$/, '')
 })
 
 function openCreate(asset?: AssetOut): void {
@@ -639,10 +641,10 @@ function openCreate(asset?: AssetOut): void {
 const createDeploy = useMutation(
   async () => {
     const contestId = contest.currentId
-    if (!contestId) throw new Error('还没有选场次')
+    if (!contestId) throw new Error('未选择场次')
     if (!form.assetId) throw new Error('请选择要下发的文件')
     if (form.targetKind === 'player' && form.playerIds.length === 0) {
-      throw new Error('请选择至少一名选手')
+      throw new Error('请选择选手')
     }
     if (form.targetKind === 'group' && !form.targetGroup) {
       throw new Error('请选择分组')
@@ -660,7 +662,7 @@ const createDeploy = useMutation(
   {
     // `DeployTaskOut` 上没有服务端写的回执，只能自己拼一句；目标数是这套动作里
     // 教师最想立刻看到的数字
-    success: (task) => `已创建下发任务，目标 ${task.total} 台`,
+    success: (task) => `已创建下发，目标 ${task.total} 台`,
     onDone: async () => {
       createDialog.value = false
       await tasks.reload()
@@ -679,10 +681,9 @@ const cancelTask = useMutation((task: DeployTaskOut) => deployApi.cancel(task.id
 async function askCancel(task: DeployTaskOut): Promise<void> {
   try {
     await ElMessageBox.confirm(
-      `取消下发「${task.filename}」？\n\n` +
-        '只停掉还没完成的目标 —— 已经收到文件的机器不会回滚。',
-      '取消下发',
-      { type: 'warning', confirmButtonText: '取消下发', cancelButtonText: '再想想' },
+      '未完成的目标将停止下发；已收到文件的机器不回滚。',
+      `取消下发「${task.filename}」？`,
+      { type: 'warning', confirmButtonText: '取消下发', cancelButtonText: '返回' },
     )
   } catch {
     return
@@ -708,10 +709,8 @@ const removeTask = useMutation((task: DeployTaskOut) => deployApi.remove(task.id
 async function askRemoveTask(task: DeployTaskOut): Promise<void> {
   try {
     await ElMessageBox.confirm(
-      `删除下发记录「${task.filename}」？\n\n` +
-        '已经落地的文件不会撤回；还没下完的机器不会再收到这个作业。\n' +
-        '要停止下发请用「取消」。',
-      '删除下发记录',
+      '将删除该下发记录及逐选手进度，不可恢复；未完成的机器不再收到此文件，已落地的文件不会撤回。',
+      `删除下发记录「${task.filename}」？`,
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
     )
   } catch {
@@ -747,301 +746,301 @@ function targetKindLabel(kind: string): string {
   if (kind === 'group') return '按分组'
   return '指定选手'
 }
+
+// --------------------------------------------------------------------------- //
+// 快捷操作入口：?do=new 打开新建下发
+// --------------------------------------------------------------------------- //
+
+watch(
+  () => route.query.do,
+  (action) => {
+    if (action !== 'new') return
+    openCreate()
+    void router.replace({ query: { ...route.query, do: undefined } })
+  },
+  { immediate: true },
+)
 </script>
 
 <template>
-  <PageShell
-    title="文件下发"
-    hint="题面和样例直接传 zip；非 zip 的文件可以点它那一行的「打包成 zip」。"
-    :error="listError"
-    error-action="刷新页面或检查服务端；资产列表取不到时不要下发。"
-    retryable
-    @retry="refreshAll"
-  >
+  <PageShell title="文件下发" :error="listError" retryable @retry="refreshAll">
     <template #toolbar>
-      <input ref="fileInput" type="file" style="display: none" @change="handleFileChange" />
-      <span class="field-label">类别</span>
-      <el-select v-model="uploadKind" size="small" style="width: 110px">
-        <el-option v-for="kind in KIND_PRESETS" :key="kind" :label="kind" :value="kind" />
-      </el-select>
-      <el-checkbox v-model="uploadPackage" size="small">打包成 zip</el-checkbox>
-      <el-input
-        v-if="uploadPackage"
-        v-model="uploadZipPassword"
-        size="small"
-        style="width: 190px"
-        placeholder="密码（留空 = 服务端生成）"
-      />
-      <el-button size="small" :loading="upload.pending.value" @click="pickFile">上传文件</el-button>
-      <el-button size="small" @click="openTextDialog('create')">新建文本文件</el-button>
-      <el-button size="small" @click="openTextDialog('notice', NOTICE_FILENAME)">写考场公告</el-button>
-      <el-button
-        size="small"
-        type="primary"
-        :disabled="!assets.total.value"
-        @click="openCreate()"
-      >
-        新建下发
+      <el-button :loading="assets.loading.value || tasks.loading.value" @click="refreshAll">
+        <el-icon><Refresh /></el-icon>刷新
       </el-button>
-      <el-button size="small" :loading="assets.loading.value || tasks.loading.value" @click="refreshAll">
-        刷新
+      <el-button type="primary" :disabled="!assets.total.value" @click="openCreate()">
+        <el-icon><Promotion /></el-icon>新建下发
       </el-button>
     </template>
 
-    <div class="list-head">
-      <h3 class="section-title">
-        可下发文件
-        <span class="muted">（共 {{ assets.total.value }} 个）</span>
-      </h3>
-    </div>
+    <input ref="fileInput" type="file" style="display: none" @change="handleFileChange" />
 
-    <DataTable
-      :rows="assets.rows.value"
-      :row-key="(row: AssetOut) => row.id"
-      :loading="assets.loading.value"
-      :total="assets.total.value"
-      :page="assets.page.value"
-      :page-size="assets.pageSize.value"
-      empty-text="还没有上传任何文件"
-      @update:page="assets.setPage"
-      @update:pageSize="assets.setPageSize"
-    >
-      <template #columns>
-        <el-table-column label="文件名" min-width="200">
-          <template #default="{ row }">
-            <span class="mono">{{ row.filename }}</span>
-            <!-- 不会自己解压这件事已经写在页面标题的问号里，这里只标出来它是压缩包 -->
-            <el-tag v-if="row.filename.toLowerCase().endsWith('.zip')" size="small" effect="plain">
-              压缩包
-            </el-tag>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="类别" width="110">
-          <template #default="{ row }">
-            <span class="cell-sub">{{ kindLabel(row.kind) }}</span>
-          </template>
-        </el-table-column>
-
-        <!-- 精确字节数：核对"传上去的是不是手上这一份"时看的就是它 -->
-        <el-table-column label="大小" width="110" align="right">
-          <template #default="{ row }">
-            <el-tooltip :content="`${row.size.toLocaleString()} 字节`">
-              <span class="mono">{{ formatBytes(row.size) }}</span>
-            </el-tooltip>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="内容哈希" width="140">
-          <template #default="{ row }">
-            <el-tooltip :content="row.sha256">
-              <span class="mono muted">{{ row.sha256.slice(0, 12) }}…</span>
-            </el-tooltip>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="上传时间" width="160">
-          <template #default="{ row }">
-            <span class="cell-sub">{{ formatTime(row.created_at) }}</span>
-          </template>
-        </el-table-column>
-
-        <!-- 「编辑」对所有资产都开放：它承担**改名**（原独立「改名」按钮已并入）
-             以及服务端说 `editable` 时的正文编辑。正文那一栏由对话框按 editable
-             决定显示与否，前端不按扩展名自己判断。 -->
-        <el-table-column label="操作" width="280" fixed="right">
-          <template #default="{ row }">
-            <el-button
-              link
-              type="primary"
-              size="small"
-              @click="openEditTextDialog(row)"
-            >
-              编辑
-            </el-button>
-            <!-- 每一行都有这个动作（系统生成的 password.txt 除外，见 canZipAction）：
-                 zip 行是「密码」，其余是「打包成 zip」。真正的判据在服务端 ——
-                 它按**内容**决定这次是打包还是改密码。 -->
-            <el-button
-              v-if="canZipAction(row)"
-              link
-              type="primary"
-              size="small"
-              :loading="zipLoading && zipTarget?.id === row.id"
-              @click="openZipPasswordDialog(row)"
-            >
-              {{ zipActionLabel(row.filename) }}
-            </el-button>
-            <el-button link type="primary" size="small" @click="openCreate(row)">下发</el-button>
-            <el-button link type="danger" size="small" @click="askRemoveAsset(row)">删除</el-button>
-          </template>
-        </el-table-column>
-      </template>
-
-      <template #empty>
-        <p>还没有上传任何文件。</p>
-        <p>题面直接传 zip；传了别的文件之后，可以点它那一行的「打包成 zip」。</p>
-        <el-button type="primary" size="small" style="margin-top: 12px" @click="pickFile">
-          上传文件
+    <SectionCard title="可下发文件" :meta="`${assets.total.value} 个`" flush>
+      <template #extra>
+        <span class="field-label">类别</span>
+        <el-select v-model="uploadKind" style="width: 100px">
+          <el-option v-for="kind in KIND_PRESETS" :key="kind" :label="kind" :value="kind" />
+        </el-select>
+        <el-checkbox v-model="uploadPackage">打包成 zip</el-checkbox>
+        <el-input
+          v-if="uploadPackage"
+          v-model="uploadZipPassword"
+          style="width: 170px"
+          placeholder="密码，留空自动生成"
+        />
+        <el-button type="primary" plain :loading="upload.pending.value" @click="pickFile">
+          <el-icon><Upload /></el-icon>上传文件
         </el-button>
-      </template>
-    </DataTable>
-
-    <div class="list-head" style="margin-top: 22px">
-      <h3 class="section-title">
-        下发任务
-        <span class="muted">（共 {{ tasks.total.value }} 条）</span>
-      </h3>
-      <p class="page-hint" style="margin: 0">展开一行看每一台机器的情况。</p>
-    </div>
-
-    <DataTable
-      :rows="tasks.rows.value"
-      :row-key="(row: DeployTaskOut) => row.id"
-      :loading="tasks.loading.value"
-      :total="tasks.total.value"
-      :page="tasks.page.value"
-      :page-size="tasks.pageSize.value"
-      empty-text="还没有任何下发任务"
-      @update:page="tasks.setPage"
-      @update:pageSize="tasks.setPageSize"
-    >
-      <template #columns>
-        <!-- 逐选手进度：`include_targets=true` 已经把它一起带回来了，不用展开再拉 -->
-        <el-table-column type="expand">
-          <template #default="{ row }">
-            <div class="expand-body">
-              <el-table v-if="row.targets?.length" :data="row.targets" size="small" border>
-                <el-table-column label="选手" prop="player_no" width="110" />
-                <el-table-column label="状态" width="100">
-                  <template #default="scope">
-                    <el-tag :type="statusType(scope.row.status)" size="small" effect="plain">
-                      {{ statusLabel(scope.row.status) }}
-                    </el-tag>
-                  </template>
-                </el-table-column>
-                <el-table-column label="该机进度" min-width="160">
-                  <template #default="scope">
-                    <el-progress
-                      :percentage="percent(scope.row.bytes_done, row.size)"
-                      :status="scope.row.status === 'failed' ? 'exception' : undefined"
-                      :stroke-width="10"
-                    />
-                  </template>
-                </el-table-column>
-                <el-table-column label="已传字节" width="120" align="right">
-                  <template #default="scope">
-                    <el-tooltip :content="`共 ${formatBytes(row.size)}`">
-                      <span class="mono">{{ scope.row.bytes_done.toLocaleString() }}</span>
-                    </el-tooltip>
-                  </template>
-                </el-table-column>
-                <el-table-column label="重试" prop="retry_count" width="70" align="right" />
-                <el-table-column label="错误" min-width="240">
-                  <template #default="scope">
-                    <span v-if="scope.row.last_error" class="error-text">
-                      {{ scope.row.last_error }}
-                    </span>
-                    <span v-else class="muted">—</span>
-                  </template>
-                </el-table-column>
-              </el-table>
-              <!-- 一条目标都没有：任务建出来时目标为空，或者解析不出选手 -->
-              <p v-else class="page-hint">这条任务没有任何目标。</p>
-            </div>
+        <el-dropdown trigger="click">
+          <el-button>
+            新建文本<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item @click="openTextDialog('create')">新建文本文件</el-dropdown-item>
+              <el-dropdown-item @click="openTextDialog('notice', NOTICE_FILENAME)">
+                写考场公告
+              </el-dropdown-item>
+            </el-dropdown-menu>
           </template>
-        </el-table-column>
-
-        <el-table-column label="文件" min-width="180">
-          <template #default="{ row }">
-            <span class="mono">{{ row.filename }}</span>
-            <div class="cell-sub">{{ formatBytes(row.size) }}</div>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="目标" width="180">
-          <template #default="{ row }">
-            <el-tag size="small" effect="plain">{{ targetKindLabel(row.target_kind) }}</el-tag>
-            <div class="cell-sub">目录：{{ row.dest_dir || '（桌面根目录）' }}</div>
-            <div class="cell-sub">同名文件：{{ row.mode === 'skip_exist' ? '跳过' : '覆盖' }}</div>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="进度" min-width="220">
-          <template #default="{ row }">
-            <el-progress
-              :percentage="percent(row.done + row.failed, row.total)"
-              :status="row.failed > 0 ? 'exception' : row.status === 'done' ? 'success' : undefined"
-              :stroke-width="14"
-            />
-            <div class="cell-sub">
-              完成 {{ row.done }} · 失败 {{ row.failed }} · 待处理 {{ row.pending }}<template
-                v-if="row.cancelled"
-              > · 已取消 {{ row.cancelled }}</template> / 共 {{ row.total }}
-            </div>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="状态" width="100">
-          <template #default="{ row }">
-            <el-tag :type="statusType(row.status)" size="small" effect="plain">
-              {{ statusLabel(row.status) }}
-            </el-tag>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="创建时间" width="160">
-          <template #default="{ row }">
-            <span class="cell-sub">{{ formatTime(row.created_at) }}</span>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="操作" width="150" fixed="right">
-          <template #default="{ row }">
-            <el-button
-              v-if="row.status !== 'done' && row.status !== 'cancelled'"
-              link
-              type="danger"
-              size="small"
-              :loading="cancelTask.pending.value"
-              @click="askCancel(row)"
-            >
-              取消
-            </el-button>
-            <el-button
-              v-if="row.failed > 0"
-              link
-              type="primary"
-              size="small"
-              :loading="retryTask.pending.value"
-              @click="retryTask.run(row)"
-            >
-              重试
-            </el-button>
-            <el-button link type="danger" size="small" @click="askRemoveTask(row)">删除</el-button>
-          </template>
-        </el-table-column>
+        </el-dropdown>
       </template>
 
-      <template #empty>
-        <p>还没有任何下发任务。</p>
-        <p>先在上面「上传文件」，再点它那一行的「下发」。</p>
-        <el-button type="primary" size="small" style="margin-top: 12px" @click="pickFile">
-          上传文件
-        </el-button>
-      </template>
-    </DataTable>
+      <DataTable
+        :rows="assets.rows.value"
+        :row-key="(row: AssetOut) => row.id"
+        :loading="assets.loading.value"
+        :total="assets.total.value"
+        :page="assets.page.value"
+        :page-size="assets.pageSize.value"
+        empty-text="无可下发文件"
+        @update:page="assets.setPage"
+        @update:pageSize="assets.setPageSize"
+      >
+        <template #columns>
+          <el-table-column label="文件名" min-width="200">
+            <template #default="{ row }">
+              <span class="mono">{{ row.filename }}</span>
+              <el-tag
+                v-if="row.filename.toLowerCase().endsWith('.zip')"
+                effect="plain"
+                class="name-tag"
+              >
+                压缩包
+              </el-tag>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="类别" width="110">
+            <template #default="{ row }">
+              <span class="cell-sub">{{ kindLabel(row.kind) }}</span>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="大小" width="110" align="right">
+            <template #default="{ row }">
+              <el-tooltip :content="`${row.size.toLocaleString()} 字节`">
+                <span class="mono">{{ formatBytes(row.size) }}</span>
+              </el-tooltip>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="内容哈希" width="140">
+            <template #default="{ row }">
+              <el-tooltip :content="row.sha256">
+                <span class="mono muted">{{ row.sha256.slice(0, 12) }}…</span>
+              </el-tooltip>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="上传时间" width="170">
+            <template #default="{ row }">
+              <span class="cell-sub">{{ formatTime(row.created_at) }}</span>
+            </template>
+          </el-table-column>
+
+          <!-- 编辑 = 改名 + （editable 时）改正文 -->
+          <el-table-column label="操作" width="260" fixed="right">
+            <template #default="{ row }">
+              <el-button link type="primary" size="small" @click="openCreate(row)">下发</el-button>
+              <el-button link type="primary" size="small" @click="openEditTextDialog(row)">
+                编辑
+              </el-button>
+              <el-button
+                v-if="canZipAction(row)"
+                link
+                type="primary"
+                size="small"
+                :loading="zipLoading && zipTarget?.id === row.id"
+                @click="openZipPasswordDialog(row)"
+              >
+                {{ zipActionLabel(row.filename) }}
+              </el-button>
+              <el-button link type="danger" size="small" @click="askRemoveAsset(row)">删除</el-button>
+            </template>
+          </el-table-column>
+        </template>
+
+        <template #empty>
+          <div>无可下发文件</div>
+          <el-button link type="primary" style="margin-top: 8px" @click="pickFile">上传文件</el-button>
+        </template>
+      </DataTable>
+    </SectionCard>
+
+    <SectionCard title="下发任务" :meta="`${tasks.total.value} 条`" flush>
+      <DataTable
+        :rows="tasks.rows.value"
+        :row-key="(row: DeployTaskOut) => row.id"
+        :loading="tasks.loading.value"
+        :total="tasks.total.value"
+        :page="tasks.page.value"
+        :page-size="tasks.pageSize.value"
+        empty-text="无下发任务"
+        @update:page="tasks.setPage"
+        @update:pageSize="tasks.setPageSize"
+      >
+        <template #columns>
+          <!-- 逐选手进度随 include_targets=true 一起带回 -->
+          <el-table-column type="expand">
+            <template #default="{ row }">
+              <div class="expand-body">
+                <el-table v-if="row.targets?.length" :data="row.targets">
+                  <el-table-column label="考号" prop="player_no" width="110" />
+                  <el-table-column label="状态" width="100">
+                    <template #default="scope">
+                      <el-tag :type="statusType(scope.row.status)" effect="light">
+                        {{ statusLabel(scope.row.status) }}
+                      </el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="进度" min-width="160">
+                    <template #default="scope">
+                      <el-progress
+                        :percentage="percent(scope.row.bytes_done, row.size)"
+                        :status="scope.row.status === 'failed' ? 'exception' : undefined"
+                        :stroke-width="10"
+                      />
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="已传字节" width="120" align="right">
+                    <template #default="scope">
+                      <el-tooltip :content="`共 ${formatBytes(row.size)}`">
+                        <span class="mono">{{ scope.row.bytes_done.toLocaleString() }}</span>
+                      </el-tooltip>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="重试" prop="retry_count" width="70" align="right" />
+                  <el-table-column label="错误" min-width="240">
+                    <template #default="scope">
+                      <span v-if="scope.row.last_error" class="error-text cell-error">
+                        {{ scope.row.last_error }}
+                      </span>
+                      <span v-else class="muted">—</span>
+                    </template>
+                  </el-table-column>
+                </el-table>
+                <div v-else class="muted">无目标</div>
+              </div>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="文件" min-width="180">
+            <template #default="{ row }">
+              <span class="mono">{{ row.filename }}</span>
+              <div class="cell-sub">{{ formatBytes(row.size) }}</div>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="目标" width="190">
+            <template #default="{ row }">
+              <el-tag effect="plain">{{ targetKindLabel(row.target_kind) }}</el-tag>
+              <div class="cell-sub">目录：{{ row.dest_dir || '桌面' }}</div>
+              <div class="cell-sub">同名文件：{{ row.mode === 'skip_exist' ? '跳过' : '覆盖' }}</div>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="进度" min-width="220">
+            <template #default="{ row }">
+              <el-progress
+                :percentage="percent(row.done + row.failed, row.total)"
+                :status="row.failed > 0 ? 'exception' : row.status === 'done' ? 'success' : undefined"
+                :stroke-width="12"
+              />
+              <div class="cell-sub">
+                完成 {{ row.done }} · 失败 {{ row.failed }} · 待处理 {{ row.pending }}<template
+                  v-if="row.cancelled"
+                > · 已取消 {{ row.cancelled }}</template> / 共 {{ row.total }} 台
+              </div>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="状态" width="100">
+            <template #default="{ row }">
+              <el-tag :type="statusType(row.status)" effect="light">
+                {{ statusLabel(row.status) }}
+              </el-tag>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="创建时间" width="170">
+            <template #default="{ row }">
+              <span class="cell-sub">{{ formatTime(row.created_at) }}</span>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="操作" width="160" fixed="right">
+            <template #default="{ row }">
+              <el-button
+                v-if="row.failed > 0"
+                link
+                type="primary"
+                size="small"
+                :loading="retryTask.pending.value"
+                @click="retryTask.run(row)"
+              >
+                重试
+              </el-button>
+              <el-button
+                v-if="row.status !== 'done' && row.status !== 'cancelled'"
+                link
+                type="warning"
+                size="small"
+                :loading="cancelTask.pending.value"
+                @click="askCancel(row)"
+              >
+                取消
+              </el-button>
+              <el-button link type="danger" size="small" @click="askRemoveTask(row)">删除</el-button>
+            </template>
+          </el-table-column>
+        </template>
+
+        <template #empty>
+          <div>无下发任务</div>
+          <el-button
+            link
+            type="primary"
+            style="margin-top: 8px"
+            :disabled="!assets.total.value"
+            @click="openCreate()"
+          >
+            新建下发
+          </el-button>
+        </template>
+      </DataTable>
+    </SectionCard>
 
     <FormDialog
       v-model="createDialog"
-      title="新建下发任务"
+      title="新建下发"
       :submitting="createDeploy.pending.value"
-      confirm-text="创建"
+      confirm-text="下发"
       @submit="createDeploy.run(undefined)"
     >
-      <el-form label-width="90px">
-        <el-form-item label="下发文件">
-          <el-select v-model="form.assetId" placeholder="选择文件" style="width: 100%">
+      <el-form label-width="80px">
+        <el-form-item label="文件">
+          <el-select v-model="form.assetId" placeholder="选择文件" filterable style="width: 100%">
             <el-option
               v-for="asset in assets.rows.value"
               :key="asset.id"
@@ -1051,7 +1050,7 @@ function targetKindLabel(kind: string): string {
           </el-select>
         </el-form-item>
 
-        <el-form-item label="下发范围">
+        <el-form-item label="范围">
           <el-radio-group v-model="form.targetKind">
             <el-radio-button value="all">全员</el-radio-button>
             <el-radio-button value="group">按分组</el-radio-button>
@@ -1060,12 +1059,14 @@ function targetKindLabel(kind: string): string {
         </el-form-item>
 
         <el-form-item v-if="form.targetKind === 'group'" label="分组">
-          <el-select v-model="form.targetGroup" placeholder="选择分组" style="width: 100%">
+          <el-select
+            v-model="form.targetGroup"
+            :placeholder="groups.length ? '选择分组' : '无分组'"
+            :disabled="!groups.length"
+            style="width: 100%"
+          >
             <el-option v-for="group in groups" :key="group" :label="group" :value="group" />
           </el-select>
-          <div v-if="!groups.length" class="page-hint">
-            还没有任何选手设置了分组，请先在导入选手时填写 group_name。
-          </div>
         </el-form-item>
 
         <el-form-item v-if="form.targetKind === 'player'" label="选手">
@@ -1086,32 +1087,24 @@ function targetKindLabel(kind: string): string {
         </el-form-item>
 
         <el-form-item label="目标目录">
-          <el-input
-            v-model="form.destDir"
-            placeholder="留空 = 桌面根目录；{player_no}/题目名 = 该选手的题目目录"
-          />
-          <div class="page-hint">
-            <strong>实际落点预览：</strong>
-            <code>{{ destPreview }}</code>
-          </div>
+          <el-input v-model="form.destDir" placeholder="例如 {player_no}/A，留空为桌面" />
+          <div class="cell-sub">落点：<code class="mono">{{ destPreview }}</code></div>
         </el-form-item>
 
         <el-form-item label="同名文件">
           <el-radio-group v-model="form.mode">
             <el-radio value="overwrite">覆盖</el-radio>
-            <el-radio value="skip_exist">已存在则跳过</el-radio>
+            <el-radio value="skip_exist">跳过</el-radio>
           </el-radio-group>
-          <div class="page-hint">目标位置上已有同名文件时：覆盖会换掉它，跳过则留原来那份。</div>
         </el-form-item>
       </el-form>
     </FormDialog>
 
-    <!-- 「新建文本文件」「写考场公告」「编辑已有文件」共用这一个对话框。
-         编辑模式对**所有**资产开放：文件名都能改（原来的「改名」按钮已经并进来），
-         正文那一栏只有服务端说 editable 的才显示。 -->
+    <!-- 新建文本 / 写公告 / 编辑已有文件共用 -->
     <FormDialog
       v-model="textDialog"
       :title="textTitle"
+      width="640px"
       :submitting="createText.pending.value || saveText.pending.value"
       :disabled="textLoading || !textForm.filename.trim() || (textMode === 'edit' && !textDirty)"
       :confirm-text="textMode === 'edit' ? '保存' : '创建'"
@@ -1124,33 +1117,16 @@ function targetKindLabel(kind: string): string {
         show-icon
         style="margin-bottom: 14px"
       >
-        <template #title>改名只影响以后的派发</template>
-        <template #default>
-          还没下完的任务会按新名字落地；<strong>已经落到机器上的那份不会跟着变</strong>。
-          <template v-if="textEditable">
-            <br />
-            正文改了则不同：已下发完成的机器会被重新排队、再领一次新的那一份；
-            已经落到机器上的旧文件不会自己消失。
-          </template>
-        </template>
+        <template #title>已落到机器上的文件不随改名变化</template>
+        <template v-if="textEditable" #default>改正文后，已完成的机器将重新下发。</template>
       </el-alert>
 
-      <el-alert
-        v-if="textMode === 'edit' && !textEditable"
-        type="info"
-        :closable="false"
-        show-icon
-        style="margin-bottom: 14px"
-      >
-        <template #title>这个文件不能在线上改正文</template>
-      </el-alert>
-
-      <el-form label-width="90px">
+      <el-form v-loading="textLoading" label-width="80px">
         <el-form-item label="文件名" required>
           <el-input v-model="textForm.filename" placeholder="例如 须知.txt" maxlength="255" />
         </el-form-item>
 
-        <el-form-item label="用途">
+        <el-form-item label="类别">
           <el-select v-model="uploadKind" :disabled="textMode === 'edit'" style="width: 100%">
             <el-option v-for="kind in KIND_PRESETS" :key="kind" :label="kind" :value="kind" />
           </el-select>
@@ -1163,125 +1139,103 @@ function targetKindLabel(kind: string): string {
             type="textarea"
             :rows="14"
             maxlength="200000"
-            placeholder="可以留空 —— 留空就是一个空文件"
+            placeholder="例如 比赛结束后不要关机"
           />
+        </el-form-item>
+        <el-form-item v-else label="内容">
+          <span class="muted">仅可改名</span>
         </el-form-item>
       </el-form>
     </FormDialog>
 
-    <!-- zip 打密码 / 改密码 / 打包成 zip / 生成随机密码 -->
+    <!-- zip 加密码 / 改密码 / 打包成 zip -->
     <FormDialog
       v-model="zipDialog"
-      :title="zipPackMode ? '打包成 zip' : '给 zip 加密码'"
+      :title="zipPackMode ? '打包成 zip' : '设置 zip 密码'"
       :submitting="saveZipPassword.pending.value"
       :disabled="!zipCanSubmit"
       :confirm-text="zipPackMode ? '打包' : '重新打包'"
       @submit="saveZipPassword.run(undefined)"
     >
-      <el-alert
-        v-if="zipStatus"
-        :type="zipStatus.encrypted ? 'warning' : 'info'"
-        :closable="false"
-        show-icon
-        style="margin-bottom: 14px"
-      >
-        <template #title>
-          {{
-            zipPackMode
-              ? '这个文件还不是压缩包'
-              : zipStatus.encrypted
-                ? '这个包现在有密码'
-                : '这个包现在没有密码'
-          }}
-        </template>
-        <template #default>
+      <el-form label-width="80px">
+        <el-form-item label="文件">
+          <span class="mono">{{ zipTarget?.filename }}</span>
           <template v-if="zipPackMode">
-            提交后会把它打包成带密码的 zip，文件名改成
-            <code>{{ zipNewName }}</code>；包里那个成员仍叫
-            <code>{{ zipTarget?.filename }}</code>。
+            <el-icon class="arrow"><Right /></el-icon>
+            <span class="mono">{{ zipNewName }}</span>
           </template>
-          <template v-else-if="zipStatus.encrypted">
-            改密码要先填旧密码。旧密码就在之前那份 password.txt 里。
-          </template>
-          <template v-else>提交后会把它重新打包成带密码的 zip。</template>
-        </template>
-      </el-alert>
+        </el-form-item>
 
-      <el-alert type="warning" :closable="false" show-icon style="margin-bottom: 14px">
-        <template #title>这是弱加密：挡得住随手翻看，挡不住有心人</template>
-      </el-alert>
+        <el-form-item v-if="zipStatus && !zipPackMode" label="当前">
+          <el-tag v-if="zipStatus.encrypted" type="warning" effect="light">有密码</el-tag>
+          <el-tag v-else type="info" effect="plain">无密码</el-tag>
+        </el-form-item>
 
-      <el-form label-width="90px">
+        <el-form-item label="加密方式">
+          <span>ZipCrypto</span>
+          <el-tag type="warning" effect="plain" class="name-tag">弱加密</el-tag>
+        </el-form-item>
+
         <el-form-item v-if="zipStatus?.encrypted" label="旧密码">
           <el-input
             v-model="zipForm.oldPassword"
             type="password"
             show-password
-            placeholder="之前那份 password.txt 里写着的那个"
+            placeholder="见旧的 password.txt"
           />
         </el-form-item>
 
         <el-form-item label="新密码">
-          <el-input
-            v-model="zipForm.password"
-            :disabled="zipForm.generate"
-            :placeholder="zipForm.generate ? '提交时由服务端生成' : '自己填一个，或让服务端生成'"
-          />
-          <el-button size="small" style="margin-top: 8px" @click="toggleGeneratePassword">
-            {{ zipForm.generate ? '改为自己填' : '生成随机密码' }}
-          </el-button>
-          <div v-if="zipForm.generate" class="page-hint">提交后才显示，请随手抄下来。</div>
+          <div class="password-row">
+            <el-input
+              v-model="zipForm.password"
+              :disabled="zipForm.generate"
+              :placeholder="zipForm.generate ? '提交后生成' : '例如 noip2026'"
+            />
+            <el-button @click="toggleGeneratePassword">
+              {{ zipForm.generate ? '手动填写' : '生成随机密码' }}
+            </el-button>
+          </div>
         </el-form-item>
       </el-form>
 
-      <p class="page-hint" style="margin: 0">
-        提交后会同时生成（或更新）一份 <code>password.txt</code>，里面写清是哪个包的密码。
-        它<strong>不会自动发下去</strong> —— 请再到「可下发文件」里把它下发一次。
-      </p>
+      <div class="cell-sub">
+        将同时更新 <code class="mono">password.txt</code>，需另行下发；已完成的机器将重新下发此包。
+      </div>
     </FormDialog>
   </PageShell>
 </template>
 
 <style scoped>
-.section-title {
-  font-size: 15px;
-  margin: 22px 0 10px;
-}
-
-.list-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.list-head .section-title {
-  margin-bottom: 10px;
-}
-
 .field-label {
   font-size: 13px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 
-.muted {
-  font-size: 12px;
-  font-weight: 400;
-  color: #909399;
+.name-tag {
+  margin-left: 6px;
 }
 
 .expand-body {
-  padding: 8px 0 4px 42px;
+  padding: 8px 20px 12px 48px;
 }
 
-.error-text {
-  color: #f56c6c;
+.cell-error {
   font-size: 12px;
 }
 
-/* 正文往往是写给选手照着抄的（一行命令、一个路径），等宽字体比默认字体好抄 */
+.arrow {
+  margin: 0 6px;
+  color: var(--sj-text-3);
+}
+
+.password-row {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+}
+
 .text-content :deep(textarea) {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+  font-family: var(--sj-mono);
 }
 </style>

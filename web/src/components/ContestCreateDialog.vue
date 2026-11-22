@@ -106,7 +106,7 @@ const createContest = useMutation(
   (payload: ContestCreate) => contestApi.create(payload),
   {
     // 服务端的回执只有实体本身，这里自己说一句更清楚是哪一个
-    success: (contest) => `场次「${contest.name}」已创建`,
+    success: (contest) => `已创建场次「${contest.name}」`,
     onDone: (contest) => {
       visible.value = false
       emit('created', contest)
@@ -150,17 +150,17 @@ async function submit(): Promise<void> {
       <el-form-item label="标识">
         <el-input
           v-model="form.slug"
-          placeholder="留空则从名称自动生成"
+          placeholder="例如 mock-2025，留空自动生成"
           @input="slugTouched = true"
         />
       </el-form-item>
 
       <el-form-item label="状态">
         <el-select v-model="form.status" style="width: 100%">
-          <el-option label="进行中（正常收卷与下发）" value="running" />
-          <el-option label="筹备中（先建好，暂不使用）" value="draft" />
-          <el-option label="已封榜（停止下发，仍收卷）" value="frozen" />
-          <el-option label="已结束（不再自动扫成绩）" value="closed" />
+          <el-option label="进行中" value="running" />
+          <el-option label="筹备中" value="draft" />
+          <el-option label="已封榜 · 停止下发" value="frozen" />
+          <el-option label="已结束 · 停止扫描成绩" value="closed" />
         </el-select>
       </el-form-item>
 
@@ -168,7 +168,7 @@ async function submit(): Promise<void> {
         <el-date-picker
           v-model="form.startsAt"
           type="datetime"
-          placeholder="留空 = 不限制"
+          placeholder="不限"
           clearable
           style="width: 100%"
         />
@@ -178,19 +178,16 @@ async function submit(): Promise<void> {
         <el-date-picker
           v-model="form.endsAt"
           type="datetime"
-          placeholder="留空 = 不限制"
+          placeholder="不限"
           clearable
           style="width: 100%"
         />
-        <div class="cell-sub">
-          <strong>留空 = 不限制</strong>，只填一个也合法。
-        </div>
       </el-form-item>
 
       <el-form-item label="默认名单">
         <el-select
           v-model="form.defaultRosterId"
-          placeholder="可选：留空则之后手动导入选手"
+          placeholder="不指定"
           clearable
           style="width: 100%"
         >
@@ -207,9 +204,5 @@ async function submit(): Promise<void> {
         <el-input v-model="form.note" type="textarea" :rows="2" maxlength="500" />
       </el-form-item>
     </el-form>
-
-    <el-alert type="info" :closable="false" show-icon>
-      <template #title>建好还有两步</template>
-    </el-alert>
   </FormDialog>
 </template>

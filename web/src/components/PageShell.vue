@@ -46,7 +46,7 @@ const emit = defineEmits<{ retry: [] }>()
       :closable="false"
       show-icon
       :title="error"
-      style="margin-bottom: 12px"
+      class="page-error"
     >
       <template v-if="errorAction || retryable" #default>
         <div class="error-actions">
@@ -71,6 +71,10 @@ const emit = defineEmits<{ retry: [] }>()
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+.page-error {
+  margin-bottom: 16px;
 }
 
 .error-actions {

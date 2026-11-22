@@ -89,7 +89,7 @@ async function onPick(event: Event): Promise<void> {
 async function removeTestdata(): Promise<void> {
   if (!current.value?.testdata) return
   try {
-    await ElMessageBox.confirm(`删除 ${current.value.testdata.name}？`, '删除数据包', {
+    await ElMessageBox.confirm(`将删除 ${current.value.testdata.name}，不可恢复。`, '删除数据包？', {
       type: 'warning',
       confirmButtonText: '删除',
       cancelButtonText: '取消',
@@ -117,7 +117,7 @@ function formatSize(bytes: number): string {
     width="560px"
     :close-on-click-modal="false"
   >
-    <el-form label-width="96px" size="small">
+    <el-form label-width="96px">
       <el-form-item label="评测方式">
         <el-radio-group v-model="form.judge_mode">
           <el-radio-button value="external">外部评测器</el-radio-button>
@@ -125,11 +125,11 @@ function formatSize(bytes: number): string {
         </el-radio-group>
       </el-form-item>
       <template v-if="form.judge_mode === 'builtin'">
-        <el-form-item label="时限 (ms)">
-          <el-input-number v-model="form.time_limit_ms" :min="100" :max="60000" :step="100" placeholder="1000" />
+        <el-form-item label="时限（ms）">
+          <el-input-number v-model="form.time_limit_ms" :min="100" :max="60000" :step="100" placeholder="例如 1000" />
         </el-form-item>
-        <el-form-item label="内存 (MB)">
-          <el-input-number v-model="form.memory_limit_mb" :min="16" :max="4096" :step="16" placeholder="256" />
+        <el-form-item label="内存（MB）">
+          <el-input-number v-model="form.memory_limit_mb" :min="16" :max="4096" :step="16" placeholder="例如 256" />
         </el-form-item>
         <el-form-item label="输入输出">
           <el-radio-group v-model="form.io_mode">
@@ -138,14 +138,14 @@ function formatSize(bytes: number): string {
           </el-radio-group>
         </el-form-item>
         <el-form-item label="编译参数">
-          <el-input v-model="form.compile_flags" placeholder="-std=c++14 -O2" clearable />
+          <el-input v-model="form.compile_flags" placeholder="例如 -std=c++14 -O2" clearable />
         </el-form-item>
         <el-form-item label="数据包">
           <div class="testdata">
             <template v-if="current?.testdata">
               <span class="mono">{{ current.testdata.name }}</span>
-              <span class="muted">
-                {{ formatSize(current.testdata.size) }} · {{ current.testdata.cases }} 点
+              <span class="cell-sub">
+                {{ formatSize(current.testdata.size) }} · {{ current.testdata.cases }} 个测试点
                 <template v-if="current.testdata.subtasks"> · {{ current.testdata.subtasks }} 个子任务</template>
                 <template v-if="current.testdata.has_checker"> · checker</template>
                 · 满分 {{ current.testdata.total_score }}
@@ -153,8 +153,10 @@ function formatSize(bytes: number): string {
             </template>
             <span v-else class="muted">无</span>
             <div>
-              <el-button size="small" :loading="uploading" @click="fileInput?.click()">上传 zip</el-button>
-              <el-button v-if="current?.testdata" size="small" type="danger" plain @click="removeTestdata">
+              <el-button :loading="uploading" @click="fileInput?.click()">
+                <el-icon><Upload /></el-icon>上传 zip
+              </el-button>
+              <el-button v-if="current?.testdata" type="danger" plain @click="removeTestdata">
                 删除
               </el-button>
             </div>
@@ -176,10 +178,7 @@ function formatSize(bytes: number): string {
   flex-direction: column;
   gap: 6px;
 }
-.mono {
-  font-family: var(--el-font-family-mono, monospace);
-}
-.muted {
-  color: var(--el-text-color-secondary);
+.testdata .mono {
+  color: var(--sj-text);
 }
 </style>

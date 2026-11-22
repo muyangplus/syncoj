@@ -267,7 +267,7 @@ onMounted(async () => {
   height: 32px;
   flex-shrink: 0;
   border-radius: 9px;
-  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  background: var(--sj-brand-gradient);
   color: #fff;
   font-weight: 700;
   font-size: 16px;

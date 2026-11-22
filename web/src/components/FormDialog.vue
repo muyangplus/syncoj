@@ -36,16 +36,37 @@ const emit = defineEmits<{
     <slot />
 
     <template #footer>
-      <slot name="footer-prepend" />
-      <el-button @click="emit('update:modelValue', false)">取消</el-button>
-      <el-button
-        type="primary"
-        :loading="submitting"
-        :disabled="disabled"
-        @click="emit('submit')"
-      >
-        {{ confirmText ?? '保存' }}
-      </el-button>
+      <div class="form-dialog-footer">
+        <div class="footer-start"><slot name="footer-prepend" /></div>
+        <el-button @click="emit('update:modelValue', false)">取消</el-button>
+        <el-button
+          type="primary"
+          :loading="submitting"
+          :disabled="disabled"
+          @click="emit('submit')"
+        >
+          {{ confirmText ?? '保存' }}
+        </el-button>
+      </div>
     </template>
   </el-dialog>
 </template>
+
+<style scoped>
+.form-dialog-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.footer-start {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.form-dialog-footer .el-button + .el-button {
+  margin-left: 0;
+}
+</style>

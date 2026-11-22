@@ -11,7 +11,7 @@ import { formatBytes, formatTime } from '@/utils/format'
  * 一台机器**最新一份**诊断包（Agent 定期 / 出错 / 被点名时回传的现场）。
  *
  * 每台机器只留最新一份：服务端覆盖写，所以这里没有"历史"这个概念。
- * 读了没有就点「要一份」—— 服务端点一个一次性标记，机器下一次心跳回传。
+ * 读了没有就点「索取诊断包」—— 服务端点一个一次性标记，机器下一次心跳回传。
  *
  * 抽成组件是因为**两个列表都要它**：待配对的机器（`MachinesView`）与场次里的
  * 机器（`OverviewView`）。同一段对话框抄两遍，改动必然只改一处。
@@ -35,9 +35,9 @@ const bundle = ref<DiagnosticsOut | null>(null)
 /** `reason` 显示成人话；不认识的取值原样显示（服务端只存 Agent 自报的原因）。 */
 function reasonText(reason: string | null | undefined): string {
   if (reason === 'periodic') return '定期'
-  if (reason === 'error') return '出错后补的'
-  if (reason === 'manual') return '手动要的'
-  return reason || '未说明'
+  if (reason === 'error') return '出错'
+  if (reason === 'manual') return '手动'
+  return reason || '—'
 }
 
 async function load(): Promise<void> {
@@ -99,22 +99,21 @@ const request = useMutation(
 
       <template v-if="bundle">
         <p class="cell-sub" style="margin-top: 0">
-          收到时间 {{ formatTime(bundle.received_at) }} · 原因
-          {{ reasonText(bundle.reason) }} · 大小 {{ formatBytes(bundle.bytes) }}
+          收到 {{ formatTime(bundle.received_at) }} · 触发 {{ reasonText(bundle.reason) }} ·
+          {{ formatBytes(bundle.bytes) }}
         </p>
         <pre class="diag-json mono">{{ JSON.stringify(bundle.content, null, 2) }}</pre>
       </template>
-      <template v-else-if="!error">
-        <p style="margin: 0">还没有收到诊断包</p>
-        <p class="cell-sub">点「要一份」，机器下一次心跳会回传。</p>
-      </template>
+      <el-empty v-else-if="!error" description="无诊断包" :image-size="64" />
     </div>
 
     <template #footer>
       <el-button @click="emit('update:modelValue', false)">关闭</el-button>
-      <el-button v-if="bundle" :loading="loading" @click="load">刷新</el-button>
+      <el-button v-if="bundle" :loading="loading" @click="load">
+        <el-icon><Refresh /></el-icon>刷新
+      </el-button>
       <el-button type="primary" :loading="request.pending.value" @click="request.run(undefined)">
-        要一份
+        <el-icon><Download /></el-icon>索取诊断包
       </el-button>
     </template>
   </el-dialog>
@@ -126,9 +125,10 @@ const request = useMutation(
   padding: 12px;
   max-height: 420px;
   overflow: auto;
-  background: #f5f7fa;
-  border: 1px solid #e4e7ed;
-  border-radius: 4px;
+  color: var(--sj-text);
+  background: var(--sj-surface-2);
+  border: 1px solid var(--sj-border);
+  border-radius: var(--sj-radius-sm);
   font-size: 12px;
   line-height: 1.5;
   white-space: pre-wrap;

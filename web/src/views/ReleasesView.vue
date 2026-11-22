@@ -9,6 +9,8 @@ import type {
   ReleaseSourceOut,
   UpgradeStatusOut,
 } from '@/api/types'
+import PageShell from '@/components/PageShell.vue'
+import SectionCard from '@/components/SectionCard.vue'
 import { useMutation } from '@/composables/useMutation'
 import { usePolling } from '@/composables/usePolling'
 import { formatBytes, formatTime } from '@/utils/format'
@@ -180,7 +182,7 @@ async function copyText(value: string | undefined, what: string): Promise<void> 
     ElMessage.success(`已复制${what}`)
   } catch {
     // 非 HTTPS 或浏览器策略下剪贴板不可用，提示手工复制而不是静默失败
-    ElMessage.warning('浏览器不允许自动复制，请手工选中复制')
+    ElMessage.warning('复制失败，请手动复制')
   }
 }
 
@@ -248,8 +250,8 @@ const build = useMutation(
   {
     success: (release) =>
       release.bootstrap_key_id
-        ? `已构建并签发 ${release.version}，包内附带统一注册密钥 ${release.bootstrap_key_label}（未铺开，Agent 还看不到）`
-        : `已构建并签发 ${release.version}（未铺开，Agent 还看不到）`,
+        ? `已签发 ${release.version}（附带密钥 ${release.bootstrap_key_label}，未铺开）`
+        : `已签发 ${release.version}（未铺开）`,
     onDone: async (release) => {
       buildNotes.value = ''
       resetPolicies()
@@ -259,8 +261,8 @@ const build = useMutation(
       if (release.bootstrap_key_id) {
         ElMessage.warning({
           message:
-            `这个包附带了一把统一注册密钥（${release.bootstrap_key_label}）—— 它等于一张「能注册进这台服务端」的通行证，` +
-            '公开装机入口不发它，只能在这里下载做成离线包；离线包拷出去就收不回来，发完就吊销这一把。',
+            `${release.version} 附带统一注册密钥 ${release.bootstrap_key_label}：` +
+            '持有安装包者均可注册机器，直到吊销该密钥。',
           duration: 10000,
           showClose: true,
         })
@@ -274,7 +276,7 @@ const upload = useMutation(
   {
     // 回执用服务端算出来的版本号：服务端在覆盖同名版本时会走另一条分支，
     // 界面自己拼一句"已上传 xxx"会把这件事盖掉
-    success: (release) => `已上传版本 ${release.version}（尚未铺开，Agent 还看不到）`,
+    success: (release) => `已上传 ${release.version}（未铺开）`,
     onDone: async () => {
       version.value = ''
       notes.value = ''
@@ -291,7 +293,7 @@ function handleFileChange(event: Event): void {
   if (!file) return
   // 版本号是签名之外的另一个判据，空着传上去之后只剩 sha256 可认，先拦住
   if (!version.value.trim()) {
-    ElMessage.warning('请先填写版本号，再选择安装包')
+    ElMessage.warning('请填写版本号')
     return
   }
   void upload.run(file)
@@ -300,12 +302,12 @@ function handleFileChange(event: Event): void {
 // 两个动作都返回更新后的 ReleaseOut，所以回执里带上服务端算出来的版本号 ——
 // 那是"这一下动的是哪个版本"的唯一权威答案
 const rolloutMutation = useMutation((release: ReleaseOut) => releaseApi.rollout(release.id), {
-  success: (result: ReleaseOut) => `已开始铺开 ${result.version}，Agent 下一轮检查就会拿到它`,
+  success: (result: ReleaseOut) => `已铺开 ${result.version}`,
   onDone: () => refresh(),
 })
 
 const yankMutation = useMutation((release: ReleaseOut) => releaseApi.yank(release.id), {
-  success: (result: ReleaseOut) => `已撤回 ${result.version}，Agent 不会再被提供它`,
+  success: (result: ReleaseOut) => `已撤回 ${result.version}`,
   onDone: () => refresh(),
 })
 
@@ -320,14 +322,10 @@ async function rollout(release: ReleaseOut): Promise<void> {
   const previous = activeRelease.value
   try {
     await ElMessageBox.confirm(
-      `开始向所有考试机提供版本 ${release.version}？\n\n` +
-        '铺开之后 Agent 就会去拉它 —— 但真正做什么取决于每台机器的 upgrade.mode：' +
-        'off（默认）只记录「有新版本」、stage 下载并验签但不激活、apply 才会切换并重启。\n\n' +
-        (previous
-          ? `同一时刻只能有一个版本在铺开，所以 ${previous.version} 会被自动下架。`
-          : '当前没有别的版本在铺开。'),
-      '铺开版本',
-      { type: 'warning', confirmButtonText: '开始铺开', cancelButtonText: '取消' },
+      `将向全部机器提供 ${release.version}` +
+        (previous ? `；${previous.version} 将被撤回。` : '。'),
+      '铺开版本？',
+      { type: 'warning', confirmButtonText: '铺开', cancelButtonText: '取消' },
     )
   } catch {
     return
@@ -339,10 +337,8 @@ async function rollout(release: ReleaseOut): Promise<void> {
 async function yank(release: ReleaseOut): Promise<void> {
   try {
     await ElMessageBox.confirm(
-      `撤回版本 ${release.version}？\n\n` +
-        '撤回之后 Agent 不会再被提供这个版本（包括还在排队下载的）。\n' +
-        '但它**不能把已经升级上去的机器降回去** —— 那要靠客户端侧的回滚（升级后连续启动失败会退回上一版本）。',
-      '撤回版本',
+      `${release.version} 将不再提供给 Agent（含排队下载中的）；已升级的机器不会降级。`,
+      '撤回版本？',
       { type: 'warning', confirmButtonText: '撤回', cancelButtonText: '取消' },
     )
   } catch {
@@ -363,9 +359,8 @@ async function yank(release: ReleaseOut): Promise<void> {
 async function removeRelease(release: ReleaseOut): Promise<void> {
   try {
     await ElMessageBox.confirm(
-      `删除版本 ${release.version} 的发布记录？\n\n` +
-        '包文件不会动，但删掉之后「当时推的是哪个包」就没有对照物了。',
-      '删除发布记录',
+      `将删除 ${release.version} 的发布记录，不可恢复；已安装的 Agent 不受影响。`,
+      '删除发布记录？',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
     )
   } catch {
@@ -392,7 +387,7 @@ const revokeKeyMutation = useMutation(
   (keyId: number) => bootstrapKeyApi.revoke(keyId),
   {
     success: (key: BootstrapKeyOut) =>
-      `已吊销统一注册密钥 ${key.label || `#${key.id}`} —— 它不能再注册新机器，已注册的机器不受影响`,
+      `已吊销 ${key.label || `#${key.id}`}`,
     onDone: () => refresh(),
   },
 )
@@ -401,12 +396,9 @@ async function revokeKey(release: ReleaseOut): Promise<void> {
   if (!release.bootstrap_key_id) return
   try {
     await ElMessageBox.confirm(
-      `吊销版本 ${release.version} 附带的统一注册密钥（${release.bootstrap_key_label ?? `#${release.bootstrap_key_id}`}）？\n\n` +
-        '吊销之后**再用这个包装机就注册不上了** —— 这通常正是想要的效果：' +
-        '离线包拷出去就收不回来，发完就该把这一把收掉。\n' +
-        '已经用别的办法注册好的机器不受影响（它们手里是各自的凭据，不是这把密钥）。\n' +
-        '版本记录会留着，随时能回看"当年发的是哪个包、带的是哪把钥匙"。',
-      '吊销统一注册密钥',
+      `将吊销 ${release.version} 附带的密钥 ${release.bootstrap_key_label ?? `#${release.bootstrap_key_id}`}，不可恢复；` +
+        '用该安装包装机将无法注册，已注册的机器不受影响。',
+      '吊销统一注册密钥？',
       { type: 'warning', confirmButtonText: '吊销', cancelButtonText: '取消' },
     )
   } catch {
@@ -439,7 +431,7 @@ function openEdit(release: ReleaseOut): void {
 const editSave = useMutation(
   () => releaseApi.update(editForm.id, { notes: editForm.notes.trim() || null }),
   {
-    success: (result: ReleaseOut) => `已保存 ${result.version} 的备注`,
+    success: () => '已保存',
     onDone: async () => {
       editVisible.value = false
       await refresh()
@@ -449,132 +441,101 @@ const editSave = useMutation(
 </script>
 
 <template>
-  <div>
-    <div class="page-header">
-      <div>
-        <h2 class="page-title">Agent 发布</h2>
-      </div>
-      <div class="toolbar">
-        <el-button size="small" :loading="loading" @click="refresh">刷新</el-button>
-      </div>
-    </div>
+  <PageShell title="Agent 发布" :error="error" retryable @retry="refresh">
+    <template #toolbar>
+      <el-button :loading="loading" @click="refresh">
+        <el-icon><Refresh /></el-icon>刷新
+      </el-button>
+    </template>
 
-    <el-alert
-      v-if="error"
-      type="error"
-      :closable="false"
-      show-icon
-      :title="error"
-      style="margin-bottom: 12px"
-    >
-      <template #default>
-        <div class="error-actions">
-          <el-button size="small" type="primary" plain @click="refresh">重试</el-button>
-        </div>
-      </template>
-    </el-alert>
-
-    <!--
-      服务端没有配置发布签名私钥。
-      这不是"这一页没配好"，而是整台服务端的能力缺失：签不出包，而没有签名的包
-      Agent 一律拒绝，于是**任何一台机器都不可能被升级**。所以它用一个显眼的
-      卡片而不是普通提示条，并把"在哪里配"一并写出来。
-    -->
-    <el-card
-      v-if="signingKnown && !signingReady"
-      shadow="never"
-      class="section blocked-card"
-    >
-      <template #header>
-        <span class="blocked-title">服务端没有配置发布签名私钥 —— 自更新功能整体关闭</span>
-      </template>
-
-      <el-descriptions :column="1" size="small" border style="margin-top: 12px">
-        <el-descriptions-item label="第一步：生成密钥对">
-          <span class="mono">
-            python -m syncoj_server.cli genkey --out /etc/syncoj/release-key.pem
-          </span>
+    <SectionCard v-if="signingKnown && !signingReady" title="发布签名私钥">
+      <el-alert
+        type="error"
+        :closable="false"
+        show-icon
+        title="未配置发布签名私钥：无法签发与铺开版本"
+        style="margin-bottom: 12px"
+      />
+      <el-descriptions :column="1" border>
+        <el-descriptions-item label="生成密钥对">
+          <span class="mono">python -m syncoj_server.cli genkey --out /etc/syncoj/release-key.pem</span>
         </el-descriptions-item>
-        <el-descriptions-item label="第二步：服务端指向私钥">
-          <span class="mono">SYNCOJ_RELEASE_KEY=/etc/syncoj/release-key.pem</span>
-          ，然后重启服务端
+        <el-descriptions-item label="服务端环境变量">
+          <span class="mono">SYNCOJ_RELEASE_KEY=/etc/syncoj/release-key.pem</span>（重启服务端）
         </el-descriptions-item>
-        <el-descriptions-item label="第三步：分发公钥">
-          把公钥放到每台考试机的
-          <span class="mono">/etc/syncoj/release-key.pub.json</span>
-          ，并在 agent.ini 的 <span class="mono">[upgrade]</span> 段写
-          <span class="mono">public_key =</span> 指向它
+        <el-descriptions-item label="机器公钥">
+          <span class="mono">/etc/syncoj/release-key.pub.json</span> ·
+          agent.ini <span class="mono">[upgrade] public_key</span>
         </el-descriptions-item>
-        <el-descriptions-item v-if="status?.error" label="当前错误">
+        <el-descriptions-item v-if="status?.error" label="错误">
           <span class="mono">{{ status.error }}</span>
         </el-descriptions-item>
       </el-descriptions>
-    </el-card>
+    </SectionCard>
 
-    <!--
-      「发布当前版本」：服务端本机仓库里就有 agent/ 源码时，不必先手工打包再上传。
-      放在「上传新版本」前面是因为它是**正常路径**；上传那条留给"服务端没有源码
-      的部署"（生产上服务端常常只是一个 pip 装出来的实例）。
-    -->
-    <el-card v-if="signingReady && buildable" shadow="never" class="section">
-      <template #header><span>发布当前版本</span></template>
+    <SectionCard v-if="activeRelease || (signingReady && !loading)" title="当前铺开版本">
+      <template v-if="activeRelease" #extra>
+        <el-button
+          type="danger"
+          plain
+          :loading="yankMutation.pending.value"
+          @click="yank(activeRelease)"
+        >
+          撤回
+        </el-button>
+      </template>
+      <template v-if="activeRelease">
+        <div class="active-box">
+          <div class="active-version mono">{{ activeRelease.version }}</div>
+          <div class="cell-sub">
+            {{ formatBytes(activeRelease.size) }} · 发布于 {{ formatTime(activeRelease.published_at) }}
+          </div>
+        </div>
+        <div v-if="installCommand" class="install-row">
+          <span class="install-label">安装命令</span>
+          <code class="install-command">{{ installCommand }}</code>
+          <el-button @click="copyText(installCommand, '安装命令')">
+            <el-icon><CopyDocument /></el-icon>复制
+          </el-button>
+        </div>
+        <p v-else class="warn-hint">未配置对外地址（SYNCOJ_PUBLIC_URL），无安装命令</p>
+      </template>
+      <el-empty v-else description="无铺开版本" :image-size="64" />
+    </SectionCard>
 
+    <SectionCard v-if="signingReady && buildable" title="发布当前版本" :meta="source?.version ? `源码版本 ${source.version}` : ''">
       <div class="upload-row">
-        <el-input v-model="buildVersion" placeholder="版本号" style="width: 160px" />
-        <el-input v-model="buildNotes" placeholder="发布说明（可选）" style="flex: 1" />
+        <el-input v-model="buildVersion" placeholder="例如 0.1.1" style="width: 160px" />
+        <el-input v-model="buildNotes" placeholder="发布说明（可选）" style="flex: 1; min-width: 200px" />
         <el-button
           type="primary"
           :loading="build.pending.value"
           :disabled="!canBuild"
           @click="build.run(undefined)"
         >
-          构建并签发
+          <el-icon><Stamp /></el-icon>构建并签发
         </el-button>
       </div>
 
-      <p v-if="versionDrifts" class="cell-sub warn-hint">
-        版本号和源码里写的不一致，服务端会拒绝
-      </p>
-      <p v-else-if="versionExists" class="cell-sub warn-hint">
-        历史里已有这个版本号
-      </p>
-      <p v-if="trustAnchorMissing" class="cell-sub warn-hint">
-        本机缺发布公钥，构建会被拒
-      </p>
+      <p v-if="versionDrifts" class="warn-hint">版本号与源码不一致，服务端将拒绝</p>
+      <p v-else-if="versionExists" class="warn-hint">版本号已存在</p>
+      <p v-if="trustAnchorMissing" class="warn-hint">缺发布公钥，无法构建</p>
 
-      <!--
-        「附带统一注册密钥」。
-        文案是**说得清的后果**，不是"建议"式的软话：这个包一旦流出，等于一张
-        "能注册进这台服务端"的通行证。装机入口不鉴权，所以它拒发这种包；这种包只经
-        管理端下载、做成离线包，而离线包拷出去就收不回来。
-      -->
       <div class="key-option">
-        <el-checkbox v-model="includeBootstrapKey" :disabled="!canBuild">
-          附带统一注册密钥
-        </el-checkbox>
+        <el-checkbox v-model="includeBootstrapKey" :disabled="!canBuild">附带统一注册密钥</el-checkbox>
+        <span v-if="includeBootstrapKey" class="danger-hint">
+          持有安装包者均可注册机器，直到吊销该密钥。
+        </span>
       </div>
 
-      <!--
-        高级选项：三条随包带下去的策略。收进折叠区是因为它们都有默认值，多数发版
-        不需要动 —— 而摊在卡片上会让"构建并签发"这颗按钮被一堆选项挤到看不见。
-      -->
       <el-collapse v-model="advancedActive" class="advanced">
-        <el-collapse-item name="policy">
-          <template #title>高级选项（安装策略）</template>
-
-          <!--
-            覆盖机器上已有的注册密钥。只在勾了"附带"时出现：包里没有那把钥匙时
-            这个选择无从谈起。默认 replace —— 包内那把是权威（真机事故的修复）。
-          -->
+        <el-collapse-item name="policy" title="安装策略">
           <div v-if="includeBootstrapKey" class="policy-row">
-            <span class="policy-label">覆盖机器上已有的注册密钥</span>
+            <span class="policy-label">机器上已有的注册密钥</span>
             <el-radio-group v-model="bootstrapKeyPolicy" :disabled="!canBuild">
-              <el-radio value="replace">覆盖</el-radio>
-              <el-radio value="keep">保留机器上那把</el-radio>
+              <el-radio value="replace">覆盖（原密钥备份）</el-radio>
+              <el-radio value="keep">保留</el-radio>
             </el-radio-group>
-            <div class="cell-sub policy-note">
-              覆盖会替换那台机器上的统一注册密钥；安装器会先把旧那把备份下来，备份路径写在装机回执里。
-            </div>
           </div>
 
           <div class="policy-row">
@@ -584,21 +545,15 @@ const editSave = useMutation(
                 {{ item.label }}
               </el-radio>
             </el-radio-group>
-            <div class="cell-sub policy-note">
-              机器下载完这个版本之后怎么处理它。
-            </div>
           </div>
 
-          <!--
-            逐键更新 agent.ini。默认全部"不改"：升级包不该顺手改掉考场机器的配置。
-          -->
           <div class="policy-row">
-            <span class="policy-label">更新机器上的 agent.ini</span>
+            <span class="policy-label">agent.ini 逐键更新</span>
             <div v-for="group in configPolicyGroups" :key="group.section" class="policy-group">
-              <div class="policy-section mono">{{ group.section }}</div>
+              <div class="policy-section mono">[{{ group.section }}]</div>
               <div v-for="item in group.keys" :key="item.key" class="policy-key">
                 <span class="mono policy-key-name">{{ item.name }}</span>
-                <el-radio-group v-model="configPolicy[item.key]" :disabled="!canBuild" size="small">
+                <el-radio-group v-model="configPolicy[item.key]" :disabled="!canBuild">
                   <el-radio-button
                     v-for="choice in CONFIG_POLICY_CHOICES"
                     :key="choice.value"
@@ -607,85 +562,41 @@ const editSave = useMutation(
                     {{ choice.label }}
                   </el-radio-button>
                 </el-radio-group>
-                <el-tooltip
-                  v-if="MACHINE_FACT_KEYS.includes(item.key)"
-                  content="这是那台机器自己的事实。要改它请重装那台机器，不要随发版带过去。"
-                >
-                  <span class="cell-sub">建议不改</span>
-                </el-tooltip>
+                <el-tag v-if="MACHINE_FACT_KEYS.includes(item.key)" type="warning" effect="plain">
+                  机器自有
+                </el-tag>
               </div>
             </div>
           </div>
         </el-collapse-item>
       </el-collapse>
-    </el-card>
+    </SectionCard>
 
-    <el-card v-else-if="signingReady && source && !source.available" shadow="never" class="section">
-      <template #header><span>发布当前版本</span></template>
-      <p class="cell-sub" style="margin: 0">
-        {{ source.reason }}
-      </p>
-    </el-card>
+    <SectionCard v-else-if="signingReady && source && !source.available" title="发布当前版本">
+      <span class="muted">{{ source.reason }}</span>
+    </SectionCard>
 
-    <el-card v-if="signingReady" shadow="never" class="section">
-      <template #header><span>上传新版本</span></template>
+    <SectionCard
+      v-if="signingReady"
+      title="上传新版本"
+      :meta="status?.key_id ? `签名密钥 ${status.key_id}` : ''"
+    >
       <div class="upload-row">
-        <el-input v-model="version" placeholder="版本号，例如 0.1.1" style="width: 160px" />
-        <el-input v-model="notes" placeholder="发布说明（可选）" style="flex: 1" />
+        <el-input v-model="version" placeholder="例如 0.1.1" style="width: 160px" />
+        <el-input v-model="notes" placeholder="发布说明（可选）" style="flex: 1; min-width: 200px" />
         <input ref="fileInput" type="file" style="display: none" @change="handleFileChange" />
         <el-button :loading="upload.pending.value" @click="pickFile">
-          选择安装包并上传
+          <el-icon><Upload /></el-icon>选择安装包并上传
         </el-button>
       </div>
-      <p v-if="status?.key_id" class="cell-sub">
-        当前用于签名的密钥：<span class="mono">{{ status.key_id }}</span>
-      </p>
-    </el-card>
+    </SectionCard>
 
-    <el-card v-if="activeRelease" shadow="never" class="section">
-      <template #header><span>当前铺开版本</span></template>
-      <div class="active-box">
-        <div>
-          <div class="active-version">{{ activeRelease.version }}</div>
-          <div class="cell-sub">
-            {{ formatBytes(activeRelease.size) }} ·
-            发布于 {{ formatTime(activeRelease.published_at) }}
-          </div>
-        </div>
-        <el-button
-          type="danger"
-          plain
-          size="small"
-          :loading="yankMutation.pending.value"
-          @click="yank(activeRelease)"
-        >
-          撤回
-        </el-button>
-      </div>
-      <!--
-        给空机器的安装命令。**只发已铺开的版本**（与升级同一个判据），所以它必须
-        出现在这块"当前铺开版本"卡片里 —— 没铺开就没有可安装的东西。
-        服务端报不出自己地址时这条不显示，原因见 installCommand 的注释。
-      -->
-      <template v-if="installCommand">
-        <div class="install-row">
-          <div class="install-label">在新机器上装 Agent：</div>
-          <code class="install-command">{{ installCommand }}</code>
-          <el-button size="small" @click="copyText(installCommand, '安装命令')">复制</el-button>
-        </div>
-      </template>
-      <p v-else class="cell-sub warn-hint">
-        报不出对外地址，给不出安装命令 —— 先配 SYNCOJ_PUBLIC_URL。
-      </p>
-    </el-card>
-
-    <el-card v-else-if="signingReady && !loading" shadow="never" class="section">
-      <template #header><span>当前没有铺开任何版本</span></template>
-    </el-card>
-
-    <el-card shadow="never">
-      <template #header><span>版本历史（{{ releases.length }}）</span></template>
-      <el-table :data="releases" v-loading="loading" size="small" border>
+    <SectionCard
+      title="版本历史"
+      :meta="`${releases.length} 个 · 铺开中 ${rolledOutCount} · 已撤回 ${yankedCount}`"
+      flush
+    >
+      <el-table v-loading="loading" :data="releases">
         <el-table-column label="版本" prop="version" width="120">
           <template #default="{ row }">
             <span class="mono">{{ row.version }}</span>
@@ -694,9 +605,7 @@ const editSave = useMutation(
 
         <el-table-column label="状态" width="100">
           <template #default="{ row }">
-            <el-tag :type="statusTag(row).type" size="small" effect="plain">
-              {{ statusTag(row).text }}
-            </el-tag>
+            <el-tag :type="statusTag(row).type" effect="light">{{ statusTag(row).text }}</el-tag>
           </template>
         </el-table-column>
 
@@ -704,7 +613,7 @@ const editSave = useMutation(
           <template #default="{ row }">{{ formatBytes(row.size) }}</template>
         </el-table-column>
 
-        <el-table-column label="校验和" width="150">
+        <el-table-column label="SHA-256" width="150">
           <template #default="{ row }">
             <el-tooltip :content="row.sha256">
               <span class="mono muted">{{ row.sha256.slice(0, 12) }}…</span>
@@ -712,15 +621,10 @@ const editSave = useMutation(
           </template>
         </el-table-column>
 
-        <el-table-column label="附带密钥" min-width="150">
+        <el-table-column label="附带密钥" min-width="160">
           <template #default="{ row }">
             <span v-if="!row.bootstrap_key_id" class="muted">—</span>
-            <el-tag
-              v-else
-              :type="row.bootstrap_key_revoked ? 'info' : 'danger'"
-              size="small"
-              effect="plain"
-            >
+            <el-tag v-else :type="row.bootstrap_key_revoked ? 'info' : 'danger'" effect="plain">
               {{ row.bootstrap_key_label || `#${row.bootstrap_key_id}` }}
               {{ row.bootstrap_key_revoked ? '（已吊销）' : '（有效）' }}
             </el-tag>
@@ -729,14 +633,8 @@ const editSave = useMutation(
 
         <el-table-column label="安装策略" min-width="180">
           <template #default="{ row }">
-            <!--
-              这一版发出去时带的是什么策略。事后问"这批机器为什么被升成 apply 了"
-              只能靠翻审计，不如就在这一行里看得见。
-            -->
-            <el-tag size="small" effect="plain">{{ row.upgrade_mode }}</el-tag>
-            <span v-if="row.bootstrap_key_policy === 'replace'" class="cell-sub">
-              · 覆盖注册密钥
-            </span>
+            <el-tag effect="plain">{{ row.upgrade_mode }}</el-tag>
+            <span v-if="row.bootstrap_key_policy === 'replace'" class="cell-sub"> · 覆盖注册密钥</span>
             <span v-if="configTouchCount(row)" class="cell-sub">
               · {{ configTouchCount(row) }} 个配置键
             </span>
@@ -749,13 +647,13 @@ const editSave = useMutation(
           </template>
         </el-table-column>
 
-        <el-table-column label="上传时间" width="160">
+        <el-table-column label="上传时间" width="170">
           <template #default="{ row }">
             <span class="cell-sub">{{ formatTime(row.created_at) }}</span>
           </template>
         </el-table-column>
 
-        <el-table-column label="操作" width="300" fixed="right">
+        <el-table-column label="操作" width="240" fixed="right">
           <template #default="{ row }">
             <el-button
               v-if="!row.rolled_out"
@@ -777,12 +675,7 @@ const editSave = useMutation(
             >
               撤回
             </el-button>
-            <el-button link size="small" @click="openEdit(row)">备注</el-button>
-            <!--
-              就地吊销这一版附带的那把统一注册密钥。已经吊销过的（或这个包本来
-              就没带密钥的）不显示 —— 留一个点了不会变的状态的按钮只会让人以为
-              "再点一次才是真吊销"。
-            -->
+            <el-button link type="primary" size="small" @click="openEdit(row)">备注</el-button>
             <el-button
               v-if="row.bootstrap_key_id && !row.bootstrap_key_revoked"
               link
@@ -793,45 +686,30 @@ const editSave = useMutation(
             >
               吊销密钥
             </el-button>
-            <!--
-              铺开中的版本服务端会直接拒绝删除（要先「撤回」再删），所以这里
-              置灰并说明原因，而不是让教师点了再吃一句红字。
-            -->
-            <el-tooltip
-              :disabled="!row.rolled_out"
-              content="正在铺开。先「撤回」，再删除。"
+            <el-button
+              link
+              type="danger"
+              size="small"
+              :disabled="row.rolled_out"
+              :loading="removeMutation.pending.value"
+              @click="removeRelease(row)"
             >
-              <span>
-                <el-button
-                  link
-                  type="danger"
-                  size="small"
-                  :disabled="row.rolled_out"
-                  :loading="removeMutation.pending.value"
-                  @click="removeRelease(row)"
-                >
-                  删除
-                </el-button>
-              </span>
-            </el-tooltip>
+              删除
+            </el-button>
           </template>
         </el-table-column>
 
-        <template #empty>
-          <div class="empty-block">还没有上传过任何 Agent 版本。</div>
-        </template>
+        <template #empty>无版本</template>
       </el-table>
+    </SectionCard>
 
-      <p class="cell-sub">铺开中 {{ rolledOutCount }} 个，已撤回 {{ yankedCount }} 个。「删除」删的是发布记录，不是已经装到机器上的程序。</p>
-    </el-card>
-
-    <el-dialog v-model="editVisible" :title="`编辑版本 ${editForm.version} 的备注`" width="520px">
+    <el-dialog v-model="editVisible" :title="`编辑备注：${editForm.version}`" width="520px">
       <el-input
         v-model="editForm.notes"
         type="textarea"
         :rows="4"
         maxlength="2000"
-        placeholder="例如：修复了扫描目录不存在时的崩溃"
+        placeholder="例如 修复扫描目录不存在时的崩溃"
       />
       <template #footer>
         <el-button @click="editVisible = false">取消</el-button>
@@ -840,21 +718,10 @@ const editSave = useMutation(
         </el-button>
       </template>
     </el-dialog>
-  </div>
+  </PageShell>
 </template>
 
 <style scoped>
-.error-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.section {
-  margin-bottom: 12px;
-}
-
 .upload-row {
   display: flex;
   gap: 8px;
@@ -864,57 +731,42 @@ const editSave = useMutation(
 
 .active-box {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  align-items: baseline;
+  gap: 16px;
+  flex-wrap: wrap;
   padding: 12px 16px;
-  background: #f0f9eb;
-  border: 1px solid #e1f3d8;
-  border-radius: 4px;
+  background: var(--sj-success-soft);
+  border: 1px solid var(--sj-border);
+  border-radius: var(--sj-radius-sm);
 }
 
 .active-version {
   font-size: 22px;
   font-weight: 700;
-  color: #67c23a;
+  color: var(--sj-success);
   line-height: 1.2;
 }
 
-/* 没有私钥时用整块红卡，而不是一条会被划过去的提示条 */
-.blocked-card :deep(.el-card__header) {
-  background: #fef0f0;
-  border-bottom: 1px solid #fde2e2;
-}
-
-.blocked-title {
-  color: #f56c6c;
-  font-weight: 700;
-}
-
-.blocked-lead {
-  margin: 0 0 8px;
-  line-height: 1.6;
-}
-
 .muted {
-  color: #909399;
-  font-size: 12px;
+  color: var(--sj-text-3);
 }
 
-/* 提醒用的提示行：不是错误，是"这一步会怎样" */
 .warn-hint {
-  color: #e6a23c;
+  margin: 8px 0 0;
+  font-size: 12.5px;
+  color: var(--sj-warning);
 }
 
-/*
-  附带密钥那一块。文案是"后果"而不是"建议"，所以用偏红的警示色 + 左边框，
-  让它和上面那些普通的 `.page-hint` 一眼分得开 —— 这一句读漏了，后果是这个包
-  等于一张能注册进这台服务端的通行证。
-*/
+.danger-hint {
+  margin-left: 12px;
+  font-size: 12.5px;
+  color: var(--sj-danger);
+}
+
 .key-option {
   margin-top: 12px;
 }
 
-/* 高级选项：折叠区放在"附带密钥"下面，与上面那块留一点呼吸 */
 .advanced {
   margin-top: 4px;
 }
@@ -926,13 +778,8 @@ const editSave = useMutation(
 .policy-label {
   display: block;
   font-size: 13px;
-  color: #606266;
+  color: var(--sj-text-2);
   margin-bottom: 4px;
-}
-
-/* 后果说明贴着控件走：它是给人读的那一句，不该和标签(h3)混在一起 */
-.policy-note {
-  margin-top: 2px;
 }
 
 .policy-group {
@@ -941,15 +788,15 @@ const editSave = useMutation(
 
 .policy-section {
   font-size: 12px;
-  color: #909399;
-  margin-bottom: 2px;
+  color: var(--sj-text-3);
+  margin-bottom: 4px;
 }
 
 .policy-key {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 2px;
+  margin-bottom: 4px;
 }
 
 .policy-key-name {
@@ -957,23 +804,9 @@ const editSave = useMutation(
   font-size: 12px;
 }
 
-.key-warning {
-  margin: 8px 0 0;
-  padding: 8px 12px;
-  border-left: 3px solid #f56c6c;
-  background: #fef0f0;
-  color: #c45656;
-  line-height: 1.6;
-}
-
-/*
-  安装命令那一行：等宽、可换行、占满宽度。
-  **不能截断** —— 一条被省略号吃掉尾巴的命令，教师复制过去就是语法错误，
-  而报错会指向 shell，指不到"这里少了一段"。
-*/
 .install-row {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 8px;
   margin-top: 12px;
   flex-wrap: wrap;
@@ -981,17 +814,19 @@ const editSave = useMutation(
 
 .install-label {
   font-size: 13px;
-  color: #606266;
-  line-height: 26px;
+  color: var(--sj-text-2);
 }
 
+/* 安装命令不能截断：复制出去必须是完整的一条 */
 .install-command {
   flex: 1;
   min-width: 280px;
-  padding: 4px 8px;
-  background: #f5f7fa;
-  border: 1px solid #e4e7ed;
-  border-radius: 4px;
+  padding: 6px 10px;
+  color: var(--sj-text);
+  background: var(--sj-surface-2);
+  border: 1px solid var(--sj-border);
+  border-radius: var(--sj-radius-sm);
+  font-family: var(--sj-mono);
   font-size: 12px;
   line-height: 18px;
   word-break: break-all;

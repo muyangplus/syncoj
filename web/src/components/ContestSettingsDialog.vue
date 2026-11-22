@@ -28,10 +28,10 @@ const rosters = ref<RosterOut[]>([])
 const applyReceipt = ref('')
 
 const STATUSES: Array<{ value: string; label: string }> = [
-  { value: 'running', label: '进行中（正常收卷与下发）' },
-  { value: 'draft', label: '筹备中（先建好，暂不使用）' },
-  { value: 'frozen', label: '已封榜（停止下发，仍收卷）' },
-  { value: 'closed', label: '已结束（不再自动扫成绩）' },
+  { value: 'running', label: '进行中' },
+  { value: 'draft', label: '筹备中' },
+  { value: 'frozen', label: '已封榜 · 停止下发' },
+  { value: 'closed', label: '已结束 · 停止扫描成绩' },
 ]
 
 const form = reactive({
@@ -113,7 +113,7 @@ function describeApply(report: ApplyRosterOut): string {
   if (report.kept) bits.push(`保留 ${report.kept} 人`)
   const protectedCount = report.protected?.length ?? 0
   if (protectedCount) bits.push(`${protectedCount} 人有提交，未动`)
-  return bits.length ? `已按名单补人：${bits.join('、')}` : '名单里的人和场次里的一致，没有改动'
+  return bits.length ? `已补人：${bits.join('、')}` : '无改动'
 }
 
 async function submit(): Promise<void> {
@@ -166,7 +166,7 @@ async function submit(): Promise<void> {
         <el-date-picker
           v-model="form.startsAt"
           type="datetime"
-          placeholder="留空 = 不限制"
+          placeholder="不限"
           clearable
           style="width: 100%"
         />
@@ -176,19 +176,16 @@ async function submit(): Promise<void> {
         <el-date-picker
           v-model="form.endsAt"
           type="datetime"
-          placeholder="留空 = 不限制"
+          placeholder="不限"
           clearable
           style="width: 100%"
         />
-        <div class="cell-sub">
-          <strong>留空 = 不限制</strong>
-        </div>
       </el-form-item>
 
       <el-form-item label="默认名单">
         <el-select
           v-model="form.defaultRosterId"
-          placeholder="不预设名单"
+          placeholder="不指定"
           clearable
           style="width: 100%"
         >
@@ -199,23 +196,19 @@ async function submit(): Promise<void> {
             :value="roster.id"
           />
         </el-select>
-        <!--
-          选名单**不会**自己改选手（场次里的选手是从名单复制出去的独立数据，
-          改名单不该动历史场次），所以这里必须给动作，而不是给一句"请去别处点"。
-        -->
+        <!-- 选名单不改选手，补人要显式点 -->
         <div v-if="form.defaultRosterId !== null" class="apply-row">
           <el-button
-            size="small"
             :loading="applyRoster.pending.value"
             @click="applyRoster.run(form.defaultRosterId as number)"
           >
-            按这份名单补人
+            按名单补人
           </el-button>
-          <span class="cell-sub">只补人、不删人</span>
+          <span class="cell-sub">只补不删</span>
         </div>
         <div v-if="applyReceipt" class="cell-sub apply-receipt">{{ applyReceipt }}</div>
         <div v-if="contest?.player_count" class="cell-sub">
-          这场现在有 {{ contest.player_count }} 名选手。
+          当前选手 {{ contest.player_count }} 名
         </div>
       </el-form-item>
 
@@ -225,7 +218,6 @@ async function submit(): Promise<void> {
           type="textarea"
           :rows="2"
           maxlength="500"
-          placeholder="给自己看的内部说明"
         />
       </el-form-item>
     </el-form>

@@ -106,7 +106,7 @@ async function copyText(value: string | undefined, what: string): Promise<void> 
     ElMessage.success(`已复制${what}`)
   } catch {
     // 非 HTTPS 或浏览器策略下剪贴板不可用，提示手工复制而不是静默失败
-    ElMessage.warning('浏览器不允许自动复制，请手工选中复制')
+    ElMessage.warning('复制失败，请手工选取')
   }
 }
 
@@ -124,122 +124,98 @@ function goRollout(): void {
 
 <template>
   <div class="install-page">
-    <el-card v-loading="loading" class="install-card" shadow="always">
-      <div class="brand">
-        <div class="brand-title">把 SyncOJ 装到考试机上</div>
-      </div>
-
-      <!--
-        取数失败：命令里的版本号与校验和都可能对不上，所以先说"别抄"再给重试。
-      -->
-      <el-alert v-if="error" type="error" :closable="false" show-icon :title="error">
-        <div class="alert-row">
-          <el-button size="small" type="primary" plain @click="load">重试</el-button>
+    <div class="install-shell">
+      <header class="brand">
+        <span class="brand-mark">S</span>
+        <div>
+          <div class="brand-title">SyncOJ 装机</div>
+          <div class="brand-sub">考试机 Agent</div>
         </div>
-      </el-alert>
+      </header>
 
-      <!--
-        没有铺开任何版本：不显示命令、也不显示下载区 —— 命令指向的包不存在，
-        给出来只会让人在空机器上撞一个 404，然后怀疑网络。
-      -->
-      <div v-else-if="emptyReason" class="empty-state">
-        <p class="empty-text">{{ emptyReason }}</p>
-        <el-button type="primary" @click="goRollout">去登录后到 Agent 发布页铺开</el-button>
-      </div>
+      <section v-loading="loading" class="panel">
+        <!-- 取数失败：版本与校验和都不可信，只给重试 -->
+        <el-alert v-if="error" type="error" :closable="false" show-icon :title="error">
+          <div class="alert-row">
+            <el-button type="primary" plain @click="load">重试</el-button>
+          </div>
+        </el-alert>
 
-      <template v-else-if="ledger">
-        <!--
-          主操作：一条命令。它必须是这一页最显眼的东西 —— 教师就是来抄它的。
-          **不能截断**：被省略号吃掉尾巴的命令抄过去就是语法错误，而报错会指向
-          shell 的哪一行，指不到"这里少了一段"。
-        -->
-        <div class="install-row">
-          <code class="install-command">{{ command }}</code>
-          <el-button size="small" type="primary" @click="copyText(command, '安装命令')">
-            复制
-          </el-button>
+        <!-- 未铺开任何版本：不给命令与下载（指向的包不存在） -->
+        <div v-else-if="emptyReason" class="empty-state">
+          <el-icon class="empty-icon"><Box /></el-icon>
+          <p class="empty-text">{{ emptyReason }}</p>
+          <el-button type="primary" @click="goRollout">登录并铺开版本</el-button>
         </div>
-        <p class="hint">在每台空机器上跑它。</p>
 
-        <div class="info">
-          <div class="info-row">
-            <span class="info-label">版本</span>
-            <span class="mono">{{ ledger.version }}</span>
-            <!--
-              签名有没有是这一页唯一会让人误判的字段：没签名时"机器有公钥也验不了"，
-              所以不摆一个空的占位，直接标出来并把原因挂在 tooltip 上。
-            -->
-            <el-tooltip
-              :content="
-                ledger.signature
-                  ? `已签名（key_id: ${ledger.key_id ?? '未知'}）`
-                  : '台账里没有签名记录'
-              "
-            >
-              <el-tag :type="ledger.signature ? 'success' : 'warning'" size="small" effect="plain">
-                {{ ledger.signature ? '已签名' : '未签名' }}
-              </el-tag>
-            </el-tooltip>
-          </div>
-
-          <div class="info-row">
-            <span class="info-label">大小</span>
-            <span>{{ formatBytes(ledger.size) }}</span>
-          </div>
-
-          <div class="info-row">
-            <span class="info-label">sha256</span>
-            <!-- 只显示前 12 位是为了扫一眼就能比较；全量在 tooltip 里，供人手工核对 -->
-            <el-tooltip :content="ledger.sha256">
-              <span class="mono">{{ ledger.sha256.slice(0, 12) }}…</span>
-            </el-tooltip>
-            <el-button link type="primary" @click="copyText(ledger.sha256, '完整 sha256')">
-              复制
+        <template v-else-if="ledger">
+          <!-- 主操作：一条命令，不能截断 -->
+          <div class="block-label">安装命令</div>
+          <div class="command-box">
+            <code class="install-command">{{ command }}</code>
+            <el-button type="primary" @click="copyText(command, '安装命令')">
+              <el-icon><DocumentCopy /></el-icon>复制
             </el-button>
           </div>
 
-          <div class="info-row">
-            <span class="info-label">发布说明</span>
-            <span class="notes">{{ ledger.notes || '—' }}</span>
-          </div>
+          <dl class="info">
+            <div class="info-row">
+              <dt>版本</dt>
+              <dd>
+                <span class="mono">{{ ledger.version }}</span>
+                <el-tooltip :disabled="!ledger.signature" :content="`key_id: ${ledger.key_id ?? '—'}`">
+                  <el-tag :type="ledger.signature ? 'success' : 'warning'" size="small" effect="light">
+                    {{ ledger.signature ? '已签名' : '未签名' }}
+                  </el-tag>
+                </el-tooltip>
+              </dd>
+            </div>
+            <div class="info-row">
+              <dt>大小</dt>
+              <dd>{{ formatBytes(ledger.size) }}</dd>
+            </div>
+            <div class="info-row">
+              <dt>sha256</dt>
+              <dd>
+                <el-tooltip :content="ledger.sha256">
+                  <span class="mono">{{ ledger.sha256.slice(0, 12) }}…</span>
+                </el-tooltip>
+                <el-button link type="primary" @click="copyText(ledger.sha256, '完整 sha256')">复制</el-button>
+              </dd>
+            </div>
+            <div class="info-row">
+              <dt>发布说明</dt>
+              <dd class="notes">{{ ledger.notes || '—' }}</dd>
+            </div>
+            <div class="info-row">
+              <dt>离线下载</dt>
+              <dd class="downloads">
+                <el-link type="primary" :href="bundleUrl" target="_blank" rel="noopener">
+                  <el-icon><Download /></el-icon>安装包
+                </el-link>
+                <el-link type="primary" :href="installerUrl" target="_blank" rel="noopener">
+                  <el-icon><Download /></el-icon>安装器
+                </el-link>
+              </dd>
+            </div>
+          </dl>
+        </template>
+
+        <el-skeleton v-else-if="loading" :rows="4" animated />
+      </section>
+
+      <!-- 卸载与台账无关，始终显示；次要且破坏性，放最下 -->
+      <section class="panel panel-muted">
+        <div class="block-label">卸载命令</div>
+        <div class="command-box">
+          <code class="install-command">{{ uninstall }}</code>
+          <el-button @click="copyText(uninstall, '卸载命令')">
+            <el-icon><DocumentCopy /></el-icon>复制
+          </el-button>
         </div>
-
-        <!--
-          下载区：给"想先下下来、再用 U 盘拷过去"的场景。address 用当前 origin 拼，
-          理由与安装命令一样（只有这个地址是局域网真的可达的）。
-        -->
-        <div class="download-row">
-          <span class="info-label">先下后拷</span>
-          <el-link type="primary" :href="bundleUrl" target="_blank" rel="noopener">
-            下载安装包
-          </el-link>
-          <el-link type="primary" :href="installerUrl" target="_blank" rel="noopener">
-            下载安装器
-          </el-link>
-        </div>
-
-        <p class="hint">去管理界面「机器配对」绑给选手。</p>
-      </template>
-
-      <!-- 首屏：台账还没回来，给骨架而不是一片空白（空白会被当成"这页坏了"） -->
-      <el-skeleton v-else-if="loading" :rows="4" animated />
-
-      <!--
-        卸载命令**不在上面那个 `v-else-if="ledger"` 里**：它与台账无关（没有铺开任何
-        版本时，机器上照样装着老版本、照样可能要卸）。所以模板里的顺序是"先说完要装的，
-        再说要卸的"，而这个块永远显示。
-
-        位置在最下面（次要）：它是一次性、破坏性的操作，不该抢"来抄安装命令"的人的视线。
-        命令与安装同源 —— bootstrap.sh 把参数原样交给 install.py，所以机器上不必先有
-        安装器（离线包刻意不含它）。
-      -->
-      <div class="install-row uninstall-row">
-        <span class="info-label">卸载</span>
-        <code class="install-command">{{ uninstall }}</code>
-        <el-button size="small" @click="copyText(uninstall, '卸载命令')">复制</el-button>
-      </div>
-      <p class="hint">在要清掉的那台机器上跑它。会删掉统一注册密钥与本机凭据。</p>
-    </el-card>
+        <p class="consequence">将卸载 Agent，并删除本机的统一注册密钥与凭据。</p>
+      </section>
+    </div>
   </div>
 </template>
 
@@ -249,37 +225,72 @@ function goRollout(): void {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 24px 16px;
-  background: linear-gradient(135deg, #1f2d3d 0%, #2c405a 100%);
+  padding: 32px 16px;
+  background:
+    radial-gradient(60% 40% at 50% 0%, var(--sj-primary-soft) 0%, transparent 70%),
+    var(--sj-bg);
 }
 
-.install-card {
-  width: 720px;
-  max-width: 100%;
-  border-radius: 8px;
+.install-shell {
+  width: 100%;
+  max-width: 760px;
 }
 
 .brand {
-  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+/* 与 AppLayout 侧栏的品牌方块一致 */
+.brand-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  flex: none;
+  border-radius: 11px;
+  background: var(--sj-brand-gradient);
+  color: var(--el-color-white);
+  font-weight: 700;
+  font-size: 18px;
 }
 
 .brand-title {
-  font-size: 22px;
+  font-size: 20px;
   font-weight: 700;
-  color: #1f2d3d;
+  letter-spacing: -0.01em;
+  color: var(--sj-text);
 }
 
 .brand-sub {
-  font-size: 12px;
-  color: #909399;
-  margin-top: 4px;
+  font-size: 12.5px;
+  color: var(--sj-text-3);
 }
 
-.hint {
-  margin: 8px 0 0;
-  font-size: 12px;
-  color: #909399;
-  line-height: 1.7;
+.panel {
+  padding: 22px 24px;
+  background: var(--sj-surface);
+  border: 1px solid var(--sj-border);
+  border-radius: var(--sj-radius);
+  box-shadow: var(--sj-shadow-lg);
+}
+
+.panel + .panel {
+  margin-top: 16px;
+}
+
+.panel-muted {
+  box-shadow: var(--sj-shadow);
+}
+
+.block-label {
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--sj-text-2);
 }
 
 .alert-row {
@@ -287,6 +298,7 @@ function goRollout(): void {
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+  margin-top: 6px;
 }
 
 .empty-state {
@@ -294,71 +306,71 @@ function goRollout(): void {
   text-align: center;
 }
 
+.empty-icon {
+  font-size: 32px;
+  color: var(--sj-text-3);
+}
+
 .empty-text {
-  margin: 0 0 16px;
+  margin: 10px 0 16px;
   font-size: 13px;
-  color: #606266;
+  color: var(--sj-text-2);
   line-height: 1.7;
 }
 
-.install-row {
+.command-box {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
-}
-
-/* 卸载命令：与上面几块拉开距离，但样式复用安装命令那一套（同一类东西长得一样） */
-.uninstall-row {
-  margin-top: 16px;
-  padding-top: 12px;
-  border-top: 1px solid #ebeef5;
+  gap: 10px;
 }
 
 /*
-  命令本体：等宽 + 换行。
-
-  **用 `overflow-wrap: anywhere`，不用 `word-break: break-all`。** 后者连单词中间都
-  断：实测把 `--server` 拆成了 `--serve` + `r` 两行，而这一行是给**站在机器前面照抄**
-  的人看的（剪贴板被策略禁掉、或者要手敲时）。`anywhere` 优先在空格处断，只有单个词
-  真的长过一行时才断词 —— 而那种"长词"通常是 URL，断在哪里都还认得出来。
-
-  `white-space: pre-wrap` 保留换行与连续空格；`min-width: 0` 让它在 flex 里能收缩
-  （否则 flex 默认的 `min-width: auto` 会撑出横向滚动条）。
+  命令本体：等宽 + 换行。用 overflow-wrap: anywhere（优先在空格处断），
+  不用 word-break: break-all（会把 --server 拆成两行，照抄时出错）。
 */
 .install-command {
   flex: 1;
   min-width: 0;
-  padding: 8px 10px;
-  background: #f5f7fa;
-  border: 1px solid #e4e7ed;
-  border-radius: 4px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
-  font-size: 12px;
-  line-height: 18px;
-  color: #303133;
+  padding: 10px 12px;
+  background: var(--sj-surface-2);
+  border: 1px solid var(--sj-border);
+  border-radius: var(--sj-radius-sm);
+  font-family: var(--sj-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--sj-text);
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
 
 .info {
-  margin-top: 16px;
-  padding-top: 12px;
-  border-top: 1px solid #ebeef5;
+  margin: 20px 0 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--sj-border);
 }
 
 .info-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  min-height: 26px;
-  flex-wrap: wrap;
+  gap: 12px;
+  min-height: 32px;
 }
 
-.info-label {
+.info-row dt {
   flex: none;
-  width: 64px;
-  font-size: 12px;
-  color: #909399;
+  width: 72px;
+  font-size: 12.5px;
+  color: var(--sj-text-3);
+}
+
+.info-row dd {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+  margin: 0;
+  color: var(--sj-text);
 }
 
 .notes {
@@ -366,13 +378,24 @@ function goRollout(): void {
   line-height: 1.6;
 }
 
-.download-row {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  flex-wrap: wrap;
-  margin-top: 16px;
-  padding-top: 12px;
-  border-top: 1px solid #ebeef5;
+.downloads {
+  gap: 16px !important;
+}
+
+.downloads .el-icon {
+  margin-right: 4px;
+}
+
+.consequence {
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  color: var(--sj-danger);
+}
+
+@media (max-width: 560px) {
+  .command-box {
+    flex-direction: column;
+    align-items: stretch;
+  }
 }
 </style>

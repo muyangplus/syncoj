@@ -474,7 +474,7 @@ async function rejudge(run: JudgeRunDetailOut, force = false): Promise<void> {
   const contestId = contest.currentId
   if (!contestId) return
   try {
-    const result = await judgingApi.queue(contestId, { problem: run.problem, player_id: run.player_id, force })
+    const result = await judgingApi.queue(contestId, { problem: run.problem, player_id: run.player_id, force, rerun: false })
     ElMessage.success(result.queued ? '已排队重测' : '未排队：该题不是自带评测')
   } catch (err) {
     if (err instanceof ApiError && err.code === 'contest_in_progress' && !force) {

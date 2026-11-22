@@ -490,6 +490,9 @@ class ContestOut(_Base):
     #: ``null`` = 这一端不限制。
     starts_at: Optional[str] = None
     ends_at: Optional[str] = None
+    #: 自带评测的自动入队（§12.9）：``off`` / ``on_change``；去抖秒数
+    auto_judge: str = "off"
+    auto_judge_delay: int = 60
 
 
 class ContestUpdate(_Base):
@@ -832,12 +835,20 @@ class ProblemJudgeIn(_Base):
 
 
 class BuiltinJudgeIn(_Base):
-    """排自带评测任务。都不填 = 全场所有用自带评测的题 × 所有选手。"""
+    """排自带评测任务。都不填 = 全场所有用自带评测的题 × 所有选手（评最新版）。
+
+    给了 ``version_id`` = 重测那一个历史版本（§12.9）：选手与题目由版本定，结果只进历史与
+    timeline，不覆盖成绩矩阵（教师「采用」才写）；不受"场次还在进行"的限制。
+    """
 
     problem: Optional[str] = Field(default=None, max_length=64)
     player_id: Optional[int] = None
     #: 场次还在进行时也评（评的是考到一半的代码）
     force: bool = False
+    #: 指定历史版本（``GET .../judge/versions`` 的 ``id``）
+    version_id: Optional[int] = None
+    #: 真跑一遍：不复用相同 (数据包, 评测配置, 代码) 的已有结果
+    rerun: bool = False
 
 
 class BuiltinJudgeQueuedOut(_Base):
@@ -852,12 +863,110 @@ class BuiltinJudgeFailureOut(_Base):
 
 
 class BuiltinJudgeProgressOut(_Base):
+    """排队 / 在评是全数；完成 / 失败只数每 (选手, 题目) 最新的那条任务。"""
+
     total: int = 0
     queued: int = 0
     running: int = 0
     done: int = 0
     failed: int = 0
+    #: 排队中、还在去抖（没到 ``not_before``）的自动任务数
+    delayed: int = 0
     failures: List[BuiltinJudgeFailureOut] = Field(default_factory=list)
+
+
+class JudgeAutoIn(_Base):
+    """场次的自动入队设置（§12.9）。"""
+
+    auto_judge: Literal["off", "on_change"]
+    #: 去抖秒数：同一 (选手, 题目) 在这段时间内连续改动只评最后一版
+    auto_judge_delay: int = Field(default=60, ge=0, le=3600)
+
+
+class JudgeAutoOut(_Base):
+    auto_judge: str
+    auto_judge_delay: int
+
+
+class JudgeTaskOut(_Base):
+    """一个评测任务（任务即历史，§12.9）。"""
+
+    id: int
+    player_id: int
+    player_no: str
+    problem: str
+    #: queued / running / done / failed
+    status: str
+    #: auto / manual / rejudge
+    trigger: str
+    requested_by: Optional[str] = None
+    source_version_id: Optional[int] = None
+    source_path: Optional[str] = None
+    source_sha256: Optional[str] = None
+    score: Optional[int] = None
+    max_score: Optional[int] = None
+    #: 评测状态（AC / WA …），没交为 ``missing``
+    outcome: Optional[str] = None
+    error: Optional[str] = None
+    #: 结果抄自哪个任务（没占评测机）
+    reused_from: Optional[int] = None
+    rerun: bool = False
+    #: 结果写进过 result.json（自动写入或被采用）
+    applied: bool = False
+    #: 成绩矩阵当前这一格就是这个任务的结果
+    in_matrix: bool = False
+    has_result: bool = False
+    created_at: str
+    finished_at: Optional[str] = None
+    #: 去抖：这个时刻之前不发给评测机
+    not_before: Optional[str] = None
+
+
+class JudgeTaskDetailOut(JudgeTaskOut):
+    """任务连同结果里的测试点明细（形状同 ``JudgeRunDetailOut`` 的明细部分）。"""
+
+    judge: Optional[str] = None
+    language: Optional[str] = None
+    isolated: Optional[bool] = None
+    compile_message: str = ""
+    judged_at: Optional[str] = None
+    cases: List[JudgeCaseOut] = Field(default_factory=list)
+    subtasks: List[JudgeSubtaskOut] = Field(default_factory=list)
+    truncated: bool = False
+
+
+class VersionJudgeOut(_Base):
+    """一个版本最近一次评测的摘要。"""
+
+    task_id: int
+    status: str
+    trigger: str
+    score: Optional[int] = None
+    max_score: Optional[int] = None
+    outcome: Optional[str] = None
+    reused: bool = False
+    applied: bool = False
+    finished_at: Optional[str] = None
+
+
+class SourceVersionOut(_Base):
+    """代码的一个历史版本（§12.9），连同它的评测结果。"""
+
+    id: int
+    player_id: int
+    rel_path: str
+    sha256: str
+    size: int = 0
+    received_at: str
+    #: 按**当前**题目模式归到的题；归不到为 null
+    problem: Optional[str] = None
+    #: 这一版就是台账里的当前版本
+    current: bool = False
+    #: 评过这一版的任务数
+    tasks: int = 0
+    judge: Optional[VersionJudgeOut] = None
+    #: 成绩矩阵当前这一格用的是这一版的结果
+    in_matrix: bool = False
 
 
 class JudgeWorkerIn(_Base):
@@ -1428,6 +1537,8 @@ class JudgeRunDetailOut(JudgeRunOut):
     cases: List[JudgeCaseOut] = Field(default_factory=list)
     subtasks: List[JudgeSubtaskOut] = Field(default_factory=list)
     truncated: bool = False
+    #: 自带评测写的结果：出自哪个评测任务（§12.9）
+    task_id: Optional[int] = None
 
 
 class JudgeScanOut(_Base):

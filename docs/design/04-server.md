@@ -22,6 +22,7 @@
 | `agent` | 每机 Token 哈希、`machine_uuid`、指纹、`roster_entry_id`、可选 `contest_id`、配对码哈希、吊销状态 |
 | `agent_diagnostic` | 每台机器**最新一份**诊断包（解压后的 JSON 文本），新覆盖旧 |
 | `source_file` | 回收台账 `(contest, player, path, sha256, scanned_sha256, size, revision, first_seen, last_seen)`：`sha256` 是已存版本，`scanned_sha256` 是最近扫描到的，不等即待上传 |
+| `source_version` | 代码版本历史：每份新内容一条 `(player, path, sha256, size, received_at, problem)`，内容不被回收（§12.9） |
 | `asset` | 内容寻址的下发文件 |
 | `deploy_task` / `deploy_target` | 下发任务与逐选手进度（含 `bytes_done`） |
 | `judge_run` | 成绩回写 |

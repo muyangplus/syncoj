@@ -64,6 +64,7 @@ from ..security import hash_token, new_token
 from ..storage import BlobTooLarge, HashMismatch, materialize
 from ..services import (
     announce,
+    builtin_judge,
     diagnostics,
     discovery,
     enrollment,
@@ -1179,6 +1180,14 @@ def upload_file(
         row.last_seen_at = now
         session.flush()
         revision = row.revision
+
+        # 版本历史（§12.9）：每份新内容记一条；场次开了自动入队就为这道题排一个去抖任务
+        builtin_judge.record_version(
+            session, identity.contest_id, identity.player_id, rel_path, actual_sha, size, now, ctx.settings
+        )
+        contest = session.get(Contest, identity.contest_id)
+        if contest is not None:
+            builtin_judge.auto_enqueue(session, contest, identity.player_id, rel_path, now, ctx.settings)
 
     return UploadResult(path=rel_path, sha256=actual_sha, revision=revision, stored=True)
 

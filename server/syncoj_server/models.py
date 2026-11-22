@@ -45,6 +45,7 @@ __all__ = [
     "Agent",
     "AgentDiagnostic",
     "SourceFile",
+    "SourceVersion",
     "Asset",
     "DeployTask",
     "DeployTarget",
@@ -183,6 +184,12 @@ class Contest(Base, TimestampMixin):
     #: 只是**模板**，不参与鉴权也不参与成绩 —— 改了名单不会动已有选手，
     #: 得显式应用一次。这样"名单调整"和"比赛数据"永远是两件分开的事。
     default_roster_id = Column(Integer, ForeignKey("roster.id", ondelete="SET NULL"), nullable=True)
+
+    #: 自带评测的自动入队（§12.9）：``off`` = 不自动评；``on_change`` = 收到某题的新版本就排一个任务。
+    #: 可空只为老库（迁移 020 回填 ``off``），读作 ``off``。
+    auto_judge = Column(String(16), nullable=True, default="off")
+    #: 自动入队的去抖秒数：同一 (选手, 题目) 在这段时间内连续改动只评最后一版。NULL 读作 60。
+    auto_judge_delay = Column(Integer, nullable=True, default=60)
 
     players = relationship("Player", back_populates="contest", cascade="all, delete-orphan")
     default_roster = relationship("Roster")
@@ -488,10 +495,15 @@ class JudgeWorker(Base):
 
 
 class JudgeTask(Base):
-    """一次自带评测（选手 × 题目）。同一对只留最新一条：重测 = 删掉旧的、排一条新的。
+    """一次自带评测（选手 × 题目 × 某一版代码）。任务即历史：完成的任务连同结果留着，
+    分数 timeline 从这里读（§12.9）。
 
     状态：``queued`` → ``running``（带租约，worker 崩了租约过期自动回到队列）→ ``done`` / ``failed``。
     ``done`` 不等于有成绩：没交代码的选手直接 ``done``、不写 ``result.json``（矩阵照旧显示未交）。
+
+    ``trigger``：``auto``（收到新版本自动排）/ ``manual``（教师排，评最新版）/ ``rejudge``
+    （教师指定某个历史版本重测）。前两种领任务时才选代码，结果写进 ``result.json``；
+    ``rejudge`` 钉死 ``source_version_id``，结果只进历史，教师「采用」后才写 ``result.json``。
     """
 
     __tablename__ = "judge_task"
@@ -513,9 +525,34 @@ class JudgeTask(Base):
     created_at = Column(DateTime, default=utcnow, nullable=False)
     finished_at = Column(DateTime, nullable=True)
 
+    # ---- 按版本记（§12.9，迁移 020）----
+    #: auto / manual / rejudge（见类说明）；NULL 读作 manual（迁移前的老任务）
+    trigger = Column(String(16), nullable=True)
+    #: 排任务的管理员用户名；自动入队为 NULL
+    requested_by = Column(String(64), nullable=True)
+    #: 评的是哪一版代码。rejudge 排任务时就定下；auto / manual 领任务时选定。
+    #: 版本被删（清代码、删选手）时置空，任务与结果仍留在历史里
+    source_version_id = Column(Integer, ForeignKey("source_version.id", ondelete="SET NULL"), nullable=True)
+    #: 去抖：这个时刻之前不发给评测机（自动入队用；手动排的为 NULL）
+    not_before = Column(DateTime, nullable=True)
+    #: 教师要求真跑一遍，不复用相同 (数据包, 评测配置, 代码) 的已有结果
+    rerun = Column(Boolean, nullable=True, default=False)
+    #: (数据包 sha, 评测配置, 代码 sha) 的指纹，复用结果按它找
+    judge_key = Column(String(64), nullable=True)
+    #: 结果直接抄自哪个任务（没有占评测机）
+    reused_from = Column(Integer, nullable=True)
+    #: 交回的结果：三项成绩与完整文档（测试点明细，超长时截断）
+    score = Column(Integer, nullable=True)
+    max_score = Column(Integer, nullable=True)
+    result_json = Column(Text, nullable=True)
+    #: 这份结果写进 result.json 的时刻（自动写入或教师「采用」）
+    applied_at = Column(DateTime, nullable=True)
+
     __table_args__ = (
-        UniqueConstraint("contest_id", "player_id", "problem", name="uq_judge_task"),
         Index("ix_judge_task_status", "status", "id"),
+        Index("ix_judge_task_pair", "contest_id", "player_id", "problem"),
+        Index("ix_judge_task_version", "source_version_id"),
+        Index("ix_judge_task_key", "judge_key"),
     )
 
 
@@ -595,6 +632,33 @@ class SourceFile(Base):
     __table_args__ = (
         UniqueConstraint("player_id", "rel_path", name="uq_source_player_path"),
         Index("ix_source_sha", "player_id", "sha256"),
+    )
+
+
+class SourceVersion(Base):
+    """代码的版本历史（§12.9）：Agent 每传上来一份**新内容**就记一条。
+
+    ``SourceFile`` 只记当前版本；这里留下每一版的内容指纹（内容在 ``blobs/`` 里，列入
+    blob 引用清单不被回收），分数 timeline 与"重测过去的版本"都从这里取。选手删除、
+    清空代码台账（含已消失的）时一并删掉并回收内容。
+
+    ``problem`` 是收到时按题目模式归到的题（审计用；读的一侧按**当前**题目模式重新归题，
+    改题目标识或模式不会让历史对不上）。迁移 020 补的初始版本为空。
+    """
+
+    __tablename__ = "source_version"
+
+    id = Column(Integer, primary_key=True)
+    player_id = Column(Integer, ForeignKey("player.id", ondelete="CASCADE"), nullable=False)
+    rel_path = Column(String(1024), nullable=False)
+    sha256 = Column(String(64), nullable=False)
+    size = Column(BigInteger, nullable=False, default=0)
+    received_at = Column(DateTime, default=utcnow, nullable=False)
+    problem = Column(String(64), nullable=True)
+
+    __table_args__ = (
+        Index("ix_source_version_player", "player_id", "rel_path", "id"),
+        Index("ix_source_version_sha", "sha256"),
     )
 
 

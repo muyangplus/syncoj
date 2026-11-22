@@ -126,6 +126,9 @@ const EVENT_CATEGORY_LABELS: Record<string, string> = {
   problem_clear: '清空题目',
   // 成绩
   judge_manual: '手工录分',
+  judge_queue: '排评测任务',
+  judge_auto: '自动评测设置',
+  judge_adopt: '采用版本成绩',
   scores_clear: '清空成绩',
   // 审计
   events_clear: '清空日志',

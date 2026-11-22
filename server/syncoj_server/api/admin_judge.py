@@ -8,19 +8,34 @@ from __future__ import annotations
 import json
 import re
 import zipfile
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, File, Query, UploadFile
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from ..context import AppContext
 from ..errors import ApiError
 from ..judging.testdata import TestdataError, parse_testdata
-from ..models import Contest, EventLog, JudgeWorker, Player, Problem, utcnow
+from ..models import (
+    Contest,
+    EventLog,
+    JudgeRun,
+    JudgeTask,
+    JudgeWorker,
+    Player,
+    Problem,
+    SourceFile,
+    SourceVersion,
+    utcnow,
+)
 from ..schemas import (
     BuiltinJudgeIn,
     BuiltinJudgeProgressOut,
     BuiltinJudgeQueuedOut,
+    JudgeAutoIn,
+    JudgeAutoOut,
+    JudgeTaskDetailOut,
+    JudgeTaskOut,
     JudgeWorkerCreatedOut,
     JudgeWorkerIn,
     JudgeWorkerOut,
@@ -28,12 +43,24 @@ from ..schemas import (
     ProblemJudgeIn,
     ProblemOut,
     SimpleAck,
+    SourceVersionOut,
+    VersionJudgeOut,
+    page_of,
     slice_page,
 )
 from ..security import hash_token, new_token
 from ..storage import BlobTooLarge
 from ..services import builtin_judge
-from .admin import AdminIdentity, _iso, _problem_out, _reclaim_blobs, require_admin, require_confirm
+from ..services.judge import SCAN_LOCK, scan_contest_results
+from .admin import (
+    AdminIdentity,
+    _iso,
+    _problem_out,
+    _reclaim_blobs,
+    _result_details,
+    require_admin,
+    require_confirm,
+)
 from .deps import PageParams, get_ctx
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
@@ -168,16 +195,20 @@ def queue_builtin_judge(
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> BuiltinJudgeQueuedOut:
-    """排自带评测：指定的题（或全部用自带评测的题）× 指定的选手（或全部选手）。
+    """排自带评测：指定的题（或全部用自带评测的题）× 指定的选手（或全部选手），评最新版。
 
     场次还在进行时拒绝（``contest_in_progress``）：那时评的是考到一半的代码；教师确认后带
-    ``force`` 再来。已有的任务（不管什么状态）会被替换 —— 重测就是重新排。
+    ``force`` 再来。同一对还在排队的最新版任务会被替换；跑完的留作历史（§12.9）。
+
+    带 ``version_id`` = 重测那一个历史版本：结果只进历史与 timeline，不受场次进行中的限制。
     """
     now = utcnow()
     with ctx.db.session() as session:
         contest = session.get(Contest, contest_id)
         if contest is None:
             raise ApiError(404, "not_found", "场次不存在")
+        if payload.version_id is not None:
+            return _queue_version(ctx, session, contest, payload, admin)
         if builtin_judge.contest_in_progress(contest, now) and not payload.force:
             raise ApiError(409, "contest_in_progress", "场次还在进行：现在评测的是考到一半的代码")
         stmt = select(Problem).where(Problem.contest_id == contest_id)
@@ -193,13 +224,309 @@ def queue_builtin_judge(
         if payload.player_id is not None:
             players = players.where(Player.id == payload.player_id)
         player_ids = list(session.execute(players).scalars())
+        if payload.player_id is not None and not player_ids:
+            raise ApiError(404, "not_found", "选手不在本场次")
         idents = [row.ident for row in problems]
-        queued = builtin_judge.enqueue(session, contest_id, idents, player_ids)
+        queued = builtin_judge.enqueue(
+            session, contest_id, idents, player_ids,
+            trigger=builtin_judge.MANUAL, requested_by=admin.username, rerun=payload.rerun,
+        )
         session.add(EventLog(
             level="info", category="judge_queue", contest_id=contest_id,
             message="排自带评测 %d 个任务（%s）" % (queued, "、".join(idents)),
         ))
     return BuiltinJudgeQueuedOut(queued=queued, problems=idents)
+
+
+def _queue_version(ctx: AppContext, session, contest: Contest, payload: BuiltinJudgeIn,
+                   admin: AdminIdentity) -> BuiltinJudgeQueuedOut:
+    version = session.get(SourceVersion, payload.version_id)
+    player = session.get(Player, version.player_id) if version is not None else None
+    if version is None or player is None or player.contest_id != contest.id:
+        raise ApiError(404, "not_found", "这个版本不在本场次")
+    if payload.player_id is not None and payload.player_id != version.player_id:
+        raise ApiError(400, "validation_error", "版本不属于这位选手")
+    if not ctx.blobs.has(version.sha256):
+        raise ApiError(410, "gone", "这一版代码的内容已不在服务端")
+    ident = payload.problem or builtin_judge.classify(
+        session, contest.id, [version.rel_path], ctx.settings
+    )[version.rel_path]
+    problem = session.execute(
+        select(Problem).where(Problem.contest_id == contest.id, Problem.ident == ident)
+    ).scalar_one_or_none() if ident else None
+    if problem is None or not builtin_judge.is_builtin(problem):
+        raise ApiError(400, "validation_error", "这一版代码归不到自带评测的题目")
+    if not problem.testdata_sha256:
+        raise ApiError(400, "validation_error", "这些题还没有数据包：%s" % problem.ident)
+    builtin_judge.enqueue_version(
+        session, contest.id, version, problem.ident, requested_by=admin.username, rerun=payload.rerun,
+    )
+    session.add(EventLog(
+        level="info", category="judge_queue", contest_id=contest.id,
+        message="重测 %s「%s」的历史版本 %s（%s）"
+        % (player.player_no, problem.ident, version.sha256[:8], version.rel_path),
+    ))
+    return BuiltinJudgeQueuedOut(queued=1, problems=[problem.ident])
+
+
+@router.put("/contests/{contest_id}/judge/auto", response_model=JudgeAutoOut)
+def set_auto_judge(
+    contest_id: int,
+    payload: JudgeAutoIn,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> JudgeAutoOut:
+    """自动入队（§12.9）：``on_change`` = 收到某题的新版本就排评测，同一 (选手, 题目)
+    在 ``auto_judge_delay`` 秒内连续改动只评最后一版。场次进行中也排。"""
+    with ctx.db.session() as session:
+        contest = session.get(Contest, contest_id)
+        if contest is None:
+            raise ApiError(404, "not_found", "场次不存在")
+        contest.auto_judge = payload.auto_judge
+        contest.auto_judge_delay = payload.auto_judge_delay
+        session.add(EventLog(
+            level="info", category="judge_auto", contest_id=contest_id,
+            message="自动评测：%s（去抖 %d 秒）" % (
+                "收到新版本即评" if payload.auto_judge == "on_change" else "关闭", payload.auto_judge_delay),
+        ))
+        return JudgeAutoOut(auto_judge=contest.auto_judge, auto_judge_delay=contest.auto_judge_delay)
+
+
+def _matrix_task_ids(session, contest_id: int, player_ids=None) -> Dict[Tuple[int, str], int]:
+    """成绩矩阵当前格子来自哪个评测任务（自带评测写的 result.json 里带 ``task_id``）。"""
+    stmt = select(JudgeRun.player_id, JudgeRun.problem, JudgeRun.raw_json, JudgeRun.parse_status).where(
+        JudgeRun.contest_id == contest_id
+    )
+    if player_ids is not None:
+        stmt = stmt.where(JudgeRun.player_id.in_(list(player_ids)))
+    found = {}
+    for player_id, problem, raw, parse_status in session.execute(stmt):
+        if parse_status != "ok" or not raw or '"task_id"' not in raw:
+            continue
+        task_id = _result_details(raw).get("task_id")
+        if task_id:
+            found[(player_id, problem)] = task_id
+    return found
+
+
+def _task_out(task: JudgeTask, player_no: str, matrix: Dict[Tuple[int, str], int]) -> JudgeTaskOut:
+    return JudgeTaskOut(
+        id=task.id,
+        player_id=task.player_id,
+        player_no=player_no,
+        problem=task.problem,
+        status=task.status,
+        trigger=builtin_judge.trigger_of(task),
+        requested_by=task.requested_by,
+        source_version_id=task.source_version_id,
+        source_path=task.source_path,
+        source_sha256=task.source_sha256,
+        score=task.score,
+        max_score=task.max_score,
+        outcome=task.outcome,
+        error=task.error,
+        reused_from=task.reused_from,
+        rerun=bool(task.rerun),
+        applied=task.applied_at is not None,
+        in_matrix=matrix.get((task.player_id, task.problem)) == task.id,
+        has_result=bool(task.result_json),
+        created_at=_iso(task.created_at) or "",
+        finished_at=_iso(task.finished_at),
+        not_before=_iso(task.not_before),
+    )
+
+
+@router.get("/contests/{contest_id}/judge/tasks", response_model=Page[JudgeTaskOut])
+def list_judge_tasks(
+    contest_id: int,
+    player_id: Optional[int] = None,
+    problem: Optional[str] = Query(default=None, max_length=64),
+    status: Optional[str] = Query(default=None, max_length=16),
+    trigger: Optional[str] = Query(default=None, max_length=16),
+    page: PageParams = Depends(),
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> Page[JudgeTaskOut]:
+    """评测任务（新的在前）。任务即历史：每一次评测（含复用的）都在这里。"""
+    conditions = [JudgeTask.contest_id == contest_id]
+    if player_id is not None:
+        conditions.append(JudgeTask.player_id == player_id)
+    if problem:
+        conditions.append(JudgeTask.problem == problem)
+    if status:
+        conditions.append(JudgeTask.status == status)
+    if trigger:
+        if trigger == builtin_judge.MANUAL:
+            conditions.append(JudgeTask.trigger.is_(None) | (JudgeTask.trigger == trigger))
+        else:
+            conditions.append(JudgeTask.trigger == trigger)
+    with ctx.db.session() as session:
+        total = session.execute(select(func.count(JudgeTask.id)).where(*conditions)).scalar_one()
+        rows = session.execute(
+            select(JudgeTask, Player.player_no)
+            .join(Player, JudgeTask.player_id == Player.id)
+            .where(*conditions)
+            .order_by(JudgeTask.id.desc())
+            .limit(page.limit)
+            .offset(page.offset)
+        ).all()
+        matrix = _matrix_task_ids(session, contest_id, {task.player_id for task, _ in rows})
+        items = [_task_out(task, player_no, matrix) for task, player_no in rows]
+    return page_of(items, total, page)
+
+
+def _load_task(session, contest_id: int, task_id: int) -> Tuple[JudgeTask, str]:
+    found = session.execute(
+        select(JudgeTask, Player.player_no)
+        .join(Player, JudgeTask.player_id == Player.id)
+        .where(JudgeTask.id == task_id, JudgeTask.contest_id == contest_id)
+    ).first()
+    if found is None:
+        raise ApiError(404, "not_found", "评测任务不存在")
+    return found[0], found[1]
+
+
+@router.get("/contests/{contest_id}/judge/tasks/{task_id}", response_model=JudgeTaskDetailOut)
+def get_judge_task(
+    contest_id: int,
+    task_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> JudgeTaskDetailOut:
+    """一个评测任务及其结果的测试点明细（历史版本的结果从这里看）。"""
+    with ctx.db.session() as session:
+        task, player_no = _load_task(session, contest_id, task_id)
+        matrix = _matrix_task_ids(session, contest_id, [task.player_id])
+        base = _task_out(task, player_no, matrix).model_dump()
+        details = _result_details(task.result_json)
+        for key in ("source_sha256", "judged_source", "task_id"):
+            details.pop(key, None)
+        return JudgeTaskDetailOut(**base, **details)
+
+
+@router.post("/contests/{contest_id}/judge/tasks/{task_id}/adopt", response_model=JudgeTaskOut)
+def adopt_judge_task(
+    contest_id: int,
+    task_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> JudgeTaskOut:
+    """采用此版本成绩：把这个任务的结果写成当前 ``result.json`` 并立即重扫，成绩矩阵这一格
+    换成它。手工录入的格子不动（409 ``manual_score``，先清除手工成绩）。"""
+    now = utcnow()
+    with ctx.db.session() as session:
+        task, player_no = _load_task(session, contest_id, task_id)
+        if task.status != builtin_judge.DONE or not task.result_json:
+            raise ApiError(409, "judge_task_no_result", "这个任务没有可采用的评测结果")
+        manual = session.execute(
+            select(JudgeRun.id).where(
+                JudgeRun.contest_id == contest_id,
+                JudgeRun.player_id == task.player_id,
+                JudgeRun.problem == task.problem,
+                JudgeRun.parse_status == "manual",
+            )
+        ).first()
+        if manual is not None:
+            raise ApiError(409, "manual_score", "这一格是手工录入的成绩，先清除再采用")
+        builtin_judge.adopt(ctx, session, task, now)
+        session.add(EventLog(
+            level="info", category="judge_adopt", contest_id=contest_id,
+            message="采用 %s「%s」评测任务 #%d 的成绩（%s/%s）"
+            % (player_no, task.problem, task.id, task.score, task.max_score),
+        ))
+    with SCAN_LOCK, ctx.db.session() as session:
+        contest = session.get(Contest, contest_id)
+        if contest is not None:
+            scan_contest_results(session, ctx.settings, contest)
+    with ctx.db.session() as session:
+        task, player_no = _load_task(session, contest_id, task_id)
+        return _task_out(task, player_no, _matrix_task_ids(session, contest_id, [task.player_id]))
+
+
+@router.get("/contests/{contest_id}/judge/versions", response_model=Page[SourceVersionOut])
+def list_source_versions(
+    contest_id: int,
+    player_id: int = Query(..., description="选手"),
+    problem: Optional[str] = Query(default=None, max_length=64, description="只看归到这道题的版本"),
+    page: PageParams = Depends(),
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> Page[SourceVersionOut]:
+    """一位选手的代码版本历史（旧的在前），每版带最近一次评测结果 —— 分数 timeline 的数据。
+
+    归题按**当前**题目模式现算（改了题目标识或模式也对得上）。一个人的版本数有界，在
+    Python 里切页。
+    """
+    with ctx.db.session() as session:
+        player = session.get(Player, player_id)
+        if player is None or player.contest_id != contest_id:
+            raise ApiError(404, "not_found", "选手不在本场次")
+        versions = list(session.execute(
+            select(SourceVersion)
+            .where(SourceVersion.player_id == player_id)
+            .order_by(SourceVersion.received_at, SourceVersion.id)
+        ).scalars())
+        idents = builtin_judge.classify(session, contest_id, [v.rel_path for v in versions], ctx.settings)
+        if problem:
+            versions = [v for v in versions if idents.get(v.rel_path) == problem]
+        total = len(versions)
+        chunk = versions[page.offset:page.offset + page.limit]
+
+        live = {
+            row.rel_path: row.sha256
+            for row in session.execute(
+                select(SourceFile).where(
+                    SourceFile.player_id == player_id,
+                    SourceFile.deleted_at.is_(None),
+                    SourceFile.content_stored.is_(True),
+                )
+            ).scalars()
+        }
+        newest = {}
+        for version in versions:
+            newest[version.rel_path] = version.id
+        tasks: Dict[int, List[JudgeTask]] = {}
+        ids = [v.id for v in chunk]
+        for start in range(0, len(ids), 500):
+            for task in session.execute(
+                select(JudgeTask)
+                .where(JudgeTask.source_version_id.in_(ids[start:start + 500]))
+                .order_by(JudgeTask.id)
+            ).scalars():
+                tasks.setdefault(task.source_version_id, []).append(task)
+        matrix = _matrix_task_ids(session, contest_id, [player_id])
+        matrix_ids = set(matrix.values())
+
+        items = []
+        for version in chunk:
+            ident = idents.get(version.rel_path)
+            mine = [task for task in tasks.get(version.id, []) if ident is None or task.problem == ident]
+            judged = [task for task in mine if task.status == builtin_judge.DONE and task.result_json]
+            chosen = (judged or mine or [None])[-1]
+            items.append(SourceVersionOut(
+                id=version.id,
+                player_id=version.player_id,
+                rel_path=version.rel_path,
+                sha256=version.sha256,
+                size=int(version.size or 0),
+                received_at=_iso(version.received_at) or "",
+                problem=ident,
+                current=newest.get(version.rel_path) == version.id and live.get(version.rel_path) == version.sha256,
+                tasks=len(mine),
+                judge=None if chosen is None else VersionJudgeOut(
+                    task_id=chosen.id,
+                    status=chosen.status,
+                    trigger=builtin_judge.trigger_of(chosen),
+                    score=chosen.score,
+                    max_score=chosen.max_score,
+                    outcome=chosen.outcome,
+                    reused=chosen.reused_from is not None,
+                    applied=chosen.applied_at is not None,
+                    finished_at=_iso(chosen.finished_at),
+                ),
+                in_matrix=any(task.id in matrix_ids for task in mine),
+            ))
+    return page_of(items, total, page)
 
 
 @router.get("/contests/{contest_id}/judge/builtin", response_model=BuiltinJudgeProgressOut)

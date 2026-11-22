@@ -32,6 +32,7 @@ python server/tools/parallel_tests.py --root server --pattern "tests/test_docs.p
 | 协议改动同步三处：`server/syncoj_server/schemas.py`、`agent/syncoj_agent/` 报文构造、`docs/reference/protocol.md` | `server/tests/test_agent_contract.py` |
 | 前端类型不手写；改服务端模型后运行 `python server/tools/dump_openapi.py && (cd web && npm run gen:types)` | `check.py` 的 `openapi` / `web-types` 步骤 |
 | 服务端路径校验独立实现，不信任 Agent 上报路径；`agent/syncoj_agent/safepath.py` 是另一份实现 | `test_path_validation_parity` |
+| 增删或升级依赖（`web/package.json` 的 `dependencies`、`server/pyproject.toml` 的 `dependencies`、`judging/vendor/`）后运行 `python scripts/collect_licenses.py`，生成的 `THIRD-PARTY-LICENSES.md` 与 `web/src/legal/credits.generated.ts` 一起提交 | `check.py` 的 `licenses` 步骤 |
 | `docs/**` 每个文件列进 `docs/README.md`；`§` 引用落到设计文档标题；`README.md` ≤ 40 行、`DESIGN.md` ≤ 60 行 | `server/tests/test_docs.py` |
 
 规则清单另见 [`docs/README.md`](docs/README.md)「开发约定」。

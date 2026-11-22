@@ -171,7 +171,7 @@ python3 agent/packaging/build_bundle.py --out dist/syncoj-agent-0.1.0.tar.gz
 
 | 产物 | 内容 |
 |---|---|
-| `syncoj-<版本>.tar.gz` | 源码 + 预构建 `web/dist`，解开后 `pip install -e server` |
+| `syncoj-<版本>.tar.gz` | 源码 + 预构建 `web/dist`，解开后 `pip install -e server`；第三方许可证：根目录 `THIRD-PARTY-LICENSES.md`、`web/dist/assets/third-party-licenses.txt`（打包进前端产物的全部第三方包） |
 | `syncoj-agent-<版本>.tar.gz` | Agent 离线包，不带公钥、不带服务端地址 |
 | `install.py`、`bootstrap.sh` | 独立安装器 |
 | `SHA256SUMS` | 校验和 |

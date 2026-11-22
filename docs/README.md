@@ -29,6 +29,7 @@
 | [`reference/api-conventions.md`](reference/api-conventions.md) | 管理端 API 约定：列表信封、错误体、命名、删除语义 |
 | [`reference/judge-result.md`](reference/judge-result.md) | 成绩目录与格式、三条解析规则、自带评测数据包与评测机接口 |
 | [`reference/config-keys.md`](reference/config-keys.md) | `agent.ini` 逐键说明（与 `CONFIG_POLICY_KEYS` 对账） |
+| [`reference/player-api.md`](reference/player-api.md) | 考生页接口：降级预览、准考证号 + 密码登录与令牌、本人上下文、网页下载 |
 | [`reference/problem-formats.md`](reference/problem-formats.md) | 题目配置导入导出：识别顺序、各格式映射、原生格式、提示代码、上限 |
 
 ### 设计（原 `DESIGN.md` 拆分，编号不变）

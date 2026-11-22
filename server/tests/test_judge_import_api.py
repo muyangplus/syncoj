@@ -280,3 +280,53 @@ def test_apply_streams_blobs_instead_of_bytes(client: TestClient, contest: dict,
         assert response.status_code == 200, response.text
         (out,) = response.json()["problems"]
         assert out["testdata"]["cases"] == body["problems"][0]["cases"] > 0
+
+
+def test_concurrent_apply_of_one_token_is_serialized(client: TestClient, contest: dict, admin_headers: dict,
+                                                     monkeypatch) -> None:
+    """同一 token 并发 apply：一个成功，另一个等它做完后拿到 404（暂存已删），不是 500。"""
+    import threading
+    import time as time_mod
+
+    from syncoj_server.api import admin_problem_io
+    from syncoj_server.services import problem_io
+
+    body = preview(client, contest, admin_headers, make_native_zip([native_problem("a"), native_problem("b")])).json()
+    real = problem_io.parse_archive
+
+    def slow_parse(*args, **kwargs):
+        time_mod.sleep(0.3)  # 没有锁时两个请求都会越过"查已有题目"再同时写库
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(problem_io, "parse_archive", slow_parse)
+    statuses: List[int] = []
+
+    def run() -> None:
+        statuses.append(apply(client, contest, admin_headers, body["token"], accept_all(body)).status_code)
+
+    threads = [threading.Thread(target=run) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sorted(statuses) == [200, 404]
+    assert admin_problem_io._apply_locks == {}
+
+
+def test_unique_constraint_race_is_ident_conflict(client: TestClient, contest: dict, admin_headers: dict, app,
+                                                  monkeypatch) -> None:
+    """查完已有题目之后别人抢先建了同名题：撞唯一约束时返回 409 ident_conflict，不是 500。"""
+    from syncoj_server.api import admin_problem_io
+
+    body = preview(client, contest, admin_headers, make_native_zip([native_problem("sum")])).json()
+    response = client.post("%s/contests/%d/problems" % (ADMIN, contest["id"]), json=[{"ident": "sum"}],
+                           headers=admin_headers)
+    assert response.status_code == 200, response.text
+    monkeypatch.setattr(admin_problem_io, "_existing", lambda session, contest_id: {})
+    response = apply(client, contest, admin_headers, body["token"],
+                     [{"key": body["problems"][0]["key"], "ident": "sum", "action": "create"}])
+    assert response.status_code == 409, response.text
+    assert response.json()["code"] == "ident_conflict"
+    with app.state.ctx.db.session() as session:
+        rows = session.execute(select(Problem).where(Problem.contest_id == contest["id"])).scalars().all()
+        assert [(row.ident, row.testdata_sha256) for row in rows] == [("sum", None)]

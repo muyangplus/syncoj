@@ -24,7 +24,7 @@
 
 * 预览默认动作：有错误 → `skip`；ident 已存在 → `update`；否则 `create`。有错误的题只能 `skip`（否则 400）。界面改 ident 后按 `existing_idents` 在 `create` / `update` 间切换（手选的 `skip` 不动）。
 * 试构建：预览只算摘要，不写出完整数据包（测试点写成空文件的骨架包回读自检，测试数据按成员各解压一遍查损坏，同一成员每次请求只读一遍）；apply 把数据包写到暂存目录下的临时文件再流式入库，原生包的内层 zip 直接从导入包流式入库。
-* apply：token 不存在 / 过期 / 属于别的场次 → 404 `import_token_expired`；本批 ident 重复或 `create` 撞已有 ident → 409 `ident_conflict`。
+* apply：token 不存在 / 过期 / 属于别的场次 → 404 `import_token_expired`；同一 token 的 apply 串行，后到的在前一个完成后得 404；本批 ident 重复、`create` 撞已有 ident 或写库时撞唯一约束（别处同时建了同名题）→ 409 `ident_conflict`。
 * 新建题目 `judge_mode=builtin`；覆盖已有题目时 `set_builtin=true`（默认）才改成 builtin。覆盖时 `title` 只在包里有值、且不等于来源名或 ident（不分大小写）时覆盖，`file_patterns` 不动（原生格式除外）。
 * 导出不传 `problem_id`：`syncoj` 取全部题目；其他格式取全部带数据包的自带评测题。非原生格式跳过没有数据包或 blob 丢失的题（`included=false`）。
 * 整包级错误：400 `validation_error`，`details.code_detail` = 下表代码；`too_many_problems` 为 413。

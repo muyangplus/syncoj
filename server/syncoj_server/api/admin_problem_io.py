@@ -3,7 +3,7 @@
 导入分两步：``preview`` 把上传的包暂存到 ``<data_root>/tmp/judge-import/<token>.bin``、解析并试构建
 数据包（不写 blob），返回每题的建议 ident、动作与警告；``apply`` 凭 token **重新解析**暂存包
 （不信任客户端回传的配置，只采用 ident 与动作），写 blob、建题或覆盖。暂存 2 小时过期，
-每个场次最多留 5 份。
+每个场次最多留 5 份。同一 token 的 apply 在进程内串行。
 
 内存：preview 只算摘要（``try_summarize``，不写出完整数据包）；apply 把数据包写到暂存目录下的
 临时文件再流式入库（``try_build`` + ``put_stream``）。两者各有一份整请求共用的构建预算。
@@ -16,13 +16,16 @@ from __future__ import annotations
 import json
 import re
 import secrets
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from ..config import Settings
 from ..context import AppContext
@@ -72,6 +75,28 @@ _TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
 # --------------------------------------------------------------------------- #
 # 暂存
 # --------------------------------------------------------------------------- #
+
+#: 正在 apply 的 token → [锁, 引用数]。同一 token 的 apply 串行：后到的等前一个做完，
+#: 那时暂存已删，拿到 404 ``import_token_expired``，而不是两个请求同时建同名题撞唯一约束
+_apply_locks: Dict[str, list] = {}
+_apply_locks_guard = threading.Lock()
+
+
+@contextmanager
+def _token_lock(token: str) -> Iterator[None]:
+    with _apply_locks_guard:
+        entry = _apply_locks.get(token)
+        if entry is None:
+            entry = _apply_locks[token] = [threading.Lock(), 0]
+        entry[1] += 1
+    try:
+        with entry[0]:
+            yield
+    finally:
+        with _apply_locks_guard:
+            entry[1] -= 1
+            if entry[1] == 0:
+                del _apply_locks[token]
 
 
 def _staging_dir(ctx: AppContext) -> Path:
@@ -308,6 +333,11 @@ def judge_import_apply(
     admin: AdminIdentity = Depends(require_admin),
 ) -> JudgeImportOut:
     """按预览时的 token 应用导入。每题只采用客户端给的 ident 与动作（新建 / 覆盖 / 跳过）。"""
+    with _token_lock(payload.token):
+        return _apply(contest_id, payload, ctx)
+
+
+def _apply(contest_id: int, payload: JudgeImportApplyIn, ctx: AppContext) -> JudgeImportOut:
     folder, meta = _load_staged(ctx, payload.token, contest_id)
     fmt = str(meta.get("format") or "auto")
     try:
@@ -441,6 +471,10 @@ def judge_import_apply(
                 message="导入题目配置（%s）：新建 %d 道，覆盖 %d 道"
                 % (problem_io.FORMATS[parsed.result.format].label, result.created, result.updated),
             ))
+    except IntegrityError:
+        # 别的请求（另一份导入包、手工建题）在我们查完已有题目之后抢先建了同名题
+        _reclaim_blobs(ctx, new_blobs)
+        raise ApiError(409, "ident_conflict", "题目标识已被占用，重新预览后再导入")
     except Exception:
         _reclaim_blobs(ctx, new_blobs)
         raise

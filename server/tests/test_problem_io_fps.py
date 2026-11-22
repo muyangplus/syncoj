@@ -365,3 +365,46 @@ def test_preview_and_apply_through_api(client: TestClient, contest: dict, admin_
     out = response.json()
     assert out["created"] == 2
     assert out["problems"][0]["testdata"]["cases"] == 4
+
+
+def test_too_many_cases_reports_exact_count(tmp_path: Path) -> None:
+    bundle, _ = _one(tmp_path, fps_item(tests=fps_tests(MAX_CASES + 100, named=False)))
+    assert _codes(bundle.errors) == ["too_many_cases"]
+    assert str(MAX_CASES + 100) in bundle.errors[0].message
+
+
+def test_element_spam_does_not_build_a_tree() -> None:
+    """大量空元素 / 深层元素不建进树：内存与元素个数无关。"""
+    import tracemalloc
+
+    spam = "<x/>" * 1000000
+    data = make_fps_xml([fps_item(extra_xml="<junk>%s</junk>%s" % (spam, spam))])
+    tracemalloc.start()
+    try:
+        tree = fps._parse_xml(data)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    (item,) = tree.root.findall("item")
+    assert len(list(item)) < 20
+    assert peak < 32 * 1024 * 1024, peak
+
+
+def test_nested_text_still_counts() -> None:
+    tree = fps._parse_xml(make_fps_xml([fps_item(title="A<b>+</b>B")]).replace(b"<![CDATA[A<b>+</b>B]]>", b"A<b>+</b>B"))
+    (item,) = tree.root.findall("item")
+    assert fps._text(item.find("title")) == "A+B"
+
+
+def test_too_many_items_stop_parsing() -> None:
+    from syncoj_server.services.problem_io.bundle import MAX_PROBLEMS
+
+    with pytest.raises(ProblemIoError) as info:
+        fps._parse_xml(make_fps_xml(["<item/>"] * (MAX_PROBLEMS + 1)))
+    assert info.value.code == "too_many_problems"
+
+
+def test_xml_size_is_capped_while_streaming(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ProblemIoError) as info:
+        fps._parse_xml(make_fps_xml(), limit=100)
+    assert info.value.code == "member_too_large"

@@ -197,7 +197,7 @@ syncoj-problems.json
 
 * `contest/contest.cdf`（紧凑 JSON，`version "1.0"`）+ `contest/data/<ident>/`。
 * 散点一个 testCase，子任务一个 testCase（含全部文件对），都带整题时限与内存。
-* `subFolderCheck`：代码路径模式展开后全是 `<ident>.<扩展名>` → false；全是 `<ident>/<ident>.<扩展名>`（含默认模式）→ true；其他写法按有无子目录取值并给 `lemon_layout_mismatch`。
+* `subFolderCheck`：按收代码时生效的代码路径模式（没配时是服务端的 `default_file_pattern`）判断：展开后全是 `<ident>.<扩展名>` → false；全是 `<ident>/<ident>.<扩展名>` → true；其他写法按有无子目录取值并给 `lemon_layout_mismatch`。
 * 有 checker：`comparisonMode=5`、`specialJudge="<ident>/checker"`，源码写成 `data/<ident>/checker.cpp`（`checker_needs_build`）；没用 testlib → `checker_not_testlib`。
 * 编译参数 → `flags_dropped`。
 

@@ -569,6 +569,39 @@ def test_export_sub_folder_check_follows_file_patterns(patterns, sub_folder: boo
     assert ("lemon_layout_mismatch" in codes(outcome.notices[1])) is warned
 
 
+@pytest.mark.parametrize("effective, sub_folder, warned", [
+    (["{ident}.cpp"], False, False),          # 服务端默认模式配成平铺
+    (["{ident}/{ident}.cpp"], True, False),
+    (["src/{ident}.cpp"], True, True),
+])
+def test_export_sub_folder_check_uses_effective_patterns(effective, sub_folder: bool, warned: bool) -> None:
+    """题目没配模式时看收代码实际生效的模式（服务端的 default_file_pattern），不是出厂默认值。"""
+    blobs = _blobs(PLAIN)
+    outcome = _export([_problem(1, "sum", PLAIN, file_patterns=None, effective_patterns=effective)], blobs)
+    with zipfile.ZipFile(outcome.spool) as zf:  # type: ignore[arg-type]
+        (task,) = json.loads(zf.read("contest/contest.cdf"))["tasks"]
+    assert task["subFolderCheck"] is sub_folder
+    assert ("lemon_layout_mismatch" in codes(outcome.notices[1])) is warned
+
+
+def test_export_api_follows_server_default_pattern(client: TestClient, contest: dict, admin_headers: dict, app) -> None:
+    """接口导出时按 problem_rules 算生效模式：服务端默认模式是平铺时 subFolderCheck 为假。"""
+    from problem_io_fixtures import make_testdata_zip
+
+    app.state.ctx.settings.default_file_pattern = "{ident}.cpp"
+    (row,) = client.post("%s/contests/%d/problems" % (ADMIN, contest["id"]), json=[{"ident": "sum"}],
+                         headers=admin_headers).json()["problems"]
+    client.put("%s/problems/%d/judge" % (ADMIN, row["id"]), json={"judge_mode": "builtin"}, headers=admin_headers)
+    response = client.post("%s/problems/%d/testdata" % (ADMIN, row["id"]),
+                           files={"file": ("t.zip", make_testdata_zip())}, headers=admin_headers)
+    assert response.status_code == 200, response.text
+    response = client.get("%s/problems/%d/judge-export?format=lemonlime" % (ADMIN, row["id"]), headers=admin_headers)
+    assert response.status_code == 200, response.text
+    with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+        (task,) = json.loads(zf.read("contest/contest.cdf"))["tasks"]
+    assert task["subFolderCheck"] is False
+
+
 def test_codeforces_style_io_names(tmp_path: Path) -> None:
     bundle = parse_one(tmp_path, lemon_task("cf", 2, inputFileName="input.txt", outputFileName="output.txt"))
     assert bundle.errors == []

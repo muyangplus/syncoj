@@ -145,6 +145,9 @@ class ExportProblem:
     note: Optional[str] = None
     #: 库里存的原值：None = 用服务端默认模式
     file_patterns: Optional[List[str]] = None
+    #: 收代码时实际生效的模式模板（``problem_rules.patterns_for``：没配时是服务端配置的
+    #: ``default_file_pattern``）。None = 调用方没给，按 ``file_patterns`` 或出厂默认模式
+    effective_patterns: Optional[List[str]] = None
     judge_mode: str = "external"
     time_limit_ms: Optional[int] = None
     memory_limit_mb: Optional[int] = None

@@ -24,6 +24,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import func, select
 
+from ..config import Settings
 from ..context import AppContext
 from ..errors import ApiError
 from ..models import Contest, EventLog, Problem
@@ -43,6 +44,7 @@ from ..services import problem_io
 from ..services.problem_io.build import BuildBudget, try_build, try_summarize
 from ..services.problem_io.bundle import ExportProblem, Notice, ProblemBundle
 from ..services.problem_io.notices import ProblemIoError
+from ..services.problem_rules import patterns_for
 from ..storage import BlobTooLarge, HashMismatch
 from .admin import (
     AdminIdentity,
@@ -451,7 +453,7 @@ def judge_import_apply(
 # --------------------------------------------------------------------------- #
 
 
-def _snapshot(row: Problem) -> ExportProblem:
+def _snapshot(row: Problem, settings: Settings) -> ExportProblem:
     try:
         patterns = json.loads(row.file_patterns) if row.file_patterns else None
     except ValueError:
@@ -463,6 +465,7 @@ def _snapshot(row: Problem) -> ExportProblem:
         order_index=int(row.order_index or 0),
         note=row.note,
         file_patterns=patterns if isinstance(patterns, list) else None,
+        effective_patterns=patterns_for(row, settings),
         judge_mode=row.judge_mode or "external",
         time_limit_ms=row.time_limit_ms,
         memory_limit_mb=row.memory_limit_mb,
@@ -489,7 +492,7 @@ def _select(ctx: AppContext, contest_id: int, fmt: str, problem_ids: Optional[Li
                 raise ApiError(404, "not_found", "题目不在本场次")
         elif fmt != "syncoj":
             rows = [row for row in rows if row.judge_mode == "builtin" and row.testdata_sha256]
-        return contest.slug, [_snapshot(row) for row in rows]
+        return contest.slug, [_snapshot(row, ctx.settings) for row in rows]
 
 
 def _export(ctx: AppContext, problems: List[ExportProblem], fmt: str, dry_run: bool) -> problem_io.ExportOutcome:

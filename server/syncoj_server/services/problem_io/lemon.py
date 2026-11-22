@@ -475,10 +475,12 @@ def _export_task(problem: ExportProblem, zf_in: Any, testdata: Any, zf: Any, roo
 
 def _sub_folder_check(problem: ExportProblem, notices: List[Notice]) -> bool:
     """按题目的代码路径模式决定 ``subFolderCheck``：LemonLime 为真时找 ``<选手>/<pid>/<pid>.cpp``，
-    为假时找 ``<选手>/<pid>.cpp``。SyncOJ 按模式的相对路径把代码落到 ``source/<场次>/<选手>/``。"""
+    为假时找 ``<选手>/<pid>.cpp``。SyncOJ 按模式的相对路径把代码落到 ``source/<场次>/<选手>/``。
+
+    用收代码时实际生效的模式（没配时是服务端配置的默认模式，不是出厂值）。"""
     from .. import matching
 
-    patterns = problem.file_patterns or [matching.DEFAULT_PATTERN]
+    patterns = problem.effective_patterns or problem.file_patterns or [matching.DEFAULT_PATTERN]
     expanded = [matching.expand_pattern(p, problem.ident, problem.title) for p in patterns]
     ident = re.escape(problem.ident)
     flat = [bool(re.match(r"^%s\.[^/*?\[]+$" % ident, p)) for p in expanded]

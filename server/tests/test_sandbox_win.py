@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -122,6 +123,18 @@ def test_工作目录根_非ASCII时退到ASCII目录() -> None:
     assert sw.ascii_safe(r"C:\Temp") and not sw.ascii_safe("C:\\Users\\Zoë")
 
 
+def test_完整性标签_是否禁止低完整性读() -> None:
+    assert sw.label_blocks_read_up(sw.NO_READ_UP_FILE_LABEL)
+    assert sw.label_blocks_read_up(sw.NO_READ_UP_DIR_LABEL)
+    assert sw.label_blocks_read_up("S:(ML;OICI;NRNW;;;HI)")
+    assert sw.label_blocks_read_up("S:(ML;;0x3;;;S-1-16-8192)")
+    assert not sw.label_blocks_read_up("")
+    assert not sw.label_blocks_read_up(sw.LOW_DIR_LABEL)
+    assert not sw.label_blocks_read_up("S:(ML;;NW;;;ME)")  # 只禁写
+    assert not sw.label_blocks_read_up("S:(ML;;NRNW;;;LW)")  # Low 级别挡不住 Low 进程
+    assert not sw.label_blocks_read_up("S:(ML;OICIIO;NRNWNX;;;ME)")  # 只给子对象继承
+
+
 def test_非Windows上不能建winjob沙箱(tmp_path: Path) -> None:
     if sys.platform == "win32":
         pytest.skip("Windows 上能建")
@@ -223,6 +236,28 @@ def test_win_端到端_AC(tmp_path: Path) -> None:
     (box,) = CREATED
     assert not sw.ascii_safe(str(tmp_path)) and sw.ascii_safe(str(box.workdir))  # 退到了 ASCII 目录
     assert not box.workdir.exists()  # 工作目录已清理
+    assert box.low_integrity, box.degraded
+
+
+@windows
+@needs_windows_gxx
+def test_win_端到端_checker也在低完整性下读写工作目录(tmp_path: Path) -> None:
+    checker = ("#include <cstdio>\nint main(int c, char **v){ FILE *o = fopen(v[2], \"r\"), *a = fopen(v[3], \"r\");"
+               " long long x = -1, y = -2; if (!o || !a) return 3; fscanf(o, \"%lld\", &x); fscanf(a, \"%lld\", &y);"
+               " return x == y ? 0 : 1; }\n")
+    outcome = _judge(tmp_path, AB, checker=checker)
+    assert outcome.status == "AC", outcome
+    wrong = _judge(tmp_path, AB.replace("a+b", "a-b"), checker=checker)
+    assert wrong.status == "WA", wrong
+
+
+@windows
+@needs_windows_gxx
+def test_win_端到端_文件IO在工作目录里读写(tmp_path: Path) -> None:
+    code = ("#include <cstdio>\nint main(){ freopen(\"ab.in\",\"r\",stdin); freopen(\"ab.out\",\"w\",stdout);"
+            " long long a,b; scanf(\"%lld%lld\",&a,&b); printf(\"%lld\\n\",a+b); }\n")
+    outcome = _judge(tmp_path, code, io_mode="file")
+    assert outcome.status == "AC", outcome
 
 
 @windows
@@ -286,3 +321,43 @@ def test_win_选手程序起不了子进程(tmp_path: Path) -> None:
         assert result.status == "OK", result
     finally:
         box.close()
+
+
+@windows
+@needs_windows_gxx
+def test_win_低完整性_读不了NR文件_写不了工作目录以外() -> None:
+    """模拟令牌文件：标了 NO_READ_UP 的文件选手程序打不开；工作目录以外的普通目录写不进去。
+
+    对照组：同一目录里没标签的文件能读（证明打不开是标签挡的，不是路径不对）。
+    用 ASCII 目录（box 的根），MinGW 程序的 fopen 走 ANSI API。"""
+    box = sw.WinJobSandbox()
+    outside = Path(tempfile.mkdtemp(prefix="syncoj-outside-", dir=str(box.workdir.parent)))
+    try:
+        assert box.low_integrity, "选手程序没能以低完整性运行：%s" % box.degraded
+        secret = outside / "token"
+        secret.write_text("secret", encoding="ascii")
+        assert sw.ensure_no_read_up(secret) is None
+        plain = outside / "plain.txt"
+        plain.write_text("plain", encoding="ascii")
+        (outside / "probe.txt").write_text("", encoding="ascii")  # 评测机自己能写这个目录
+        (outside / "probe.txt").unlink()
+        box.put("main.cpp", (
+            b"#include <cstdio>\n"
+            b"int main(int argc, char **argv){\n"
+            b"  FILE *f = fopen(argv[1], \"rb\"); if (f) return 10;\n"
+            b"  f = fopen(argv[2], \"rb\"); if (!f) return 11; fclose(f);\n"
+            b"  f = fopen(argv[3], \"wb\"); if (f) return 12;\n"
+            b"  f = fopen(\"inside.txt\", \"wb\"); if (!f) return 13; fputs(\"ok\", f); fclose(f);\n"
+            b"  return 0;\n}\n"
+        ))
+        built = box.run(runner.platform_compile_argv(["g++", "-O2", "-o", "prog", "main.cpp"]),
+                        runner.COMPILE_LIMITS, stderr="err.txt")
+        assert built.status == "OK", (box.workdir / "err.txt").read_text(errors="replace")
+        result = box.run(["./prog.exe", str(secret), str(plain), str(outside / "written.txt")], LIMITS)
+        assert result.status == "OK", (result, {10: "读到了 NR 文件", 11: "对照文件也读不了",
+                                               12: "写进了工作目录以外", 13: "写不了工作目录"}.get(result.exit_code))
+        assert not (outside / "written.txt").exists()
+        assert (box.workdir / "inside.txt").read_text() == "ok"
+    finally:
+        box.close()
+        shutil.rmtree(str(outside), ignore_errors=True)

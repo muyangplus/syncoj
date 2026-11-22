@@ -304,7 +304,7 @@ $p = Join-Path $env:TEMP syncoj-judge-install.ps1; iwr -UseBasicParsing http://1
 | 安装脚本 | 装到 | 后端 | 可选参数 |
 |---|---|---|---|
 | `install.sh` | `/opt/syncoj-judge/syncoj-judge.pyz`、`/etc/syncoj-judge/token`（0600）、systemd 单元 `syncoj-judge` | 有 isolate 用 isolate（服务以账号 `syncoj-judge` 运行）；没有则询问后用 rlimit（服务以 root 运行，选手程序用账号 `syncoj-judge-run`） | `--server` / `--backend` / `--run-as` / `--slots` / `--yes`（没有 isolate 不询问） |
-| `install.ps1` | `%ProgramData%\SyncOJ\judge\`（`syncoj-judge.pyz`、`token`、`cache\`、`judge.log`）、计划任务「SyncOJ Judge」（开机启动、SYSTEM、失败每分钟重启） | `winjob` | `-Server` / `-Backend` / `-Slots` / `-Python` / `-InstallDir` |
+| `install.ps1` | `%ProgramData%\SyncOJ\judge\`（`syncoj-judge.pyz`、`token`、`cache\`、`boxes\`、`judge.log`；目录不继承上级权限，令牌与 `cache\` 标 `NO_READ_UP`）、计划任务「SyncOJ Judge」（开机启动、以 LOCAL SERVICE 运行、失败每分钟重启） | `winjob` | `-Server` / `-Backend` / `-Slots` / `-Python` / `-InstallDir` |
 
 - 两个脚本都幂等：重跑 = 换令牌 / 换参数 / 升级评测机程序并重启。
 - 前提：Python ≥ 3.8、g++（Windows 上是 MinGW-w64，且在**系统** PATH 里）；脚本检查并提示。
@@ -320,13 +320,14 @@ syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
 |---|---|
 | `--server` | 服务端管理端口地址（必填） |
 | `--token-file` | 令牌文件（必填） |
-| `--backend` | `isolate`（Linux 默认，需先装 [isolate](https://github.com/ioi/isolate)）/ `rlimit`（只用 `setrlimit`，不隔离网络与文件系统，仅开发自测；结果 `isolated: false`）/ `winjob`（Windows 默认，Job Object 限 CPU / 内存 / 进程数；不隔离网络与文件系统，结果 `isolated: false`） |
+| `--backend` | `isolate`（Linux 默认，需先装 [isolate](https://github.com/ioi/isolate)）/ `rlimit`（只用 `setrlimit`，不隔离网络与文件系统，仅开发自测；结果 `isolated: false`）/ `winjob`（Windows 默认，Job Object 限 CPU / 内存 / 进程数，选手程序低完整性级别运行；不隔离网络，结果 `isolated: false`） |
 | `--box-id` | isolate box 编号，同机多 worker 各不相同（默认 0） |
 | `--slots` | 同时评几个任务（默认 1）；isolate 的 box 编号从 `--box-id` 起依次占用 |
 | `--cgroups` | isolate 用 cgroup 记内存 |
 | `--isolate` | isolate 可执行文件路径（默认 `isolate`） |
 | `--run-as` | rlimit 后端以 root 运行时必填：选手程序的运行账号；`winjob` 不支持 |
 | `--cache-dir` | 数据包缓存目录（默认 `~/.cache/syncoj-judge`） |
+| `--box-dir` | `rlimit` / `winjob` 工作目录所在（默认系统临时目录；`winjob` 遇非 ASCII 路径自动换） |
 | `--poll` | 轮询间隔（默认 5 秒）；评测中也按它报状态 |
 | `--log-file` | 日志写到文件（默认 stderr） |
 | `--once` | 评一个任务后退出 |
@@ -365,7 +366,7 @@ syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
 **Windows（`winjob`）**
 
 - 前置：Python ≥ 3.8；MinGW-w64 的 `g++` 在 `PATH` 里（找不到记 SE「评测机上找不到 g++（MinGW-w64）」）。
-- 以低权限专用账号运行：选手程序以评测机账号运行，能读写该账号可访问的文件、能联网。
+- 评测机以 LOCAL SERVICE 运行（install.ps1）；选手程序与 checker 以受限令牌（无特权）+ 低完整性级别运行：只能写工作目录，读不了令牌文件与数据包缓存（`NO_READ_UP`）与评测机进程内存；**能联网**，能读低完整性可读的文件。降权失败时退回评测机权限并在日志告警。
 - 工作目录的根须为纯 ASCII 路径（MinGW 限制），否则依次换到 `SYNCOJ_JUDGE_BOXES`、`%ProgramData%\SyncOJ\judge\boxes`、`%SystemDrive%\syncoj-judge-boxes`。
 - 编译追加 `-pipe -static -Wl,--stack=<内存限制>`，产物 `prog.exe`；checker 同样处理。
 - 与 Linux 评测环境的差异：

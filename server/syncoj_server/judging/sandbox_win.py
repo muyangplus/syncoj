@@ -1,4 +1,4 @@
-"""Windows 沙箱后端 ``winjob``（§12）：Job Object 限资源，不隔离文件系统与网络。
+"""Windows 沙箱后端 ``winjob``（§12）：Job Object 限资源 + 低完整性级别，不隔离网络。
 
 做法：
 
@@ -6,24 +6,33 @@
   checker 起不了子进程；编译器要起 cc1plus / as / ld，不限）、用户态 CPU 时间上限（略高于
   时限，判 TLE 仍看实际 CPU 时间）、未处理异常直接结束（不弹 WER 对话框）、关 Job 即杀光、
   UI 限制（剪贴板、桌面、全局原子、关机等）。
-* **自己调 CreateProcessW**（``CREATE_SUSPENDED``）拿到主线程句柄 → ``AssignProcessToJobObject``
-  → ``ResumeThread``。程序在进 Job 之前一条指令都没执行，没有逃逸窗口。没用
-  ``subprocess.Popen``：它不暴露主线程句柄，只能靠未公开的 ``NtResumeProcess`` 恢复。
+* **自己调 CreateProcessW / CreateProcessAsUserW**（``CREATE_SUSPENDED``）拿到主线程句柄 →
+  ``AssignProcessToJobObject`` → ``ResumeThread``。程序在进 Job 之前一条指令都没执行，没有逃逸
+  窗口。没用 ``subprocess.Popen``：它不暴露主线程句柄，只能靠未公开的 ``NtResumeProcess`` 恢复。
   继承的句柄用 ``PROC_THREAD_ATTRIBUTE_HANDLE_LIST`` 限定为 stdin / stdout / stderr 三个。
+* **选手程序与 checker 以受限令牌 + 低完整性级别运行**：当前进程令牌 → ``CreateRestrictedToken``
+  （``DISABLE_MAX_PRIVILEGE``，只留 SeChangeNotify）→ 完整性级别设为 Low（S-1-16-4096）→
+  ``CreateProcessAsUserW``。令牌由本进程令牌派生，不需要 SeAssignPrimaryTokenPrivilege。
+  低完整性进程写不了没有低标签的文件与目录（默认 no-write-up），读不了评测机进程内存
+  （进程默认 no-read-up），读不了标了 ``NO_READ_UP`` 的令牌文件与数据包缓存
+  （:func:`ensure_no_read_up`）。工作目录标为 Low（``S:(ML;OICI;NW;;;LW)``），里面的输入输出照常读写。
+  编译器用普通令牌运行（也在 Job 里）。降权不可用时退回普通令牌，记告警（:attr:`WinJobSandbox.degraded`），不静默。
 * 工作目录的根必须是纯 ASCII 路径：MinGW 的 as / ld 用 ANSI API 打开文件，中文用户名的
   ``%TEMP%`` 会让编译失败。不是 ASCII 时依次退到 ``SYNCOJ_JUDGE_BOXES``、
   ``%ProgramData%\\SyncOJ\\judge\\boxes``、``%SystemDrive%\\syncoj-judge-boxes``（:func:`box_root_candidates`）。
 * 计时：Job 记账的用户态 + 内核态 CPU 时间判 TLE；墙钟到 ``wall_seconds`` 就 ``TerminateJobObject``。
   内存：Job 记的峰值提交量（``PeakProcessMemoryUsed`` / 编译时 ``PeakJobMemoryUsed``）。
   输出：运行中每 25 ms 看一次工作目录增长，超过 ``output_bytes`` 就杀掉判 OLE。
-* 不切换账号（Windows 上要密码），``isolated`` 恒为 False；评测机应以低权限专用账号运行。
+* 不切换账号、不隔离网络，``isolated`` 恒为 False；评测机以 LOCAL SERVICE 运行（install.ps1）。
 
 本模块在 Linux 上也能导入（ctypes 只在用到时才装载 Win32 函数），纯逻辑在 Linux 上测试。
 """
 
 from __future__ import annotations
 
+import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -45,7 +54,11 @@ __all__ = [
     "environment_block",
     "ascii_safe",
     "box_root_candidates",
+    "label_blocks_read_up",
+    "ensure_no_read_up",
 ]
+
+log = logging.getLogger("syncoj.judge")
 
 #: 常见的 NTSTATUS 退出码 → 可读名称（未处理异常时进程以异常码退出）
 NTSTATUS_NAMES: Dict[int, str] = {
@@ -100,6 +113,13 @@ JOB_OBJECT_UILIMIT_ALL = 0x000000FF
 
 COMPILERS = frozenset({"g++", "gcc", "c++", "cc"})
 
+#: 工作目录的强制完整性标签：Low、子目录与文件继承、只禁止写上（低完整性进程能读写里面）
+LOW_DIR_LABEL = "S:(ML;OICI;NW;;;LW)"
+#: 令牌文件与数据包缓存：Medium、禁止读上 / 写上 / 执行上（低完整性进程打不开）
+NO_READ_UP_FILE_LABEL = "S:(ML;;NRNWNX;;;ME)"
+NO_READ_UP_DIR_LABEL = "S:(ML;OICI;NRNWNX;;;ME)"
+#: 不低于 Medium 的完整性级别（SDDL 缩写）
+_AT_LEAST_MEDIUM = frozenset({"ME", "MP", "HI", "SI"})
 #: 覆盖工作目录根的环境变量（必须是纯 ASCII 路径）
 BOXES_ENV = "SYNCOJ_JUDGE_BOXES"
 
@@ -128,6 +148,35 @@ def box_root_candidates(base: Optional[str], environ: Mapping[str, str], tempdir
         if item and ascii_safe(item) and item not in result:
             result.append(item)
     return result
+
+
+_LABEL_ACE = re.compile(r"\(ML;([^;]*);([^;]*);[^;]*;[^;]*;([^)]*)\)")
+
+
+def label_blocks_read_up(sddl: str) -> bool:
+    """SDDL 里的强制标签是否让低完整性进程读不了：级别不低于 Medium、带 ``NO_READ_UP``、作用于对象本身。"""
+    for flags, rights, level in _LABEL_ACE.findall(sddl or ""):
+        if "IO" in flags.upper():  # 只给子对象继承，不作用于自己
+            continue
+        rights = rights.upper()
+        if rights.startswith("0X"):
+            try:
+                no_read_up = bool(int(rights, 16) & 0x2)
+            except ValueError:
+                no_read_up = False
+        else:
+            no_read_up = "NR" in [rights[i:i + 2] for i in range(0, len(rights), 2)]
+        level = level.upper()
+        if level.startswith("S-1-16-"):
+            try:
+                high_enough = int(level[7:]) >= 0x2000
+            except ValueError:
+                high_enough = False
+        else:
+            high_enough = level in _AT_LEAST_MEDIUM
+        if no_read_up and high_enough:
+            return True
+    return False
 
 
 def _is_crash(code: Optional[int]) -> bool:
@@ -343,11 +392,44 @@ def _win32():  # pragma: no cover - 只在 Windows 上跑
         "UpdateProcThreadAttribute": (BOOL, [LPVOID, DWORD, ctypes.c_size_t, LPVOID, ctypes.c_size_t,
                                              LPVOID, LPVOID]),
         "DeleteProcThreadAttributeList": (None, [LPVOID]),
+        "GetCurrentProcess": (HANDLE, []),
+        "LocalFree": (LPVOID, [LPVOID]),
     }
     for name, (restype, argtypes) in signatures.items():
         function = getattr(k32, name)
         function.restype = restype
         function.argtypes = argtypes
+
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    PHANDLE = ctypes.POINTER(HANDLE)
+    advapi_signatures = {
+        "OpenProcessToken": (BOOL, [HANDLE, DWORD, PHANDLE]),
+        "CreateRestrictedToken": (BOOL, [HANDLE, DWORD, DWORD, LPVOID, DWORD, LPVOID, DWORD, LPVOID, PHANDLE]),
+        "SetTokenInformation": (BOOL, [HANDLE, ctypes.c_int, LPVOID, DWORD]),
+        "ConvertStringSidToSidW": (BOOL, [wintypes.LPCWSTR, ctypes.POINTER(LPVOID)]),
+        "GetLengthSid": (DWORD, [LPVOID]),
+        "CreateProcessAsUserW": (BOOL, [HANDLE, wintypes.LPCWSTR, wintypes.LPWSTR, LPVOID, LPVOID, BOOL, DWORD,
+                                        LPVOID, wintypes.LPCWSTR, LPVOID, ctypes.POINTER(PROCESS_INFORMATION)]),
+        "ConvertStringSecurityDescriptorToSecurityDescriptorW": (
+            BOOL, [wintypes.LPCWSTR, DWORD, ctypes.POINTER(LPVOID), LPVOID]),
+        "ConvertSecurityDescriptorToStringSecurityDescriptorW": (
+            BOOL, [LPVOID, DWORD, DWORD, LPVOID, LPVOID]),
+        "GetSecurityDescriptorSacl": (BOOL, [LPVOID, LPVOID, LPVOID, LPVOID]),
+        # 这两个直接返回错误码（不走 GetLastError）
+        "SetNamedSecurityInfoW": (DWORD, [wintypes.LPWSTR, ctypes.c_int, DWORD, LPVOID, LPVOID, LPVOID, LPVOID]),
+        "GetNamedSecurityInfoW": (DWORD, [wintypes.LPCWSTR, ctypes.c_int, DWORD, LPVOID, LPVOID, LPVOID, LPVOID,
+                                          ctypes.POINTER(LPVOID)]),
+    }
+    for name, (restype, argtypes) in advapi_signatures.items():
+        function = getattr(advapi, name)
+        function.restype = restype
+        function.argtypes = argtypes
+
+    class SID_AND_ATTRIBUTES(ctypes.Structure):
+        _fields_ = [("Sid", LPVOID), ("Attributes", DWORD)]
+
+    class TOKEN_MANDATORY_LABEL(ctypes.Structure):
+        _fields_ = [("Label", SID_AND_ATTRIBUTES)]
 
     class Api:
         pass
@@ -355,10 +437,12 @@ def _win32():  # pragma: no cover - 只在 Windows 上跑
     api = Api()
     api.ctypes = ctypes
     api.k32 = k32
+    api.advapi = advapi
     api.HANDLE = HANDLE
     api.DWORD = DWORD
     for cls in (JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
-                JOBOBJECT_BASIC_UI_RESTRICTIONS, STARTUPINFOW, STARTUPINFOEXW, PROCESS_INFORMATION):
+                JOBOBJECT_BASIC_UI_RESTRICTIONS, STARTUPINFOW, STARTUPINFOEXW, PROCESS_INFORMATION,
+                TOKEN_MANDATORY_LABEL):
         setattr(api, cls.__name__, cls)
     _API = api
     return api
@@ -380,16 +464,135 @@ _WAIT_OBJECT_0 = 0
 # SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX：子进程继承，不弹对话框
 _ERROR_MODE = 0x0001 | 0x0002 | 0x8000
 
+# 令牌
+_TOKEN_ASSIGN_PRIMARY = 0x0001
+_TOKEN_DUPLICATE = 0x0002
+_TOKEN_QUERY = 0x0008
+_TOKEN_ADJUST_DEFAULT = 0x0080
+_DISABLE_MAX_PRIVILEGE = 0x1
+_TokenIntegrityLevel = 25
+_SE_GROUP_INTEGRITY = 0x20
+_LOW_INTEGRITY_SID = "S-1-16-4096"
+# 安全描述符
+_SE_FILE_OBJECT = 1
+_LABEL_SECURITY_INFORMATION = 0x10
+_SDDL_REVISION_1 = 1
+#: CreateProcessAsUserW 因权限失败时退回普通令牌（ERROR_ACCESS_DENIED / ERROR_PRIVILEGE_NOT_HELD）
+_PRIVILEGE_ERRORS = frozenset({5, 1314})
 
-def _fail(what: str) -> SandboxError:  # pragma: no cover - 只在 Windows 上跑
+#: 已经告警过的降级原因（每种只记一次，不刷屏）
+_WARNED = set()
+
+
+def _fail(what: str, code: Optional[int] = None) -> SandboxError:  # pragma: no cover - 只在 Windows 上跑
     import ctypes
 
-    code = ctypes.get_last_error()
-    return SandboxError("%s 失败：%s" % (what, ctypes.FormatError(code).strip() if code else "未知错误"))
+    if code is None:
+        code = ctypes.get_last_error()
+    error = SandboxError("%s 失败：%s" % (what, ctypes.FormatError(code).strip() if code else "未知错误"))
+    error.winerror = code  # type: ignore[attr-defined]
+    return error
+
+
+def _set_label(api, path: Path, sddl: str) -> None:  # pragma: no cover - 只在 Windows 上跑
+    """给文件 / 目录设强制完整性标签（只动 SACL 里的标签，不碰 DACL）。需要对它有 WRITE_OWNER。"""
+    ctypes = api.ctypes
+    descriptor = ctypes.c_void_p()
+    if not api.advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        sddl, _SDDL_REVISION_1, ctypes.byref(descriptor), None,
+    ):
+        raise _fail("解析标签 %s" % sddl)
+    try:
+        present, defaulted = ctypes.c_long(0), ctypes.c_long(0)
+        sacl = ctypes.c_void_p()
+        if not api.advapi.GetSecurityDescriptorSacl(descriptor, ctypes.byref(present), ctypes.byref(sacl),
+                                                    ctypes.byref(defaulted)):
+            raise _fail("GetSecurityDescriptorSacl")
+        code = api.advapi.SetNamedSecurityInfoW(str(path), _SE_FILE_OBJECT, _LABEL_SECURITY_INFORMATION,
+                                                None, None, None, sacl)
+        if code:
+            raise _fail("给 %s 设完整性标签" % path, code)
+    finally:
+        api.k32.LocalFree(descriptor)
+
+
+def _get_label(api, path: Path) -> str:  # pragma: no cover - 只在 Windows 上跑
+    """文件 / 目录当前的强制标签（SDDL，如 ``S:(ML;;NRNWNX;;;ME)``；没有显式标签时为空）。"""
+    ctypes = api.ctypes
+    descriptor = ctypes.c_void_p()
+    code = api.advapi.GetNamedSecurityInfoW(str(path), _SE_FILE_OBJECT, _LABEL_SECURITY_INFORMATION,
+                                            None, None, None, None, ctypes.byref(descriptor))
+    if code:
+        raise _fail("读 %s 的完整性标签" % path, code)
+    try:
+        text = ctypes.c_void_p()
+        if not api.advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor, _SDDL_REVISION_1, _LABEL_SECURITY_INFORMATION, ctypes.byref(text), None,
+        ):
+            raise _fail("ConvertSecurityDescriptorToStringSecurityDescriptorW")
+        try:
+            return ctypes.wstring_at(text.value) if text.value else ""
+        finally:
+            api.k32.LocalFree(text)
+    finally:
+        api.k32.LocalFree(descriptor)
+
+
+def ensure_no_read_up(path) -> Optional[str]:  # pragma: no cover - 只在 Windows 上跑
+    """让低完整性进程读不了 ``path``（令牌文件、数据包缓存）：已有这样的标签就不动，否则设上
+    （目录带继承）。成功返回 None，失败返回原因（调用方告警，不中断）。"""
+    path = Path(path)
+    api = _win32()
+    try:
+        if label_blocks_read_up(_get_label(api, path)):
+            return None
+    except SandboxError:
+        pass
+    try:
+        _set_label(api, path, NO_READ_UP_DIR_LABEL if path.is_dir() else NO_READ_UP_FILE_LABEL)
+    except SandboxError as exc:
+        return str(exc)
+    return None
+
+
+def _low_integrity_token(api):  # pragma: no cover - 只在 Windows 上跑
+    """受限（去掉全部特权）+ 低完整性级别的主令牌，由本进程令牌派生。
+
+    CreateRestrictedToken 产出的就是主令牌，且是本进程令牌的"子令牌"，CreateProcessAsUserW
+    用它不需要 SeAssignPrimaryTokenPrivilege（管理员默认没有这项特权），所以不再 DuplicateTokenEx。"""
+    ctypes = api.ctypes
+    process_token = api.HANDLE()
+    access = _TOKEN_ASSIGN_PRIMARY | _TOKEN_DUPLICATE | _TOKEN_QUERY | _TOKEN_ADJUST_DEFAULT
+    if not api.advapi.OpenProcessToken(api.k32.GetCurrentProcess(), access, ctypes.byref(process_token)):
+        raise _fail("OpenProcessToken")
+    token = api.HANDLE()
+    try:
+        if not api.advapi.CreateRestrictedToken(process_token, _DISABLE_MAX_PRIVILEGE, 0, None, 0, None, 0, None,
+                                                ctypes.byref(token)):
+            raise _fail("CreateRestrictedToken")
+    finally:
+        api.k32.CloseHandle(process_token)
+    sid = ctypes.c_void_p()
+    try:
+        if not api.advapi.ConvertStringSidToSidW(_LOW_INTEGRITY_SID, ctypes.byref(sid)):
+            raise _fail("ConvertStringSidToSidW")
+        label = api.TOKEN_MANDATORY_LABEL()
+        label.Label.Sid = sid
+        label.Label.Attributes = _SE_GROUP_INTEGRITY
+        size = ctypes.sizeof(label) + api.advapi.GetLengthSid(sid)
+        if not api.advapi.SetTokenInformation(token, _TokenIntegrityLevel, ctypes.byref(label), size):
+            raise _fail("SetTokenInformation(TokenIntegrityLevel)")
+    except BaseException:
+        api.k32.CloseHandle(token)
+        raise
+    finally:
+        if sid:
+            api.k32.LocalFree(sid)
+    return token
 
 
 class WinJobSandbox(Sandbox):
-    """Job Object 限资源。不隔离文件系统与网络（见模块说明）。"""
+    """Job Object 限资源，选手程序与 checker 以低完整性级别运行。不隔离网络（见模块说明）。"""
 
     isolated = False
 
@@ -401,6 +604,16 @@ class WinJobSandbox(Sandbox):
         api = _win32()
         api.k32.SetErrorMode(_ERROR_MODE)
         self.workdir = self._make_workdir(base)
+        #: 选手程序与 checker 是否以低完整性级别运行；降级时 :attr:`degraded` 写原因
+        self.low_integrity = False
+        self.degraded = ""
+        self._token = None
+        try:
+            _set_label(api, self.workdir, LOW_DIR_LABEL)
+            self._token = _low_integrity_token(api)
+            self.low_integrity = True
+        except SandboxError as exc:
+            self._degrade(str(exc))
 
     @staticmethod
     def _make_workdir(base: Optional[Path]) -> Path:
@@ -413,6 +626,17 @@ class WinJobSandbox(Sandbox):
             except OSError as exc:
                 problems.append("%s（%s）" % (root, exc))
         raise SandboxError("建不了纯 ASCII 路径的工作目录：%s" % ("；".join(problems) or "没有可用的候选目录"))
+
+    def _degrade(self, reason: str) -> None:
+        """降权不可用：选手程序改以评测机自己的令牌运行。明确告警（每种原因只记一次）。"""
+        self.low_integrity = False
+        self.degraded = reason
+        if self._token:
+            _win32().k32.CloseHandle(self._token)
+            self._token = None
+        if reason not in _WARNED:
+            _WARNED.add(reason)
+            log.warning("winjob：选手程序没能以低完整性级别运行，退回评测机账号的权限：%s", reason)
 
     # ------------------------------------------------------------------ #
 
@@ -488,8 +712,21 @@ class WinJobSandbox(Sandbox):
             # 限进程数时不给控制台：有控制台就会多一个 conhost.exe 算进 Job 的活动进程数。
             # 编译器要给子进程（cc1plus / as / ld）共用一个隐藏控制台，否则每个子进程各开一个。
             flags |= _CREATE_NO_WINDOW if limits.processes is None else _DETACHED_PROCESS
-            if not api.k32.CreateProcessW(program, command, None, None, True, flags, env_buffer,
-                                          str(self.workdir), ctypes.byref(startup), ctypes.byref(info)):
+            # 编译器（不限进程数）用普通令牌；选手程序与 checker 用低完整性令牌
+            created = False
+            if limits.processes is not None and self._token:
+                created = bool(api.advapi.CreateProcessAsUserW(
+                    self._token, program, command, None, None, True, flags, env_buffer,
+                    str(self.workdir), ctypes.byref(startup), ctypes.byref(info),
+                ))
+                if not created:
+                    error = _fail("CreateProcessAsUserW（%s）" % argv[0])
+                    if getattr(error, "winerror", None) not in _PRIVILEGE_ERRORS:
+                        raise error
+                    self._degrade(str(error))
+            if not created and not api.k32.CreateProcessW(program, command, None, None, True, flags, env_buffer,
+                                                          str(self.workdir), ctypes.byref(startup),
+                                                          ctypes.byref(info)):
                 raise _fail("CreateProcessW（%s）" % argv[0])
         finally:
             api.k32.DeleteProcThreadAttributeList(attributes)
@@ -572,6 +809,9 @@ class WinJobSandbox(Sandbox):
         return RunResult(status, exit_code, None, cpu, wall, peak, message)
 
     def close(self) -> None:
+        if self._token:
+            _win32().k32.CloseHandle(self._token)
+            self._token = None
         # 进程刚结束时文件句柄可能还没释放，删不掉就等一会儿再试
         for attempt in range(10):
             try:

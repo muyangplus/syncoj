@@ -194,7 +194,8 @@ class Worker:
         task_id = int(task["id"])
         testdata_sha = task["testdata"]["sha256"]
         testdata = self._fetch(task_id, testdata_sha, self.cache_dir / ("%s.zip" % testdata_sha))
-        work = Path(tempfile.mkdtemp(prefix="syncoj-judge-src-"))
+        # 放在缓存目录下：Windows 上缓存目录禁止低完整性进程读，别的选手程序读不到这份代码
+        work = Path(tempfile.mkdtemp(prefix="syncoj-judge-src-", dir=str(self.cache_dir)))
         try:
             source_name = Path(task["source"]["path"] or "main.cpp").name
             source = self._fetch(task_id, task["source"]["sha256"], work / source_name)
@@ -301,18 +302,34 @@ def _sha256_of(path: Path) -> str:
     return digest.hexdigest()
 
 
+def harden_windows_paths(paths: List[Path]) -> None:
+    """Windows：令牌文件与数据包缓存设 NO_READ_UP 标签，低完整性的选手程序读不到（§12）。
+    install.ps1 已经设过时这里只是确认；设不上只告警（评测照常）。"""
+    from .sandbox_win import ensure_no_read_up
+
+    for path in paths:
+        try:
+            problem = ensure_no_read_up(path)
+        except Exception as exc:  # noqa: BLE001 - 加固失败不该让评测机起不来
+            problem = str(exc)
+        if problem:
+            log.warning("没能禁止低完整性进程读 %s：%s", path, problem)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="syncoj-judge", description="SyncOJ 评测机（自带沙箱评测）")
     parser.add_argument("--server", required=True, help="服务端管理端口地址，如 http://10.0.0.5:8000")
     parser.add_argument("--token-file", required=True, help="管理端「评测机」签发的令牌（文件里只有这一行）")
     parser.add_argument("--backend", choices=list(sb.BACKENDS), default=None,
                         help="沙箱：isolate（Linux 默认、推荐）/ rlimit（只给开发自测，不隔离网络与文件系统）"
-                             " / winjob（Windows 默认，Job Object 限资源，不隔离网络与文件系统）")
+                             " / winjob（Windows 默认，Job Object 限资源 + 低完整性级别，不隔离网络）")
     parser.add_argument("--run-as", default=None, help="rlimit 后端以 root 运行时，选手程序换成这个账号跑")
     parser.add_argument("--box-id", type=int, default=0, help="isolate 的 box 编号（同机多个 worker 要各不相同）")
     parser.add_argument("--isolate", default="isolate", help="isolate 可执行文件路径")
     parser.add_argument("--cgroups", action="store_true", help="isolate 用 cgroup 记内存（需要 isolate 配好 cgroup）")
     parser.add_argument("--cache-dir", default=None, help="数据包缓存目录（默认 ~/.cache/syncoj-judge）")
+    parser.add_argument("--box-dir", default=None,
+                        help="rlimit / winjob 的工作目录放在这里（默认系统临时目录；winjob 遇到非 ASCII 路径自动换）")
     parser.add_argument("--poll", type=float, default=DEFAULT_POLL_SECONDS, help="没有任务时多久问一次（秒）")
     parser.add_argument("--slots", type=int, default=1, help="同时评几个任务（isolate 的 box 编号从 --box-id 起依次占用）")
     parser.add_argument("--log-file", default=None, help="日志写到这个文件（默认 stderr）")
@@ -343,10 +360,13 @@ def main(argv=None) -> int:
         return sb.make_sandbox(
             backend, run_as=args.run_as, box_id=args.box_id + slot,
             isolate_binary=args.isolate, cgroups=args.cgroups,
+            base=Path(args.box_dir) if args.box_dir else None,
         )
 
     if backend == "winjob":
-        log.warning("winjob 后端不隔离网络与文件系统：请以低权限专用账号运行评测机")
+        log.warning("winjob 后端不隔离网络：选手程序以低完整性级别运行，仍能联网")
+        cache.mkdir(parents=True, exist_ok=True)
+        harden_windows_paths([Path(args.token_file), cache])
     if backend == "rlimit":
         log.warning("rlimit 后端不隔离网络与文件系统：只用于开发自测，正式考试请用 isolate")
         if hasattr(os, "geteuid") and os.geteuid() == 0 and not args.run_as:

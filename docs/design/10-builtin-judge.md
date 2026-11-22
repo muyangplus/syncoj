@@ -6,7 +6,7 @@
 ### 12.1 目标与边界
 
 * **要**：教师对一个场次（或一道题、一个选手）发起评测，按 NOI 惯例编译、运行、比对，成绩进成绩矩阵；能重测；能看每个测试点。
-* **不要**：在线 OJ 那一套（题库、提交队列、实时排行榜）；交互题与通信题；Windows 上的隔离沙箱（`winjob` 只限资源）。
+* **不要**：在线 OJ 那一套（题库、提交队列、实时排行榜）；交互题与通信题；Windows 上的网络隔离（`winjob` 限资源 + 低完整性级别，不隔离网络）。
 * **硬约束**：选手代码**不可信**；服务端进程持有数据库、发布私钥（`.key/`）、统一注册密钥，**不在服务端进程内、不以服务端账号**运行选手程序。
 
 ### 12.2 关键决定：产物写进现有的 `judge_result/`
@@ -35,7 +35,7 @@ syncoj-server（服务端账号）         syncoj-judge worker（专用账号，
 |---|---|---|---|
 | `isolate` | 调用 IOI 的 isolate（命名空间 + 可选 cgroup） | 机器装了 isolate（setuid root）；同机多个 worker 用不同 `--box-id` | **推荐**，正式考试用 |
 | `rlimit` | `fork` + `setrlimit`（CPU / 内存 / 输出 / 进程数）+ 另一账号运行 + 每点前清空工作目录 | 无；worker 以 root 跑时必须给 `--run-as`，否则拒绝 | **只给开发与自测**，无网络与文件系统隔离，界面标红"不隔离" |
-| `winjob` | Windows Job Object（CPU / 内存 / 活动进程数 1 / UI 限制 / 关 Job 即杀）+ 每次运行独立临时目录 | Windows，Python ≥ 3.8，MinGW-w64 `g++` 在 `PATH`；不支持 `--run-as` | Windows 上的评测机；无网络与文件系统隔离（`isolated: false`），以低权限专用账号运行 |
+| `winjob` | Windows Job Object（CPU / 内存 / 活动进程数 1 / UI 限制 / 关 Job 即杀）+ 选手程序与 checker 以受限令牌、低完整性级别运行 + 每次运行独立临时目录 | Windows，Python ≥ 3.8，MinGW-w64 `g++` 在系统 `PATH`；不支持 `--run-as` | Windows 上的评测机；以 LOCAL SERVICE 运行；不隔离网络（`isolated: false`） |
 
 * isolate 是**调用**不是链接（它是 GPL-2），不影响本仓库许可证。
 * 否决自研 `unshare` + seccomp：安全边界，自研维护成本与出错代价过高；`rlimit` 覆盖无更好选择时的情形。
@@ -44,7 +44,10 @@ syncoj-server（服务端账号）         syncoj-judge worker（专用账号，
 * 一个 worker 默认一次评一个任务；`--slots N` 并发评 N 个（各占一个 box，§12.10），或起多个 worker（各用不同 `--box-id`）。
 * 平台守卫：Linux 只认 `isolate` / `rlimit`，Windows 只认 `winjob`（默认），其余组合启动即报错。
 * `winjob`：自己调 `CreateProcessW`（`CREATE_SUSPENDED`）→ `AssignProcessToJobObject` → `ResumeThread`，程序进 Job 前不执行任何指令；否决 `subprocess.Popen` + 未公开的 `NtResumeProcess`（Popen 不给主线程句柄）。继承句柄用 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 限定为标准输入输出三个；限进程数时以 `DETACHED_PROCESS` 启动（否则 conhost.exe 占掉 Job 的活动进程名额），编译用不限进程数、限整个 Job CPU 与内存的 Job。CPU 取 Job 记账的用户 + 内核时间；内存取峰值提交量；墙钟超限 `TerminateJobObject`；运行中轮询工作目录增长判 OLE。崩溃（NTSTATUS / `abort()`）且峰值已达内存限制 90% 记 MLE（Job 挡住的分配不计入峰值）。编译加 `-static`（不依赖 MinGW 的 DLL）、`-Wl,--stack=<内存限制>`（对齐 Linux 栈不限）与 `-pipe`。
+  * 降权：选手程序与 checker 用本进程令牌派生的受限令牌（`CreateRestrictedToken` 去掉全部特权）、完整性级别 Low，经 `CreateProcessAsUserW` 启动（同样挂起 → 进 Job → 恢复）；编译器用普通令牌，也在 Job 里。工作目录标 Low（`S:(ML;OICI;NW;;;LW)`），输入输出照常读写；目录以外写不了（no-write-up），评测机进程内存读不了（进程默认 no-read-up）。降权失败时退回评测机令牌并告警，不静默。
+  * 令牌文件与数据包缓存（含评测中的选手代码）标 `NO_READ_UP`（Medium，`NRNWNX`），低完整性进程读不了；install.ps1 设，worker 启动时再确认（失败只告警）。
   * 工作目录的根必须是纯 ASCII（MinGW 的 as / ld 用 ANSI API，中文用户名的 `%TEMP%` 会编译失败）：否则依次换到 `SYNCOJ_JUDGE_BOXES`、`%ProgramData%\SyncOJ\judge\boxes`、`%SystemDrive%\syncoj-judge-boxes`。
+  * 不隔离网络；选手程序仍能读 LOCAL SERVICE 与低完整性可读的文件（系统文件等）。
 
 ### 12.5 评测语义（NOI 惯例）
 
@@ -105,5 +108,5 @@ syncoj-server（服务端账号）         syncoj-judge worker（专用账号，
 * **并发**：`--slots N` 起 N 个评测线程，各领各的任务；isolate 的 box 编号从 `--box-id` 起依次占用。
 * **一键接入**：服务端（只在管理端口）发 `GET /judge/worker.pyz`、`/judge/install.sh`、`/judge/install.ps1`。pyz 把 `syncoj_server/judging/`（只用标准库，测试用 AST 守着）连同只有版本号的包根打成 zipapp，按「版本号 + 源码指纹」缓存在 `<数据目录>/cache/judge-worker/`；另一台机器只要有 Python 3.8+ 与编译器，不必装服务端包。安装脚本嵌入请求的 Host 头（形状不安全就不嵌）与 pyz 的 sha256，令牌由教师在命令行给。签发令牌的响应直接带 Linux / Windows 两条一行命令。
   * Linux：`/opt/syncoj-judge/syncoj-judge.pyz`、`/etc/syncoj-judge/token`（0600）、systemd 单元 `syncoj-judge`。有 isolate 用 isolate、服务以专用账号 `syncoj-judge` 运行；没有 isolate 先询问（`--yes` 跳过），用 rlimit、服务以 root 运行、选手程序换成 `syncoj-judge-run` 跑。幂等，重跑 = 换令牌 / 升级。
-  * Windows：`%ProgramData%\SyncOJ\judge\`，令牌只给 SYSTEM 与 Administrators（按 SID 授权），计划任务「SyncOJ Judge」开机启动、以 SYSTEM 运行、失败每分钟重启，`--backend winjob`。检查 Python ≥ 3.8 与 g++ 是否在**系统** PATH。脚本是 UTF-8 BOM（PowerShell 5.1 无 BOM 按 ANSI 读），所以一行命令先下载到文件再执行，而不是 `iwr | iex`。
+  * Windows：`%ProgramData%\SyncOJ\judge\`（不继承上级权限），令牌只给 SYSTEM、Administrators 读写与 LOCAL SERVICE 读（按 SID 授权）并标 `NO_READ_UP`，`cache\` / `boxes\` / 日志给 LOCAL SERVICE 修改；计划任务「SyncOJ Judge」开机启动、以 LOCAL SERVICE 运行（不是 SYSTEM）、失败每分钟重启，`--backend winjob`。检查 Python ≥ 3.8 与 g++ 是否在**系统** PATH、LOCAL SERVICE 能否读到（Python 装在用户目录下时提示改为「为所有用户安装」）。脚本是 UTF-8 BOM（PowerShell 5.1 无 BOM 按 ANSI 读），所以一行命令先下载到文件再执行，而不是 `iwr | iex`。
 * **本机评测机**：Linux 服务端可在界面一键启停一个子进程评测机（`python -m syncoj_server.judging.worker`，连 `127.0.0.1:<管理端口>`）。它是 `judge_worker` 里 `is_local = 1` 的那一行，每次启动换一枚令牌（写 `<数据目录>/judge-local/token`，0600）；有 isolate 用 isolate，否则 rlimit（服务端是 root 时选手程序以 `SYNCOJ_JUDGE_LOCAL_RUN_AS`，默认 `nobody` 运行）。日志 `<数据目录>/logs/judge-local.log`。服务端退出时一并停掉（SIGTERM，10 秒后 SIGKILL）；不随服务端启动自动拉起。非 Linux 服务端不提供。

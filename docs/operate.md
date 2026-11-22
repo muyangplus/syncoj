@@ -248,6 +248,7 @@ python scripts/smoke_systemd245.py --keep   # 失败后保留容器与临时目�
 | `--isolate` | `isolate` | isolate 可执行文件路径 |
 | `--cgroups` | 关 | isolate 用 cgroup 统计内存 |
 | `--cache-dir` | `~/.cache/syncoj-judge` | 数据包缓存目录 |
+| `--box-dir` | 系统临时目录 | `rlimit` / `winjob` 的工作目录所在 |
 | `--slots` | `1` | 同时评几个任务 |
 | `--poll` | `5` 秒 | 轮询间隔（评测中也按它报状态） |
 | `--log-file` | stderr | 日志文件 |

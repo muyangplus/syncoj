@@ -720,6 +720,16 @@ def _migration_021_agent_binding(engine: Engine) -> None:
     _rebuild_table(engine, "agent")
 
 
+def _migration_022_contest_player_password(engine: Engine) -> None:
+    """场次加考生页密码哈希列。
+
+    NULL = 本场不开放「准考证号 + 密码」登录考生页，老场次行为不变。
+    """
+    if "contest" not in _tables(engine):
+        return
+    _add_column(engine, "contest", "player_password_hash", "VARCHAR(255)")
+
+
 MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
     (1, "统一密钥注册 + 名单库所需的结构", _migration_001_enrollment),
     (2, "机器永久绑定名单条目；去掉注册码链路", _migration_002_roster_binding),
@@ -809,6 +819,11 @@ MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
         21,
         "机器可以同时绑多份名单：绑定搬进 agent_binding",
         _migration_021_agent_binding,
+    ),
+    (
+        22,
+        "场次加考生页密码",
+        _migration_022_contest_player_password,
     ),
 ]
 

@@ -499,6 +499,8 @@ class ContestOut(_Base):
     #: 自带评测的自动入队（§12.9）：``off`` / ``on_change``；去抖秒数
     auto_judge: str = "off"
     auto_judge_delay: int = 60
+    #: 是否设了考生页密码。密码本身**只写不读**（库里也只有哈希）。
+    has_player_password: bool = False
 
 
 class ContestUpdate(_Base):
@@ -519,6 +521,12 @@ class ContestUpdate(_Base):
     #: 显式置空用的开关。``None`` 字段没法区分"没传"和"传了 null"，
     #: 所以要多一个布尔 —— 否则教师永远清不掉已经选错的名单。
     clear_default_roster: bool = False
+    #: 考生页密码。给了就**替换**（存 scrypt 哈希）；不给 = 不动。
+    #: 设了它，考生能在考生页用「准考证号 + 这个密码」看到自己的清单并下载文件。
+    player_password: Optional[str] = Field(default=None, min_length=4, max_length=128)
+    #: 清除考生页密码（关掉那条登录路径，已签出的令牌随之失效）。
+    #: 与 ``player_password`` 同时给时以清除为准。
+    clear_player_password: bool = False
 
 
 # --------------------------------------------------------------------------- #
@@ -1893,11 +1901,14 @@ class PlayerProfileOut(_Base):
 class PlayerAssetOut(_Base):
     """清单里的一行：下发了什么、该落在哪个目录、到没到。
 
+    ``id`` 是资产 id，考生页的「下载」按它取文件（``GET /player/assets/{id}``）。
+
     ``dest_dir`` 是**任务的**目标目录模板展开后的样子（``DeployTask.dest_dir``），
     不是某个选手磁盘上的绝对路径 —— 服务端不认识选手机器上的家目录，编一个
     绝对路径只会是错的。空串表示"直接落在下发根目录"（默认就是桌面）。
     """
 
+    id: int
     filename: str
     dest_dir: str = ""
     #: ``DeployStatus`` 的取值：pending/ready/done/failed/cancelled
@@ -1937,9 +1948,9 @@ class PlayerContextOut(_Base):
 
     * ``matched_by="machine"``：请求没带参数，服务端按来源 IP 认出了这台机器。
       这是主路径 —— 选手在考场机器上打开就是一个带参数的快捷方式，一个字都不用填。
-    * ``matched_by="explicit"``：请求带了 ``contest`` + ``player_no``，按这两个值
-      精确查找。自动匹配不上时（教师的笔记本、Agent 没起来的机器、换了 IP）
-      靠它兜底。
+    * ``matched_by="token"``：请求带了考生页登录令牌（``X-Player-Token``），
+      那是用「准考证号 + 场次考生页密码」换来的（``POST /player/login``）。
+      自动匹配不上时（教师的笔记本、Agent 没起来的机器、换了 IP）靠它兜底。
 
     回这个字段是让**页面**能说清"我这份清单是怎么定位到你的"：自动匹配到别人的
     机器上时，页面上的考号会当场露馅，而不是安静地显示一份不属于这台机器的清单。
@@ -1951,8 +1962,50 @@ class PlayerContextOut(_Base):
     #: 空对象会让页面显示一个"有公告、但内容是空的"的框，而事实是压根没有。
     notice: Optional[PlayerNoticeOut] = None
     assets: List[PlayerAssetOut] = Field(default_factory=list)
-    #: ``machine`` / ``explicit``，见类说明
+    #: ``machine`` / ``token``，见类说明
     matched_by: str
     #: 服务端的 Unix 秒。时钟不一致时页面上还能显示"服务端现在几点"，
     #: 而考试里"还剩多久"是靠它算的。
     server_time: int
+
+
+class PlayerPreviewContestOut(_Base):
+    """降级预览里的一场：只有场次本身与**面向全场**的公告。
+
+    降级预览是谁都能打开的（没认出本机、也没登录），所以这里**绝不**出现任何
+    选手的信息或个人下发清单。公告只取"目标是全场"的 ``NOTICE.md`` 下发
+    （``DeployTask.target_kind == "all"`` 且没取消）—— 只发给部分人的公告不算。
+    """
+
+    slug: str
+    name: str
+    status: str
+    starts_at: Optional[str] = None
+    ends_at: Optional[str] = None
+    notice: Optional[PlayerNoticeOut] = None
+    #: 本场设了考生页密码 = 可以用「准考证号 + 密码」登录
+    login_enabled: bool = False
+
+
+class PlayerPreviewOut(_Base):
+    """考生页的降级预览：当前在考的场次（多场可切换）。"""
+
+    contests: List[PlayerPreviewContestOut] = Field(default_factory=list)
+    #: 服务端的 Unix 秒（倒计时的基准），同 ``PlayerContextOut.server_time``
+    server_time: int
+
+
+class PlayerLoginIn(_Base):
+    """考生页登录：场次标识 + 准考证号（精确匹配）+ 场次的考生页密码。"""
+
+    contest: str = Field(min_length=1, max_length=64)
+    player_no: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class PlayerLoginOut(_Base):
+    """登录成功签出的短期令牌。之后放进 ``X-Player-Token`` 头取上下文与下载。"""
+
+    token: str
+    #: 过期时刻（Unix 秒）
+    expires_at: int

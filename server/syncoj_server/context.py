@@ -42,7 +42,7 @@ class AppContext:
     #: 全局注册限速 —— 挡住"从很多 IP 一起刷"。考场内网 IP 数量有限，
     #: 全局上限才是真正的兜底
     enroll_global_limiter: RateLimiter = field(default_factory=lambda: RateLimiter(limit=0))
-    #: 管理端登录、选手页手填查找：按 IP、每分钟计
+    #: 管理端登录、考生页登录：按 IP、每分钟计
     login_limiter: RateLimiter = field(default_factory=lambda: RateLimiter(limit=0))
     player_lookup_limiter: RateLimiter = field(default_factory=lambda: RateLimiter(limit=0))
     #: 未配对机器的配对码明文。**只在内存里** —— 协议要求每一轮 tick 都带上
@@ -71,6 +71,9 @@ class AppContext:
     #: 服务端实例 ID（``<data_root>/server-id``，见 ``services/server_id.py``）。空串 =
     #: 读写失败，tick / 发现 / 挑战应答都按不带它的旧格式回
     server_uuid: str = ""
+    #: 考生页登录令牌的 HMAC 密钥。第一次用到时从 ``<data_root>/player-token.key``
+    #: 读出（没有就生成），见 ``services/player_tokens.py``
+    player_token_secret: Optional[bytes] = None
 
     @classmethod
     def create(cls, settings: Settings) -> "AppContext":

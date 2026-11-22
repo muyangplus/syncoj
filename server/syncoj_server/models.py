@@ -184,6 +184,10 @@ class Contest(Base, TimestampMixin):
     starts_at = Column(DateTime, nullable=True)
     ends_at = Column(DateTime, nullable=True)
     note = Column(Text, nullable=True)
+    #: 考生页密码（scrypt 哈希，同 ``Admin.password_hash``）。**可空 = 不开放**
+    #: 「准考证号 + 密码」登录考生页 —— 那一页只剩降级预览与本机自动匹配。
+    #: 只写不读：接口只回 ``has_player_password``（迁移 022）。
+    player_password_hash = Column(String(255), nullable=True)
 
     #: 默认名单。建场次时从名单库挑一份，之后可以「一键应用」把名单落到选手表。
     #: 对**选手表**它只是模板 —— 改了名单不会动已有选手，得显式应用一次。
@@ -466,7 +470,7 @@ class Agent(Base, TimestampMixin):
     #:
     #: 它**不是**身份依据（IP 可以变、可以共享、局域网里也可以伪造）：真正的身份
     #: 是凭据 + 配对关系，这里只回答"打开这一页的浏览器大概在哪台机器上"。
-    #: 匹配不上时页面会退回到手填场次与考号，那条路才是兜底。
+    #: 匹配不上时页面会退回到降级预览与「准考证号 + 考生页密码」登录。
     last_seen_ip = Column(String(64), nullable=True)
     revoked_at = Column(DateTime, nullable=True)
     #: 完成配对的时间

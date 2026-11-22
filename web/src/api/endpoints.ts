@@ -222,13 +222,16 @@ export const paths = {
 
   // ---- 装机入口（**免登录**）----
   // 不在 `/api/v1/admin` 下面，因为调用者不是登录后的管理界面，而是"任意一台还没
-  // 装 Agent 的机器"和站在它前面的教师。**这里也放选手页的只读接口** —— 它同样
-  // 免登录（选手不登录），身份靠场次 slug + 考号。
+  // 装 Agent 的机器"和站在它前面的教师。**这里也放考生页的接口** —— 它同样
+  // 不要管理端凭据：身份靠本机来源 IP，或「准考证号 + 场次考生页密码」换来的令牌。
   installLedger: () => '/api/v1/agent/install.json',
   installBundle: () => '/api/v1/agent/install/bundle',
   installInstaller: () => '/api/v1/agent/install/installer',
   installBootstrap: () => '/api/v1/agent/install/bootstrap.sh',
   playerContext: () => '/api/v1/player/context',
+  playerPreview: () => '/api/v1/player/preview',
+  playerLogin: () => '/api/v1/player/login',
+  playerAsset: (assetId: number) => `/api/v1/player/assets/${assetId}`,
   /** 全站运行时常量（显示时区…）。**免登录**，三个前台页面都要读它。 */
   meta: () => `${API_ROOT}/meta`,
 } as const

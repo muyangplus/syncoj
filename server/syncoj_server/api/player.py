@@ -1,31 +1,44 @@
-"""选手页（免登录）API。
+"""考生页（免登录）API。
 
 这一页是给**考场里的选手**看的：他坐在机器前，要确认"这场发给我的文件到了没、
 老师有什么话要说"。它必须免登录 —— 选手没有管理后台账号，现场也不会有人发一个给他。
 
-于是身份只有两条来源，优先级明确：
+页面分三层，从谁都能看的到只有本人能看的：
 
-1. **自动匹配本机**（主路径）：桌面上放一个指向这一页的快捷方式，选手点开就该直接
-   看到自己的清单，一个字都不用填。服务端按请求的**来源 IP** 找那台机器，再用与
-   ``/tick`` **完全相同**的 ``resolve_machine`` 解析出"哪场比赛的哪个选手"。
-2. **手填 ``contest`` + ``player_no``**（兜底）：教师的笔记本、Agent 没起来的机器、
-   或者换了 IP 的机器，靠这两个值精确查找。
+0. **降级预览**（``GET /preview``，默认）：当前在考的场次（``running`` / ``frozen``
+   且还没到结束时间；多场可切换），每场只有名称、时间窗和**面向全场**的公告 ——
+   ``NOTICE.md`` 的下发任务目标是"全场"（``target_kind == "all"``）才算。
+   这一层谁都能打开，所以**绝不**含任何选手的信息或个人下发清单：只发给部分人的
+   公告也不出现（那是给那部分人的话）。
+1. **自动匹配本机**（``GET /context`` 不带令牌）：桌面上放一个指向这一页的快捷方式，
+   选手点开就该直接看到自己的清单，一个字都不用填。服务端按请求的**来源 IP** 找那台
+   机器，再用与 ``/tick`` **完全相同**的 ``resolve_machine`` 解析出"哪场比赛的哪个
+   选手"。
+2. **准考证号 + 考生页密码**（``POST /login`` 换令牌，``GET /context`` 带
+   ``X-Player-Token``）：教师的笔记本、Agent 没起来的机器、换了 IP 的机器靠它。
+   密码是**场次级**的（场次设置里设，库里只存哈希）；场次没设密码时这条路关着。
+   令牌是 HMAC 短期令牌（见 ``services/player_tokens.py``），绑定场次 + 选手，
+   并签进了密码指纹 —— 教师换掉或清除密码，签出去的令牌全部作废。
 
-两条路都回同一个模型，并如实告诉调用方是哪一种（``matched_by``）。
+曾经的第三条路"只填场次 + 考号、不要密码"已经删掉：它让任何人都能看任何人的清单。
+
+后两条路回同一个模型，并如实告诉调用方是哪一种（``matched_by``）。
 
 免登录带来的边界，全部在下面这几行里：
 
-* 只有两个自由输入，命中不了就 404/403，**不做模糊匹配、不做"最近一个"这类兜底** ——
-  输错一个字符就该看到"没有这个选手"，而不是看到别人的清单。
+* 考号**精确匹配**，不做模糊、不做"最近一个"这类兜底；登录失败**统一 403**，
+  不区分"考号不存在"和"密码错"（否则一个循环就能试出哪些考号存在），并按 IP 限速。
 * 返回的只有这个选手自己的东西：下发给他的资产台账（按 ``DeployTarget.player_id``
   过滤）、**从他自己的下发目标里认出来的公告**（文件名 ``NOTICE.md``，见
   ``_notice_for``）、以及他自己的考号/姓名/座位/分组。代码（``SourceFile``）、
   成绩（``JudgeRun``）、别的选手一律**不进模型**。前端不显示不是边界，
   服务端不返回才是。
+* 网页下载（``GET /assets/{id}``）只给**确实下发给这个人、且没取消**的资产。
 * 来源 IP 只用来缩小"打开这一页的是哪台机器"的范围，它**不是身份依据**
   （可共享、可变、局域网里也可伪造）。所以它解析出来的仍然只是"这台机器自己"
   这个身份，解析不出场次时如实报卡在哪一档，绝不猜测。
-* 它也不比别的接口多给一个字节：资产清单里的文件名、目录、状态本来就是发给选手的。
+* 失效的令牌回 **403** ``player_token_invalid`` 而不是 401：管理端前端把 401
+  当成"管理员会话失效"，教师在自己的浏览器里打开考生页时会被踢回登录页。
 
 为什么单独一个路由文件而不是塞进 ``agent.py``：两者的调用方、鉴权方式和能看到的数据
 都不同（Agent 有 Bearer 凭据和自己的 identity，这里什么都没有）。混在一个 900 行的
@@ -41,7 +54,8 @@ from datetime import timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Header, Request
+from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -52,6 +66,7 @@ from ..models import (
     Agent,
     Asset,
     Contest,
+    ContestStatus,
     DeployStatus,
     DeployTarget,
     DeployTask,
@@ -62,21 +77,35 @@ from ..schemas import (
     PlayerAssetOut,
     PlayerContextOut,
     PlayerContestOut,
+    PlayerLoginIn,
+    PlayerLoginOut,
     PlayerNoticeOut,
+    PlayerPreviewContestOut,
+    PlayerPreviewOut,
     PlayerProfileOut,
 )
+from ..security import verify_password
+from ..services import player_tokens
 from ..services.deploy import expand_dest_template
+from .attachments import blob_response
 from .deps import get_ctx, resolve_machine
 
-__all__ = ["router"]
+__all__ = ["router", "TOKEN_HEADER"]
 
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/player", tags=["player"])
 
+#: 登录令牌放在这个头里。不用 ``Authorization``：教师在管理端的浏览器里打开考生页时，
+#: 前端会顺手带上管理员的 Bearer —— 两种凭据挤在一个头里只会互相顶掉。
+TOKEN_HEADER = "X-Player-Token"
+
 #: 一次最多回多少条下发目标。契约里定的上限：清单是给人看的，超过 200 行时
 #: 真正的问题不是"还有多少条没显示"，而是这个场次的下发配置出了别的事。
 MAX_ASSETS = 200
+
+#: 降级预览最多列几场。同时在考的场次本来就是个位数。
+MAX_PREVIEW_CONTESTS = 20
 
 #: 考场公告的**文件名约定**：基名等于它（不分大小写）就算公告。
 #:
@@ -123,47 +152,175 @@ _BLOCKED_STATUS = {
 @router.get("/context", response_model=PlayerContextOut)
 def player_context(
     request: Request,
-    contest: Optional[str] = Query(
-        default=None, max_length=64, description="场次标识（slug），自动匹配不上时手填"
-    ),
-    player_no: Optional[str] = Query(
-        default=None, max_length=64, description="考号，自动匹配不上时手填"
+    x_player_token: Optional[str] = Header(
+        default=None,
+        max_length=256,
+        description="考生页登录令牌（POST /player/login 签出）。不带 = 按来源 IP 自动匹配本机",
     ),
     ctx: AppContext = Depends(get_ctx),
 ) -> PlayerContextOut:
-    """取选手页要显示的全部内容。**不鉴权。**
+    """取考生页上"这个选手"的全部内容。**不需要管理端凭据。**
 
-    不传参数 = 按来源 IP 自动匹配本机；两个参数都传 = 显式查找。
-    只传一个直接 400：单独一个 ``contest`` 或单独一个 ``player_no`` 都定位不到人，
-    而"猜另一半"正是这一页最不该做的事。
+    带 ``X-Player-Token`` = 已登录的考生；不带 = 按来源 IP 自动匹配本机。
+    自动匹配失败时回 403/404/409 人话，页面据此退到降级预览（``GET /preview``）。
     """
-    slug = (contest or "").strip()
-    number = (player_no or "").strip()
-    if bool(slug) != bool(number):
-        raise ApiError(
-            400,
-            "bad_request",
-            "场次和考号要么都填、要么都不填 —— 只填一个没法确定是谁",
-        )
-
     now = utcnow()
-    if slug and number:
-        # 手填查找按 IP 限速：考号通常连号，不限的话一个循环就能翻遍整场
-        client_ip = request.client.host if request.client else "unknown"
-        try:
-            ctx.player_lookup_limiter.check(client_ip, time.monotonic())
-        except RateLimitExceeded as exc:
-            raise ApiError(
-                429, "rate_limited", "查找太频繁了，请稍后再试",
-                {"retry_after": exc.retry_after},
-            )
     with ctx.db.session() as session:
-        if slug and number:
-            contest_row, player, matched_by = _resolve_explicit(session, slug, number)
+        if x_player_token:
+            contest_row, player = _resolve_by_token(session, ctx, x_player_token)
+            matched_by = "token"
         else:
             contest_row, player, matched_by = _resolve_by_machine(session, request)
 
         return _build_context(session, contest_row, player, ctx, matched_by, now)
+
+
+@router.get("/preview", response_model=PlayerPreviewOut)
+def player_preview(ctx: AppContext = Depends(get_ctx)) -> PlayerPreviewOut:
+    """降级预览：当前在考的场次与面向全场的公告。**谁都能看，所以不含任何个人信息。**
+
+    "在考" = 状态是 ``running`` / ``frozen``（不是这两个就不算，以后加的状态也一样），
+    并且还没到结束时间。**还没开考的也列出来**：考生提前进场时要看到"距开考"
+    倒计时和全场公告，而那份公告本来就已经下发到了每台机器上。
+    """
+    now = utcnow()
+    with ctx.db.session() as session:
+        contests = session.execute(
+            select(Contest)
+            .where(Contest.status.in_((ContestStatus.RUNNING, ContestStatus.FROZEN)))
+            .order_by(Contest.id)
+        ).scalars().all()
+        live = [row for row in contests if row.ends_at is None or now < row.ends_at]
+        # 先开考的排前面；没配开考时间的按建场顺序排在最前（它们"一直在考"）
+        live.sort(key=lambda row: (row.starts_at is not None, row.starts_at or now, row.id))
+
+        items = [
+            PlayerPreviewContestOut(
+                slug=row.slug,
+                name=row.name,
+                status=row.status,
+                starts_at=_iso(row.starts_at),
+                ends_at=_iso(row.ends_at),
+                notice=_contest_wide_notice(session, ctx, row.id),
+                login_enabled=bool(row.player_password_hash),
+            )
+            for row in live[:MAX_PREVIEW_CONTESTS]
+        ]
+    return PlayerPreviewOut(contests=items, server_time=_unix(now))
+
+
+@router.post("/login", response_model=PlayerLoginOut)
+def player_login(
+    payload: PlayerLoginIn,
+    request: Request,
+    ctx: AppContext = Depends(get_ctx),
+) -> PlayerLoginOut:
+    """准考证号 + 场次考生页密码 → 短期令牌。
+
+    * 考号**精确匹配**（只去掉首尾空白：从准考证上抄过来多一个空格是常事）
+    * 考号不存在与密码错**统一 403** ``player_login_failed``；两种情况都完整地算一遍
+      scrypt，响应时间上也分不出来
+    * 场次没设密码 → 409 ``player_login_disabled``：这条路关着，页面只剩降级预览
+    * 按来源 IP 限速（``player_lookup_per_ip_per_minute``），先限速再算 scrypt
+    """
+    client_ip = request.client.host if request.client else "unknown"
+    try:
+        ctx.player_lookup_limiter.check(client_ip, time.monotonic())
+    except RateLimitExceeded as exc:
+        raise ApiError(
+            429, "rate_limited", "尝试太频繁了，请稍后再试",
+            {"retry_after": exc.retry_after},
+        )
+
+    slug = payload.contest.strip()
+    number = payload.player_no.strip()
+    with ctx.db.session() as session:
+        contest_row = session.execute(
+            select(Contest).where(Contest.slug == slug)
+        ).scalar_one_or_none()
+        if contest_row is None:
+            raise ApiError(404, "not_found", "没有标识为 %s 的场次" % slug)
+        password_hash = contest_row.player_password_hash
+        if not password_hash:
+            raise ApiError(409, "player_login_disabled", "本场没有开放考生登录")
+
+        # 先验密码、再查人：两种失败走同样多的 scrypt，时间上分不出"考号不存在"
+        password_ok = verify_password(payload.password, password_hash)
+        player = session.execute(
+            select(Player).where(
+                Player.contest_id == contest_row.id,
+                Player.player_no == number,
+            )
+        ).scalar_one_or_none()
+        if player is None or not password_ok:
+            raise ApiError(403, "player_login_failed", "准考证号或密码不对")
+
+        token, expires_at = player_tokens.issue_token(
+            _token_secret(ctx), contest_row.id, player.id, password_hash, int(time.time())
+        )
+        log.info("考生页登录：场次 %s 考号 %s（来源 %s）", contest_row.slug, player.player_no, client_ip)
+    return PlayerLoginOut(token=token, expires_at=expires_at)
+
+
+@router.get("/assets/{asset_id}")
+def player_download_asset(
+    asset_id: int,
+    request: Request,
+    x_player_token: Optional[str] = Header(default=None, max_length=256),
+    ctx: AppContext = Depends(get_ctx),
+) -> Response:
+    """网页下载一个下发给本人的文件。
+
+    身份二选一：登录令牌，或来源 IP 自动匹配到本机。之后**必须**确实有一条
+    "这个资产 → 这个选手"的下发目标，而且任务没取消、目标也没被取消 ——
+    与 Agent 下载（``api/agent.py::download_asset``）同一个判据。
+
+    * 认不出你是谁 → 403
+    * 资产不存在 / 不在你这一场 / 这一场里根本没下发过 → 404
+    * 下发过、但不是给你（或已取消）→ 403
+    * 内容已被清理 → 410
+    """
+    with ctx.db.session() as session:
+        if x_player_token:
+            contest_row, player = _resolve_by_token(session, ctx, x_player_token)
+        else:
+            try:
+                contest_row, player, _ = _resolve_by_machine(session, request)
+            except ApiError:
+                raise ApiError(403, "forbidden", "认不出你是哪位考生 —— 请先登录")
+
+        asset = session.get(Asset, asset_id)
+        if asset is None or asset.contest_id != contest_row.id:
+            raise ApiError(404, "not_found", "没有这个文件")
+
+        live_deploy = (
+            DeployTask.asset_id == asset.id,
+            DeployTask.contest_id == contest_row.id,
+            DeployTask.cancelled_at.is_(None),
+            DeployTarget.status != DeployStatus.CANCELLED,
+        )
+        mine = session.execute(
+            select(DeployTarget.id)
+            .join(DeployTask, DeployTarget.task_id == DeployTask.id)
+            .where(DeployTarget.player_id == player.id, *live_deploy)
+            .limit(1)
+        ).first()
+        if mine is None:
+            anyone = session.execute(
+                select(DeployTarget.id)
+                .join(DeployTask, DeployTarget.task_id == DeployTask.id)
+                .where(DeployTask.asset_id == asset.id, DeployTask.contest_id == contest_row.id)
+                .limit(1)
+            ).first()
+            if anyone is None:
+                raise ApiError(404, "not_found", "没有这个文件")
+            raise ApiError(403, "forbidden", "这个文件没有下发给你")
+
+        sha256, filename = asset.sha256, asset.filename
+
+    if not ctx.blobs.path_for(sha256).is_file():
+        raise ApiError(410, "gone", "这个文件的内容已经不在服务端了 —— 请找监考老师")
+    return blob_response(ctx, sha256, Path(filename).name or filename)
 
 
 # --------------------------------------------------------------------------- #
@@ -171,35 +328,34 @@ def player_context(
 # --------------------------------------------------------------------------- #
 
 
-def _resolve_explicit(
-    session: Session, slug: str, number: str
-) -> Tuple[Contest, Player, str]:
-    """按"场次 slug + 考号"精确查找（兜底路径）。
+def _token_secret(ctx: AppContext) -> bytes:
+    """签令牌的密钥：第一次用到时从数据目录读出（没有就生成），之后记在 ctx 上。"""
+    secret = ctx.player_token_secret
+    if secret is None:
+        secret = player_tokens.load_or_create_secret(ctx.settings.data_root)
+        ctx.player_token_secret = secret
+    return secret
 
-    现场最常见的是考号输错，所以那句 404 要把**两个值都报出来** —— "没有这个选手"
-    五个字分不清是场次错了还是考号错了。按精确相等命中，不做任何模糊匹配。
+
+def _resolve_by_token(session: Session, ctx: AppContext, token: str) -> Tuple[Contest, Player]:
+    """登录令牌 → (场次, 选手)。任何一步不对都是同一个 403 ``player_token_invalid``。
+
+    验签用的是场次**当前**的密码哈希：密码换了 / 清了，旧令牌当场作废。
     """
-    contest_row = session.execute(
-        select(Contest).where(Contest.slug == slug)
-    ).scalar_one_or_none()
-    if contest_row is None:
-        raise ApiError(404, "not_found", "没有标识为 %s 的场次，请核对地址" % slug)
-
-    # 库里的 player_no 在写入时都 strip 过（见 admin.py 的三处导入），查询前也 strip：
-    # 从屏幕上抄一个 " S001 " 过来是现场的高频动作，为一个空格 404 没有道理。
-    player = session.execute(
-        select(Player).where(
-            Player.contest_id == contest_row.id,
-            Player.player_no == number,
-        )
-    ).scalar_one_or_none()
-    if player is None:
-        raise ApiError(
-            404,
-            "not_found",
-            "场次 %s 里没有编号 %s 的选手，请核对考号是否输错" % (contest_row.slug, number),
-        )
-    return contest_row, player, "explicit"
+    invalid = ApiError(403, "player_token_invalid", "考生登录已失效，请重新登录")
+    claims = player_tokens.parse_token(token)
+    if claims is None:
+        raise invalid
+    contest_row = session.get(Contest, claims.contest_id)
+    player = session.get(Player, claims.player_id)
+    if contest_row is None or player is None or player.contest_id != contest_row.id:
+        raise invalid
+    verified = player_tokens.verify_token(
+        _token_secret(ctx), token, contest_row.player_password_hash, int(time.time())
+    )
+    if verified is None:
+        raise invalid
+    return contest_row, player
 
 
 def _resolve_by_machine(
@@ -302,24 +458,20 @@ def _build_context(
             starts_at=_iso(contest_row.starts_at),
             ends_at=_iso(contest_row.ends_at),
         ),
-        # 手填查找（explicit）只回考号：知道"场次 + 考号"的不一定是本人，而姓名、
-        # 座位、分组是别人的个人信息 —— 曾经一个循环就能拿到全班座位表。
-        # 按来源 IP 认出本机（machine）的才回全部。
+        # 两条路都证明了"就是这个人"（本机 / 准考证号 + 密码），所以回全部。
+        # 曾经那条不要密码的手填查找只回考号 —— 它已经删掉了。
         player=PlayerProfileOut(
             player_no=player.player_no,
-            name=player.name if matched_by == "machine" else None,
-            seat=player.seat if matched_by == "machine" else None,
-            group_name=player.group_name if matched_by == "machine" else None,
+            name=player.name,
+            seat=player.seat,
+            group_name=player.group_name,
         ),
         # 没下发公告就是 None（不是空对象）：前端只判一次"有没有"，
         # 不需要分辨"{} 和 null 哪个是没公告"。
         notice=notice,
         assets=assets,
         matched_by=matched_by,
-        # 取 epoch 之前**补回 tzinfo**：``utcnow()`` 是 naive UTC，直接对它
-        # ``.timestamp()`` 会按本机时区去解释，在东八区的机器上整整差 8 小时。
-        # 页面上"清单是服务端几点取的"就是靠这个数显示的，差 8 小时就是直接显示错。
-        server_time=int(now.replace(tzinfo=timezone.utc).timestamp()),
+        server_time=_unix(now),
     )
 
 
@@ -353,6 +505,7 @@ def _assets_for(
 
     return [
         PlayerAssetOut(
+            id=asset.id,
             filename=asset.filename,
             dest_dir=_student_dest_dir(task.dest_dir, player_no),
             status=target.status,
@@ -463,6 +616,34 @@ def _notice_for(
     return None
 
 
+def _contest_wide_notice(
+    session: Session, ctx: AppContext, contest_id: int
+) -> Optional[PlayerNoticeOut]:
+    """降级预览用的**全场公告**：目标是全场（``target_kind == "all"``）、没取消的
+    ``NOTICE.md`` 下发里最后下发的那一个。
+
+    只认 ``all``：发给分组 / 指定选手的公告是给那几个人的话，降级预览谁都能看，
+    放出来就是把它发给了全场。宁可空着，也不猜"这几个人差不多就是全场"。
+    """
+    rows = session.execute(
+        select(Asset)
+        .join(DeployTask, DeployTask.asset_id == Asset.id)
+        .where(
+            DeployTask.contest_id == contest_id,
+            DeployTask.target_kind == "all",
+            DeployTask.cancelled_at.is_(None),
+        )
+        .order_by(DeployTask.id.desc())
+    ).scalars().all()
+    for asset in rows:
+        if Path(asset.filename or "").name.lower() != NOTICE_FILENAME:
+            continue
+        text = _read_notice_text(ctx, asset)
+        if text is not None:
+            return PlayerNoticeOut(filename=asset.filename, content=text)
+    return None
+
+
 def _read_notice_text(ctx: AppContext, asset: Asset) -> Optional[str]:
     """读出一个候选资产的正文；它不像公告就返回 ``None``。
 
@@ -517,3 +698,13 @@ def _read_notice_text(ctx: AppContext, asset: Asset) -> Optional[str]:
 
 def _iso(value) -> Optional[str]:
     return value.strftime(_ISO) if value else None
+
+
+def _unix(now) -> int:
+    """naive UTC → Unix 秒。
+
+    取 epoch 之前**补回 tzinfo**：``utcnow()`` 是 naive UTC，直接对它
+    ``.timestamp()`` 会按本机时区去解释，在东八区的机器上整整差 8 小时。
+    页面上的倒计时就是靠这个数算的，差 8 小时就是直接显示错。
+    """
+    return int(now.replace(tzinfo=timezone.utc).timestamp())

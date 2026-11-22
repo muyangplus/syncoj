@@ -2689,6 +2689,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/player/assets/{asset_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Player Download Asset
+         * @description 网页下载一个下发给本人的文件。
+         *
+         *     身份二选一：登录令牌，或来源 IP 自动匹配到本机。之后**必须**确实有一条
+         *     "这个资产 → 这个选手"的下发目标，而且任务没取消、目标也没被取消 ——
+         *     与 Agent 下载（``api/agent.py::download_asset``）同一个判据。
+         *
+         *     * 认不出你是谁 → 403
+         *     * 资产不存在 / 不在你这一场 / 这一场里根本没下发过 → 404
+         *     * 下发过、但不是给你（或已取消）→ 403
+         *     * 内容已被清理 → 410
+         */
+        get: operations["player_download_asset_api_v1_player_assets__asset_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/player/context": {
         parameters: {
             query?: never;
@@ -2698,13 +2727,62 @@ export interface paths {
         };
         /**
          * Player Context
-         * @description 取选手页要显示的全部内容。**不鉴权。**
+         * @description 取考生页上"这个选手"的全部内容。**不需要管理端凭据。**
          *
-         *     不传参数 = 按来源 IP 自动匹配本机；两个参数都传 = 显式查找。
-         *     只传一个直接 400：单独一个 ``contest`` 或单独一个 ``player_no`` 都定位不到人，
-         *     而"猜另一半"正是这一页最不该做的事。
+         *     带 ``X-Player-Token`` = 已登录的考生；不带 = 按来源 IP 自动匹配本机。
+         *     自动匹配失败时回 403/404/409 人话，页面据此退到降级预览（``GET /preview``）。
          */
         get: operations["player_context_api_v1_player_context_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/player/login": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Player Login
+         * @description 准考证号 + 场次考生页密码 → 短期令牌。
+         *
+         *     * 考号**精确匹配**（只去掉首尾空白：从准考证上抄过来多一个空格是常事）
+         *     * 考号不存在与密码错**统一 403** ``player_login_failed``；两种情况都完整地算一遍
+         *       scrypt，响应时间上也分不出来
+         *     * 场次没设密码 → 409 ``player_login_disabled``：这条路关着，页面只剩降级预览
+         *     * 按来源 IP 限速（``player_lookup_per_ip_per_minute``），先限速再算 scrypt
+         */
+        post: operations["player_login_api_v1_player_login_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/player/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Player Preview
+         * @description 降级预览：当前在考的场次与面向全场的公告。**谁都能看，所以不含任何个人信息。**
+         *
+         *     "在考" = 状态是 ``running`` / ``frozen``（不是这两个就不算，以后加的状态也一样），
+         *     并且还没到结束时间。**还没开考的也列出来**：考生提前进场时要看到"距开考"
+         *     倒计时和全场公告，而那份公告本来就已经下发到了每台机器上。
+         */
+        get: operations["player_preview_api_v1_player_preview_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -3467,6 +3545,11 @@ export interface components {
             default_roster_name?: string | null;
             /** Ends At */
             ends_at?: string | null;
+            /**
+             * Has Player Password
+             * @default false
+             */
+            has_player_password: boolean;
             /** Id */
             id: number;
             /** Name */
@@ -3505,6 +3588,11 @@ export interface components {
              * @default false
              */
             clear_default_roster: boolean;
+            /**
+             * Clear Player Password
+             * @default false
+             */
+            clear_player_password: boolean;
             /** Default Roster Id */
             default_roster_id?: number | null;
             /** Ends At */
@@ -3513,6 +3601,8 @@ export interface components {
             name?: string | null;
             /** Note */
             note?: string | null;
+            /** Player Password */
+            player_password?: string | null;
             /** Starts At */
             starts_at?: string | null;
             /** Status */
@@ -4982,6 +5072,8 @@ export interface components {
          * PlayerAssetOut
          * @description 清单里的一行：下发了什么、该落在哪个目录、到没到。
          *
+         *     ``id`` 是资产 id，考生页的「下载」按它取文件（``GET /player/assets/{id}``）。
+         *
          *     ``dest_dir`` 是**任务的**目标目录模板展开后的样子（``DeployTask.dest_dir``），
          *     不是某个选手磁盘上的绝对路径 —— 服务端不认识选手机器上的家目录，编一个
          *     绝对路径只会是错的。空串表示"直接落在下发根目录"（默认就是桌面）。
@@ -4996,6 +5088,8 @@ export interface components {
             filename: string;
             /** Finished At */
             finished_at?: string | null;
+            /** Id */
+            id: number;
             /** Sha256 */
             sha256: string;
             /**
@@ -5055,9 +5149,9 @@ export interface components {
          *
          *     * ``matched_by="machine"``：请求没带参数，服务端按来源 IP 认出了这台机器。
          *       这是主路径 —— 选手在考场机器上打开就是一个带参数的快捷方式，一个字都不用填。
-         *     * ``matched_by="explicit"``：请求带了 ``contest`` + ``player_no``，按这两个值
-         *       精确查找。自动匹配不上时（教师的笔记本、Agent 没起来的机器、换了 IP）
-         *       靠它兜底。
+         *     * ``matched_by="token"``：请求带了考生页登录令牌（``X-Player-Token``），
+         *       那是用「准考证号 + 场次考生页密码」换来的（``POST /player/login``）。
+         *       自动匹配不上时（教师的笔记本、Agent 没起来的机器、换了 IP）靠它兜底。
          *
          *     回这个字段是让**页面**能说清"我这份清单是怎么定位到你的"：自动匹配到别人的
          *     机器上时，页面上的考号会当场露馅，而不是安静地显示一份不属于这台机器的清单。
@@ -5095,6 +5189,28 @@ export interface components {
              * @default 0
              */
             updated: number;
+        };
+        /**
+         * PlayerLoginIn
+         * @description 考生页登录：场次标识 + 准考证号（精确匹配）+ 场次的考生页密码。
+         */
+        PlayerLoginIn: {
+            /** Contest */
+            contest: string;
+            /** Password */
+            password: string;
+            /** Player No */
+            player_no: string;
+        };
+        /**
+         * PlayerLoginOut
+         * @description 登录成功签出的短期令牌。之后放进 ``X-Player-Token`` 头取上下文与下载。
+         */
+        PlayerLoginOut: {
+            /** Expires At */
+            expires_at: number;
+            /** Token */
+            token: string;
         };
         /**
          * PlayerNoticeOut
@@ -5144,6 +5260,42 @@ export interface components {
             player_no: string;
             /** Seat */
             seat?: string | null;
+        };
+        /**
+         * PlayerPreviewContestOut
+         * @description 降级预览里的一场：只有场次本身与**面向全场**的公告。
+         *
+         *     降级预览是谁都能打开的（没认出本机、也没登录），所以这里**绝不**出现任何
+         *     选手的信息或个人下发清单。公告只取"目标是全场"的 ``NOTICE.md`` 下发
+         *     （``DeployTask.target_kind == "all"`` 且没取消）—— 只发给部分人的公告不算。
+         */
+        PlayerPreviewContestOut: {
+            /** Ends At */
+            ends_at?: string | null;
+            /**
+             * Login Enabled
+             * @default false
+             */
+            login_enabled: boolean;
+            /** Name */
+            name: string;
+            notice?: components["schemas"]["PlayerNoticeOut"] | null;
+            /** Slug */
+            slug: string;
+            /** Starts At */
+            starts_at?: string | null;
+            /** Status */
+            status: string;
+        };
+        /**
+         * PlayerPreviewOut
+         * @description 考生页的降级预览：当前在考的场次（多场可切换）。
+         */
+        PlayerPreviewOut: {
+            /** Contests */
+            contests?: components["schemas"]["PlayerPreviewContestOut"][];
+            /** Server Time */
+            server_time: number;
         };
         /**
          * PlayerProfileOut
@@ -10453,15 +10605,46 @@ export interface operations {
             };
         };
     };
+    player_download_asset_api_v1_player_assets__asset_id__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-player-token"?: string | null;
+            };
+            path: {
+                asset_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     player_context_api_v1_player_context_get: {
         parameters: {
-            query?: {
-                /** @description 场次标识（slug），自动匹配不上时手填 */
-                contest?: string | null;
-                /** @description 考号，自动匹配不上时手填 */
-                player_no?: string | null;
+            query?: never;
+            header?: {
+                /** @description 考生页登录令牌（POST /player/login 签出）。不带 = 按来源 IP 自动匹配本机 */
+                "x-player-token"?: string | null;
             };
-            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -10483,6 +10666,59 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    player_login_api_v1_player_login_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PlayerLoginIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlayerLoginOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    player_preview_api_v1_player_preview_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlayerPreviewOut"];
                 };
             };
         };

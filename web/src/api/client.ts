@@ -82,6 +82,8 @@ interface RequestOptions {
   /** multipart 请求体（与 body 互斥） */
   form?: FormData
   signal?: AbortSignal
+  /** 额外的请求头（考生页的 `X-Player-Token`）。 */
+  headers?: Record<string, string>
 }
 
 function authHeaders(): Record<string, string> {
@@ -136,7 +138,7 @@ async function readJson(response: Response): Promise<ErrorBody | undefined> {
 }
 
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const headers = authHeaders()
+  const headers = { ...authHeaders(), ...options.headers }
   let body: BodyInit | undefined
   if (options.form) {
     // 不要手动设 Content-Type：浏览器要自己补 multipart 的 boundary
@@ -190,10 +192,10 @@ export function query(params: Record<string, string | number | boolean | undefin
  * 走 `fetch` 而不是 `window.open` 是为了能带上 `Authorization` 头 —— 新标签页
  * 里没有这个头，服务端会回 401 并把一个 JSON 错误存成 .zip。
  */
-async function fetchRaw(path: string): Promise<Response> {
+async function fetchRaw(path: string, extra: Record<string, string> = {}): Promise<Response> {
   let response: Response
   try {
-    response = await fetch(path, { headers: authHeaders() })
+    response = await fetch(path, { headers: { ...authHeaders(), ...extra } })
   } catch {
     throw new ApiError(0, '无法连接服务端，请检查网络或服务是否在运行', 'network_error')
   }
@@ -241,8 +243,12 @@ export function filenameFromResponse(response: Response): string | null {
 }
 
 /** 下载并采用服务端的文件名。 */
-export async function downloadWithServerName(path: string, fallback: string): Promise<void> {
-  const response = await fetchRaw(path)
+export async function downloadWithServerName(
+  path: string,
+  fallback: string,
+  headers: Record<string, string> = {},
+): Promise<void> {
+  const response = await fetchRaw(path, headers)
   const blob = await response.blob()
   saveBlob(blob, filenameFromResponse(response) ?? fallback)
 }

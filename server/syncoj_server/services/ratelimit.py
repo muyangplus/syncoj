@@ -54,7 +54,7 @@ class RateLimiter:
 
     #: 每个窗口允许的次数
     limit: int
-    #: 窗口长度（秒）。注册是"每秒 N 次"；登录、选手页手填是"每分钟 N 次"。
+    #: 窗口长度（秒）。注册是"每秒 N 次"；登录、考生页登录是"每分钟 N 次"。
     window: float = _WINDOW
     #: 每个 key 的记录：``(窗口起点, 计数)``
     _buckets: Dict[str, Tuple[float, int]] = field(default_factory=dict)

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 测试点明细（§12）：逐点状态、用时、内存、信息，子任务，编译信息。
+ * 测试点明细（§12）：逐点状态、用时、内存、信息，子任务，编译信息，源码预检的预警。
  *
  * 两种来源：成绩矩阵的一条评测记录（`runId`），或某个评测任务（`taskId`，历史版本的结果，
  * §12.9）。两者明细形状相同，这里归一成同一个视图。
@@ -55,6 +55,7 @@ const detail = computed(() => {
       judged_source: t.source_path,
       judged_at: t.judged_at,
       compile_message: t.compile_message,
+      precheck_warnings: t.precheck_warnings ?? [],
       subtasks: t.subtasks,
       cases: t.cases,
       truncated: t.truncated,
@@ -75,6 +76,7 @@ const detail = computed(() => {
       judged_source: r.judged_source,
       judged_at: r.judged_at,
       compile_message: r.compile_message,
+      precheck_warnings: r.precheck_warnings ?? [],
       subtasks: r.subtasks,
       cases: r.cases,
       truncated: r.truncated,
@@ -131,7 +133,7 @@ const caseSubtask = computed(() => {
   <el-dialog
     v-model="visible"
     :title="detail ? `${detail.player_no} · ${detail.problem}` : '评测明细'"
-    width="820px"
+    width="min(820px, calc(100vw - 32px))"
   >
     <div v-loading="loading" class="body">
       <template v-if="detail">
@@ -165,13 +167,29 @@ const caseSubtask = computed(() => {
           </div>
           <div>
             <dt>沙箱</dt>
-            <dd>{{ detail.isolated === false ? '不隔离' : detail.isolated ? 'isolate' : '—' }}</dd>
+            <dd>{{ detail.isolated === false ? '不隔离' : detail.isolated ? '隔离' : '—' }}</dd>
           </div>
         </dl>
 
         <template v-if="detail.compile_message">
           <div class="section-label">编译信息</div>
           <pre class="compile">{{ detail.compile_message }}</pre>
+        </template>
+
+        <template v-if="detail.precheck_warnings.length">
+          <div class="section-label">
+            源码预警 <span class="muted">{{ detail.precheck_warnings.length }} 条</span>
+          </div>
+          <ul class="warnings">
+            <li v-for="(item, index) in detail.precheck_warnings" :key="`${item.code}-${item.line}-${index}`">
+              <div class="warning-head">
+                <el-tag size="small" type="warning" effect="plain" class="mono">{{ item.code }}</el-tag>
+                <span v-if="item.line" class="muted">第 {{ item.line }} 行</span>
+                <span class="warning-message">{{ item.message }}</span>
+              </div>
+              <code v-if="item.excerpt" class="warning-excerpt">{{ item.excerpt }}</code>
+            </li>
+          </ul>
         </template>
 
         <template v-if="detail.subtasks?.length">
@@ -307,6 +325,42 @@ const caseSubtask = computed(() => {
   font-family: var(--sj-mono);
   font-size: 12px;
   white-space: pre-wrap;
+}
+.warnings {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--sj-border);
+  border-radius: var(--sj-radius-sm);
+  background: var(--sj-warning-soft);
+}
+.warnings li {
+  padding: 8px 12px;
+}
+.warnings li + li {
+  border-top: 1px solid var(--sj-border);
+}
+.warning-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 13px;
+}
+.warning-message {
+  color: var(--sj-text);
+}
+.warning-excerpt {
+  display: block;
+  margin-top: 4px;
+  font-family: var(--sj-mono);
+  font-size: 12px;
+  color: var(--sj-text-2);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.mono {
+  font-family: var(--sj-mono);
 }
 .subtasks {
   display: flex;

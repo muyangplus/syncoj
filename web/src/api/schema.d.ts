@@ -3774,6 +3774,29 @@ export interface components {
             source: components["schemas"]["JudgeBlobRefOut"];
             testdata: components["schemas"]["JudgeBlobRefOut"];
         };
+        /**
+         * JudgePrecheckFindingOut
+         * @description 源码预检的一条预警（规则 code 见 ``judging/precheck.py``）。
+         */
+        JudgePrecheckFindingOut: {
+            /** Code */
+            code: string;
+            /**
+             * Excerpt
+             * @default
+             */
+            excerpt: string;
+            /**
+             * Line
+             * @default 0
+             */
+            line: number;
+            /**
+             * Message
+             * @default
+             */
+            message: string;
+        };
         /** JudgeProblemConfigOut */
         JudgeProblemConfigOut: {
             /** Compile Flags */
@@ -3864,6 +3887,8 @@ export interface components {
             player_id: number;
             /** Player No */
             player_no: string;
+            /** Precheck Warnings */
+            precheck_warnings?: components["schemas"]["JudgePrecheckFindingOut"][];
             /** Problem */
             problem: string;
             /** Score */

@@ -157,7 +157,9 @@ def test_文件IO可以用input_txt与output_txt(tmp_path) -> None:
 def test_程序不能跨测试点留东西(tmp_path) -> None:
     sneaky = ("#include <cstdio>\nint main(){FILE*f=fopen(\"mark\",\"r\");if(f){puts(\"0\");return 0;}"
               "fopen(\"mark\",\"w\");long long a,b;scanf(\"%lld%lld\",&a,&b);printf(\"%lld\\n\",a+b);}")
-    assert judge(tmp_path, sneaky, ab_data(tmp_path)).status == "AC"
+    # 源码预检会拦下打开 "mark"：这里要的是沙箱本身的行为，关掉这条规则
+    data = ab_data(tmp_path, {"config.json": json.dumps({"precheck": {"disabled": ["file_access"]}})})
+    assert judge(tmp_path, sneaky, data).status == "AC"
 
 
 @needs_gcc

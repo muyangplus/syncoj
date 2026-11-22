@@ -21,7 +21,7 @@ from .deps import _bearer, get_ctx
 router = APIRouter(prefix="/api/v1/judge", tags=["judge"])
 
 #: 交回的结果里，除了三项成绩之外原样落进 result.json 的键
-DETAIL_KEYS = ("judge", "isolated", "language", "compile_message", "cases", "subtasks")
+DETAIL_KEYS = ("judge", "isolated", "language", "compile_message", "cases", "subtasks", "precheck_warnings")
 
 
 def require_judge_worker(request: Request, ctx: AppContext = Depends(get_ctx)) -> int:

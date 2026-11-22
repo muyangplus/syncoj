@@ -5296,6 +5296,18 @@ def _run_detail(run: JudgeRun, player_no: str) -> JudgeRunDetailOut:
                 "cases": [str(name)[:128] for name in item.get("cases") or []][:1000],
             }
         )
+    precheck_warnings = []
+    for item in document.get("precheck_warnings") or []:
+        if not isinstance(item, dict) or not item.get("code"):
+            continue
+        precheck_warnings.append(
+            {
+                "code": str(item.get("code"))[:32],
+                "line": _int_or_none(item.get("line")) or 0,
+                "message": str(item.get("message") or "")[:500],
+                "excerpt": str(item.get("excerpt") or "")[:200],
+            }
+        )
     isolated = document.get("isolated")
     return JudgeRunDetailOut(
         **base,
@@ -5308,6 +5320,7 @@ def _run_detail(run: JudgeRun, player_no: str) -> JudgeRunDetailOut:
         judged_source=str(document["source_path"])[:1024] if document.get("source_path") else None,
         cases=cases,
         subtasks=subtasks,
+        precheck_warnings=precheck_warnings[:200],
         truncated=bool(document.get("truncated")),
     )
 

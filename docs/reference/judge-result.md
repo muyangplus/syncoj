@@ -277,10 +277,12 @@ checker.cpp          # 可选：special judge（testlib 风格），testlib.h �
 `config.json`（全部可选）：
 
 ```json
-{"cases": [{"name": "1", "score": 10}], "subtasks": [{"score": 40, "cases": ["1", "2"]}]}
+{"cases": [{"name": "1", "score": 10}], "subtasks": [{"score": 40, "cases": ["1", "2"]}],
+ "precheck": {"mode": "block", "disabled": ["file_access"]}}
 ```
 
 - 未写分值：总分 100 按测试点平均，余数给最后几个点。
+- `precheck`：源码预检配置（第 7 节）；不合法时上传报 `400 validation_error`。
 - 子任务：全部 AC 才得该子任务分；子任务内的点不单独计分。
 
 ### 评测机
@@ -326,6 +328,7 @@ syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
  "subtasks": [{"index": 1, "score": 0, "max_score": 40, "cases": ["2", "3"]}]}
 ```
 
+- 有源码预检预警时多一个 `precheck_warnings`：`[{"code", "line", "message", "excerpt"}]`（第 7 节）；没有预警或旧评测机时不带。
 - 扫描器只读 `score` / `max_score` / `status`，其余进 `raw_json`。
 - 评测机自身故障（沙箱起不来、checker 编不过，记 `SE`）：不写成绩，任务退回队列；第 3 次仍失败记失败，进度里显示原因。
 - 代码选择：只看仍在机器上、内容已存下的文件，按题目代码路径归题；多份候选时取文件名与题目同名者；仍无法区分 → 记失败。
@@ -343,7 +346,66 @@ syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
 |---|---|
 | `POST /api/v1/judge/lease` | 领任务（租约 15 分钟，过期回队列）；无任务 `204`。返回 `id`、`contest_slug`、`player_no`、`problem`（`ident` / `time_limit_ms` / `memory_limit_mb` / `io_mode` / `input_file` / `output_file` / `compile_flags`；文件名为 `null` = 用 `<ident>.in` / `<ident>.out`）、`source`（`path` / `sha256`）、`testdata`（`sha256` / `name`）、`attempt` |
 | `GET /api/v1/judge/tasks/{id}/blobs/{sha256}` | 取本任务的代码或数据包；其他内容 `404` |
-| `POST /api/v1/judge/tasks/{id}/result` | `{score, max_score, status, detail}`（`score` / `max_score` 0–1000000，`status` 1–16 字符），写 `result.json` |
+| `POST /api/v1/judge/tasks/{id}/result` | `{score, max_score, status, detail}`（`score` / `max_score` 0–1000000，`status` 1–16 字符），写 `result.json`；`detail` 里认 `judge` / `isolated` / `language` / `compile_message` / `cases` / `subtasks` / `precheck_warnings`，其余丢弃 |
 | `POST /api/v1/judge/tasks/{id}/fail` | `{message}`（≤2000），退回队列 |
 
 评测机与服务端出自同一个包，需一起升级：旧评测机不认 `input_file` / `output_file`，仍按 `<ident>.in` / `<ident>.out` 读写，设了自定义文件名的题会被评错。
+
+## 7. 源码预检
+
+自带评测编译前检查选手源码（`server/syncoj_server/judging/precheck.py`，只用标准库，评测机与服务端共用）。
+
+- 有拦截项：不编译，记 `CE`；`compile_message` 每项一行 `源码检查未通过：<说明>（第 N 行）`，下一行缩进给原文片段。
+- 预警：照常评测，写进 `result.json` 的 `precheck_warnings`（`code` / `line` / `message` / `excerpt`，片段 ≤80 字符）；评测记录详情 `GET .../judge/runs/{run_id}` 同名字段。
+- 只查选手代码，不查 checker。
+
+### 规范化
+
+匹配在规范化后的文本上做，按 C 翻译阶段：
+
+1. 换行统一为 `\n`；三字符序列替换（`??=` → `#` 等 9 个）。
+2. 反斜杠续行拼接（反斜杠与换行间允许空白）；行号记原始行。
+3. 去注释（块注释换成一个空格，可把指令并成一行）；字符串、字符字面量、C++ 原始字符串 `R"x(...)x"` 的内容换成占位符另存，`1'000` 数字分隔符不当字符字面量。原始字符串内部不做 1、2 步，直接取原文。
+4. 二合字母替换（`%:` → `#`、`%:%:` → `##`、`<:` `:>` `<%` `%>`；C++ 的 `<::` 除外）；代码里的 `\uXXXX` 解码。
+
+`#include` 路径另在规范化前的原文指令上再查一遍。源码按 UTF-8 解码，失败按 GB18030。
+
+### 拦截
+
+| code | 拦截 |
+|---|---|
+| `pragma` | `#pragma`（含 `#/**/pragma`、续行、`%:pragma`、`??=pragma`）、`_Pragma`、`__pragma` |
+| `attribute_optimize` | `__attribute__((...))` 里的 `optimize` / `target` / `target_clones`；`[[gnu::optimize]]` / `[[gnu::target]]` |
+| `inline_asm` | `asm` / `__asm__` / `__asm` |
+| `syscall` | `system` `popen` `fork` `vfork` `exec*` `posix_spawn` `ptrace` `syscall` `dlopen` `PROT_EXEC` `CreateProcess*` `ShellExecute*` `WinExec`（作为标识符出现即拦，成员访问除外）；`kill` `socket` `connect` `bind` 只拦调用，源码里有同名函数定义或赋值（lambda）时放行，`std::bind` 放行、`::connect(` 照拦；有 `##` 时，能由源码里的记号拼出上述名字也拦 |
+| `forbidden_header` | `<windows.h>` `<winsock2.h>` `<process.h>` `<sys/socket.h>` `<sys/un.h>` `<netdb.h>` `<netinet/…>` `<arpa/…>` `<linux/…>` `<sys/ptrace.h>` `<sys/syscall.h>` `<dlfcn.h>` `<sys/mman.h>` `<sys/shm.h>` `<spawn.h>` `<sys/wait.h>` `<sys/prctl.h>` 等；`#include` / `#include_next` / `#import` 用绝对路径、盘符、`..`、含 `/dev/` `/proc/` `/etc/` `/sys/`，或用宏 |
+| `file_access` | `fopen` `freopen` `open` `creat` 与 `ifstream` / `ofstream` / `fstream` 构造的文件名字面量含 `/` `\` `..` 或盘符，或不是 `<题目>.in` / `<题目>.out` / 题目配置的输入输出文件名；`NULL` 与 `/dev/stdin` `/dev/stdout` `/dev/stderr` 放行 |
+| `bidi` | U+202A–202E、U+2066–2069、U+200E、U+200F、U+061C |
+
+### 预警
+
+| code | 条件（默认阈值） |
+|---|---|
+| `macro_heavy` | `#define` 超过 30 个；宏名是关键字或常用标准名（`if` `return` `main` `printf` …）；类型关键字（`#define int long long`）不算 |
+| `token_paste` | `#define` 里有 `##` |
+| `trigraph_digraph` | 用了三字符序列或二合字母 |
+| `line_splice` | 续行拆开标识符 |
+| `long_line` | 单行超过 500 字符；非空行 ≥10 时平均行长超过 200 |
+| `big_table` | 字符串与数字字面量共超过 64 KiB；单个初始化列表超过 5000 个元素 |
+| `encoded_blob` | 字符串里连续 base64 / 十六进制字符或 `\x` 转义超过 200 个 |
+| `non_ascii_ident` | 代码（字面量、注释外）里有非 ASCII 标识符字符 |
+| `huge_source` | 源码超过 256 KiB |
+| `file_dynamic` | 打开文件的文件名不是字面量 |
+
+每条规则最多报 20 处。
+
+### 配置
+
+数据包 `config.json` 的 `precheck`（可选，缺省按默认）：
+
+| 字段 | 取值 | 默认 |
+|---|---|---|
+| `mode` | `block`：拦截项拦截、预警项预警；`warn`：拦截项降为预警；`off`：不查 | `block` |
+| `disabled` | 关闭的规则 code 数组 | `[]` |
+
+不认识的字段、模式或 code：上传时报错。

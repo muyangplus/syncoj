@@ -11,6 +11,7 @@ NOI 惯例：
 * 默认比对：逐行比较，忽略行末空白与文末空行。数据包里有 ``checker.cpp`` 时用它
   （testlib 风格：``checker <in> <out> <ans>``，退出码 0 为通过）。
 * 每个测试点前清空工作目录：程序不能跨测试点留东西。
+* 编译前先做源码预检（:mod:`.precheck`）：有拦截项就不编译、记 CE；预警写进 ``precheck_warnings``。
 """
 
 from __future__ import annotations
@@ -20,10 +21,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
+from . import precheck as pc
 from . import sandbox as sb
 from .testdata import Testdata, parse_testdata
 
-__all__ = ["ProblemConfig", "judge", "compare_text", "STATUS_ORDER", "LANGUAGES"]
+__all__ = ["ProblemConfig", "judge", "io_file_names", "compare_text", "STATUS_ORDER", "LANGUAGES"]
 
 AC, WA, CE = "AC", "WA", "CE"
 #: 整题状态取"最严重"的那个
@@ -87,9 +89,11 @@ class JudgeOutcome:
     cases: List[CaseResult] = field(default_factory=list)
     subtasks: List[Dict[str, object]] = field(default_factory=list)
     isolated: bool = False
+    #: 源码预检的预警（``Finding.to_dict()``）；没有就不写进结果
+    precheck_warnings: List[Dict[str, object]] = field(default_factory=list)
 
     def to_result_json(self) -> Dict[str, object]:
-        return {
+        document: Dict[str, object] = {
             "score": self.score,
             "max_score": self.max_score,
             "status": self.status,
@@ -100,6 +104,9 @@ class JudgeOutcome:
             "cases": [case.to_dict() for case in self.cases],
             "subtasks": self.subtasks,
         }
+        if self.precheck_warnings:
+            document["precheck_warnings"] = self.precheck_warnings
+        return document
 
 
 def worst(statuses: List[str]) -> str:
@@ -153,11 +160,27 @@ def judge(
 
     with zipfile.ZipFile(str(testdata_zip)) as archive:
         data = parse_testdata(archive)
+        report = pc.check_source(
+            source.read_bytes(), language=language, rules=data.precheck, allowed_files=io_file_names(config),
+        )
+        warnings = [item.to_dict() for item in report.warnings]
+        if report.blocked:
+            return JudgeOutcome(0, data.total_score, CE, language, _truncate(report.blocked_message().encode("utf-8")),
+                                precheck_warnings=warnings)
         box = sandbox_factory()
         try:
-            return _judge_in(box, archive, data, source, main_name, compile_argv, language, config)
+            outcome = _judge_in(box, archive, data, source, main_name, compile_argv, language, config)
         finally:
             box.close()
+        outcome.precheck_warnings = warnings
+        return outcome
+
+
+def io_file_names(config: ProblemConfig) -> List[str]:
+    """选手代码可以用字面量打开的文件名：``<题目>.in`` / ``<题目>.out`` 与题目配置的输入输出文件名。"""
+    names = ["%s.in" % config.ident, "%s.out" % config.ident]
+    names += [name for name in (config.input_file, config.output_file) if name]
+    return names
 
 
 def _judge_in(box, archive, data: Testdata, source, main_name, compile_argv, language, config):

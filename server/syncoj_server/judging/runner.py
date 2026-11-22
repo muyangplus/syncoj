@@ -227,7 +227,9 @@ def _judge_in(box, archive, data: Testdata, source, main_name, compile_argv, lan
         return JudgeOutcome(0, max_score, CE, language, (reason + "\n" + compile_message).strip(),
                             isolated=box.isolated)
 
-    keep = [prog]
+    # 编译产物读进评测机内存：选手程序能改写工作目录（换掉 checker 就能"永远 AC"），
+    # 所以每次运行前清空工作目录、从这里重新放一份干净的，不在测试点之间留任何文件
+    binaries = {prog: (box.workdir / prog).read_bytes()}
     if data.checker:
         for member in [data.checker] + data.checker_support:
             box.put(Path(member).name, archive.read(member))
@@ -236,7 +238,7 @@ def _judge_in(box, archive, data: Testdata, source, main_name, compile_argv, lan
                         COMPILE_LIMITS, stderr="checker.err")
         if built.status != sb.OK or not (box.workdir / chk).is_file():
             raise sb.SandboxError("checker 编译失败：%s" % _truncate(_read(box, "checker.err", 1 << 20) or b""))
-        keep.append(chk)
+        binaries[chk] = (box.workdir / chk).read_bytes()
 
     limits = sb.Limits(
         cpu_seconds=config.time_limit_ms / 1000.0,
@@ -251,7 +253,8 @@ def _judge_in(box, archive, data: Testdata, source, main_name, compile_argv, lan
 
     cases: List[CaseResult] = []
     for case in data.cases:
-        box.clean(keep)
+        box.clean()
+        box.put(prog, binaries[prog], 0o755)
         box.put(in_name, archive.read(case.input))
         run = box.run(
             ["./" + prog], limits,
@@ -269,7 +272,7 @@ def _judge_in(box, archive, data: Testdata, source, main_name, compile_argv, lan
                 item.status = WA
                 item.message = ("没有输出文件 %s（是不是忘了 freopen？）" % out_name) if file_io else "没有输出"
             elif data.checker:
-                item.status, item.message = _run_checker(box, archive, case, output, keep)
+                item.status, item.message = _run_checker(box, archive, case, output, binaries[chk])
             else:
                 item.status = AC if compare_text(output, archive.read(case.answer)) else WA
         elif run.status == "RE" and run.signal:
@@ -298,8 +301,9 @@ def _judge_in(box, archive, data: Testdata, source, main_name, compile_argv, lan
     )
 
 
-def _run_checker(box, archive, case, output: bytes, keep: List[str]):
-    box.clean(keep)
+def _run_checker(box, archive, case, output: bytes, checker: bytes):
+    box.clean()
+    box.put(exe_name("chk"), checker, 0o755)
     box.put("in.txt", archive.read(case.input))
     box.put("out.txt", output)
     box.put("ans.txt", archive.read(case.answer))

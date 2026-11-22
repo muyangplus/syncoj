@@ -163,6 +163,20 @@ def test_程序不能跨测试点留东西(tmp_path) -> None:
 
 
 @needs_gcc
+def test_选手程序改写checker不影响判分(tmp_path) -> None:
+    """选手程序能写工作目录：把 chk 换成"永远通过"的脚本、再输出错答案，仍要判 WA。"""
+    checker = ("#include <cstdio>\nint main(int c,char**v){FILE*o=fopen(v[2],\"r\"),*a=fopen(v[3],\"r\");"
+               "long long x,y;fscanf(o,\"%lld\",&x);fscanf(a,\"%lld\",&y);return x==y?0:1;}")
+    tamper = ("#include <cstdio>\nint main(){FILE*f=fopen(\"chk\",\"w\");"
+              "if(f){fputs(\"#!/bin/sh\\nexit 0\\n\",f);fclose(f);}puts(\"-1\");}")
+    config = {"precheck": {"disabled": ["file_access"]}}
+    data = ab_data(tmp_path, {"checker.cpp": checker, "config.json": json.dumps(config)})
+    outcome = judge(tmp_path, tamper, data)
+    assert [item.status for item in outcome.cases] == ["WA", "WA", "WA"], outcome
+    assert outcome.score == 0
+
+
+@needs_gcc
 def test_checker与子任务(tmp_path) -> None:
     checker = ("#include <cstdio>\nint main(int c,char**v){FILE*o=fopen(v[2],\"r\"),*a=fopen(v[3],\"r\");"
                "long long x,y;fscanf(o,\"%lld\",&x);fscanf(a,\"%lld\",&y);if(x==y)return 0;"

@@ -13,6 +13,7 @@ import type {
   BuiltinJudgeIn,
   BuiltinJudgeProgressOut,
   BuiltinJudgeQueuedOut,
+  JudgeRunDetailOut,
   JudgeWorkerCreatedOut,
   JudgeWorkerOut,
   ProblemJudgeIn,
@@ -42,6 +43,10 @@ export const judgingApi = {
     request<BuiltinJudgeQueuedOut>(paths.contestBuiltinJudge(contestId), { method: 'POST', body: payload }),
 
   progress: (contestId: number) => request<BuiltinJudgeProgressOut>(paths.contestBuiltinJudge(contestId)),
+
+  /** 一条评测记录与测试点明细。 */
+  run: (contestId: number, runId: number) =>
+    request<JudgeRunDetailOut>(paths.contestJudgeRun(contestId, runId)),
 
   workers: (params: ListParams = {}, signal?: AbortSignal) =>
     listPage<JudgeWorkerOut>(paths.judgeWorkers(), { limit: 100, ...params }, signal),

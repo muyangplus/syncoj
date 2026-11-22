@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, reactive, ref } from 'vue'
 
-import { scoreApi } from '@/api'
-import type { JudgeRunOut, JudgeScanOut, ScoreCellOut, ScoreRowOut } from '@/api/types'
-import BuiltinJudgeDialog from '@/components/BuiltinJudgeDialog.vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+
+import { judgingApi, scoreApi } from '@/api'
+import { ApiError } from '@/api/client'
+import type { JudgeRunDetailOut, JudgeRunOut, JudgeScanOut, ScoreCellOut, ScoreRowOut } from '@/api/types'
+import JudgeRunDetailDialog from '@/components/JudgeRunDetailDialog.vue'
 import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
 import DataTable from '@/components/DataTable.vue'
 import FormDialog from '@/components/FormDialog.vue'
@@ -415,8 +418,56 @@ function runStatusLabel(parseStatus: string): string {
   return map[parseStatus] ?? parseStatus
 }
 
-// 自带评测（§12）：排任务、看进度、管评测机
-const builtinOpen = ref(false)
+// --------------------------------------------------------------------------- //
+// 测试点明细（§12）
+// --------------------------------------------------------------------------- //
+
+const detailOpen = ref(false)
+const detailRunId = ref<number | null>(null)
+
+function openDetail(runId: number): void {
+  detailRunId.value = runId
+  detailOpen.value = true
+}
+
+/** 带测试点明细的格子打开明细，其余打开手工录分。 */
+function openCell(row: ScoreRowOut, ident: string): void {
+  const cell = cellOf(row, ident)
+  if (cell?.has_cases && cell.run_id) {
+    openDetail(cell.run_id)
+    return
+  }
+  openManual(row, ident, cell)
+}
+
+function manualFromDetail(run: JudgeRunDetailOut): void {
+  detailOpen.value = false
+  openManual(run, run.problem, run)
+}
+
+async function rejudge(run: JudgeRunDetailOut, force = false): Promise<void> {
+  const contestId = contest.currentId
+  if (!contestId) return
+  try {
+    const result = await judgingApi.queue(contestId, { problem: run.problem, player_id: run.player_id, force })
+    ElMessage.success(result.queued ? '已排队重测' : '未排队：该题不是自带评测')
+  } catch (err) {
+    if (err instanceof ApiError && err.code === 'contest_in_progress' && !force) {
+      try {
+        await ElMessageBox.confirm('场次未结束，将评测当前已回收的代码。', '仍要重测？', {
+          type: 'warning',
+          confirmButtonText: '仍要重测',
+          cancelButtonText: '取消',
+        })
+      } catch {
+        return
+      }
+      await rejudge(run, true)
+      return
+    }
+    ElMessage.error((err as Error).message)
+  }
+}
 </script>
 
 <template>
@@ -431,7 +482,7 @@ const builtinOpen = ref(false)
       <el-button size="small" :loading="rescan.pending.value" @click="rescan.run(undefined)">
         立即重扫
       </el-button>
-      <el-button size="small" :disabled="!contest.currentId" @click="builtinOpen = true">自带评测</el-button>
+      <el-button size="small" @click="router.push({ name: 'judge' })">自带评测</el-button>
       <el-button size="small" :disabled="!view?.rows.length" @click="exportCsv">导出 CSV</el-button>
       <el-button size="small" :loading="loading" @click="reloadMatrix">刷新</el-button>
     </template>
@@ -597,7 +648,7 @@ const builtinOpen = ref(false)
               size="small"
               effect="plain"
               class="clickable"
-              @click="openManual(row, column.ident, cellOf(row, column.ident))"
+              @click="openCell(row, column.ident)"
             >
               {{ cellView(cellOf(row, column.ident)).text }}
             </el-tag>
@@ -696,8 +747,11 @@ const builtinOpen = ref(false)
               <span class="cell-sub">{{ formatTime(row.updated_at) }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="90" fixed="right">
+          <el-table-column label="操作" width="110" fixed="right">
             <template #default="{ row }">
+              <el-button v-if="row.has_cases" link type="primary" size="small" @click="openDetail(row.id)">
+                明细
+              </el-button>
               <el-button link type="primary" size="small" @click="openManual(row, row.problem, row)">
                 {{ row.parse_status === 'unparsed' ? '补录' : '修正' }}
               </el-button>
@@ -802,7 +856,13 @@ const builtinOpen = ref(false)
         </template>
       </el-alert>
     </ConfirmByNameDialog>
-    <BuiltinJudgeDialog v-model="builtinOpen" :contest-id="contest.currentId" @update:model-value="(v: boolean) => { if (!v) reloadMatrix() }" />
+    <JudgeRunDetailDialog
+      v-model="detailOpen"
+      :contest-id="contest.currentId"
+      :run-id="detailRunId"
+      @manual="manualFromDetail"
+      @rejudge="rejudge"
+    />
   </PageShell>
 </template>
 

@@ -1217,6 +1217,10 @@ class ScoreCellOut(_Base):
     submitted: bool = False
     detail: Optional[str] = None
     updated_at: Optional[str] = None
+    #: 对应的评测记录；``parse_status="missing"`` 时为 None
+    run_id: Optional[int] = None
+    #: 结果文件带测试点明细（``GET .../judge/runs/{run_id}``）
+    has_cases: bool = False
 
 
 class ScoreRowOut(_Base):
@@ -1294,6 +1298,39 @@ class JudgeRunOut(_Base):
     detail: Optional[str] = None
     source_path: Optional[str] = None
     updated_at: str
+    has_cases: bool = False
+
+
+class JudgeCaseOut(_Base):
+    name: str
+    status: str
+    score: int = 0
+    time_ms: Optional[int] = None
+    memory_kb: Optional[int] = None
+    message: str = ""
+
+
+class JudgeSubtaskOut(_Base):
+    index: int
+    score: int
+    max_score: int
+    cases: List[str] = Field(default_factory=list)
+
+
+class JudgeRunDetailOut(JudgeRunOut):
+    """一条评测记录连同结果文件里的测试点明细。"""
+
+    judge: Optional[str] = None
+    language: Optional[str] = None
+    isolated: Optional[bool] = None
+    compile_message: str = ""
+    judged_at: Optional[str] = None
+    source_sha256: Optional[str] = None
+    #: 评测时用的选手代码路径（结果文件里的 ``source_path``）
+    judged_source: Optional[str] = None
+    cases: List[JudgeCaseOut] = Field(default_factory=list)
+    subtasks: List[JudgeSubtaskOut] = Field(default_factory=list)
+    truncated: bool = False
 
 
 class JudgeScanOut(_Base):

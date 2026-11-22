@@ -96,6 +96,8 @@ export type ScoreRowOut = S['ScoreRowOut']
 export type ScoreCellOut = S['ScoreCellOut']
 export type ProblemColumnOut = S['ProblemColumnOut']
 export type JudgeRunOut = S['JudgeRunOut']
+export type JudgeRunDetailOut = S['JudgeRunDetailOut']
+export type JudgeCaseOut = S['JudgeCaseOut']
 export type JudgeScanOut = S['JudgeScanOut']
 export type ManualScoreIn = S['ManualScoreIn']
 

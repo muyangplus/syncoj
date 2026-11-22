@@ -80,6 +80,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '文件下发' },
       },
       {
+        path: 'judge',
+        name: 'judge',
+        component: () => import('@/views/JudgeView.vue'),
+        meta: { title: '评测' },
+      },
+      {
         path: 'scores',
         name: 'scores',
         component: () => import('@/views/ScoresView.vue'),

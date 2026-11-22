@@ -103,6 +103,7 @@ from ..schemas import (
     EventOut,
     FileClearIn,
     JudgeRunClearIn,
+    JudgeRunDetailOut,
     JudgeRunOut,
     JudgeScanOut,
     LoginRequest,
@@ -5086,6 +5087,8 @@ def score_matrix(
                         submitted=submitted,
                         detail=run.detail,
                         updated_at=_iso(run.updated_at),
+                        run_id=run.id,
+                        has_cases=_has_cases(run),
                     )
                 )
             rows.append(
@@ -5220,22 +5223,109 @@ def list_judge_runs(
         )
 
         items = [
-            JudgeRunOut(
-                id=run.id,
-                player_id=run.player_id,
-                player_no=player_no,
-                problem=run.problem,
-                score=run.score,
-                max_score=run.max_score,
-                status=run.status,
-                parse_status=run.parse_status,
-                detail=run.detail,
-                source_path=run.source_path,
-                updated_at=_iso(run.updated_at) or "",
-            )
+            _judge_run_out(run, player_no)
             for run, player_no in session.execute(stmt)
         ]
         return page_of(items, total, page)
+
+
+def _has_cases(run: JudgeRun) -> bool:
+    return bool(run.raw_json) and '"cases"' in run.raw_json
+
+
+def _judge_run_out(run: JudgeRun, player_no: str) -> JudgeRunOut:
+    return JudgeRunOut(
+        id=run.id,
+        player_id=run.player_id,
+        player_no=player_no,
+        problem=run.problem,
+        score=run.score,
+        max_score=run.max_score,
+        status=run.status,
+        parse_status=run.parse_status,
+        detail=run.detail,
+        source_path=run.source_path,
+        updated_at=_iso(run.updated_at) or "",
+        has_cases=_has_cases(run),
+    )
+
+
+def _int_or_none(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    return None
+
+
+def _run_detail(run: JudgeRun, player_no: str) -> JudgeRunDetailOut:
+    """结果文件原文里的测试点明细。字段缺失或形状不对的项跳过，不报错。"""
+    base = _judge_run_out(run, player_no).model_dump()
+    try:
+        document = json.loads(run.raw_json) if run.raw_json else None
+    except ValueError:
+        document = None
+    if not isinstance(document, dict):
+        return JudgeRunDetailOut(**base)
+    cases = []
+    for item in document.get("cases") or []:
+        if not isinstance(item, dict) or item.get("name") is None:
+            continue
+        cases.append(
+            {
+                "name": str(item.get("name"))[:128],
+                "status": str(item.get("status") or "")[:16],
+                "score": _int_or_none(item.get("score")) or 0,
+                "time_ms": _int_or_none(item.get("time_ms")),
+                "memory_kb": _int_or_none(item.get("memory_kb")),
+                "message": str(item.get("message") or "")[:2000],
+            }
+        )
+    subtasks = []
+    for item in document.get("subtasks") or []:
+        if not isinstance(item, dict):
+            continue
+        subtasks.append(
+            {
+                "index": _int_or_none(item.get("index")) or len(subtasks) + 1,
+                "score": _int_or_none(item.get("score")) or 0,
+                "max_score": _int_or_none(item.get("max_score")) or 0,
+                "cases": [str(name)[:128] for name in item.get("cases") or []][:1000],
+            }
+        )
+    isolated = document.get("isolated")
+    return JudgeRunDetailOut(
+        **base,
+        judge=str(document["judge"])[:64] if document.get("judge") else None,
+        language=str(document["language"])[:16] if document.get("language") else None,
+        isolated=isolated if isinstance(isolated, bool) else None,
+        compile_message=str(document.get("compile_message") or "")[:8000],
+        judged_at=str(document["judged_at"])[:32] if document.get("judged_at") else None,
+        source_sha256=str(document["source_sha256"])[:64] if document.get("source_sha256") else None,
+        judged_source=str(document["source_path"])[:1024] if document.get("source_path") else None,
+        cases=cases,
+        subtasks=subtasks,
+        truncated=bool(document.get("truncated")),
+    )
+
+
+@router.get("/contests/{contest_id}/judge/runs/{run_id}", response_model=JudgeRunDetailOut)
+def get_judge_run(
+    contest_id: int,
+    run_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> JudgeRunDetailOut:
+    """一条评测记录及其测试点明细。"""
+    with ctx.db.session() as session:
+        found = session.execute(
+            select(JudgeRun, Player.player_no)
+            .join(Player, JudgeRun.player_id == Player.id)
+            .where(JudgeRun.id == run_id, JudgeRun.contest_id == contest_id)
+        ).first()
+        if found is None:
+            raise HTTPException(status_code=404, detail="评测记录不存在")
+        return _run_detail(found[0], found[1])
 
 
 @router.post("/contests/{contest_id}/judge/rescan", response_model=JudgeScanOut)
@@ -5320,19 +5410,7 @@ def set_judge_score(
             )
         )
 
-        return JudgeRunOut(
-            id=run.id,
-            player_id=run.player_id,
-            player_no=player.player_no,
-            problem=run.problem,
-            score=run.score,
-            max_score=run.max_score,
-            status=run.status,
-            parse_status=run.parse_status,
-            detail=run.detail,
-            source_path=run.source_path,
-            updated_at=_iso(run.updated_at) or "",
-        )
+        return _judge_run_out(run, player.player_no)
 
 
 @router.delete("/contests/{contest_id}/judge/score", response_model=SimpleAck)

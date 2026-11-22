@@ -775,6 +775,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/contests/{contest_id}/judge/runs/{run_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Judge Run
+         * @description 一条评测记录及其测试点明细。
+         */
+        get: operations["get_judge_run_api_v1_admin_contests__contest_id__judge_runs__run_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/contests/{contest_id}/judge/score": {
         parameters: {
             query?: never;
@@ -3433,6 +3453,27 @@ export interface components {
             /** Sha256 */
             sha256: string;
         };
+        /** JudgeCaseOut */
+        JudgeCaseOut: {
+            /** Memory Kb */
+            memory_kb?: number | null;
+            /**
+             * Message
+             * @default
+             */
+            message: string;
+            /** Name */
+            name: string;
+            /**
+             * Score
+             * @default 0
+             */
+            score: number;
+            /** Status */
+            status: string;
+            /** Time Ms */
+            time_ms?: number | null;
+        };
         /** JudgeFailIn */
         JudgeFailIn: {
             /**
@@ -3505,10 +3546,74 @@ export interface components {
             /** Player Id */
             player_id?: number | null;
         };
+        /**
+         * JudgeRunDetailOut
+         * @description 一条评测记录连同结果文件里的测试点明细。
+         */
+        JudgeRunDetailOut: {
+            /** Cases */
+            cases?: components["schemas"]["JudgeCaseOut"][];
+            /**
+             * Compile Message
+             * @default
+             */
+            compile_message: string;
+            /** Detail */
+            detail?: string | null;
+            /**
+             * Has Cases
+             * @default false
+             */
+            has_cases: boolean;
+            /** Id */
+            id: number;
+            /** Isolated */
+            isolated?: boolean | null;
+            /** Judge */
+            judge?: string | null;
+            /** Judged At */
+            judged_at?: string | null;
+            /** Judged Source */
+            judged_source?: string | null;
+            /** Language */
+            language?: string | null;
+            /** Max Score */
+            max_score?: number | null;
+            /** Parse Status */
+            parse_status: string;
+            /** Player Id */
+            player_id: number;
+            /** Player No */
+            player_no: string;
+            /** Problem */
+            problem: string;
+            /** Score */
+            score?: number | null;
+            /** Source Path */
+            source_path?: string | null;
+            /** Source Sha256 */
+            source_sha256?: string | null;
+            /** Status */
+            status?: string | null;
+            /** Subtasks */
+            subtasks?: components["schemas"]["JudgeSubtaskOut"][];
+            /**
+             * Truncated
+             * @default false
+             */
+            truncated: boolean;
+            /** Updated At */
+            updated_at: string;
+        };
         /** JudgeRunOut */
         JudgeRunOut: {
             /** Detail */
             detail?: string | null;
+            /**
+             * Has Cases
+             * @default false
+             */
+            has_cases: boolean;
             /** Id */
             id: number;
             /** Max Score */
@@ -3559,6 +3664,17 @@ export interface components {
              * @default 0
              */
             unparsed: number;
+        };
+        /** JudgeSubtaskOut */
+        JudgeSubtaskOut: {
+            /** Cases */
+            cases?: string[];
+            /** Index */
+            index: number;
+            /** Max Score */
+            max_score: number;
+            /** Score */
+            score: number;
         };
         /** JudgeWorkerCreatedOut */
         JudgeWorkerCreatedOut: {
@@ -4717,6 +4833,11 @@ export interface components {
         ScoreCellOut: {
             /** Detail */
             detail?: string | null;
+            /**
+             * Has Cases
+             * @default false
+             */
+            has_cases: boolean;
             /** Max Score */
             max_score?: number | null;
             /**
@@ -4726,6 +4847,8 @@ export interface components {
             parse_status: string;
             /** Problem */
             problem: string;
+            /** Run Id */
+            run_id?: number | null;
             /** Score */
             score?: number | null;
             /** Status */
@@ -6215,6 +6338,38 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_judge_run_api_v1_admin_contests__contest_id__judge_runs__run_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contest_id: number;
+                run_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JudgeRunDetailOut"];
                 };
             };
             /** @description Validation Error */

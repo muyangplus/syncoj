@@ -87,6 +87,9 @@ onMounted(async () => {
         <el-menu-item index="deploys" :route="{ name: 'deploys' }">
           <el-icon><UploadFilled /></el-icon><span>文件下发</span>
         </el-menu-item>
+        <el-menu-item index="judge" :route="{ name: 'judge' }">
+          <el-icon><Cpu /></el-icon><span>评测</span>
+        </el-menu-item>
         <el-menu-item index="scores" :route="{ name: 'scores' }">
           <el-icon><Trophy /></el-icon><span>成绩</span>
         </el-menu-item>

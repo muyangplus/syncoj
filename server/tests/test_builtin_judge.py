@@ -163,6 +163,39 @@ def test_端到端_评完进成绩矩阵(client, admin_headers, contest, problem
     assert result["judge"] == "syncoj-builtin" and len(result["cases"]) == 2
     assert result["source_path"] == "ab/ab.cpp"
 
+    assert cell["has_cases"] is True
+    detail = client.get("/api/v1/admin/contests/%d/judge/runs/%d" % (contest["id"], cell["run_id"]),
+                        headers=admin_headers).json()
+    assert [case["status"] for case in detail["cases"]] == ["AC", "AC"]
+    assert detail["language"] == "cpp" and detail["judged_source"] == "ab/ab.cpp"
+
+
+def test_结果文件里的测试点明细可查(client, admin_headers, contest, player) -> None:
+    root = Path(client.app.state.ctx.settings.judge_result_root) / contest["slug"] / player["player_no"] / "ab"
+    root.mkdir(parents=True)
+    (root / "result.json").write_text(json.dumps({
+        "score": 50, "max_score": 100, "status": "WA", "judge": "syncoj-builtin", "isolated": False,
+        "language": "cpp", "compile_message": "",
+        "cases": [
+            {"name": "1", "status": "AC", "score": 50, "time_ms": 3, "memory_kb": 1024, "message": ""},
+            {"name": "2", "status": "WA", "score": 0, "time_ms": 4, "memory_kb": 1024, "message": "第 1 行不同"},
+            "坏项",
+        ],
+        "subtasks": [{"index": 1, "score": 0, "max_score": 100, "cases": ["1", "2"]}],
+    }), encoding="utf-8")
+
+    cell = scores(client, admin_headers, contest)[(player["player_no"], "ab")]
+    assert cell["has_cases"] is True and cell["run_id"]
+    detail = client.get("/api/v1/admin/contests/%d/judge/runs/%d" % (contest["id"], cell["run_id"]),
+                        headers=admin_headers).json()
+    assert [(case["name"], case["status"]) for case in detail["cases"]] == [("1", "AC"), ("2", "WA")]
+    assert detail["cases"][1]["message"] == "第 1 行不同"
+    assert detail["subtasks"][0]["cases"] == ["1", "2"] and detail["isolated"] is False
+
+    other = client.get("/api/v1/admin/contests/%d/judge/runs/%d" % (contest["id"] + 999, cell["run_id"]),
+                       headers=admin_headers)
+    assert other.status_code == 404
+
 
 @needs_gcc
 def test_重测替换旧结果_手工成绩不被覆盖(client, admin_headers, contest, problem, enrolled, worker_token, tmp_path) -> None:

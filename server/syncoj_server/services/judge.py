@@ -74,6 +74,8 @@ class ParsedScore:
     max_score: Optional[int] = None
     status: Optional[str] = None
     detail: str = ""
+    #: JSON 结果文件的原文（带 ``cases`` 等测试点明细时界面展开用）；其他格式为 None
+    raw: Optional[str] = None
 
 
 # --------------------------------------------------------------------------- #
@@ -410,6 +412,8 @@ def parse_result_file(path: Path) -> Tuple[Optional[ParsedScore], str, str]:
             log.debug("解析器 %s 处理 %s 时抛异常: %s", name, path, exc)
             continue
         if parsed is not None:
+            if name == "json":
+                parsed.raw = text
             return parsed, name, parsed.detail
 
     return None, "", "没有解析器认得这个格式"
@@ -563,7 +567,7 @@ def scan_contest_results(
                 status=parsed.status,
                 parse_status="ok",
                 detail=("%s：%s" % (parser_name, reason or ""))[:512],
-                raw_json=None,
+                raw_json=parsed.raw,
             )
         pending.append((player_id, problem, values, known[0] if known else None))
 

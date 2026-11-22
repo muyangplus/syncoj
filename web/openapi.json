@@ -2221,6 +2221,57 @@
         "title": "JudgeBlobRefOut",
         "type": "object"
       },
+      "JudgeCaseOut": {
+        "additionalProperties": false,
+        "properties": {
+          "memory_kb": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Kb"
+          },
+          "message": {
+            "default": "",
+            "title": "Message",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "score": {
+            "default": 0,
+            "title": "Score",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "time_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time Ms"
+          }
+        },
+        "required": [
+          "name",
+          "status"
+        ],
+        "title": "JudgeCaseOut",
+        "type": "object"
+      },
       "JudgeFailIn": {
         "additionalProperties": false,
         "properties": {
@@ -2385,6 +2436,196 @@
         "title": "JudgeRunClearIn",
         "type": "object"
       },
+      "JudgeRunDetailOut": {
+        "additionalProperties": false,
+        "description": "一条评测记录连同结果文件里的测试点明细。",
+        "properties": {
+          "cases": {
+            "items": {
+              "$ref": "#/components/schemas/JudgeCaseOut"
+            },
+            "title": "Cases",
+            "type": "array"
+          },
+          "compile_message": {
+            "default": "",
+            "title": "Compile Message",
+            "type": "string"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "has_cases": {
+            "default": false,
+            "title": "Has Cases",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "isolated": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Isolated"
+          },
+          "judge": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Judge"
+          },
+          "judged_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Judged At"
+          },
+          "judged_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Judged Source"
+          },
+          "language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Language"
+          },
+          "max_score": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Score"
+          },
+          "parse_status": {
+            "title": "Parse Status",
+            "type": "string"
+          },
+          "player_id": {
+            "title": "Player Id",
+            "type": "integer"
+          },
+          "player_no": {
+            "title": "Player No",
+            "type": "string"
+          },
+          "problem": {
+            "title": "Problem",
+            "type": "string"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score"
+          },
+          "source_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Path"
+          },
+          "source_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Sha256"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "subtasks": {
+            "items": {
+              "$ref": "#/components/schemas/JudgeSubtaskOut"
+            },
+            "title": "Subtasks",
+            "type": "array"
+          },
+          "truncated": {
+            "default": false,
+            "title": "Truncated",
+            "type": "boolean"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "player_id",
+          "player_no",
+          "problem",
+          "parse_status",
+          "updated_at"
+        ],
+        "title": "JudgeRunDetailOut",
+        "type": "object"
+      },
       "JudgeRunOut": {
         "additionalProperties": false,
         "properties": {
@@ -2398,6 +2639,11 @@
               }
             ],
             "title": "Detail"
+          },
+          "has_cases": {
+            "default": false,
+            "title": "Has Cases",
+            "type": "boolean"
           },
           "id": {
             "title": "Id",
@@ -2516,6 +2762,37 @@
           }
         },
         "title": "JudgeScanOut",
+        "type": "object"
+      },
+      "JudgeSubtaskOut": {
+        "additionalProperties": false,
+        "properties": {
+          "cases": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Cases",
+            "type": "array"
+          },
+          "index": {
+            "title": "Index",
+            "type": "integer"
+          },
+          "max_score": {
+            "title": "Max Score",
+            "type": "integer"
+          },
+          "score": {
+            "title": "Score",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "index",
+          "score",
+          "max_score"
+        ],
+        "title": "JudgeSubtaskOut",
         "type": "object"
       },
       "JudgeWorkerCreatedOut": {
@@ -4851,6 +5128,11 @@
             ],
             "title": "Detail"
           },
+          "has_cases": {
+            "default": false,
+            "title": "Has Cases",
+            "type": "boolean"
+          },
           "max_score": {
             "anyOf": [
               {
@@ -4870,6 +5152,17 @@
           "problem": {
             "title": "Problem",
             "type": "string"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
           },
           "score": {
             "anyOf": [
@@ -7642,6 +7935,58 @@
           }
         },
         "summary": "Clear Judge Runs",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/contests/{contest_id}/judge/runs/{run_id}": {
+      "get": {
+        "description": "一条评测记录及其测试点明细。",
+        "operationId": "get_judge_run_api_v1_admin_contests__contest_id__judge_runs__run_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JudgeRunDetailOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Judge Run",
         "tags": [
           "admin"
         ]

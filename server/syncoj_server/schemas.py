@@ -326,6 +326,9 @@ class TickResponse(_Base):
     #: 解析出来的身份，Agent 拿到就存进凭据，之后才能扫代码
     player_no: Optional[str] = None
     contest_slug: Optional[str] = None
+    #: 服务端实例 ID（``<data_root>/server-id``，跨重启不变）。Agent 记住它，之后
+    #: 局域网发现 / 主动通告只切到同一个 ID 的服务端（§7.3）。老 Agent 忽略
+    server_uuid: Optional[str] = None
 
 
 class UploadResult(_Base):
@@ -355,7 +358,7 @@ class AgentEvent(_Base):
 
 
 class WhoAmIOut(_Base):
-    """挑战应答（§11）：用发布私钥签 ``syncoj-announce-v1\n<nonce>\n<url>``。
+    """挑战应答（§11）：用发布私钥签 ``syncoj-announce-v1\n<nonce>\n<url>``（v2 见下）。
 
     ``url`` 是**服务端自己认定的**对外地址（§7.3 的三条来源），不是请求里的 Host：
     机器切换到的是签名里的这个地址。
@@ -365,6 +368,9 @@ class WhoAmIOut(_Base):
     nonce: str
     key_id: str = ""
     sig: str
+    #: 请求带 ``v=2`` 且服务端有实例 ID 时才有：此时签名对象是
+    #: ``syncoj-announce-v2\n<nonce>\n<url>\n<server_uuid>``
+    server_uuid: Optional[str] = None
 
 
 class AnnounceStatusOut(_Base):
@@ -490,6 +496,11 @@ class ContestOut(_Base):
     #: ``null`` = 这一端不限制。
     starts_at: Optional[str] = None
     ends_at: Optional[str] = None
+    #: 自带评测的自动入队（§12.9）：``off`` / ``on_change``；去抖秒数
+    auto_judge: str = "off"
+    auto_judge_delay: int = 60
+    #: 是否设了考生页密码。密码本身**只写不读**（库里也只有哈希）。
+    has_player_password: bool = False
 
 
 class ContestUpdate(_Base):
@@ -510,6 +521,12 @@ class ContestUpdate(_Base):
     #: 显式置空用的开关。``None`` 字段没法区分"没传"和"传了 null"，
     #: 所以要多一个布尔 —— 否则教师永远清不掉已经选错的名单。
     clear_default_roster: bool = False
+    #: 考生页密码。给了就**替换**（存 scrypt 哈希）；不给 = 不动。
+    #: 设了它，考生能在考生页用「准考证号 + 这个密码」看到自己的清单并下载文件。
+    player_password: Optional[str] = Field(default=None, min_length=4, max_length=128)
+    #: 清除考生页密码（关掉那条登录路径，已签出的令牌随之失效）。
+    #: 与 ``player_password`` 同时给时以清除为准。
+    clear_player_password: bool = False
 
 
 # --------------------------------------------------------------------------- #
@@ -674,6 +691,80 @@ class BindResultOut(_Base):
     player_no: str
     roster_name: str = ""
     detail: str = ""
+    #: 其他名单里与这个人**同名**的条目（智能匹配，§4.6）：界面一键「同时绑定」
+    suggestions: List["BindingSuggestionOut"] = Field(default_factory=list)
+
+
+class BindingSuggestionOut(_Base):
+    """一条同名建议：把 ``agent_id`` 也绑到 ``roster_name`` 里的这个人。"""
+
+    agent_id: int
+    roster_id: int
+    roster_name: str = ""
+    roster_entry_id: int
+    player_no: str
+    name: Optional[str] = None
+    seat: Optional[str] = None
+    #: 依据：机器在哪份名单里绑着的谁（"名单 · 考号 姓名"）
+    source: str = ""
+
+
+class BoundMachineOut(_Base):
+    """已配对的机器（至少绑了一份名单）。"""
+
+    id: int
+    machine_id: str
+    hostname: Optional[str] = None
+    agent_version: Optional[str] = None
+    contest_id: Optional[int] = None
+    last_seen_at: Optional[str] = None
+    bindings: List[AgentBindingOut] = Field(default_factory=list)
+
+
+class RosterMatchPairOut(_Base):
+    """「按姓名匹配机器」预览里的一对。"""
+
+    agent_id: int
+    hostname: Optional[str] = None
+    machine_id: str = ""
+    roster_entry_id: int
+    player_no: str
+    name: Optional[str] = None
+    #: 依据：机器在哪份名单里绑着的谁
+    source: str = ""
+
+
+class RosterMatchSkipOut(_Base):
+    """没有配成对的人及原因。"""
+
+    roster_entry_id: int
+    player_no: str
+    name: Optional[str] = None
+    reason: str
+
+
+class RosterMatchPreviewOut(_Base):
+    roster_id: int
+    roster_name: str
+    pairs: List[RosterMatchPairOut] = Field(default_factory=list)
+    conflicts: List[RosterMatchSkipOut] = Field(default_factory=list)
+    skipped: List[RosterMatchSkipOut] = Field(default_factory=list)
+
+
+class RosterMatchPairIn(_Base):
+    agent_id: int
+    roster_entry_id: int
+
+
+class RosterMatchApplyIn(_Base):
+    """教师在预览里确认过的那些对。逐对重新校验，失败的列进 ``failed``。"""
+
+    pairs: List[RosterMatchPairIn] = Field(default_factory=list, max_length=5000)
+
+
+class RosterMatchApplyOut(_Base):
+    bound: int = 0
+    failed: List[RosterMatchSkipOut] = Field(default_factory=list)
 
 
 class SetAgentContestIn(_Base):
@@ -832,12 +923,20 @@ class ProblemJudgeIn(_Base):
 
 
 class BuiltinJudgeIn(_Base):
-    """排自带评测任务。都不填 = 全场所有用自带评测的题 × 所有选手。"""
+    """排自带评测任务。都不填 = 全场所有用自带评测的题 × 所有选手（评最新版）。
+
+    给了 ``version_id`` = 重测那一个历史版本（§12.9）：选手与题目由版本定，结果只进历史与
+    timeline，不覆盖成绩矩阵（教师「采用」才写）；不受"场次还在进行"的限制。
+    """
 
     problem: Optional[str] = Field(default=None, max_length=64)
     player_id: Optional[int] = None
     #: 场次还在进行时也评（评的是考到一半的代码）
     force: bool = False
+    #: 指定历史版本（``GET .../judge/versions`` 的 ``id``）
+    version_id: Optional[int] = None
+    #: 真跑一遍：不复用相同 (数据包, 评测配置, 代码) 的已有结果
+    rerun: bool = False
 
 
 class BuiltinJudgeQueuedOut(_Base):
@@ -852,16 +951,131 @@ class BuiltinJudgeFailureOut(_Base):
 
 
 class BuiltinJudgeProgressOut(_Base):
+    """排队 / 在评是全数；完成 / 失败只数每 (选手, 题目) 最新的那条任务。"""
+
     total: int = 0
     queued: int = 0
     running: int = 0
     done: int = 0
     failed: int = 0
+    #: 排队中、还在去抖（没到 ``not_before``）的自动任务数
+    delayed: int = 0
     failures: List[BuiltinJudgeFailureOut] = Field(default_factory=list)
+
+
+class JudgeAutoIn(_Base):
+    """场次的自动入队设置（§12.9）。"""
+
+    auto_judge: Literal["off", "on_change"]
+    #: 去抖秒数：同一 (选手, 题目) 在这段时间内连续改动只评最后一版
+    auto_judge_delay: int = Field(default=60, ge=0, le=3600)
+
+
+class JudgeAutoOut(_Base):
+    auto_judge: str
+    auto_judge_delay: int
+
+
+class JudgeTaskOut(_Base):
+    """一个评测任务（任务即历史，§12.9）。"""
+
+    id: int
+    player_id: int
+    player_no: str
+    problem: str
+    #: queued / running / done / failed
+    status: str
+    #: auto / manual / rejudge
+    trigger: str
+    requested_by: Optional[str] = None
+    source_version_id: Optional[int] = None
+    source_path: Optional[str] = None
+    source_sha256: Optional[str] = None
+    score: Optional[int] = None
+    max_score: Optional[int] = None
+    #: 评测状态（AC / WA …），没交为 ``missing``
+    outcome: Optional[str] = None
+    error: Optional[str] = None
+    #: 结果抄自哪个任务（没占评测机）
+    reused_from: Optional[int] = None
+    rerun: bool = False
+    #: 结果写进过 result.json（自动写入或被采用）
+    applied: bool = False
+    #: 成绩矩阵当前这一格就是这个任务的结果
+    in_matrix: bool = False
+    has_result: bool = False
+    created_at: str
+    finished_at: Optional[str] = None
+    #: 去抖：这个时刻之前不发给评测机
+    not_before: Optional[str] = None
+
+
+class JudgeTaskDetailOut(JudgeTaskOut):
+    """任务连同结果里的测试点明细（形状同 ``JudgeRunDetailOut`` 的明细部分）。"""
+
+    judge: Optional[str] = None
+    language: Optional[str] = None
+    isolated: Optional[bool] = None
+    compile_message: str = ""
+    judged_at: Optional[str] = None
+    cases: List[JudgeCaseOut] = Field(default_factory=list)
+    subtasks: List[JudgeSubtaskOut] = Field(default_factory=list)
+    precheck_warnings: List[JudgePrecheckFindingOut] = Field(default_factory=list)
+    truncated: bool = False
+
+
+class VersionJudgeOut(_Base):
+    """一个版本最近一次评测的摘要。"""
+
+    task_id: int
+    status: str
+    trigger: str
+    score: Optional[int] = None
+    max_score: Optional[int] = None
+    outcome: Optional[str] = None
+    reused: bool = False
+    applied: bool = False
+    finished_at: Optional[str] = None
+
+
+class SourceVersionOut(_Base):
+    """代码的一个历史版本（§12.9），连同它的评测结果。"""
+
+    id: int
+    player_id: int
+    rel_path: str
+    sha256: str
+    size: int = 0
+    received_at: str
+    #: 按**当前**题目模式归到的题；归不到为 null
+    problem: Optional[str] = None
+    #: 这一版就是台账里的当前版本
+    current: bool = False
+    #: 评过这一版的任务数
+    tasks: int = 0
+    judge: Optional[VersionJudgeOut] = None
+    #: 成绩矩阵当前这一格用的是这一版的结果
+    in_matrix: bool = False
 
 
 class JudgeWorkerIn(_Base):
     name: str = Field(min_length=1, max_length=64)
+
+
+class JudgeWorkerPatchIn(_Base):
+    """改名 / 暂停与恢复。不给的字段不动。"""
+
+    name: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    enabled: Optional[bool] = None
+
+
+class JudgeWorkerTaskOut(_Base):
+    """评测机手上正在评的一个任务。"""
+
+    id: int
+    contest_id: int
+    player_no: str
+    problem: str
 
 
 class JudgeWorkerOut(_Base):
@@ -870,11 +1084,64 @@ class JudgeWorkerOut(_Base):
     created_at: str
     last_seen_at: Optional[str] = None
     last_seen_ip: Optional[str] = None
+    #: 最近联系不超过轮询间隔的 3 倍（§12.10）
+    online: bool = False
+    #: 暂停 = False：领不到新任务，照常心跳
+    enabled: bool = True
+    #: ``run`` / ``stop`` / ``restart``：后两者 = 已下令、等评测机下一次 poll 取走
+    desired: Literal["run", "stop", "restart"] = "run"
+    #: 服务端拉起的本机评测机
+    local: bool = False
+    #: 以下为评测机自报；旧评测机不报，全为空
+    version: Optional[str] = None
+    backend: Optional[str] = None
+    isolated: Optional[bool] = None
+    hostname: Optional[str] = None
+    platform: Optional[str] = None
+    slots: Optional[int] = None
+    #: 能收远程停止 / 重启（报过状态的评测机）
+    remote_control: bool = False
+    running: List[JudgeWorkerTaskOut] = Field(default_factory=list)
 
 
 class JudgeWorkerCreatedOut(JudgeWorkerOut):
     #: 明文令牌，**只在这一刻返回一次**；库里只存哈希
     token: str
+    #: 一行安装命令：Linux（bash + systemd）与 Windows（PowerShell + 计划任务），已嵌入令牌与服务端地址
+    linux_command: str
+    windows_command: str
+    #: 已装好 syncoj-judge 时直接运行的命令（令牌写进文件后）
+    manual_command: str
+
+
+class JudgePollIn(_Base):
+    """评测机的一次 poll：自报状态，``want`` = 1 时顺带领一个任务（§12.10）。"""
+
+    version: Optional[str] = Field(default=None, max_length=32)
+    backend: Optional[str] = Field(default=None, max_length=16)
+    isolated: Optional[bool] = None
+    hostname: Optional[str] = Field(default=None, max_length=128)
+    platform: Optional[str] = Field(default=None, max_length=32)
+    slots: int = Field(default=1, ge=1, le=64)
+    poll_seconds: float = Field(default=5.0, ge=0.5, le=3600)
+    want: int = Field(default=1, ge=0, le=1)
+    #: 本进程的随机标识（每次启动换新）；不带 = 旧评测机，命令按一次性送达
+    boot_id: Optional[str] = Field(default=None, max_length=32)
+
+
+class LocalJudgeOut(_Base):
+    """本机评测机（服务端以子进程运行的 worker）的状态。"""
+
+    #: 只有 Linux 服务端支持；不支持时 ``reason`` 是一句短标签
+    supported: bool
+    reason: Optional[str] = None
+    running: bool = False
+    pid: Optional[int] = None
+    backend: Optional[str] = None
+    worker_id: Optional[int] = None
+    started_at: Optional[str] = None
+    #: 上一次退出的退出码（启动失败、被停止）
+    exit_code: Optional[int] = None
 
 
 class JudgeProblemConfigOut(_Base):
@@ -903,6 +1170,14 @@ class JudgeLeaseOut(_Base):
     source: JudgeBlobRefOut
     testdata: JudgeBlobRefOut
     attempt: int
+
+
+class JudgePollOut(_Base):
+    """``task`` 为空 = 没领到（没有任务、已暂停或 ``want`` = 0）。``command`` 见 §12.10。"""
+
+    task: Optional[JudgeLeaseOut] = None
+    command: Literal["run", "stop", "restart"] = "run"
+    enabled: bool = True
 
 
 class JudgeResultIn(_Base):
@@ -973,6 +1248,8 @@ class JudgeImportPreviewOut(_Base):
     problems: List[JudgeImportItemOut] = Field(default_factory=list)
     #: 整包级提示
     warnings: List[NoticeOut] = Field(default_factory=list)
+    #: 本场次已有的题目标识：界面改标识后据此在新建 / 覆盖之间切换
+    existing_idents: List[str] = Field(default_factory=list)
 
 
 class JudgeImportApplyItem(_Base):
@@ -1036,6 +1313,17 @@ class ProblemMatchOut(_Base):
     expanded: List[str] = Field(default_factory=list)
 
 
+class AgentBindingOut(_Base):
+    """机器的一条绑定：名单 · 考号 · 姓名。"""
+
+    roster_id: int
+    roster_name: str = ""
+    roster_entry_id: int
+    player_no: str
+    name: Optional[str] = None
+    seat: Optional[str] = None
+
+
 class AgentRuntimeOut(_Base):
     agent_id: int
     player_id: int
@@ -1065,6 +1353,8 @@ class AgentRuntimeOut(_Base):
     #: 页面上写一句「有 N 个文件不符合题目预设，已跳过」：没有它，教师看到的是
     #: "这个学生一份代码都没交"，而那与"他把文件存错了地方"长得一模一样。
     scan_skipped: int = Field(default=0, ge=0)
+    #: 这台机器在各份名单里的全部绑定（一机可绑多份名单，§4.6）
+    bindings: List[AgentBindingOut] = Field(default_factory=list)
 
 
 class DiagnosticsOut(_Base):
@@ -1414,6 +1704,15 @@ class JudgeSubtaskOut(_Base):
     cases: List[str] = Field(default_factory=list)
 
 
+class JudgePrecheckFindingOut(_Base):
+    """源码预检的一条预警（规则 code 见 ``judging/precheck.py``）。"""
+
+    code: str
+    line: int = 0
+    message: str = ""
+    excerpt: str = ""
+
+
 class JudgeRunDetailOut(JudgeRunOut):
     """一条评测记录连同结果文件里的测试点明细。"""
 
@@ -1427,7 +1726,11 @@ class JudgeRunDetailOut(JudgeRunOut):
     judged_source: Optional[str] = None
     cases: List[JudgeCaseOut] = Field(default_factory=list)
     subtasks: List[JudgeSubtaskOut] = Field(default_factory=list)
+    #: 自带评测的源码预检预警；旧评测机或外部评测器的结果没有
+    precheck_warnings: List[JudgePrecheckFindingOut] = Field(default_factory=list)
     truncated: bool = False
+    #: 自带评测写的结果：出自哪个评测任务（§12.9）
+    task_id: Optional[int] = None
 
 
 class JudgeScanOut(_Base):
@@ -1687,11 +1990,14 @@ class PlayerProfileOut(_Base):
 class PlayerAssetOut(_Base):
     """清单里的一行：下发了什么、该落在哪个目录、到没到。
 
+    ``id`` 是资产 id，考生页的「下载」按它取文件（``GET /player/assets/{id}``）。
+
     ``dest_dir`` 是**任务的**目标目录模板展开后的样子（``DeployTask.dest_dir``），
     不是某个选手磁盘上的绝对路径 —— 服务端不认识选手机器上的家目录，编一个
     绝对路径只会是错的。空串表示"直接落在下发根目录"（默认就是桌面）。
     """
 
+    id: int
     filename: str
     dest_dir: str = ""
     #: ``DeployStatus`` 的取值：pending/ready/done/failed/cancelled
@@ -1731,9 +2037,9 @@ class PlayerContextOut(_Base):
 
     * ``matched_by="machine"``：请求没带参数，服务端按来源 IP 认出了这台机器。
       这是主路径 —— 选手在考场机器上打开就是一个带参数的快捷方式，一个字都不用填。
-    * ``matched_by="explicit"``：请求带了 ``contest`` + ``player_no``，按这两个值
-      精确查找。自动匹配不上时（教师的笔记本、Agent 没起来的机器、换了 IP）
-      靠它兜底。
+    * ``matched_by="token"``：请求带了考生页登录令牌（``X-Player-Token``），
+      那是用「准考证号 + 场次考生页密码」换来的（``POST /player/login``）。
+      自动匹配不上时（教师的笔记本、Agent 没起来的机器、换了 IP）靠它兜底。
 
     回这个字段是让**页面**能说清"我这份清单是怎么定位到你的"：自动匹配到别人的
     机器上时，页面上的考号会当场露馅，而不是安静地显示一份不属于这台机器的清单。
@@ -1745,8 +2051,50 @@ class PlayerContextOut(_Base):
     #: 空对象会让页面显示一个"有公告、但内容是空的"的框，而事实是压根没有。
     notice: Optional[PlayerNoticeOut] = None
     assets: List[PlayerAssetOut] = Field(default_factory=list)
-    #: ``machine`` / ``explicit``，见类说明
+    #: ``machine`` / ``token``，见类说明
     matched_by: str
     #: 服务端的 Unix 秒。时钟不一致时页面上还能显示"服务端现在几点"，
     #: 而考试里"还剩多久"是靠它算的。
     server_time: int
+
+
+class PlayerPreviewContestOut(_Base):
+    """降级预览里的一场：只有场次本身与**面向全场**的公告。
+
+    降级预览是谁都能打开的（没认出本机、也没登录），所以这里**绝不**出现任何
+    选手的信息或个人下发清单。公告只取"目标是全场"的 ``NOTICE.md`` 下发
+    （``DeployTask.target_kind == "all"`` 且没取消）—— 只发给部分人的公告不算。
+    """
+
+    slug: str
+    name: str
+    status: str
+    starts_at: Optional[str] = None
+    ends_at: Optional[str] = None
+    notice: Optional[PlayerNoticeOut] = None
+    #: 本场设了考生页密码 = 可以用「准考证号 + 密码」登录
+    login_enabled: bool = False
+
+
+class PlayerPreviewOut(_Base):
+    """考生页的降级预览：当前在考的场次（多场可切换）。"""
+
+    contests: List[PlayerPreviewContestOut] = Field(default_factory=list)
+    #: 服务端的 Unix 秒（倒计时的基准），同 ``PlayerContextOut.server_time``
+    server_time: int
+
+
+class PlayerLoginIn(_Base):
+    """考生页登录：场次标识 + 准考证号（精确匹配）+ 场次的考生页密码。"""
+
+    contest: str = Field(min_length=1, max_length=64)
+    player_no: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class PlayerLoginOut(_Base):
+    """登录成功签出的短期令牌。之后放进 ``X-Player-Token`` 头取上下文与下载。"""
+
+    token: str
+    #: 过期时刻（Unix 秒）
+    expires_at: int

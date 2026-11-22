@@ -1,6 +1,6 @@
 """运行不可信程序的沙箱后端（§12）。
 
-两个后端，接口相同（:class:`Sandbox`）：
+三个后端，接口相同（:class:`Sandbox`）；``winjob``（Windows Job Object）在 :mod:`.sandbox_win`：
 
 ``isolate``（推荐，正式考试用）
     调用 IOI 的 isolate（命名空间 + 可选 cgroup）。它是竞赛圈事实标准的沙箱，自己写一份
@@ -26,7 +26,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 __all__ = [
     "Limits",
@@ -36,6 +36,9 @@ __all__ = [
     "RlimitSandbox",
     "IsolateSandbox",
     "make_sandbox",
+    "default_backend",
+    "backend_problem",
+    "BACKENDS",
     "parse_isolate_meta",
 ]
 
@@ -70,6 +73,39 @@ class RunResult:
     message: str = ""
 
 
+def create_fresh(path: Path, mode: int, owner: Optional[Tuple[int, int]] = None) -> int:
+    """在工作目录里新建文件并返回可写的 fd：先删掉同名条目，再 ``O_CREAT | O_EXCL | O_NOFOLLOW``。
+
+    工作目录对选手程序可写：它可以把 ``prog`` / ``out.txt`` 换成指向任意路径的符号链接，
+    按路径 ``write_bytes`` / ``chmod`` / ``chown`` 会跟着链接以评测机的身份（可能是 root）
+    写到别处。这里只在新建出来的那个 inode 上操作（属主、权限都经 fd 设置）。
+    """
+    try:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(str(path), ignore_errors=True)
+        else:
+            os.unlink(str(path))
+    except FileNotFoundError:
+        pass
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    fd = os.open(str(path), flags, mode)
+    try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, mode)
+        if owner is not None:
+            os.fchown(fd, owner[0], owner[1])
+    except OSError:
+        os.close(fd)
+        raise
+    return fd
+
+
+def open_existing(path: Path) -> int:
+    """只读打开工作目录里的文件，不跟随符号链接。"""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    return os.open(str(path), flags)  # O_NONBLOCK：被换成 FIFO 时不会卡住评测机
+
+
 class Sandbox:
     """一个工作目录 + 在里面运行程序的能力。路径都相对于 :attr:`workdir`。"""
 
@@ -102,9 +138,14 @@ class Sandbox:
 
     def put(self, name: str, data: bytes, mode: int = 0o644) -> Path:
         path = self.workdir / name
-        path.write_bytes(data)
-        os.chmod(str(path), mode)
+        fd = create_fresh(path, mode, self._owner())
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
         return path
+
+    def _owner(self) -> Optional[Tuple[int, int]]:
+        """新建文件的属主（uid, gid）；None = 评测机自己。"""
+        return None
 
     def close(self) -> None:  # pragma: no cover - 接口
         raise NotImplementedError
@@ -152,13 +193,61 @@ os.write(report, json.dumps([status, usage.ru_utime + usage.ru_stime, usage.ru_m
 """
 
 
+def _boot_ticks() -> Optional[int]:
+    """开机以来的时钟滴答数（与 ``/proc/<pid>/stat`` 第 22 列同一口径）；读不到返回 None。"""
+    try:
+        with open("/proc/uptime") as handle:
+            uptime = float(handle.read().split()[0])
+        return int(uptime * os.sysconf("SC_CLK_TCK"))
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def kill_processes_since(uid: int, since_ticks: int, proc_root: str = "/proc") -> int:
+    """杀掉属于 ``uid``、且在 ``since_ticks`` 之后启动的进程；返回杀掉的个数。"""
+    killed = set()
+    for _ in range(3):  # 杀的同时它可能还在 fork：多扫几遍
+        found = 0
+        try:
+            entries = os.listdir(proc_root)
+        except OSError:
+            break
+        for entry in entries:
+            if not entry.isdigit() or int(entry) in killed:
+                continue
+            try:
+                if os.stat(os.path.join(proc_root, entry)).st_uid != uid:
+                    continue
+                with open(os.path.join(proc_root, entry, "stat")) as handle:
+                    fields = handle.read().rsplit(")", 1)[1].split()
+                start = int(fields[19])  # 第 22 列（comm 之后从第 3 列算起）
+            except (OSError, ValueError, IndexError):
+                continue
+            if start + 1 < since_ticks:
+                continue
+            try:
+                os.kill(int(entry), signal.SIGKILL)
+                killed.add(int(entry))
+                found += 1
+            except OSError:
+                pass
+        if not found:
+            break
+    return len(killed)
+
+
 class RlimitSandbox(Sandbox):
     """``fork`` + ``setrlimit``。只给开发与自测（见模块说明）。"""
 
     isolated = False
 
-    def __init__(self, base: Optional[Path] = None, run_as: Optional[str] = None) -> None:
+    def __init__(self, base: Optional[Path] = None, run_as: Optional[str] = None,
+                 kill_strays: bool = False) -> None:
         import resource  # noqa: F401  （Windows 上没有：在这里就失败，而不是跑到一半）
+
+        #: 每次运行后杀掉运行账号在本次运行开始之后起的全部进程（``setsid`` 能逃出进程组清理）。
+        #: 只在专用运行账号下打开（worker 用 ``--run-as`` 时）：按账号 + 启动时刻认，不误伤别的服务
+        self._kill_strays = kill_strays
 
         self._uid = self._gid = None
         if run_as:
@@ -173,11 +262,8 @@ class RlimitSandbox(Sandbox):
         if self._uid is not None:
             os.chown(str(self.workdir), self._uid, self._gid)
 
-    def put(self, name: str, data: bytes, mode: int = 0o644) -> Path:
-        path = super().put(name, data, mode)
-        if self._uid is not None:
-            os.chown(str(path), self._uid, self._gid)
-        return path
+    def _owner(self) -> Optional[Tuple[int, int]]:
+        return None if self._uid is None else (self._uid, self._gid)
 
     def run(self, argv, limits, *, stdin=None, stdout=None, stderr=None) -> RunResult:
         import resource
@@ -206,18 +292,17 @@ class RlimitSandbox(Sandbox):
         def open_or_null(name: Optional[str], mode: str):
             if name is None:
                 return open(os.devnull, mode)
-            return open(str(self.workdir / name), mode)
+            if mode == "rb":
+                return os.fdopen(open_existing(self.workdir / name), mode)
+            return os.fdopen(create_fresh(self.workdir / name, 0o644, self._owner()), mode)
 
         files = [open_or_null(stdin, "rb"), open_or_null(stdout, "wb"), open_or_null(stderr, "wb")]
-        if uid is not None:
-            for name in (stdout, stderr):
-                if name:
-                    os.chown(str(self.workdir / name), uid, gid)
         import json
         import sys
 
         report_read, report_write = os.pipe()
 
+        since = _boot_ticks()
         started = time.monotonic()
         try:
             proc = subprocess.Popen(
@@ -262,6 +347,8 @@ class RlimitSandbox(Sandbox):
             os.killpg(proc.pid, signal.SIGKILL)  # 收拾留下的子进程
         except OSError:
             pass
+        if self._kill_strays and uid is not None and since is not None:
+            kill_processes_since(uid, since)
         wall = time.monotonic() - started
         try:
             status, cpu, maxrss = json.loads(report.decode("ascii"))
@@ -376,6 +463,29 @@ class IsolateSandbox(Sandbox):
         shutil.rmtree(str(self._meta_dir), ignore_errors=True)
 
 
+BACKENDS = ("isolate", "rlimit", "winjob")
+LINUX_BACKENDS = ("isolate", "rlimit")
+
+
+def default_backend(platform: str) -> str:
+    return "winjob" if platform == "win32" else "isolate"
+
+
+def backend_problem(backend: str, platform: str, run_as: Optional[str] = None) -> Optional[str]:
+    """这个平台能不能用这个后端；不能时返回给人看的原因。"""
+    if platform.startswith("linux"):
+        if backend in LINUX_BACKENDS:
+            return None
+        return "%s 后端只能在 Windows 上用；Linux 上用 isolate（推荐）或 rlimit" % backend
+    if platform == "win32":
+        if backend != "winjob":
+            return "%s 后端只能在 Linux 上用；Windows 上用 winjob" % backend
+        if run_as:
+            return "winjob 后端不支持 --run-as：请直接以低权限专用账号运行评测机"
+        return None
+    return "syncoj-judge 只支持 Linux（isolate / rlimit）与 Windows（winjob），当前平台 %s" % platform
+
+
 def make_sandbox(
     backend: str, *, base: Optional[Path] = None, run_as: Optional[str] = None,
     box_id: int = 0, isolate_binary: str = "isolate", cgroups: bool = False,
@@ -383,5 +493,9 @@ def make_sandbox(
     if backend == "isolate":
         return IsolateSandbox(box_id=box_id, binary=isolate_binary, cgroups=cgroups)
     if backend == "rlimit":
-        return RlimitSandbox(base=base, run_as=run_as)
-    raise SandboxError("不认识的沙箱后端：%s（isolate / rlimit）" % backend)
+        return RlimitSandbox(base=base, run_as=run_as, kill_strays=bool(run_as))
+    if backend == "winjob":
+        from .sandbox_win import WinJobSandbox
+
+        return WinJobSandbox(base=base, run_as=run_as)
+    raise SandboxError("不认识的沙箱后端：%s（%s）" % (backend, " / ".join(BACKENDS)))

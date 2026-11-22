@@ -93,7 +93,8 @@ def test_real_sample_package(tmp_path: Path) -> None:
             assert bundle.cases[0].input.member == "sample/data/%s/%s1.in" % (bundle.ident, bundle.ident)
             built = try_build(bundle, parsed.archive)
             assert built is not None, bundle.errors
-            assert built[1] == {"cases": 20, "subtasks": 0, "has_checker": False, "total_score": 100}
+            built.close()
+            assert built.summary == {"cases": 20, "subtasks": 0, "has_checker": False, "total_score": 100}
         assert not parsed.result.warnings
 
 
@@ -121,7 +122,8 @@ def test_real_sample_package_with_backslash_member_names(tmp_path: Path) -> None
             assert bundle.cases[0].input.member == "sample/data/%s/%s1.in" % (bundle.ident, bundle.ident)
             built = try_build(bundle, parsed.archive)
             assert built is not None, bundle.errors
-            assert built[1]["cases"] == 20 and built[1]["total_score"] == 100
+            built.close()
+            assert built.summary["cases"] == 20 and built.summary["total_score"] == 100
 
 
 def test_real_sample_package_through_api(client: TestClient, contest: dict, admin_headers: dict) -> None:
@@ -302,7 +304,8 @@ def test_testlib_checker_injects_testlib(tmp_path: Path) -> None:
     with problem_io.parse_archive(stage(tmp_path, data), "auto") as parsed:
         (bundle,) = parsed.result.problems
         built = try_build(bundle, parsed.archive)
-        assert built is not None and built[1]["has_checker"]
+        assert built is not None and built.summary["has_checker"]
+        built.close()
         assert "testlib_injected" in codes(bundle.warnings)
 
 
@@ -322,12 +325,16 @@ def test_custom_io_names(tmp_path: Path) -> None:
     assert (bundle.ident, bundle.io_mode, bundle.input_file, bundle.output_file) == ("sum", "file", "data.txt", "ans.txt")
 
 
-@pytest.mark.parametrize("stdin, stdout", [(True, False), (False, True)])
-def test_mixed_io_becomes_file(tmp_path: Path, stdin: bool, stdout: bool) -> None:
+@pytest.mark.parametrize("stdin, stdout, message", [
+    (True, False, "标准输入 + 文件输出已按文件 IO 导入，读标准输入的程序全部判错"),
+    (False, True, "文件输入 + 标准输出已按文件 IO 导入，写标准输出的程序全部判错"),
+])
+def test_mixed_io_becomes_file(tmp_path: Path, stdin: bool, stdout: bool, message: str) -> None:
+    """混合 IO 仍按文件 IO 导入，提示写清哪种程序会全错。"""
     bundle = parse_one(tmp_path, lemon_task("sum", standardInputCheck=stdin, standardOutputCheck=stdout,
                                             inputFileName="in.txt"))
     assert bundle.io_mode == "file" and bundle.input_file == "in.txt"
-    assert codes(bundle.warnings) == ["mixed_io"]
+    assert [(n.code, n.message) for n in bundle.warnings] == [("mixed_io", message)]
 
 
 @pytest.mark.parametrize("task_type, code", [
@@ -564,6 +571,39 @@ def test_export_sub_folder_check_follows_file_patterns(patterns, sub_folder: boo
         (task,) = json.loads(zf.read("contest/contest.cdf"))["tasks"]
     assert task["subFolderCheck"] is sub_folder
     assert ("lemon_layout_mismatch" in codes(outcome.notices[1])) is warned
+
+
+@pytest.mark.parametrize("effective, sub_folder, warned", [
+    (["{ident}.cpp"], False, False),          # 服务端默认模式配成平铺
+    (["{ident}/{ident}.cpp"], True, False),
+    (["src/{ident}.cpp"], True, True),
+])
+def test_export_sub_folder_check_uses_effective_patterns(effective, sub_folder: bool, warned: bool) -> None:
+    """题目没配模式时看收代码实际生效的模式（服务端的 default_file_pattern），不是出厂默认值。"""
+    blobs = _blobs(PLAIN)
+    outcome = _export([_problem(1, "sum", PLAIN, file_patterns=None, effective_patterns=effective)], blobs)
+    with zipfile.ZipFile(outcome.spool) as zf:  # type: ignore[arg-type]
+        (task,) = json.loads(zf.read("contest/contest.cdf"))["tasks"]
+    assert task["subFolderCheck"] is sub_folder
+    assert ("lemon_layout_mismatch" in codes(outcome.notices[1])) is warned
+
+
+def test_export_api_follows_server_default_pattern(client: TestClient, contest: dict, admin_headers: dict, app) -> None:
+    """接口导出时按 problem_rules 算生效模式：服务端默认模式是平铺时 subFolderCheck 为假。"""
+    from problem_io_fixtures import make_testdata_zip
+
+    app.state.ctx.settings.default_file_pattern = "{ident}.cpp"
+    (row,) = client.post("%s/contests/%d/problems" % (ADMIN, contest["id"]), json=[{"ident": "sum"}],
+                         headers=admin_headers).json()["problems"]
+    client.put("%s/problems/%d/judge" % (ADMIN, row["id"]), json={"judge_mode": "builtin"}, headers=admin_headers)
+    response = client.post("%s/problems/%d/testdata" % (ADMIN, row["id"]),
+                           files={"file": ("t.zip", make_testdata_zip())}, headers=admin_headers)
+    assert response.status_code == 200, response.text
+    response = client.get("%s/problems/%d/judge-export?format=lemonlime" % (ADMIN, row["id"]), headers=admin_headers)
+    assert response.status_code == 200, response.text
+    with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+        (task,) = json.loads(zf.read("contest/contest.cdf"))["tasks"]
+    assert task["subFolderCheck"] is False
 
 
 def test_codeforces_style_io_names(tmp_path: Path) -> None:

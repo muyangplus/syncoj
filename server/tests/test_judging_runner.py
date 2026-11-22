@@ -157,7 +157,23 @@ def test_文件IO可以用input_txt与output_txt(tmp_path) -> None:
 def test_程序不能跨测试点留东西(tmp_path) -> None:
     sneaky = ("#include <cstdio>\nint main(){FILE*f=fopen(\"mark\",\"r\");if(f){puts(\"0\");return 0;}"
               "fopen(\"mark\",\"w\");long long a,b;scanf(\"%lld%lld\",&a,&b);printf(\"%lld\\n\",a+b);}")
-    assert judge(tmp_path, sneaky, ab_data(tmp_path)).status == "AC"
+    # 源码预检会拦下打开 "mark"：这里要的是沙箱本身的行为，关掉这条规则
+    data = ab_data(tmp_path, {"config.json": json.dumps({"precheck": {"disabled": ["file_access"]}})})
+    assert judge(tmp_path, sneaky, data).status == "AC"
+
+
+@needs_gcc
+def test_选手程序改写checker不影响判分(tmp_path) -> None:
+    """选手程序能写工作目录：把 chk 换成"永远通过"的脚本、再输出错答案，仍要判 WA。"""
+    checker = ("#include <cstdio>\nint main(int c,char**v){FILE*o=fopen(v[2],\"r\"),*a=fopen(v[3],\"r\");"
+               "long long x,y;fscanf(o,\"%lld\",&x);fscanf(a,\"%lld\",&y);return x==y?0:1;}")
+    tamper = ("#include <cstdio>\nint main(){FILE*f=fopen(\"chk\",\"w\");"
+              "if(f){fputs(\"#!/bin/sh\\nexit 0\\n\",f);fclose(f);}puts(\"-1\");}")
+    config = {"precheck": {"disabled": ["file_access"]}}
+    data = ab_data(tmp_path, {"checker.cpp": checker, "config.json": json.dumps(config)})
+    outcome = judge(tmp_path, tamper, data)
+    assert [item.status for item in outcome.cases] == ["WA", "WA", "WA"], outcome
+    assert outcome.score == 0
 
 
 @needs_gcc
@@ -246,3 +262,45 @@ def test_checker报告自身失败不能当成选手错(tmp_path) -> None:
     data = ab_data(tmp_path, {"checker.cpp": "int main(){return 3;}"})
     with pytest.raises(sandbox.SandboxError, match="退出码 3"):
         judge(tmp_path, AB, data)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX 符号链接")
+def test_工作目录里的符号链接不会被跟着写(tmp_path) -> None:
+    """选手程序把 prog / out.txt 换成指向别处的链接：评测机放文件、读输出都不能跟过去。"""
+    box = factory(tmp_path)()
+    try:
+        victim = tmp_path / "victim"
+        victim.write_bytes(b"keep")
+        os.symlink(str(victim), str(box.workdir / "prog"))
+        box.put("prog", b"new", 0o755)
+        assert victim.read_bytes() == b"keep"
+        assert not (box.workdir / "prog").is_symlink() and (box.workdir / "prog").read_bytes() == b"new"
+        os.symlink(str(victim), str(box.workdir / "out.txt"))
+        assert runner._read(box, "out.txt") is None
+        os.mkfifo(str(box.workdir / "fifo"))
+        assert runner._read(box, "fifo") is None  # 不会卡住
+    finally:
+        box.close()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc")
+def test_逃出进程组的子进程按账号与启动时刻清掉(tmp_path) -> None:
+    import subprocess
+    import time as _time
+
+    old = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    young = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    try:
+        # 伪造 /proc：只放这两个进程，启动时刻一早一晚
+        for proc, start in ((old, 100), (young, 1000)):
+            entry = tmp_path / str(proc.pid)
+            entry.mkdir()
+            (entry / "stat").write_text("%d (sleep) S %s %d\n" % (proc.pid, " ".join(["0"] * 18), start))
+        assert sandbox.kill_processes_since(os.getuid(), 500, proc_root=str(tmp_path)) == 1
+        young.wait(timeout=5)
+        _time.sleep(0.1)
+        assert old.poll() is None
+    finally:
+        for proc in (old, young):
+            proc.kill()
+            proc.wait()

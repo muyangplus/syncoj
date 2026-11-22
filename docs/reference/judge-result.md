@@ -277,15 +277,40 @@ checker.cpp          # 可选：special judge（testlib 风格），testlib.h �
 `config.json`（全部可选）：
 
 ```json
-{"cases": [{"name": "1", "score": 10}], "subtasks": [{"score": 40, "cases": ["1", "2"]}]}
+{"cases": [{"name": "1", "score": 10}], "subtasks": [{"score": 40, "cases": ["1", "2"]}],
+ "precheck": {"mode": "block", "disabled": ["file_access"]}}
 ```
 
 - 未写分值：总分 100 按测试点平均，余数给最后几个点。
+- `precheck`：源码预检配置（第 7 节）；不合法时上传报 `400 validation_error`。
 - 子任务：全部 AC 才得该子任务分；子任务内的点不单独计分。
 
 ### 评测机
 
-「评测」→「评测机」卡片 →「添加评测机」签发令牌（只显示一次；`POST /api/v1/admin/judge-workers`）。在评测机上以专用账号运行：
+「评测」→「评测机」卡片 →「添加评测机」→ 输入名称 →「签发令牌」。令牌只显示一次（`POST /api/v1/admin/judge-workers`，响应带 `token` 与三条命令 `linux_command` / `windows_command` / `manual_command`）。
+
+一行安装（命令里的地址是打开管理界面用的那个；脚本与程序只在管理端口提供）：
+
+```bash
+# Linux（systemd）：root 运行
+curl -fsSL http://10.0.0.5:8000/judge/install.sh | sudo bash -s -- <令牌>
+```
+
+```powershell
+# Windows：在「以管理员身份运行」的 PowerShell 里
+$p = Join-Path $env:TEMP syncoj-judge-install.ps1; iwr -UseBasicParsing http://10.0.0.5:8000/judge/install.ps1 -OutFile $p; & $p -Token '<令牌>'
+```
+
+| 安装脚本 | 装到 | 后端 | 可选参数 |
+|---|---|---|---|
+| `install.sh` | `/opt/syncoj-judge/syncoj-judge.pyz`、`/etc/syncoj-judge/token`（0600）、systemd 单元 `syncoj-judge` | 有 isolate 用 isolate（服务以账号 `syncoj-judge` 运行）；没有则询问后用 rlimit（服务以 root 运行，选手程序用账号 `syncoj-judge-run`） | `--server` / `--backend` / `--run-as` / `--slots` / `--yes`（没有 isolate 不询问） |
+| `install.ps1` | `%ProgramData%\SyncOJ\judge\`（`syncoj-judge.pyz`、`token`、`cache\`、`boxes\`、`judge.log`；目录不继承上级权限，令牌与 `cache\` 标 `NO_READ_UP`）、计划任务「SyncOJ Judge」（开机启动、以 LOCAL SERVICE 运行、失败每分钟重启） | `winjob` | `-Server` / `-Backend` / `-Slots` / `-Python` / `-InstallDir` |
+
+- 两个脚本都幂等：重跑 = 换令牌 / 换参数 / 升级评测机程序并重启。
+- 前提：Python ≥ 3.8、g++（Windows 上是 MinGW-w64，且在**系统** PATH 里）；脚本检查并提示。
+- `GET /judge/worker.pyz`：评测机程序（zipapp，只用标准库），`python3 syncoj-judge.pyz --server … --token-file …` 直接运行；装了 `server/` 包的机器上等价命令是 `syncoj-judge`。
+
+手动运行：
 
 ```bash
 syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
@@ -295,17 +320,64 @@ syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
 |---|---|
 | `--server` | 服务端管理端口地址（必填） |
 | `--token-file` | 令牌文件（必填） |
-| `--backend` | `isolate`（默认，需先装 [isolate](https://github.com/ioi/isolate)）/ `rlimit`（只用 `setrlimit`，不隔离网络与文件系统，仅开发自测；结果 `isolated: false`） |
+| `--backend` | `isolate`（Linux 默认，需先装 [isolate](https://github.com/ioi/isolate)）/ `rlimit`（只用 `setrlimit`，不隔离网络与文件系统，仅开发自测；结果 `isolated: false`）/ `winjob`（Windows 默认，Job Object 限 CPU / 内存 / 进程数，选手程序低完整性级别运行；不隔离网络，结果 `isolated: false`） |
 | `--box-id` | isolate box 编号，同机多 worker 各不相同（默认 0） |
+| `--slots` | 同时评几个任务（默认 1）；只有 isolate 可大于 1（box 编号从 `--box-id` 起依次占用）。rlimit / winjob 的并发任务共用一个运行账号、能互相读写工作目录，启动即拒绝 |
 | `--cgroups` | isolate 用 cgroup 记内存 |
 | `--isolate` | isolate 可执行文件路径（默认 `isolate`） |
-| `--run-as` | rlimit 后端以 root 运行时必填：选手程序的运行账号 |
+| `--run-as` | rlimit 后端以 root 运行时必填：选手程序的运行账号；`winjob` 不支持 |
 | `--cache-dir` | 数据包缓存目录（默认 `~/.cache/syncoj-judge`） |
-| `--poll` | 无任务时轮询间隔（默认 5 秒） |
+| `--box-dir` | `rlimit` / `winjob` 工作目录所在（默认系统临时目录；`winjob` 遇非 ASCII 路径自动换） |
+| `--poll` | 轮询间隔（默认 5 秒）；评测中也按它报状态 |
+| `--log-file` | 日志写到文件（默认 stderr） |
 | `--once` | 评一个任务后退出 |
 | `--verbose` / `-v` | 调试日志 |
 
-- 评测机令牌只能领任务、取本任务的代码与数据包、交结果。
+- 评测机令牌只能报状态、领任务、取本任务的代码与数据包、交结果。
+
+卡片表格（`GET /api/v1/admin/judge-workers`）：
+
+| 列 | 来自 |
+|---|---|
+| 状态 | `online`（最近联系 ≤ 3 × 自报的轮询间隔，下限 15 秒）/ `enabled = false` 为「暂停」/ `running[]` 非空为忙碌并列出任务（考号 · 题目） |
+| 后端 | `backend`；`isolated = false` 标警告色 |
+| 主机 / 平台 | `hostname` / `platform`（`sys.platform`）/ `slots` |
+| 版本 | `version`；为空 = 旧评测机，收不到停止 / 重启（`remote_control = false`） |
+| IP、最近心跳 | `last_seen_ip`、`last_seen_at` |
+
+| 管理动作 | 接口 | 效果 |
+|---|---|---|
+| 暂停 / 恢复 | `PATCH /api/v1/admin/judge-workers/{id}` `{enabled}` | 暂停后领不到新任务，照常心跳，手上的评完照常交 |
+| 改名 | 同上 `{name}` | — |
+| 停止 | `POST /api/v1/admin/judge-workers/{id}/stop` | 下一次 poll 时送达；评完手上的任务后退出，不会被 systemd / 计划任务再拉起。不在线或旧评测机 `409 judge_worker_offline` / `judge_worker_unsupported` |
+| 重启 | `POST /api/v1/admin/judge-workers/{id}/restart` | 同上；评完手上的任务后以同样的参数重启（换上磁盘上的新程序） |
+| 吊销 | `DELETE /api/v1/admin/judge-workers/{id}?confirm=<名称>` | 令牌立即失效，它名下在评的任务立即退回队列；本机评测机一并停止 |
+
+本机评测机（只在 Linux 服务端上）：卡片头「本机评测机」启动 / 停止。
+
+| 接口 | 说明 |
+|---|---|
+| `GET /api/v1/admin/judge-local` | `supported`（非 Linux 为 `false`，`reason` = `仅 Linux`）/ `running` / `pid` / `backend` / `worker_id` / `started_at` / `exit_code` |
+| `POST /api/v1/admin/judge-local/start` | 以子进程运行 worker（连 `127.0.0.1:<管理端口>`）；有 isolate 用 isolate，否则 rlimit（服务端是 root 时选手程序以 `SYNCOJ_JUDGE_LOCAL_RUN_AS` 运行，默认 `nobody`）。令牌每次换新，写 `<数据目录>/judge-local/token`；日志 `<数据目录>/logs/judge-local.log`。已在运行则不动 |
+| `POST /api/v1/admin/judge-local/stop` | SIGTERM：评完手上的任务后退出。服务端退出时一并停止 |
+
+- 平台与后端不匹配（如 Windows 上 `--backend isolate`）时启动即报错退出（退出码 2）。
+
+**Windows（`winjob`）**
+
+- 前置：Python ≥ 3.8；MinGW-w64 的 `g++` 在 `PATH` 里（找不到记 SE「评测机上找不到 g++（MinGW-w64）」）。
+- 评测机以 LOCAL SERVICE 运行（install.ps1）；选手程序与 checker 以受限令牌（无特权）+ 低完整性级别运行：只能写工作目录，读不了令牌文件与数据包缓存（`NO_READ_UP`）与评测机进程内存；**能联网**，能读低完整性可读的文件。降权失败时退回评测机权限并在日志告警。
+- 工作目录的根须为纯 ASCII 路径（MinGW 限制），否则依次换到 `SYNCOJ_JUDGE_BOXES`、`%ProgramData%\SyncOJ\judge\boxes`、`%SystemDrive%\syncoj-judge-boxes`。
+- 编译追加 `-pipe -static -Wl,--stack=<内存限制>`，产物 `prog.exe`；checker 同样处理。
+- 与 Linux 评测环境的差异：
+
+| 项 | Linux | Windows（`winjob`） |
+|---|---|---|
+| 栈 | 不限 | 主线程栈保留到内存限制 |
+| 内存 | 峰值常驻集 | 峰值提交量（未触碰的大全局数组也计入） |
+| `long double` | 80 位，`printf("%Lf")` 正常 | 80 位，但 MinGW 的 `printf("%Lf")` 可能输出错误（视运行库） |
+| 计时 | CPU 时间 | CPU 时间（Job 记账，粒度为系统时钟中断，通常约 15.6 ms） |
+| RE 说明 | 信号 / 退出码 | NTSTATUS 退出码与名称（如 `0xC00000FD（栈溢出）`）；崩溃时峰值内存已达限制的 90% 记 MLE |
 
 ### 怎么评、结果长什么样
 
@@ -326,14 +398,27 @@ syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
  "subtasks": [{"index": 1, "score": 0, "max_score": 40, "cases": ["2", "3"]}]}
 ```
 
+- 有源码预检预警时多一个 `precheck_warnings`：`[{"code", "line", "message", "excerpt"}]`（第 7 节）；没有预警或旧评测机时不带。
 - 扫描器只读 `score` / `max_score` / `status`，其余进 `raw_json`。
 - 评测机自身故障（沙箱起不来、checker 编不过，记 `SE`）：不写成绩，任务退回队列；第 3 次仍失败记失败，进度里显示原因。
 - 代码选择：只看仍在机器上、内容已存下的文件，按题目代码路径归题；多份候选时取文件名与题目同名者；仍无法区分 → 记失败。
 - 未交代码：不写结果，矩阵显示"未交"。
 - 场次进行中：`POST /api/v1/admin/contests/{id}/judge/builtin` 返回 `409 contest_in_progress`；带 `"force": true` 后执行。
-- 重测 = 再次排任务：旧任务被替换，结果覆盖 `result.json`；手工录入的成绩不被覆盖。
+- 重测 = 再次排任务：同一对还在排队的任务被替换，跑完的留作历史；新结果覆盖 `result.json`（若已写进去的是更新版本的结果则只进历史）；手工录入的成绩不被覆盖。
+- 同一 (数据包, 评测配置, 代码) 评过（`SE` 除外）：直接复用结果，不占评测机；`rerun: true` 时真跑。
+- 自带评测写的 `result.json` 多带 `task_id`、`source_version_id`（复用的还有 `reused_from`）。
 
-排任务：`POST /api/v1/admin/contests/{id}/judge/builtin`，体 `{problem?, player_id?, force}`，都不填 = 全场所有自带评测题 × 所有选手；响应 `{queued, problems}`。进度：`GET` 同路径，返回 `total` / `queued` / `running` / `done` / `failed` / `failures[]`。
+排任务：`POST /api/v1/admin/contests/{id}/judge/builtin`，体 `{problem?, player_id?, force, version_id?, rerun}`，都不填 = 全场所有自带评测题 × 所有选手（评最新版）；`version_id` = 重测那个历史版本（结果只进历史，不受场次进行中限制）；响应 `{queued, problems}`。进度：`GET` 同路径，返回 `total` / `queued` / `running` / `done` / `failed` / `delayed`（去抖中）/ `failures[]`；完成 / 失败只数每 (选手, 题目) 最新那条。
+
+### 版本、自动评测与 timeline（§12.9）
+
+| 接口 | 说明 |
+|---|---|
+| `PUT /api/v1/admin/contests/{id}/judge/auto` | `{auto_judge: "off"\|"on_change", auto_judge_delay: 0–3600}`；场次列表回显这两项 |
+| `GET /api/v1/admin/contests/{id}/judge/versions?player_id=&problem=` | 选手的代码版本（旧的在前，列表信封）：`id` / `rel_path` / `sha256` / `size` / `received_at` / `problem`（按当前题目模式）/ `current` / `tasks` / `judge{task_id, status, trigger, score, max_score, outcome, reused, applied, finished_at}` / `in_matrix` |
+| `GET /api/v1/admin/contests/{id}/judge/tasks?player_id=&problem=&status=&trigger=` | 评测任务（新的在前，列表信封），含复用的 |
+| `GET /api/v1/admin/contests/{id}/judge/tasks/{task_id}` | 任务与测试点明细 |
+| `POST /api/v1/admin/contests/{id}/judge/tasks/{task_id}/adopt` | 采用此版本成绩：写成当前 `result.json` 并立即重扫；无结果 `409 judge_task_no_result`，手工录入的格子 `409 manual_score` |
 
 ### 评测机接口
 
@@ -341,9 +426,69 @@ syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
 
 | 接口 | 说明 |
 |---|---|
-| `POST /api/v1/judge/lease` | 领任务（租约 15 分钟，过期回队列）；无任务 `204`。返回 `id`、`contest_slug`、`player_no`、`problem`（`ident` / `time_limit_ms` / `memory_limit_mb` / `io_mode` / `input_file` / `output_file` / `compile_flags`；文件名为 `null` = 用 `<ident>.in` / `<ident>.out`）、`source`（`path` / `sha256`）、`testdata`（`sha256` / `name`）、`attempt` |
+| `POST /api/v1/judge/poll` | 体 `{version, backend, isolated, hostname, platform, slots, poll_seconds, want}`（自报状态；`want` 1 = 顺带领一个任务）。返回 `{task, command, enabled}`：`task` 形状同 `/lease` 的响应，没领到为 `null`（无任务、已暂停、`want` 0 或有命令）；`command` 为 `run` / `stop` / `restart`（一次性） |
+| `POST /api/v1/judge/lease` | 旧评测机用：领任务（租约 15 分钟，过期回队列）；无任务或已暂停 `204`。返回 `id`、`contest_slug`、`player_no`、`problem`（`ident` / `time_limit_ms` / `memory_limit_mb` / `io_mode` / `input_file` / `output_file` / `compile_flags`；文件名为 `null` = 用 `<ident>.in` / `<ident>.out`）、`source`（`path` / `sha256`）、`testdata`（`sha256` / `name`）、`attempt` |
 | `GET /api/v1/judge/tasks/{id}/blobs/{sha256}` | 取本任务的代码或数据包；其他内容 `404` |
-| `POST /api/v1/judge/tasks/{id}/result` | `{score, max_score, status, detail}`（`score` / `max_score` 0–1000000，`status` 1–16 字符），写 `result.json` |
+| `POST /api/v1/judge/tasks/{id}/result` | `{score, max_score, status, detail}`（`score` / `max_score` 0–1000000，`status` 1–16 字符），写 `result.json`；`detail` 里认 `judge` / `isolated` / `language` / `compile_message` / `cases` / `subtasks` / `precheck_warnings`，其余丢弃 |
 | `POST /api/v1/judge/tasks/{id}/fail` | `{message}`（≤2000），退回队列 |
 
 评测机与服务端出自同一个包，需一起升级：旧评测机不认 `input_file` / `output_file`，仍按 `<ident>.in` / `<ident>.out` 读写，设了自定义文件名的题会被评错。
+
+## 7. 源码预检
+
+自带评测编译前检查选手源码（`server/syncoj_server/judging/precheck.py`，只用标准库，评测机与服务端共用）。
+
+- 有拦截项：不编译，记 `CE`；`compile_message` 每项一行 `源码检查未通过：<说明>（第 N 行）`，下一行缩进给原文片段。
+- 预警：照常评测，写进 `result.json` 的 `precheck_warnings`（`code` / `line` / `message` / `excerpt`，片段 ≤80 字符）；评测记录详情 `GET .../judge/runs/{run_id}` 同名字段。
+- 只查选手代码，不查 checker。
+
+### 规范化
+
+匹配在规范化后的文本上做，按 C 翻译阶段：
+
+1. 换行统一为 `\n`；三字符序列替换（`??=` → `#` 等 9 个）。
+2. 反斜杠续行拼接（反斜杠与换行间允许空白）；行号记原始行。
+3. 去注释（块注释换成一个空格，可把指令并成一行）；字符串、字符字面量、C++ 原始字符串 `R"x(...)x"` 的内容换成占位符另存，`1'000` 数字分隔符不当字符字面量。原始字符串内部不做 1、2 步，直接取原文。
+4. 二合字母替换（`%:` → `#`、`%:%:` → `##`、`<:` `:>` `<%` `%>`；C++ 的 `<::` 除外）；代码里的 `\uXXXX` 解码。
+
+`#include` 路径另在规范化前的原文指令上再查一遍。源码按 UTF-8 解码，失败按 GB18030。
+
+### 拦截
+
+| code | 拦截 |
+|---|---|
+| `pragma` | `#pragma`（含 `#/**/pragma`、续行、`%:pragma`、`??=pragma`）、`_Pragma`、`__pragma` |
+| `attribute_optimize` | `__attribute__((...))` 里的 `optimize` / `target` / `target_clones`；`[[gnu::optimize]]` / `[[gnu::target]]` |
+| `inline_asm` | `asm` / `__asm__` / `__asm` |
+| `syscall` | `system` `popen` `fork` `vfork` `exec*` `posix_spawn` `ptrace` `syscall` `dlopen` `PROT_EXEC` `CreateProcess*` `ShellExecute*` `WinExec`（作为标识符出现即拦，成员访问除外）；`kill` `socket` `connect` `bind` 只拦调用，源码里有同名函数定义或赋值（lambda）时放行，`std::bind` 放行、`::connect(` 照拦；有 `##` 时，能由源码里的记号拼出上述名字也拦 |
+| `forbidden_header` | `<windows.h>` `<winsock2.h>` `<process.h>` `<sys/socket.h>` `<sys/un.h>` `<netdb.h>` `<netinet/…>` `<arpa/…>` `<linux/…>` `<sys/ptrace.h>` `<sys/syscall.h>` `<dlfcn.h>` `<sys/mman.h>` `<sys/shm.h>` `<spawn.h>` `<sys/wait.h>` `<sys/prctl.h>` 等；`#include` / `#include_next` / `#import` 用绝对路径、盘符、`..`、含 `/dev/` `/proc/` `/etc/` `/sys/`，或用宏 |
+| `file_access` | `fopen` `freopen` `open` `creat` 与 `ifstream` / `ofstream` / `fstream` 构造的文件名字面量含 `/` `\` `..` 或盘符，或不是 `<题目>.in` / `<题目>.out` / 题目配置的输入输出文件名；`NULL` 与 `/dev/stdin` `/dev/stdout` `/dev/stderr` 放行 |
+| `bidi` | U+202A–202E、U+2066–2069、U+200E、U+200F、U+061C |
+
+### 预警
+
+| code | 条件（默认阈值） |
+|---|---|
+| `macro_heavy` | `#define` 超过 30 个；宏名是关键字或常用标准名（`if` `return` `main` `printf` …）；类型关键字（`#define int long long`）不算 |
+| `token_paste` | `#define` 里有 `##` |
+| `trigraph_digraph` | 用了三字符序列或二合字母 |
+| `line_splice` | 续行拆开标识符 |
+| `long_line` | 单行超过 500 字符；非空行 ≥10 时平均行长超过 200 |
+| `big_table` | 字符串与数字字面量共超过 64 KiB；单个初始化列表超过 5000 个元素 |
+| `encoded_blob` | 字符串里连续 base64 / 十六进制字符或 `\x` 转义超过 200 个 |
+| `non_ascii_ident` | 代码（字面量、注释外）里有非 ASCII 标识符字符 |
+| `huge_source` | 源码超过 256 KiB |
+| `file_dynamic` | 打开文件的文件名不是字面量 |
+
+每条规则最多报 20 处。
+
+### 配置
+
+数据包 `config.json` 的 `precheck`（可选，缺省按默认）：
+
+| 字段 | 取值 | 默认 |
+|---|---|---|
+| `mode` | `block`：拦截项拦截、预警项预警；`warn`：拦截项降为预警；`off`：不查 | `block` |
+| `disabled` | 关闭的规则 code 数组 | `[]` |
+
+不认识的字段、模式或 code：上传时报错。

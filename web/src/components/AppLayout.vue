@@ -8,6 +8,7 @@ import AboutDialog from '@/components/AboutDialog.vue'
 import CommandPalette from '@/components/CommandPalette.vue'
 import { usePolling } from '@/composables/usePolling'
 import { NAV_GROUPS, useQuickActions } from '@/composables/useQuickActions'
+import type { NavItem } from '@/composables/useQuickActions'
 import { useTheme } from '@/composables/useTheme'
 import { useAuthStore } from '@/stores/auth'
 import { useContestStore } from '@/stores/contest'
@@ -27,12 +28,25 @@ const palette = ref<InstanceType<typeof CommandPalette> | null>(null)
 const collapsed = ref(false)
 const aboutOpen = ref(false)
 
+function covers(item: NavItem, name: unknown): boolean {
+  return item.name === name || !!item.children?.some((child) => child.name === name)
+}
+
 const currentGroup = computed(() => {
   for (const group of NAV_GROUPS) {
-    if (group.items.some((item) => item.name === route.name)) return group.title
+    if (group.items.some((item) => covers(item, route.name))) return group.title
   }
   return ''
 })
+
+/** 侧栏里展开着的父项（按 name）。当前页在某个父项下时默认展开。 */
+const expanded = ref<Record<string, boolean>>({})
+function isExpanded(item: NavItem): boolean {
+  return expanded.value[item.name] ?? covers(item, route.name)
+}
+function toggleExpanded(item: NavItem): void {
+  expanded.value = { ...expanded.value, [item.name]: !isExpanded(item) }
+}
 const currentTitle = computed(() => (route.meta.title as string | undefined) ?? '')
 
 const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform)
@@ -86,17 +100,72 @@ onMounted(async () => {
       <nav class="nav">
         <div v-for="group in NAV_GROUPS" :key="group.title" class="nav-group">
           <div v-if="!collapsed" class="nav-group-title">{{ group.title }}</div>
-          <RouterLink
-            v-for="item in group.items"
-            :key="item.name"
-            :to="{ name: item.name }"
-            class="nav-item"
-            :class="{ active: route.name === item.name }"
-            :title="collapsed ? item.label : undefined"
-          >
-            <el-icon class="nav-icon"><component :is="item.icon" /></el-icon>
-            <span v-if="!collapsed" class="nav-label">{{ item.label }}</span>
-          </RouterLink>
+          <template v-for="item in group.items" :key="item.name">
+            <!-- 有二级项：展开侧栏时可折叠；收起时悬停弹出二级项，点图标去第一项 -->
+            <template v-if="item.children?.length">
+              <el-popover
+                v-if="collapsed"
+                placement="right-start"
+                trigger="hover"
+                :width="160"
+                :show-arrow="false"
+              >
+                <template #reference>
+                  <RouterLink
+                    :to="{ name: item.children[0].name }"
+                    class="nav-item"
+                    :class="{ active: covers(item, route.name) }"
+                  >
+                    <el-icon class="nav-icon"><component :is="item.icon" /></el-icon>
+                  </RouterLink>
+                </template>
+                <div class="nav-pop">
+                  <RouterLink
+                    v-for="child in item.children"
+                    :key="child.name"
+                    :to="{ name: child.name }"
+                    class="nav-item nav-child"
+                    :class="{ active: route.name === child.name }"
+                  >
+                    <span class="nav-label">{{ child.label }}</span>
+                  </RouterLink>
+                </div>
+              </el-popover>
+              <template v-else>
+                <button
+                  type="button"
+                  class="nav-parent"
+                  :class="{ 'parent-active': covers(item, route.name) }"
+                  @click="toggleExpanded(item)"
+                >
+                  <el-icon class="nav-icon"><component :is="item.icon" /></el-icon>
+                  <span class="nav-label">{{ item.label }}</span>
+                  <el-icon class="nav-caret" :class="{ open: isExpanded(item) }"><ArrowRight /></el-icon>
+                </button>
+                <template v-if="isExpanded(item)">
+                  <RouterLink
+                    v-for="child in item.children"
+                    :key="child.name"
+                    :to="{ name: child.name }"
+                    class="nav-item nav-child"
+                    :class="{ active: route.name === child.name }"
+                  >
+                    <span class="nav-label">{{ child.label }}</span>
+                  </RouterLink>
+                </template>
+              </template>
+            </template>
+            <RouterLink
+              v-else
+              :to="{ name: item.name }"
+              class="nav-item"
+              :class="{ active: route.name === item.name }"
+              :title="collapsed ? item.label : undefined"
+            >
+              <el-icon class="nav-icon"><component :is="item.icon" /></el-icon>
+              <span v-if="!collapsed" class="nav-label">{{ item.label }}</span>
+            </RouterLink>
+          </template>
         </div>
       </nav>
 
@@ -132,7 +201,7 @@ onMounted(async () => {
             <template #prefix>
               <el-icon><Calendar /></el-icon>
             </template>
-            <el-option v-for="item in contests.contests" :key="item.id" :label="item.name" :value="item.id">
+            <el-option v-for="item in contests.options" :key="item.id" :label="item.name" :value="item.id">
               <div class="contest-option">
                 <span>{{ item.name }}</span>
                 <el-tag size="small" :type="contestStatusType(item.status)" effect="plain">
@@ -141,9 +210,19 @@ onMounted(async () => {
               </div>
             </el-option>
             <template #footer>
-              <el-button link type="primary" size="small" @click="router.push({ name: 'contests', query: { do: 'new' } })">
-                <el-icon><Plus /></el-icon>新建场次
-              </el-button>
+              <div class="contest-footer">
+                <el-button link type="primary" size="small" @click="router.push({ name: 'contests', query: { do: 'new' } })">
+                  <el-icon><Plus /></el-icon>新建场次
+                </el-button>
+                <el-checkbox
+                  v-if="contests.archived.length"
+                  size="small"
+                  :model-value="contests.showArchived"
+                  @update:model-value="(value: string | number | boolean) => contests.setShowArchived(!!value)"
+                >
+                  显示已归档（{{ contests.archived.length }}）
+                </el-checkbox>
+              </div>
             </template>
           </el-select>
           <el-button
@@ -339,6 +418,49 @@ onMounted(async () => {
 }
 .nav-icon {
   font-size: 17px;
+}
+.nav-parent {
+  all: unset;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 38px;
+  padding: 0 10px;
+  border-radius: 8px;
+  color: var(--sj-text-2);
+  font-size: 14px;
+  cursor: pointer;
+}
+.nav-parent:hover {
+  background: var(--sj-surface-2);
+  color: var(--sj-text);
+}
+.nav-parent.parent-active {
+  color: var(--sj-primary);
+}
+.nav-caret {
+  margin-left: auto;
+  font-size: 12px;
+  transition: transform 0.15s;
+}
+.nav-caret.open {
+  transform: rotate(90deg);
+}
+.nav-child {
+  height: 34px;
+  padding-left: 37px;
+  font-size: 13.5px;
+}
+.nav-pop .nav-child {
+  padding-left: 10px;
+}
+.contest-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 .sidebar-foot {

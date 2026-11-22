@@ -15,15 +15,16 @@
 
 | 接口 | 作用 |
 |---|---|
-| `POST /contests/{id}/judge-import/preview?format=auto\|<格式 id>` | multipart `file`；暂存、识别、解析、试构建；返回 `token` 与逐题预览 |
+| `POST /contests/{id}/judge-import/preview?format=auto\|<格式 id>` | multipart `file`；暂存、识别、解析、试构建；返回 `token`、逐题预览与本场次已有题目标识 `existing_idents` |
 | `POST /contests/{id}/judge-import/apply` | `{token, items:[{key, ident, action}], set_builtin}`；按暂存包重新解析，只采用回传的 `ident` 与 `action` |
 | `GET /contests/{id}/judge-export/preview?format=…&problem_id=…` | 逐题 `included` 与警告 |
 | `GET /contests/{id}/judge-export?format=…&problem_id=…` | 下载 zip |
 | `GET /problems/{id}/judge-export?format=…` | 单题导出 |
 | `GET /problems/{id}/testdata/file` | 原样下载数据包 |
 
-* 预览默认动作：有错误 → `skip`；ident 已存在 → `update`；否则 `create`。有错误的题只能 `skip`（否则 400）。
-* apply：token 不存在 / 过期 / 属于别的场次 → 404 `import_token_expired`；本批 ident 重复或 `create` 撞已有 ident → 409 `ident_conflict`。
+* 预览默认动作：有错误 → `skip`；ident 已存在 → `update`；否则 `create`。有错误的题只能 `skip`（否则 400）。界面改 ident 后按 `existing_idents` 在 `create` / `update` 间切换（手选的 `skip` 不动）。
+* 试构建：预览只算摘要，不写出完整数据包（测试点写成空文件的骨架包回读自检，测试数据按成员各解压一遍查损坏，同一成员每次请求只读一遍）；apply 把数据包写到暂存目录下的临时文件再流式入库，原生包的内层 zip 直接从导入包流式入库。
+* apply：token 不存在 / 过期 / 属于别的场次 → 404 `import_token_expired`；同一 token 的 apply 串行，后到的在前一个完成后得 404；本批 ident 重复、`create` 撞已有 ident 或写库时撞唯一约束（别处同时建了同名题）→ 409 `ident_conflict`。
 * 新建题目 `judge_mode=builtin`；覆盖已有题目时 `set_builtin=true`（默认）才改成 builtin。覆盖时 `title` 只在包里有值、且不等于来源名或 ident（不分大小写）时覆盖，`file_patterns` 不动（原生格式除外）。
 * 导出不传 `problem_id`：`syncoj` 取全部题目；其他格式取全部带数据包的自带评测题。非原生格式跳过没有数据包或 blob 丢失的题（`included=false`）。
 * 整包级错误：400 `validation_error`，`details.code_detail` = 下表代码；`too_many_problems` 为 413。
@@ -196,7 +197,7 @@ syncoj-problems.json
 
 * `contest/contest.cdf`（紧凑 JSON，`version "1.0"`）+ `contest/data/<ident>/`。
 * 散点一个 testCase，子任务一个 testCase（含全部文件对），都带整题时限与内存。
-* `subFolderCheck`：代码路径模式展开后全是 `<ident>.<扩展名>` → false；全是 `<ident>/<ident>.<扩展名>`（含默认模式）→ true；其他写法按有无子目录取值并给 `lemon_layout_mismatch`。
+* `subFolderCheck`：按收代码时生效的代码路径模式（没配时是服务端的 `default_file_pattern`）判断：展开后全是 `<ident>.<扩展名>` → false；全是 `<ident>/<ident>.<扩展名>` → true；其他写法按有无子目录取值并给 `lemon_layout_mismatch`。
 * 有 checker：`comparisonMode=5`、`specialJudge="<ident>/checker"`，源码写成 `data/<ident>/checker.cpp`（`checker_needs_build`）；没用 testlib → `checker_not_testlib`。
 * 编译参数 → `flags_dropped`。
 
@@ -230,6 +231,7 @@ syncoj-problems.json
 | 题目数 | ≤ 200，拿到题目目录列表时就查 | 413 `too_many_problems` |
 | 每题测试点 | ≤ 500，解析时就查 | `too_many_cases` |
 | 每题数据包解压量 | 按引用（含重复引用）累计 ≤ 2 GiB，写之前查 | `testdata_invalid` |
+| 一次 preview / apply 的数据包解压量 | 全部题目按引用累计 ≤ 4 GiB，超出的题报错 | `testdata_invalid` |
 | 暂存 | `<data_dir>/tmp/judge-import/<token>.bin`，token 为 32 位十六进制；2 小时过期；每场次最多 5 份 | 404 `import_token_expired` |
 
 ## 8. 提示代码
@@ -310,7 +312,7 @@ syncoj-problems.json
 | `dependency_dropped` | 子任务依赖已丢弃，得分可能偏高 |
 | `max_as_bundle` | max 子任务按捆绑计分，得分可能偏低 |
 | `mul_as_bundle` | mul 子任务按捆绑计分，得分可能偏低 |
-| `mixed_io` | 输入与输出方式不一致，按文件 IO 导入 |
+| `mixed_io` | {source}已按文件 IO 导入，{affected}的程序全部判错 |
 | `strict_compare_relaxed` | 原为严格逐行比较，现忽略行末空白 |
 | `diff_compare_relaxed` | 原为 diff 比较，现忽略行末空白 |
 | `real_checker_generated` | 已生成实数比较 checker（误差 {eps}） |

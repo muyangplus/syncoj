@@ -10,4 +10,4 @@
 * **Python 3.8 兼容** —— 由 ``tools/check_py38.py`` 机械门禁，不靠人眼。
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

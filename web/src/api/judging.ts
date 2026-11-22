@@ -13,11 +13,18 @@ import type {
   BuiltinJudgeIn,
   BuiltinJudgeProgressOut,
   BuiltinJudgeQueuedOut,
+  JudgeAutoIn,
+  JudgeAutoOut,
   JudgeRunDetailOut,
+  JudgeTaskDetailOut,
+  JudgeTaskOut,
   JudgeWorkerCreatedOut,
   JudgeWorkerOut,
+  JudgeWorkerPatchIn,
+  LocalJudgeOut,
   ProblemJudgeIn,
   ProblemOut,
+  SourceVersionOut,
 } from './types'
 
 export const judgingApi = {
@@ -44,6 +51,26 @@ export const judgingApi = {
 
   progress: (contestId: number) => request<BuiltinJudgeProgressOut>(paths.contestBuiltinJudge(contestId)),
 
+  /** 自动入队：`on_change` = 收到某题新版本就评，`auto_judge_delay` 秒内的连续改动只评最后一版。 */
+  setAuto: (contestId: number, payload: JudgeAutoIn) =>
+    request<JudgeAutoOut>(paths.contestJudgeAuto(contestId), { method: 'PUT', body: payload }),
+
+  /** 评测任务，新的在前；可按选手、题目、状态、触发方式筛。 */
+  tasks: (contestId: number, params: ListParams = {}, signal?: AbortSignal) =>
+    listPage<JudgeTaskOut>(paths.contestJudgeTasks(contestId), params, signal),
+
+  /** 一个任务及其测试点明细（历史版本的结果从这里看）。 */
+  task: (contestId: number, taskId: number) =>
+    request<JudgeTaskDetailOut>(paths.contestJudgeTask(contestId, taskId)),
+
+  /** 采用此版本成绩：成绩矩阵这一格换成该任务的结果。手工录入的格子 409 `manual_score`。 */
+  adopt: (contestId: number, taskId: number) =>
+    request<JudgeTaskOut>(paths.contestJudgeTaskAdopt(contestId, taskId), { method: 'POST' }),
+
+  /** 一位选手的代码版本（旧的在前），每版带最近一次评测结果。`problem` 只看归到这道题的。 */
+  versions: (contestId: number, params: ListParams = {}, signal?: AbortSignal) =>
+    listPage<SourceVersionOut>(paths.contestJudgeVersions(contestId), { limit: 500, ...params }, signal),
+
   /** 一条评测记录与测试点明细。 */
   run: (contestId: number, runId: number) =>
     request<JudgeRunDetailOut>(paths.contestJudgeRun(contestId, runId)),
@@ -51,9 +78,28 @@ export const judgingApi = {
   workers: (params: ListParams = {}, signal?: AbortSignal) =>
     listPage<JudgeWorkerOut>(paths.judgeWorkers(), { limit: 100, ...params }, signal),
 
-  /** 签发评测机令牌：明文只在这一次返回。 */
+  /** 签发评测机令牌：明文只在这一次返回，连同 Linux / Windows 一行安装命令。 */
   createWorker: (name: string) =>
     request<JudgeWorkerCreatedOut>(paths.judgeWorkers(), { method: 'POST', body: { name } }),
+
+  /** 改名；暂停（`enabled: false`，领不到新任务、照常心跳）/ 恢复。 */
+  updateWorker: (workerId: number, payload: JudgeWorkerPatchIn) =>
+    request<JudgeWorkerOut>(paths.judgeWorker(workerId), { method: 'PATCH', body: payload }),
+
+  /** 停止：下一次轮询送达，评完手上的任务后退出。离线 / 旧评测机 409。 */
+  stopWorker: (workerId: number) =>
+    request<JudgeWorkerOut>(paths.judgeWorkerStop(workerId), { method: 'POST' }),
+
+  /** 重启：评完手上的任务后以同样的参数重启。 */
+  restartWorker: (workerId: number) =>
+    request<JudgeWorkerOut>(paths.judgeWorkerRestart(workerId), { method: 'POST' }),
+
+  /** 本机评测机状态；非 Linux 服务端 `supported: false`。 */
+  localJudge: () => request<LocalJudgeOut>(paths.judgeLocal()),
+
+  startLocalJudge: () => request<LocalJudgeOut>(paths.judgeLocalStart(), { method: 'POST' }),
+
+  stopLocalJudge: () => request<LocalJudgeOut>(paths.judgeLocalStop(), { method: 'POST' }),
 
   /** 吊销（删行）。`confirm` 必须逐字等于评测机名称。 */
   removeWorker: (workerId: number, name: string) => removeItem(paths.judgeWorker(workerId), name),

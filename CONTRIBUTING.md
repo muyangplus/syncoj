@@ -12,7 +12,7 @@
 .\scripts\check.ps1
 ```
 
-步骤：py38 兼容门禁（Agent、服务端与 `scripts/` 各一遍）→ PowerShell 脚本编码 → Agent 测试 → 服务端测试 → `web/openapi.json` 与 schema 同步 → `schema.d.ts` 与 `openapi.json` 同步 → 前端入口对账 + typecheck + build。
+步骤：py38 兼容门禁（Agent、服务端与 `scripts/` 各一遍）→ PowerShell 脚本编码 → Agent 测试 → 服务端测试 →（可选）Python 3.8 下的服务端测试 → `web/openapi.json` 与 schema 同步 → `schema.d.ts` 与 `openapi.json` 同步 → 前端入口对账 + typecheck + build。
 默认某步失败后继续跑完并汇总；`--fail-fast` 在第一处失败即停。
 
 只跑一部分：
@@ -23,6 +23,17 @@
 ./scripts/check.sh --skip-web                 # 没装 web/node_modules 时
 python server/tools/parallel_tests.py --root server --pattern "tests/test_docs.py"   # 挑文件（glob）
 ```
+
+本地用 Python 3.8 跑服务端测试（目标机 NOI Linux 2.0 是 3.8；py38 门禁只查语法与标准库用法，查不出 3.8 上行为不同的地方）：
+
+```bash
+python3.8 -m venv .venv38 && .venv38/bin/pip install -e "server[dev]"
+./scripts/check.sh --only py38-tests --py38 .venv38/bin/python                # 全部服务端测试
+SYNCOJ_PY38=.venv38/bin/python ./scripts/check.sh --only py38-tests \
+  --py38-pattern "tests/test_problem_io_*.py"                                  # 只跑一部分
+```
+
+`py38-tests` 只有给了解释器（`--py38` 或环境变量 `SYNCOJ_PY38`）才跑，否则记为跳过；CI 的 py38 任务直接用 3.8 跑全量检查。`parallel_tests` 会把 `server/` 放在 `PYTHONPATH` 最前面，所以那个 venv 的可编辑安装指向别的检出（如另一个 worktree）也没关系。与 CI 一样，这一步不对账 `openapi.json`（3.8 只能装较老的 pydantic，生成结果有无害差异）。以 root 跑时评测沙箱会降权到普通用户执行 `sys.executable`，venv 要放在该用户能进入的目录（不要放在 700 的私有目录下），否则 `test_judging_runner` 等评测用例会报 Permission denied。
 
 ## 硬规则
 
@@ -43,6 +54,7 @@ python server/tools/parallel_tests.py --root server --pattern "tests/test_docs.p
 - 一次提交一件事（接口改动 + 文案改动 = 两次提交）。
 - 提交信息用中文，写清「改了什么、为什么」；写明破坏性改动与主动留下的代价。
 - 日常开发在 `dev` 分支（或从 `dev` 拉出的功能分支）；`main` 只经 PR 从 `dev` 合入，合并前 CI 全绿。
+- CI（`check.yml`）在推送到 `main` 以外的分支时跑；合入 `main` 的 PR 不触发（用 `dev` 推送那次的结果），其余本仓库分支发起的 PR 也不重复跑，外部 fork 的 PR 照跑；合入 `main` 不跑，发版时 `release.yml` 对 `main` 的提交再跑一遍。
 
 ## 许可与漏洞
 

@@ -14,10 +14,12 @@
 ``config.json``（全部可选）::
 
     {"cases": [{"name": "1", "score": 10}, ...],
-     "subtasks": [{"score": 40, "cases": ["1", "2"]}, ...]}
+     "subtasks": [{"score": 40, "cases": ["1", "2"]}, ...],
+     "precheck": {"mode": "block", "disabled": ["file_access"]}}
 
 * 没写分值：总分 100 按测试点平均分（除不尽的余数给最后几个点）。
 * 子任务：里面**全部** AC 才得这个子任务的分（捆绑测试）；子任务里的点不再单独计分。
+* ``precheck``：编译前源码预检的模式与关闭的规则（:mod:`.precheck`）；缺省按默认。
 
 校验在**上传时**做（服务端）：结构不对当场报出来，而不是等到评测时才发现。
 """
@@ -30,6 +32,8 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Dict, List, Optional, Sequence
+
+from .precheck import PrecheckConfig
 
 __all__ = [
     "TestdataError",
@@ -75,6 +79,8 @@ class Testdata:
     checker: Optional[str] = None
     #: checker 同目录下的其它源文件（testlib.h 等），编译时一起解出来
     checker_support: List[str] = field(default_factory=list)
+    #: 源码预检配置（config.json 的 ``precheck``）
+    precheck: PrecheckConfig = field(default_factory=PrecheckConfig)
 
     @property
     def total_score(self) -> int:
@@ -160,6 +166,10 @@ def parse_testdata(archive: zipfile.ZipFile) -> Testdata:
 
     _apply_scores(cases, config)
     subtasks = _parse_subtasks(cases, config)
+    try:
+        precheck = PrecheckConfig.from_json(config.get("precheck"))
+    except ValueError as exc:
+        raise TestdataError("config.json 的 %s" % exc)
 
     checker = next(
         (n for n in sorted(files) if PurePosixPath(n).name.lower() in CHECKER_NAMES), None
@@ -172,7 +182,8 @@ def parse_testdata(archive: zipfile.ZipFile) -> Testdata:
             if n != checker and str(PurePosixPath(n).parent) == folder
             and n.lower().endswith((".h", ".hpp"))
         ]
-    return Testdata(cases=cases, subtasks=subtasks, checker=checker, checker_support=support)
+    return Testdata(cases=cases, subtasks=subtasks, checker=checker, checker_support=support,
+                    precheck=precheck)
 
 
 def _apply_scores(cases: Sequence[Case], config: Dict[str, object]) -> None:

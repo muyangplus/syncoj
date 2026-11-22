@@ -59,7 +59,7 @@ def close_finished_contests(ctx: AppContext, now: Optional[datetime] = None) -> 
         found = list(
             session.execute(
                 select(Contest).where(
-                    Contest.status != ContestStatus.CLOSED,
+                    Contest.status.notin_((ContestStatus.CLOSED, ContestStatus.ARCHIVED)),
                     Contest.ends_at.isnot(None),
                     Contest.ends_at <= moment,
                 )

@@ -170,6 +170,12 @@ class Settings:
     # 周期扫描 judge_result/ 目录并回写成绩。对延迟不敏感，所以放得比较宽
     judge_scan_interval: float = 10.0
 
+    #: 本机评测机（§12.10）用 rlimit 后端、且服务端以 root 运行时，选手程序换成这个账号跑。
+    #: 装了 isolate 时用不到它；服务端不是 root 时也用不到（以服务端账号跑）。
+    judge_local_run_as: str = field(
+        default_factory=lambda: _env_opt_str("SYNCOJ_JUDGE_LOCAL_RUN_AS") or "nobody"
+    )
+
     # ---- 自更新 ----
     #: 发布包大小上限。签名私钥见上面的 ``release_signing_key`` —— 它**只能有
     #: 一处定义**：这个 dataclass 曾经把同一个字段声明了两遍（一次读环境变量、
@@ -197,6 +203,9 @@ class Settings:
     #: 拼出要广播的地址。放在 Settings 里是因为应答器跑在后台任务里，
     #: 拿不到命令行参数。
     http_port: int = 8000
+    #: HTTP 监听地址（``serve --host`` 写入）。本机评测机据此连回来：通配地址与回环用 127.0.0.1，
+    #: 绑在某个具体网卡地址上时只能连那个地址。
+    http_host: str = "127.0.0.1"
 
     #: **公开端口**：只放考试机要用的那两页（选手页 + 装机页），进去默认落在选手页。
     #:
@@ -271,7 +280,7 @@ class Settings:
     #: 单 IP 每分钟允许的管理端登录尝试。0 = 不限。scrypt 让单次尝试变慢，
     #: 但局域网里可以无限次地试 —— 一个考场的学生有整整一场考试的时间。
     login_per_ip_per_minute: int = 10
-    #: 单 IP 每分钟允许的选手页**手填查找**（场次 + 考号）。考号通常连号，
+    #: 单 IP 每分钟允许的考生页**登录尝试**（场次 + 考号 + 考生页密码）。考号通常连号，
     #: 不限的话一个循环就能把整场的下发清单都翻一遍。
     player_lookup_per_ip_per_minute: int = 30
 

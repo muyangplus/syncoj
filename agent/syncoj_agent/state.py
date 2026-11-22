@@ -6,6 +6,8 @@
 * 机器身份丢了 —— 重新生成一个 UUID，靠硬件指纹让服务端认回老机器
 * 哈希缓存丢了 —— 重新算一遍，只是慢一点
 * 下载分片丢了 —— 从头发，服务端不知道也不关心
+* 记住的服务端实例 ID 丢了 —— 下一次 tick 成功时重新记下；在那之前失联时的
+  局域网发现退回"只验签"
 
 所以本进程可以被随意 kill、状态目录可以被随意删除，都不会不可恢复。
 """
@@ -32,7 +34,9 @@ __all__ = [
     "STATE_UNCLAIMED",
     "STATE_WAITING",
     "atomic_write_text",
+    "load_server_uuid",
     "resolve_machine_id",
+    "save_server_uuid",
     "describe_os",
     "detect_desktop",
     "DESKTOP_CANDIDATES",
@@ -217,6 +221,30 @@ def resolve_machine_uuid(
     except OSError as exc:
         log.warning("无法持久化 machine_uuid（%s），重启后可能被当成新机器", exc)
     return generated
+
+
+#: 记住的服务端实例 ID 的文件名（状态目录下）
+SERVER_UUID_FILE = "server_uuid"
+
+_SERVER_UUID_RE = re.compile(r"^[0-9A-Za-z-]{8,64}$")
+
+
+def valid_server_uuid(value: object) -> bool:
+    return isinstance(value, str) and bool(_SERVER_UUID_RE.match(value))
+
+
+def load_server_uuid(state_dir: Path) -> str:
+    """上一次 tick 成功的那台服务端的实例 ID；没有 / 不合法就空串（= 老状态）。"""
+    value = _read_text(state_dir / SERVER_UUID_FILE)
+    return value if valid_server_uuid(value) else ""
+
+
+def save_server_uuid(state_dir: Path, value: str) -> None:
+    """记下服务端实例 ID（``0600``）。写不下只记警告：后果是失联时发现退回只验签。"""
+    try:
+        atomic_write_text(state_dir / SERVER_UUID_FILE, value + "\n", mode=0o600)
+    except OSError as exc:
+        log.warning("记不下服务端实例 ID（%s）：失联时的局域网发现将只验签", exc)
 
 
 def resolve_machine_fingerprint() -> str:

@@ -50,6 +50,58 @@
         "title": "AdminInfo",
         "type": "object"
       },
+      "AgentBindingOut": {
+        "additionalProperties": false,
+        "description": "机器的一条绑定：名单 · 考号 · 姓名。",
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "player_no": {
+            "title": "Player No",
+            "type": "string"
+          },
+          "roster_entry_id": {
+            "title": "Roster Entry Id",
+            "type": "integer"
+          },
+          "roster_id": {
+            "title": "Roster Id",
+            "type": "integer"
+          },
+          "roster_name": {
+            "default": "",
+            "title": "Roster Name",
+            "type": "string"
+          },
+          "seat": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seat"
+          }
+        },
+        "required": [
+          "roster_id",
+          "roster_entry_id",
+          "player_no"
+        ],
+        "title": "AgentBindingOut",
+        "type": "object"
+      },
       "AgentEvent": {
         "additionalProperties": false,
         "properties": {
@@ -106,6 +158,13 @@
               }
             ],
             "title": "Agent Version"
+          },
+          "bindings": {
+            "items": {
+              "$ref": "#/components/schemas/AgentBindingOut"
+            },
+            "title": "Bindings",
+            "type": "array"
           },
           "contest_id": {
             "title": "Contest Id",
@@ -715,6 +774,13 @@
             "default": "",
             "title": "Roster Name",
             "type": "string"
+          },
+          "suggestions": {
+            "items": {
+              "$ref": "#/components/schemas/BindingSuggestionOut"
+            },
+            "title": "Suggestions",
+            "type": "array"
           }
         },
         "required": [
@@ -723,6 +789,68 @@
           "player_no"
         ],
         "title": "BindResultOut",
+        "type": "object"
+      },
+      "BindingSuggestionOut": {
+        "additionalProperties": false,
+        "description": "一条同名建议：把 ``agent_id`` 也绑到 ``roster_name`` 里的这个人。",
+        "properties": {
+          "agent_id": {
+            "title": "Agent Id",
+            "type": "integer"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "player_no": {
+            "title": "Player No",
+            "type": "string"
+          },
+          "roster_entry_id": {
+            "title": "Roster Entry Id",
+            "type": "integer"
+          },
+          "roster_id": {
+            "title": "Roster Id",
+            "type": "integer"
+          },
+          "roster_name": {
+            "default": "",
+            "title": "Roster Name",
+            "type": "string"
+          },
+          "seat": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seat"
+          },
+          "source": {
+            "default": "",
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_id",
+          "roster_id",
+          "roster_entry_id",
+          "player_no"
+        ],
+        "title": "BindingSuggestionOut",
         "type": "object"
       },
       "Body_judge_import_preview_api_v1_admin_contests__contest_id__judge_import_preview_post": {
@@ -1043,6 +1171,77 @@
         "title": "BootstrapKeyOut",
         "type": "object"
       },
+      "BoundMachineOut": {
+        "additionalProperties": false,
+        "description": "已配对的机器（至少绑了一份名单）。",
+        "properties": {
+          "agent_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Version"
+          },
+          "bindings": {
+            "items": {
+              "$ref": "#/components/schemas/AgentBindingOut"
+            },
+            "title": "Bindings",
+            "type": "array"
+          },
+          "contest_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contest Id"
+          },
+          "hostname": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hostname"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "last_seen_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Seen At"
+          },
+          "machine_id": {
+            "title": "Machine Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "machine_id"
+        ],
+        "title": "BoundMachineOut",
+        "type": "object"
+      },
       "BuiltinJudgeFailureOut": {
         "additionalProperties": false,
         "properties": {
@@ -1069,7 +1268,7 @@
       },
       "BuiltinJudgeIn": {
         "additionalProperties": false,
-        "description": "排自带评测任务。都不填 = 全场所有用自带评测的题 × 所有选手。",
+        "description": "排自带评测任务。都不填 = 全场所有用自带评测的题 × 所有选手（评最新版）。\n\n给了 ``version_id`` = 重测那一个历史版本（§12.9）：选手与题目由版本定，结果只进历史与\ntimeline，不覆盖成绩矩阵（教师「采用」才写）；不受\"场次还在进行\"的限制。",
         "properties": {
           "force": {
             "default": false,
@@ -1098,6 +1297,22 @@
               }
             ],
             "title": "Problem"
+          },
+          "rerun": {
+            "default": false,
+            "title": "Rerun",
+            "type": "boolean"
+          },
+          "version_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version Id"
           }
         },
         "title": "BuiltinJudgeIn",
@@ -1105,7 +1320,13 @@
       },
       "BuiltinJudgeProgressOut": {
         "additionalProperties": false,
+        "description": "排队 / 在评是全数；完成 / 失败只数每 (选手, 题目) 最新的那条任务。",
         "properties": {
+          "delayed": {
+            "default": 0,
+            "title": "Delayed",
+            "type": "integer"
+          },
           "done": {
             "default": 0,
             "title": "Done",
@@ -1295,6 +1516,16 @@
       "ContestOut": {
         "additionalProperties": false,
         "properties": {
+          "auto_judge": {
+            "default": "off",
+            "title": "Auto Judge",
+            "type": "string"
+          },
+          "auto_judge_delay": {
+            "default": 60,
+            "title": "Auto Judge Delay",
+            "type": "integer"
+          },
           "created_at": {
             "title": "Created At",
             "type": "string"
@@ -1331,6 +1562,11 @@
               }
             ],
             "title": "Ends At"
+          },
+          "has_player_password": {
+            "default": false,
+            "title": "Has Player Password",
+            "type": "boolean"
           },
           "id": {
             "title": "Id",
@@ -1400,6 +1636,11 @@
             "title": "Clear Default Roster",
             "type": "boolean"
           },
+          "clear_player_password": {
+            "default": false,
+            "title": "Clear Player Password",
+            "type": "boolean"
+          },
           "default_roster_id": {
             "anyOf": [
               {
@@ -1446,6 +1687,19 @@
               }
             ],
             "title": "Note"
+          },
+          "player_password": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 4,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Player Password"
           },
           "starts_at": {
             "anyOf": [
@@ -2199,6 +2453,51 @@
         "title": "InstallLedgerOut",
         "type": "object"
       },
+      "JudgeAutoIn": {
+        "additionalProperties": false,
+        "description": "场次的自动入队设置（§12.9）。",
+        "properties": {
+          "auto_judge": {
+            "enum": [
+              "off",
+              "on_change"
+            ],
+            "title": "Auto Judge",
+            "type": "string"
+          },
+          "auto_judge_delay": {
+            "default": 60,
+            "maximum": 3600.0,
+            "minimum": 0.0,
+            "title": "Auto Judge Delay",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "auto_judge"
+        ],
+        "title": "JudgeAutoIn",
+        "type": "object"
+      },
+      "JudgeAutoOut": {
+        "additionalProperties": false,
+        "properties": {
+          "auto_judge": {
+            "title": "Auto Judge",
+            "type": "string"
+          },
+          "auto_judge_delay": {
+            "title": "Auto Judge Delay",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "auto_judge",
+          "auto_judge_delay"
+        ],
+        "title": "JudgeAutoOut",
+        "type": "object"
+      },
       "JudgeBlobRefOut": {
         "additionalProperties": false,
         "properties": {
@@ -2631,6 +2930,13 @@
       "JudgeImportPreviewOut": {
         "additionalProperties": false,
         "properties": {
+          "existing_idents": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Existing Idents",
+            "type": "array"
+          },
           "format": {
             "title": "Format",
             "type": "string"
@@ -2701,6 +3007,169 @@
           "attempt"
         ],
         "title": "JudgeLeaseOut",
+        "type": "object"
+      },
+      "JudgePollIn": {
+        "additionalProperties": false,
+        "description": "评测机的一次 poll：自报状态，``want`` = 1 时顺带领一个任务（§12.10）。",
+        "properties": {
+          "backend": {
+            "anyOf": [
+              {
+                "maxLength": 16,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Backend"
+          },
+          "boot_id": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Boot Id"
+          },
+          "hostname": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hostname"
+          },
+          "isolated": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Isolated"
+          },
+          "platform": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Platform"
+          },
+          "poll_seconds": {
+            "default": 5.0,
+            "maximum": 3600.0,
+            "minimum": 0.5,
+            "title": "Poll Seconds",
+            "type": "number"
+          },
+          "slots": {
+            "default": 1,
+            "maximum": 64.0,
+            "minimum": 1.0,
+            "title": "Slots",
+            "type": "integer"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "want": {
+            "default": 1,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Want",
+            "type": "integer"
+          }
+        },
+        "title": "JudgePollIn",
+        "type": "object"
+      },
+      "JudgePollOut": {
+        "additionalProperties": false,
+        "description": "``task`` 为空 = 没领到（没有任务、已暂停或 ``want`` = 0）。``command`` 见 §12.10。",
+        "properties": {
+          "command": {
+            "default": "run",
+            "enum": [
+              "run",
+              "stop",
+              "restart"
+            ],
+            "title": "Command",
+            "type": "string"
+          },
+          "enabled": {
+            "default": true,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "task": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JudgeLeaseOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "JudgePollOut",
+        "type": "object"
+      },
+      "JudgePrecheckFindingOut": {
+        "additionalProperties": false,
+        "description": "源码预检的一条预警（规则 code 见 ``judging/precheck.py``）。",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "excerpt": {
+            "default": "",
+            "title": "Excerpt",
+            "type": "string"
+          },
+          "line": {
+            "default": 0,
+            "title": "Line",
+            "type": "integer"
+          },
+          "message": {
+            "default": "",
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "title": "JudgePrecheckFindingOut",
         "type": "object"
       },
       "JudgeProblemConfigOut": {
@@ -2948,6 +3417,13 @@
             "title": "Player No",
             "type": "string"
           },
+          "precheck_warnings": {
+            "items": {
+              "$ref": "#/components/schemas/JudgePrecheckFindingOut"
+            },
+            "title": "Precheck Warnings",
+            "type": "array"
+          },
           "problem": {
             "title": "Problem",
             "type": "string"
@@ -3002,6 +3478,17 @@
             },
             "title": "Subtasks",
             "type": "array"
+          },
+          "task_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Id"
           },
           "truncated": {
             "default": false,
@@ -3193,16 +3680,511 @@
         "title": "JudgeSubtaskOut",
         "type": "object"
       },
-      "JudgeWorkerCreatedOut": {
+      "JudgeTaskDetailOut": {
         "additionalProperties": false,
+        "description": "任务连同结果里的测试点明细（形状同 ``JudgeRunDetailOut`` 的明细部分）。",
         "properties": {
+          "applied": {
+            "default": false,
+            "title": "Applied",
+            "type": "boolean"
+          },
+          "cases": {
+            "items": {
+              "$ref": "#/components/schemas/JudgeCaseOut"
+            },
+            "title": "Cases",
+            "type": "array"
+          },
+          "compile_message": {
+            "default": "",
+            "title": "Compile Message",
+            "type": "string"
+          },
           "created_at": {
             "title": "Created At",
             "type": "string"
           },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "has_result": {
+            "default": false,
+            "title": "Has Result",
+            "type": "boolean"
+          },
           "id": {
             "title": "Id",
             "type": "integer"
+          },
+          "in_matrix": {
+            "default": false,
+            "title": "In Matrix",
+            "type": "boolean"
+          },
+          "isolated": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Isolated"
+          },
+          "judge": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Judge"
+          },
+          "judged_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Judged At"
+          },
+          "language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Language"
+          },
+          "max_score": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Score"
+          },
+          "not_before": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Not Before"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "player_id": {
+            "title": "Player Id",
+            "type": "integer"
+          },
+          "player_no": {
+            "title": "Player No",
+            "type": "string"
+          },
+          "precheck_warnings": {
+            "items": {
+              "$ref": "#/components/schemas/JudgePrecheckFindingOut"
+            },
+            "title": "Precheck Warnings",
+            "type": "array"
+          },
+          "problem": {
+            "title": "Problem",
+            "type": "string"
+          },
+          "requested_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requested By"
+          },
+          "rerun": {
+            "default": false,
+            "title": "Rerun",
+            "type": "boolean"
+          },
+          "reused_from": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reused From"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score"
+          },
+          "source_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Path"
+          },
+          "source_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Sha256"
+          },
+          "source_version_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Version Id"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "subtasks": {
+            "items": {
+              "$ref": "#/components/schemas/JudgeSubtaskOut"
+            },
+            "title": "Subtasks",
+            "type": "array"
+          },
+          "trigger": {
+            "title": "Trigger",
+            "type": "string"
+          },
+          "truncated": {
+            "default": false,
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "player_id",
+          "player_no",
+          "problem",
+          "status",
+          "trigger",
+          "created_at"
+        ],
+        "title": "JudgeTaskDetailOut",
+        "type": "object"
+      },
+      "JudgeTaskOut": {
+        "additionalProperties": false,
+        "description": "一个评测任务（任务即历史，§12.9）。",
+        "properties": {
+          "applied": {
+            "default": false,
+            "title": "Applied",
+            "type": "boolean"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "has_result": {
+            "default": false,
+            "title": "Has Result",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "in_matrix": {
+            "default": false,
+            "title": "In Matrix",
+            "type": "boolean"
+          },
+          "max_score": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Score"
+          },
+          "not_before": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Not Before"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "player_id": {
+            "title": "Player Id",
+            "type": "integer"
+          },
+          "player_no": {
+            "title": "Player No",
+            "type": "string"
+          },
+          "problem": {
+            "title": "Problem",
+            "type": "string"
+          },
+          "requested_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requested By"
+          },
+          "rerun": {
+            "default": false,
+            "title": "Rerun",
+            "type": "boolean"
+          },
+          "reused_from": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reused From"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score"
+          },
+          "source_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Path"
+          },
+          "source_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Sha256"
+          },
+          "source_version_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Version Id"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "trigger": {
+            "title": "Trigger",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "player_id",
+          "player_no",
+          "problem",
+          "status",
+          "trigger",
+          "created_at"
+        ],
+        "title": "JudgeTaskOut",
+        "type": "object"
+      },
+      "JudgeWorkerCreatedOut": {
+        "additionalProperties": false,
+        "properties": {
+          "backend": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Backend"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "desired": {
+            "default": "run",
+            "enum": [
+              "run",
+              "stop",
+              "restart"
+            ],
+            "title": "Desired",
+            "type": "string"
+          },
+          "enabled": {
+            "default": true,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "hostname": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hostname"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "isolated": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Isolated"
           },
           "last_seen_at": {
             "anyOf": [
@@ -3226,12 +4208,79 @@
             ],
             "title": "Last Seen Ip"
           },
+          "linux_command": {
+            "title": "Linux Command",
+            "type": "string"
+          },
+          "local": {
+            "default": false,
+            "title": "Local",
+            "type": "boolean"
+          },
+          "manual_command": {
+            "title": "Manual Command",
+            "type": "string"
+          },
           "name": {
             "title": "Name",
             "type": "string"
           },
+          "online": {
+            "default": false,
+            "title": "Online",
+            "type": "boolean"
+          },
+          "platform": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Platform"
+          },
+          "remote_control": {
+            "default": false,
+            "title": "Remote Control",
+            "type": "boolean"
+          },
+          "running": {
+            "items": {
+              "$ref": "#/components/schemas/JudgeWorkerTaskOut"
+            },
+            "title": "Running",
+            "type": "array"
+          },
+          "slots": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slots"
+          },
           "token": {
             "title": "Token",
+            "type": "string"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "windows_command": {
+            "title": "Windows Command",
             "type": "string"
           }
         },
@@ -3239,7 +4288,10 @@
           "id",
           "name",
           "created_at",
-          "token"
+          "token",
+          "linux_command",
+          "windows_command",
+          "manual_command"
         ],
         "title": "JudgeWorkerCreatedOut",
         "type": "object"
@@ -3263,13 +4315,61 @@
       "JudgeWorkerOut": {
         "additionalProperties": false,
         "properties": {
+          "backend": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Backend"
+          },
           "created_at": {
             "title": "Created At",
             "type": "string"
           },
+          "desired": {
+            "default": "run",
+            "enum": [
+              "run",
+              "stop",
+              "restart"
+            ],
+            "title": "Desired",
+            "type": "string"
+          },
+          "enabled": {
+            "default": true,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "hostname": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hostname"
+          },
           "id": {
             "title": "Id",
             "type": "integer"
+          },
+          "isolated": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Isolated"
           },
           "last_seen_at": {
             "anyOf": [
@@ -3293,9 +4393,64 @@
             ],
             "title": "Last Seen Ip"
           },
+          "local": {
+            "default": false,
+            "title": "Local",
+            "type": "boolean"
+          },
           "name": {
             "title": "Name",
             "type": "string"
+          },
+          "online": {
+            "default": false,
+            "title": "Online",
+            "type": "boolean"
+          },
+          "platform": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Platform"
+          },
+          "remote_control": {
+            "default": false,
+            "title": "Remote Control",
+            "type": "boolean"
+          },
+          "running": {
+            "items": {
+              "$ref": "#/components/schemas/JudgeWorkerTaskOut"
+            },
+            "title": "Running",
+            "type": "array"
+          },
+          "slots": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slots"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
           }
         },
         "required": [
@@ -3304,6 +4459,154 @@
           "created_at"
         ],
         "title": "JudgeWorkerOut",
+        "type": "object"
+      },
+      "JudgeWorkerPatchIn": {
+        "additionalProperties": false,
+        "description": "改名 / 暂停与恢复。不给的字段不动。",
+        "properties": {
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          }
+        },
+        "title": "JudgeWorkerPatchIn",
+        "type": "object"
+      },
+      "JudgeWorkerTaskOut": {
+        "additionalProperties": false,
+        "description": "评测机手上正在评的一个任务。",
+        "properties": {
+          "contest_id": {
+            "title": "Contest Id",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "player_no": {
+            "title": "Player No",
+            "type": "string"
+          },
+          "problem": {
+            "title": "Problem",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "contest_id",
+          "player_no",
+          "problem"
+        ],
+        "title": "JudgeWorkerTaskOut",
+        "type": "object"
+      },
+      "LocalJudgeOut": {
+        "additionalProperties": false,
+        "description": "本机评测机（服务端以子进程运行的 worker）的状态。",
+        "properties": {
+          "backend": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Backend"
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exit Code"
+          },
+          "pid": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pid"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "running": {
+            "default": false,
+            "title": "Running",
+            "type": "boolean"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "supported": {
+            "title": "Supported",
+            "type": "boolean"
+          },
+          "worker_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Worker Id"
+          }
+        },
+        "required": [
+          "supported"
+        ],
+        "title": "LocalJudgeOut",
         "type": "object"
       },
       "LoginRequest": {
@@ -3505,6 +4808,34 @@
         "title": "Page[AssetOut]",
         "type": "object"
       },
+      "Page_BindingSuggestionOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/BindingSuggestionOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "default": 50,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "title": "Page[BindingSuggestionOut]",
+        "type": "object"
+      },
       "Page_BootstrapKeyOut_": {
         "properties": {
           "items": {
@@ -3531,6 +4862,34 @@
           }
         },
         "title": "Page[BootstrapKeyOut]",
+        "type": "object"
+      },
+      "Page_BoundMachineOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/BoundMachineOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "default": 50,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "title": "Page[BoundMachineOut]",
         "type": "object"
       },
       "Page_CloneAlertOut_": {
@@ -3671,6 +5030,34 @@
           }
         },
         "title": "Page[JudgeRunOut]",
+        "type": "object"
+      },
+      "Page_JudgeTaskOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/JudgeTaskOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "default": 50,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "title": "Page[JudgeTaskOut]",
         "type": "object"
       },
       "Page_JudgeWorkerOut_": {
@@ -3869,6 +5256,34 @@
         "title": "Page[SourceFileOut]",
         "type": "object"
       },
+      "Page_SourceVersionOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SourceVersionOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "default": 50,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "title": "Page[SourceVersionOut]",
+        "type": "object"
+      },
       "PendingMachineOut": {
         "additionalProperties": false,
         "description": "一台注册上来、还没配对到人的机器。",
@@ -3989,7 +5404,7 @@
       },
       "PlayerAssetOut": {
         "additionalProperties": false,
-        "description": "清单里的一行：下发了什么、该落在哪个目录、到没到。\n\n``dest_dir`` 是**任务的**目标目录模板展开后的样子（``DeployTask.dest_dir``），\n不是某个选手磁盘上的绝对路径 —— 服务端不认识选手机器上的家目录，编一个\n绝对路径只会是错的。空串表示\"直接落在下发根目录\"（默认就是桌面）。",
+        "description": "清单里的一行：下发了什么、该落在哪个目录、到没到。\n\n``id`` 是资产 id，考生页的「下载」按它取文件（``GET /player/assets/{id}``）。\n\n``dest_dir`` 是**任务的**目标目录模板展开后的样子（``DeployTask.dest_dir``），\n不是某个选手磁盘上的绝对路径 —— 服务端不认识选手机器上的家目录，编一个\n绝对路径只会是错的。空串表示\"直接落在下发根目录\"（默认就是桌面）。",
         "properties": {
           "dest_dir": {
             "default": "",
@@ -4011,6 +5426,10 @@
             ],
             "title": "Finished At"
           },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
           "sha256": {
             "title": "Sha256",
             "type": "string"
@@ -4026,6 +5445,7 @@
           }
         },
         "required": [
+          "id",
           "filename",
           "status",
           "sha256"
@@ -4104,7 +5524,7 @@
       },
       "PlayerContextOut": {
         "additionalProperties": false,
-        "description": "选手页一次要拿到的全部内容。\n\n刻意做成**一个**接口而不是三个：这一页是给选手看的，\"半张页面\"（场次加载到了、\n清单还在转圈）比多等一会儿更糟；而且\"同一个场次、同一个人\"这个一致性本来\n就只能由服务端保证。\n\n两种查法共用同一个模型：\n\n* ``matched_by=\"machine\"``：请求没带参数，服务端按来源 IP 认出了这台机器。\n  这是主路径 —— 选手在考场机器上打开就是一个带参数的快捷方式，一个字都不用填。\n* ``matched_by=\"explicit\"``：请求带了 ``contest`` + ``player_no``，按这两个值\n  精确查找。自动匹配不上时（教师的笔记本、Agent 没起来的机器、换了 IP）\n  靠它兜底。\n\n回这个字段是让**页面**能说清\"我这份清单是怎么定位到你的\"：自动匹配到别人的\n机器上时，页面上的考号会当场露馅，而不是安静地显示一份不属于这台机器的清单。",
+        "description": "选手页一次要拿到的全部内容。\n\n刻意做成**一个**接口而不是三个：这一页是给选手看的，\"半张页面\"（场次加载到了、\n清单还在转圈）比多等一会儿更糟；而且\"同一个场次、同一个人\"这个一致性本来\n就只能由服务端保证。\n\n两种查法共用同一个模型：\n\n* ``matched_by=\"machine\"``：请求没带参数，服务端按来源 IP 认出了这台机器。\n  这是主路径 —— 选手在考场机器上打开就是一个带参数的快捷方式，一个字都不用填。\n* ``matched_by=\"token\"``：请求带了考生页登录令牌（``X-Player-Token``），\n  那是用「准考证号 + 场次考生页密码」换来的（``POST /player/login``）。\n  自动匹配不上时（教师的笔记本、Agent 没起来的机器、换了 IP）靠它兜底。\n\n回这个字段是让**页面**能说清\"我这份清单是怎么定位到你的\"：自动匹配到别人的\n机器上时，页面上的考号会当场露馅，而不是安静地显示一份不属于这台机器的清单。",
         "properties": {
           "assets": {
             "items": {
@@ -4170,6 +5590,57 @@
           }
         },
         "title": "PlayerImportOut",
+        "type": "object"
+      },
+      "PlayerLoginIn": {
+        "additionalProperties": false,
+        "description": "考生页登录：场次标识 + 准考证号（精确匹配）+ 场次的考生页密码。",
+        "properties": {
+          "contest": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Contest",
+            "type": "string"
+          },
+          "password": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Password",
+            "type": "string"
+          },
+          "player_no": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Player No",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contest",
+          "player_no",
+          "password"
+        ],
+        "title": "PlayerLoginIn",
+        "type": "object"
+      },
+      "PlayerLoginOut": {
+        "additionalProperties": false,
+        "description": "登录成功签出的短期令牌。之后放进 ``X-Player-Token`` 头取上下文与下载。",
+        "properties": {
+          "expires_at": {
+            "title": "Expires At",
+            "type": "integer"
+          },
+          "token": {
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "expires_at"
+        ],
+        "title": "PlayerLoginOut",
         "type": "object"
       },
       "PlayerNoticeOut": {
@@ -4273,6 +5744,90 @@
           "player_no"
         ],
         "title": "PlayerOut",
+        "type": "object"
+      },
+      "PlayerPreviewContestOut": {
+        "additionalProperties": false,
+        "description": "降级预览里的一场：只有场次本身与**面向全场**的公告。\n\n降级预览是谁都能打开的（没认出本机、也没登录），所以这里**绝不**出现任何\n选手的信息或个人下发清单。公告只取\"目标是全场\"的 ``NOTICE.md`` 下发\n（``DeployTask.target_kind == \"all\"`` 且没取消）—— 只发给部分人的公告不算。",
+        "properties": {
+          "ends_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ends At"
+          },
+          "login_enabled": {
+            "default": false,
+            "title": "Login Enabled",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "notice": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlayerNoticeOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          },
+          "starts_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Starts At"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slug",
+          "name",
+          "status"
+        ],
+        "title": "PlayerPreviewContestOut",
+        "type": "object"
+      },
+      "PlayerPreviewOut": {
+        "additionalProperties": false,
+        "description": "考生页的降级预览：当前在考的场次（多场可切换）。",
+        "properties": {
+          "contests": {
+            "items": {
+              "$ref": "#/components/schemas/PlayerPreviewContestOut"
+            },
+            "title": "Contests",
+            "type": "array"
+          },
+          "server_time": {
+            "title": "Server Time",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "server_time"
+        ],
+        "title": "PlayerPreviewOut",
         "type": "object"
       },
       "PlayerProfileOut": {
@@ -5408,6 +6963,193 @@
         "title": "RosterImportOut",
         "type": "object"
       },
+      "RosterMatchApplyIn": {
+        "additionalProperties": false,
+        "description": "教师在预览里确认过的那些对。逐对重新校验，失败的列进 ``failed``。",
+        "properties": {
+          "pairs": {
+            "items": {
+              "$ref": "#/components/schemas/RosterMatchPairIn"
+            },
+            "maxItems": 5000,
+            "title": "Pairs",
+            "type": "array"
+          }
+        },
+        "title": "RosterMatchApplyIn",
+        "type": "object"
+      },
+      "RosterMatchApplyOut": {
+        "additionalProperties": false,
+        "properties": {
+          "bound": {
+            "default": 0,
+            "title": "Bound",
+            "type": "integer"
+          },
+          "failed": {
+            "items": {
+              "$ref": "#/components/schemas/RosterMatchSkipOut"
+            },
+            "title": "Failed",
+            "type": "array"
+          }
+        },
+        "title": "RosterMatchApplyOut",
+        "type": "object"
+      },
+      "RosterMatchPairIn": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_id": {
+            "title": "Agent Id",
+            "type": "integer"
+          },
+          "roster_entry_id": {
+            "title": "Roster Entry Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "agent_id",
+          "roster_entry_id"
+        ],
+        "title": "RosterMatchPairIn",
+        "type": "object"
+      },
+      "RosterMatchPairOut": {
+        "additionalProperties": false,
+        "description": "「按姓名匹配机器」预览里的一对。",
+        "properties": {
+          "agent_id": {
+            "title": "Agent Id",
+            "type": "integer"
+          },
+          "hostname": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hostname"
+          },
+          "machine_id": {
+            "default": "",
+            "title": "Machine Id",
+            "type": "string"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "player_no": {
+            "title": "Player No",
+            "type": "string"
+          },
+          "roster_entry_id": {
+            "title": "Roster Entry Id",
+            "type": "integer"
+          },
+          "source": {
+            "default": "",
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_id",
+          "roster_entry_id",
+          "player_no"
+        ],
+        "title": "RosterMatchPairOut",
+        "type": "object"
+      },
+      "RosterMatchPreviewOut": {
+        "additionalProperties": false,
+        "properties": {
+          "conflicts": {
+            "items": {
+              "$ref": "#/components/schemas/RosterMatchSkipOut"
+            },
+            "title": "Conflicts",
+            "type": "array"
+          },
+          "pairs": {
+            "items": {
+              "$ref": "#/components/schemas/RosterMatchPairOut"
+            },
+            "title": "Pairs",
+            "type": "array"
+          },
+          "roster_id": {
+            "title": "Roster Id",
+            "type": "integer"
+          },
+          "roster_name": {
+            "title": "Roster Name",
+            "type": "string"
+          },
+          "skipped": {
+            "items": {
+              "$ref": "#/components/schemas/RosterMatchSkipOut"
+            },
+            "title": "Skipped",
+            "type": "array"
+          }
+        },
+        "required": [
+          "roster_id",
+          "roster_name"
+        ],
+        "title": "RosterMatchPreviewOut",
+        "type": "object"
+      },
+      "RosterMatchSkipOut": {
+        "additionalProperties": false,
+        "description": "没有配成对的人及原因。",
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "player_no": {
+            "title": "Player No",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "roster_entry_id": {
+            "title": "Roster Entry Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "roster_entry_id",
+          "player_no",
+          "reason"
+        ],
+        "title": "RosterMatchSkipOut",
+        "type": "object"
+      },
       "RosterOut": {
         "additionalProperties": false,
         "properties": {
@@ -5876,6 +7618,82 @@
         "title": "SourceFileOut",
         "type": "object"
       },
+      "SourceVersionOut": {
+        "additionalProperties": false,
+        "description": "代码的一个历史版本（§12.9），连同它的评测结果。",
+        "properties": {
+          "current": {
+            "default": false,
+            "title": "Current",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "in_matrix": {
+            "default": false,
+            "title": "In Matrix",
+            "type": "boolean"
+          },
+          "judge": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VersionJudgeOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "player_id": {
+            "title": "Player Id",
+            "type": "integer"
+          },
+          "problem": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Problem"
+          },
+          "received_at": {
+            "title": "Received At",
+            "type": "string"
+          },
+          "rel_path": {
+            "title": "Rel Path",
+            "type": "string"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          },
+          "size": {
+            "default": 0,
+            "title": "Size",
+            "type": "integer"
+          },
+          "tasks": {
+            "default": 0,
+            "title": "Tasks",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "player_id",
+          "rel_path",
+          "sha256",
+          "received_at"
+        ],
+        "title": "SourceVersionOut",
+        "type": "object"
+      },
       "TickRequest": {
         "additionalProperties": false,
         "properties": {
@@ -6084,6 +7902,17 @@
           "server_time": {
             "title": "Server Time",
             "type": "integer"
+          },
+          "server_uuid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Server Uuid"
           },
           "uninstall_token": {
             "anyOf": [
@@ -6327,9 +8156,88 @@
         "title": "ValidationError",
         "type": "object"
       },
+      "VersionJudgeOut": {
+        "additionalProperties": false,
+        "description": "一个版本最近一次评测的摘要。",
+        "properties": {
+          "applied": {
+            "default": false,
+            "title": "Applied",
+            "type": "boolean"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "max_score": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Score"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "reused": {
+            "default": false,
+            "title": "Reused",
+            "type": "boolean"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "task_id": {
+            "title": "Task Id",
+            "type": "integer"
+          },
+          "trigger": {
+            "title": "Trigger",
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_id",
+          "status",
+          "trigger"
+        ],
+        "title": "VersionJudgeOut",
+        "type": "object"
+      },
       "WhoAmIOut": {
         "additionalProperties": false,
-        "description": "挑战应答（§11）：用发布私钥签 ``syncoj-announce-v1\n<nonce>\n<url>``。\n\n    ``url`` 是**服务端自己认定的**对外地址（§7.3 的三条来源），不是请求里的 Host：\n    机器切换到的是签名里的这个地址。\n    ",
+        "description": "挑战应答（§11）：用发布私钥签 ``syncoj-announce-v1\n<nonce>\n<url>``（v2 见下）。\n\n    ``url`` 是**服务端自己认定的**对外地址（§7.3 的三条来源），不是请求里的 Host：\n    机器切换到的是签名里的这个地址。\n    ",
         "properties": {
           "key_id": {
             "default": "",
@@ -6339,6 +8247,17 @@
           "nonce": {
             "title": "Nonce",
             "type": "string"
+          },
+          "server_uuid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Server Uuid"
           },
           "sig": {
             "title": "Sig",
@@ -6362,7 +8281,7 @@
   "info": {
     "description": "通用编程考试与竞赛模拟的在线同步评测系统",
     "title": "SyncOJ",
-    "version": "0.2.0"
+    "version": "0.3.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -6424,7 +8343,7 @@
     },
     "/api/v1/admin/agents/{agent_id}/bind": {
       "delete": {
-        "description": "解除机器与人的绑定（不是作废凭据）。\n\n解绑之后机器回到\"待配对\"，并在下一次心跳里重新拿到一个配对码 ——\n这样它能被绑给别人，而不用重新注册（重新注册要读 root 只读的密钥，\n在考场上等于要重启）。\n\n要彻底让一台机器下线请用「作废」。",
+        "description": "解除机器与人的绑定（不是作废凭据）。\n\n给了 ``roster_id`` 就只解除那份名单里的绑定，其他名单不动；不给则全部解除。\n一条都不剩时机器回到\"待配对\"，并在下一次心跳里重新拿到一个配对码 ——\n这样它能被绑给别人，而不用重新注册（重新注册要读 root 只读的密钥，\n在考场上等于要重启）。\n\n要彻底让一台机器下线请用「作废」。",
         "operationId": "unbind_agent_api_v1_admin_agents__agent_id__bind_delete",
         "parameters": [
           {
@@ -6434,6 +8353,24 @@
             "schema": {
               "title": "Agent Id",
               "type": "integer"
+            }
+          },
+          {
+            "description": "只解除这份名单里的绑定；不传 = 全部名单",
+            "in": "query",
+            "name": "roster_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "只解除这份名单里的绑定；不传 = 全部名单",
+              "title": "Roster Id"
             }
           }
         ],
@@ -6460,6 +8397,76 @@
           }
         },
         "summary": "Unbind Agent",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/agents/{agent_id}/binding-suggestions": {
+      "get": {
+        "description": "这台机器在其他名单里的同名建议：姓名（去首尾空白、全半角统一）完全相等，\n同名多人时用座位号 / 考号收窄，仍不唯一、或对方已有机器就不建议。",
+        "operationId": "binding_suggestions_api_v1_admin_agents__agent_id__binding_suggestions_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "每页条数",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "每页条数",
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "起始位置",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "起始位置",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_BindingSuggestionOut_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Binding Suggestions",
         "tags": [
           "admin"
         ]
@@ -6606,7 +8613,7 @@
     },
     "/api/v1/admin/agents/{agent_id}/rebind": {
       "post": {
-        "description": "把一台机器改派给名单里的另一个人（换人）。\n\n这是\"换座位\"最自然的做法：机器上的凭据不用动、不用重启、不用重新配对 ——\n服务端改一下绑定，Agent 下一轮 tick 就拿到新的准考证号、自己更新扫描目录。\n\n**为什么不做成\"作废旧凭据 + 重新注册\"**：那条路要机器重新走一遍注册，\n而走统一密钥的机器读不到 root 只读的密钥，只能等到下次开机由注册单元处理。\n考场上\"换个人\"要等到重启，这是不能接受的。\n\n目标条目**必须还没有机器**：两台机器绑同一个人，代码会往同一个目录里写，\n而且完全静默（成绩矩阵只是看起来\"这个人交了两遍\"）。",
+        "description": "把一台机器改派给名单里的另一个人（换人）。\n\n这是\"换座位\"最自然的做法：机器上的凭据不用动、不用重启、不用重新配对 ——\n服务端改一下绑定，Agent 下一轮 tick 就拿到新的准考证号、自己更新扫描目录。\n\n**为什么不做成\"作废旧凭据 + 重新注册\"**：那条路要机器重新走一遍注册，\n而走统一密钥的机器读不到 root 只读的密钥，只能等到下次开机由注册单元处理。\n考场上\"换个人\"要等到重启，这是不能接受的。\n\n目标条目**必须还没有机器**：两台机器绑同一个人，代码会往同一个目录里写，\n而且完全静默（成绩矩阵只是看起来\"这个人交了两遍\"）。\n\n一台机器可以绑多份名单：改派只替换**目标所在那份名单**里的绑定（那份名单里\n原来没绑就等于新绑一条），其他名单不动。同名建议见\n``GET /agents/{id}/binding-suggestions``。",
         "operationId": "rebind_agent_api_v1_admin_agents__agent_id__rebind_post",
         "parameters": [
           {
@@ -6998,6 +9005,24 @@
         "operationId": "list_contests_api_v1_admin_contests_get",
         "parameters": [
           {
+            "description": "true 只列已归档的；false 只列未归档的；不传列全部",
+            "in": "query",
+            "name": "archived",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "true 只列已归档的；false 只列未归档的；不传列全部",
+              "title": "Archived"
+            }
+          },
+          {
             "description": "每页条数",
             "in": "query",
             "name": "limit",
@@ -7264,6 +9289,49 @@
           }
         },
         "summary": "List Agents",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/contests/{contest_id}/archive": {
+      "post": {
+        "description": "归档场次。已归档时是空操作。",
+        "operationId": "archive_contest_api_v1_admin_contests__contest_id__archive_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContestOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Archive Contest",
         "tags": [
           "admin"
         ]
@@ -8408,6 +10476,59 @@
         ]
       }
     },
+    "/api/v1/admin/contests/{contest_id}/judge/auto": {
+      "put": {
+        "description": "自动入队（§12.9）：``on_change`` = 收到某题的新版本就排评测，同一 (选手, 题目)\n在 ``auto_judge_delay`` 秒内连续改动只评最后一版。场次进行中也排。",
+        "operationId": "set_auto_judge_api_v1_admin_contests__contest_id__judge_auto_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JudgeAutoIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JudgeAutoOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Auto Judge",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/api/v1/admin/contests/{contest_id}/judge/builtin": {
       "get": {
         "description": "自带评测的进度：排队 / 在评 / 完成 / 失败，以及失败的原因。",
@@ -8451,7 +10572,7 @@
         ]
       },
       "post": {
-        "description": "排自带评测：指定的题（或全部用自带评测的题）× 指定的选手（或全部选手）。\n\n场次还在进行时拒绝（``contest_in_progress``）：那时评的是考到一半的代码；教师确认后带\n``force`` 再来。已有的任务（不管什么状态）会被替换 —— 重测就是重新排。",
+        "description": "排自带评测：指定的题（或全部用自带评测的题）× 指定的选手（或全部选手），评最新版。\n\n场次还在进行时拒绝（``contest_in_progress``）：那时评的是考到一半的代码；教师确认后带\n``force`` 再来。同一对还在排队的最新版任务会被替换；跑完的留作历史（§12.9）。\n\n带 ``version_id`` = 重测那一个历史版本：结果只进历史与 timeline，不受场次进行中的限制。",
         "operationId": "queue_builtin_judge_api_v1_admin_contests__contest_id__judge_builtin_post",
         "parameters": [
           {
@@ -8855,6 +10976,347 @@
           }
         },
         "summary": "Set Judge Score",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/contests/{contest_id}/judge/tasks": {
+      "get": {
+        "description": "评测任务（新的在前）。任务即历史：每一次评测（含复用的）都在这里。",
+        "operationId": "list_judge_tasks_api_v1_admin_contests__contest_id__judge_tasks_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "player_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Player Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "problem",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Problem"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "trigger",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Trigger"
+            }
+          },
+          {
+            "description": "每页条数",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "每页条数",
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "起始位置",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "起始位置",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_JudgeTaskOut_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Judge Tasks",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/contests/{contest_id}/judge/tasks/{task_id}": {
+      "get": {
+        "description": "一个评测任务及其结果的测试点明细（历史版本的结果从这里看）。",
+        "operationId": "get_judge_task_api_v1_admin_contests__contest_id__judge_tasks__task_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JudgeTaskDetailOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Judge Task",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/contests/{contest_id}/judge/tasks/{task_id}/adopt": {
+      "post": {
+        "description": "采用此版本成绩：把这个任务的结果写成当前 ``result.json`` 并立即重扫，成绩矩阵这一格\n换成它。手工录入的格子不动（409 ``manual_score``，先清除手工成绩）。",
+        "operationId": "adopt_judge_task_api_v1_admin_contests__contest_id__judge_tasks__task_id__adopt_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JudgeTaskOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Adopt Judge Task",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/contests/{contest_id}/judge/versions": {
+      "get": {
+        "description": "一位选手的代码版本历史（旧的在前），每版带最近一次评测结果 —— 分数 timeline 的数据。\n\n归题按**当前**题目模式现算（改了题目标识或模式也对得上）。一个人的版本数有界，在\nPython 里切页。",
+        "operationId": "list_source_versions_api_v1_admin_contests__contest_id__judge_versions_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "选手",
+            "in": "query",
+            "name": "player_id",
+            "required": true,
+            "schema": {
+              "description": "选手",
+              "title": "Player Id",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "只看归到这道题的版本",
+            "in": "query",
+            "name": "problem",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "只看归到这道题的版本",
+              "title": "Problem"
+            }
+          },
+          {
+            "description": "每页条数",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "每页条数",
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "起始位置",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "起始位置",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_SourceVersionOut_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Source Versions",
         "tags": [
           "admin"
         ]
@@ -9449,6 +11911,49 @@
         ]
       }
     },
+    "/api/v1/admin/contests/{contest_id}/unarchive": {
+      "post": {
+        "description": "取消归档：回到「已结束」。不是已归档时是空操作。",
+        "operationId": "unarchive_contest_api_v1_admin_contests__contest_id__unarchive_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContestOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Unarchive Contest",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/api/v1/admin/deploys/{task_id}": {
       "delete": {
         "description": "删掉一条下发记录。\n\n**不会撤回已经落地的文件** —— 客户端那边的文件不归服务端管。\n它做的是\"把这条任务从列表里去掉\"，包括还没完成的那些（等于放弃它）：\n删掉之后 Agent 下一轮 tick 不会再领到这个作业。\n\n还没完成的作业被删时要提醒一句：教师很可能以为\"删除 = 取消下发\"，\n而实际上那台机器上的半份文件会留在硬盘上（``.part`` 分片）。\n真要停止下发应该用「取消」，它会保留记录、只是不再派发。",
@@ -9909,8 +12414,75 @@
         ]
       }
     },
+    "/api/v1/admin/judge-local": {
+      "get": {
+        "description": "本机评测机（服务端子进程）的状态；非 Linux 服务端 ``supported`` = false。",
+        "operationId": "local_judge_status_api_v1_admin_judge_local_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocalJudgeOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Local Judge Status",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/judge-local/start": {
+      "post": {
+        "description": "启动本机评测机：签一枚新令牌（记为本机评测机那一行），以子进程运行 worker。已在运行则不动。",
+        "operationId": "local_judge_start_api_v1_admin_judge_local_start_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocalJudgeOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Local Judge Start",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/judge-local/stop": {
+      "post": {
+        "description": "停止本机评测机：评完手上的任务后退出。",
+        "operationId": "local_judge_stop_api_v1_admin_judge_local_stop_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocalJudgeOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Local Judge Stop",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/api/v1/admin/judge-workers": {
       "get": {
+        "description": "评测机与它们自报的状态、在线与否、手上正在评的任务（§12.10）。",
         "operationId": "list_judge_workers_api_v1_admin_judge_workers_get",
         "parameters": [
           {
@@ -9969,7 +12541,7 @@
         ]
       },
       "post": {
-        "description": "签发一台评测机的令牌。明文只在这一次返回，库里只存哈希。",
+        "description": "签发一台评测机的令牌。明文只在这一次返回，库里只存哈希；顺带给出一行安装命令。",
         "operationId": "create_judge_worker_api_v1_admin_judge_workers_post",
         "requestBody": {
           "content": {
@@ -10011,7 +12583,7 @@
     },
     "/api/v1/admin/judge-workers/{worker_id}": {
       "delete": {
-        "description": "吊销一台评测机（删行）。它手上没交的任务租约到期后回到队列。",
+        "description": "吊销一台评测机（删行）。它手上没交的任务立刻退回队列；本机评测机一并停掉。",
         "operationId": "delete_judge_worker_api_v1_admin_judge_workers__worker_id__delete",
         "parameters": [
           {
@@ -10060,6 +12632,143 @@
           }
         },
         "summary": "Delete Judge Worker",
+        "tags": [
+          "admin"
+        ]
+      },
+      "patch": {
+        "description": "改名；暂停（``enabled`` = false：领不到新任务，手上的照常评完）/ 恢复。",
+        "operationId": "update_judge_worker_api_v1_admin_judge_workers__worker_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JudgeWorkerPatchIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JudgeWorkerOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Judge Worker",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/judge-workers/{worker_id}/restart": {
+      "post": {
+        "description": "重启：评完手上的任务后以同样的参数重新启动自己（换上磁盘上的新程序）。",
+        "operationId": "restart_judge_worker_api_v1_admin_judge_workers__worker_id__restart_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JudgeWorkerOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Restart Judge Worker",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/judge-workers/{worker_id}/stop": {
+      "post": {
+        "description": "停止：评测机下一次 poll 时取走命令，评完手上的任务后退出（systemd / 计划任务不会再拉起它）。",
+        "operationId": "stop_judge_worker_api_v1_admin_judge_workers__worker_id__stop_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JudgeWorkerOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stop Judge Worker",
         "tags": [
           "admin"
         ]
@@ -10206,6 +12915,67 @@
           }
         },
         "summary": "Bind Machine By Code",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/machines/bound": {
+      "get": {
+        "description": "已配对的机器（至少绑了一份名单），每台带上全部绑定。按主机名排序。",
+        "operationId": "list_bound_machines_api_v1_admin_machines_bound_get",
+        "parameters": [
+          {
+            "description": "每页条数",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "每页条数",
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "起始位置",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "起始位置",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_BoundMachineOut_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Bound Machines",
         "tags": [
           "admin"
         ]
@@ -11728,6 +14498,102 @@
         ]
       }
     },
+    "/api/v1/admin/rosters/{roster_id}/match-machines/apply": {
+      "post": {
+        "description": "应用预览里确认过的对。每一对都按配对规则重新校验（一机在一份名单里一人、\n一人一机），不成的列进 ``failed`` 并说明原因，其余照常绑定。",
+        "operationId": "apply_roster_match_api_v1_admin_rosters__roster_id__match_machines_apply_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "roster_id",
+            "required": true,
+            "schema": {
+              "title": "Roster Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RosterMatchApplyIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RosterMatchApplyOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Apply Roster Match",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/rosters/{roster_id}/match-machines/preview": {
+      "post": {
+        "description": "「按姓名匹配机器」预览：这份名单里每个未绑定的人，若恰好有一台机器在别的名单里\n绑着同名的人、且那台机器在这份名单里还没绑，就列成一对。不写库。",
+        "operationId": "preview_roster_match_api_v1_admin_rosters__roster_id__match_machines_preview_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "roster_id",
+            "required": true,
+            "schema": {
+              "title": "Roster Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RosterMatchPreviewOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Preview Roster Match",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/api/v1/admin/settings/runtime": {
       "get": {
         "description": "当前生效的运行参数。\n\n这三项决定\"机器多久心跳一次\"与\"多久没心跳算离线\"，都是**整间机房**的节奏，\n所以界面要能一眼看到当前值 —— 否则教师只能靠列表上的刷新间隔去猜。",
@@ -12186,6 +15052,16 @@
               "title": "Nonce",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "v",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "title": "V",
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -12218,7 +15094,7 @@
     },
     "/api/v1/judge/lease": {
       "post": {
-        "description": "领下一个任务；没有就 204。租约 15 分钟，过期没交结果的任务自动回到队列。",
+        "description": "领下一个任务；没有（或这台评测机被暂停）就 204。租约 15 分钟，过期没交结果的任务自动回到队列。",
         "operationId": "lease_api_v1_judge_lease_post",
         "responses": {
           "200": {
@@ -12236,6 +15112,48 @@
           }
         },
         "summary": "Lease",
+        "tags": [
+          "judge"
+        ]
+      }
+    },
+    "/api/v1/judge/poll": {
+      "post": {
+        "description": "自报状态；``want`` = 1 时顺带领一个任务；响应带管理端下的命令（§12.10）。\n\n有命令（``stop`` / ``restart``）时不发任务：评测机要做的是评完手上的然后退出。\n暂停时也不发任务，但命令照样送达。",
+        "operationId": "poll_api_v1_judge_poll_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JudgePollIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JudgePollOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Poll",
         "tags": [
           "judge"
         ]
@@ -12419,47 +15337,86 @@
         ]
       }
     },
-    "/api/v1/player/context": {
+    "/api/v1/player/assets/{asset_id}": {
       "get": {
-        "description": "取选手页要显示的全部内容。**不鉴权。**\n\n不传参数 = 按来源 IP 自动匹配本机；两个参数都传 = 显式查找。\n只传一个直接 400：单独一个 ``contest`` 或单独一个 ``player_no`` 都定位不到人，\n而\"猜另一半\"正是这一页最不该做的事。",
-        "operationId": "player_context_api_v1_player_context_get",
+        "description": "网页下载一个下发给本人的文件。\n\n身份二选一：登录令牌，或来源 IP 自动匹配到本机。之后**必须**确实有一条\n\"这个资产 → 这个选手\"的下发目标，而且任务没取消、目标也没被取消 ——\n与 Agent 下载（``api/agent.py::download_asset``）同一个判据。\n\n* 认不出你是谁 → 403\n* 资产不存在 / 不在你这一场 / 这一场里根本没下发过 → 404\n* 下发过、但不是给你（或已取消）→ 403\n* 内容已被清理 → 410",
+        "operationId": "player_download_asset_api_v1_player_assets__asset_id__get",
         "parameters": [
           {
-            "description": "场次标识（slug），自动匹配不上时手填",
-            "in": "query",
-            "name": "contest",
-            "required": false,
+            "in": "path",
+            "name": "asset_id",
+            "required": true,
             "schema": {
-              "anyOf": [
-                {
-                  "maxLength": 64,
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "场次标识（slug），自动匹配不上时手填",
-              "title": "Contest"
+              "title": "Asset Id",
+              "type": "integer"
             }
           },
           {
-            "description": "考号，自动匹配不上时手填",
-            "in": "query",
-            "name": "player_no",
+            "in": "header",
+            "name": "x-player-token",
             "required": false,
             "schema": {
               "anyOf": [
                 {
-                  "maxLength": 64,
+                  "maxLength": 256,
                   "type": "string"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "description": "考号，自动匹配不上时手填",
-              "title": "Player No"
+              "title": "X-Player-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Player Download Asset",
+        "tags": [
+          "player"
+        ]
+      }
+    },
+    "/api/v1/player/context": {
+      "get": {
+        "description": "取考生页上\"这个选手\"的全部内容。**不需要管理端凭据。**\n\n带 ``X-Player-Token`` = 已登录的考生；不带 = 按来源 IP 自动匹配本机。\n自动匹配失败时回 403/404/409 人话，页面据此退到降级预览（``GET /preview``）。",
+        "operationId": "player_context_api_v1_player_context_get",
+        "parameters": [
+          {
+            "description": "考生页登录令牌（POST /player/login 签出）。不带 = 按来源 IP 自动匹配本机",
+            "in": "header",
+            "name": "x-player-token",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "考生页登录令牌（POST /player/login 签出）。不带 = 按来源 IP 自动匹配本机",
+              "title": "X-Player-Token"
             }
           }
         ],
@@ -12491,6 +15448,70 @@
         ]
       }
     },
+    "/api/v1/player/login": {
+      "post": {
+        "description": "准考证号 + 场次考生页密码 → 短期令牌。\n\n* 考号**精确匹配**（只去掉首尾空白：从准考证上抄过来多一个空格是常事）\n* 考号不存在与密码错**统一 403** ``player_login_failed``；两种情况都完整地算一遍\n  scrypt，响应时间上也分不出来\n* 场次没设密码 → 409 ``player_login_disabled``：这条路关着，页面只剩降级预览\n* 按来源 IP 限速（``player_lookup_per_ip_per_minute``），先限速再算 scrypt",
+        "operationId": "player_login_api_v1_player_login_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlayerLoginIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlayerLoginOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Player Login",
+        "tags": [
+          "player"
+        ]
+      }
+    },
+    "/api/v1/player/preview": {
+      "get": {
+        "description": "降级预览：当前在考的场次与面向全场的公告。**谁都能看，所以不含任何个人信息。**\n\n\"在考\" = 状态是 ``running`` / ``frozen``（不是这两个就不算，以后加的状态也一样），\n并且还没到结束时间。**还没开考的也列出来**：考生提前进场时要看到\"距开考\"\n倒计时和全场公告，而那份公告本来就已经下发到了每台机器上。",
+        "operationId": "player_preview_api_v1_player_preview_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlayerPreviewOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Player Preview",
+        "tags": [
+          "player"
+        ]
+      }
+    },
     "/healthz": {
       "get": {
         "operationId": "healthz_healthz_get",
@@ -12511,6 +15532,51 @@
         "summary": "Healthz",
         "tags": [
           "meta"
+        ]
+      }
+    },
+    "/judge/install.ps1": {
+      "get": {
+        "description": "Windows 一键安装（PowerShell，UTF-8 BOM）：下载到文件后 ``& $p -Token '<令牌>'``。",
+        "operationId": "install_ps1_judge_install_ps1_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Install Ps1",
+        "tags": [
+          "judge"
+        ]
+      }
+    },
+    "/judge/install.sh": {
+      "get": {
+        "description": "Linux 一键安装：``curl -fsSL <地址>/judge/install.sh | sudo bash -s -- <令牌>``。",
+        "operationId": "install_sh_judge_install_sh_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Install Sh",
+        "tags": [
+          "judge"
+        ]
+      }
+    },
+    "/judge/worker.pyz": {
+      "get": {
+        "description": "评测机程序（zipapp）：``python3 syncoj-judge.pyz --server … --token-file …``。",
+        "operationId": "worker_pyz_judge_worker_pyz_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Worker Pyz",
+        "tags": [
+          "judge"
         ]
       }
     }

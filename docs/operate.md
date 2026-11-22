@@ -15,8 +15,27 @@ python -m venv .venv && .venv/bin/pip install -e "server[dev]"
 | `--public-url` | 空 | 对考试机的地址，同 `SYNCOJ_PUBLIC_URL` |
 | `--log-level` | `info` | `critical` / `error` / `warning` / `info` / `debug` / `trace` |
 | `--quiet-access` | 关 | 关闭访问日志 |
+| `--rebuild-web` | 关 | 前端构建过期时先重新构建再启动（需要 npm） |
 
 全局参数：`--data-root`（默认 `runtime/server`）、`--verbose`。`syncoj-server info` 打印配置与统计。
+
+### 前端构建是否过期
+
+`serve` 启动时比对 `web/dist/build-info.json`（构建时写入的版本号与前端源码指纹）与当前代码：
+
+| 情况 | 启动日志 |
+|---|---|
+| 一致 | 无提示 |
+| 版本号不同、`web/` 源码改过、或产物里没有 `build-info.json` | `[!] 前端构建已过期（原因），管理界面仍是旧版本。` 并给出命令 |
+
+重新构建（需要 Node.js）：
+
+```bash
+.venv/bin/syncoj-server build-web            # 没有 node_modules 或 package-lock.json 更新过时先 npm ci，再 npm run build
+.venv/bin/syncoj-server build-web --install  # 强制先 npm ci
+```
+
+或启动时加 `--rebuild-web`：过期则先构建再启动，构建失败不启动。发布包自带构建好的前端，版本一致时无提示。
 
 | 环境变量 | 默认 | 说明 |
 |---|---|---|
@@ -32,6 +51,7 @@ python -m venv .venv && .venv/bin/pip install -e "server[dev]"
 | `SYNCOJ_ANNOUNCE` | `true` | 服务端主动通告 |
 | `SYNCOJ_ANNOUNCE_PORT` | `45872` | 通告 UDP 端口 |
 | `SYNCOJ_DEFAULT_FILE_PATTERN` | 内置 | 题目未配代码路径时的默认 glob |
+| `SYNCOJ_JUDGE_LOCAL_RUN_AS` | `nobody` | 本机评测机用 rlimit 后端且服务端以 root 运行时，选手程序的运行账号 |
 
 ⚠️ 改 `SYNCOJ_DISCOVERY_PORT` / `SYNCOJ_ANNOUNCE_PORT` 需整间机房 Agent 同步修改。
 
@@ -88,7 +108,7 @@ syncoj-server genkey --out /etc/syncoj/release-key.pem   # 公钥默认同目录
 |---|---|---|
 | 包内嵌地址 | `build_bundle.py --server-url` 写入包内 `server.json`；界面「发布当前版本」自动写入 | — |
 | 服务端主动通告 | 服务端 UDP `45872` 广播：启动后 10 分钟内每 30 秒一次，之后每 5 分钟一次；「机器配对」→「召集机器」或顶栏「快捷操作」→「召集机器」立即发一次 | Agent 到通告地址做挑战应答（`/api/v1/agent/whoami`），验签后切换 |
-| UDP 发现（兜底） | Agent 向 UDP `45871` 广播探测 | 应答用发布私钥签名，Agent 用包内公钥验签；无公钥不发现 |
+| UDP 发现（兜底） | Agent 连不上时每 3 轮（约 90 秒）向 UDP `45871` 广播一次，直到连上 | 应答用发布私钥签名，Agent 用包内公钥验签；无公钥不发现；记着服务端实例 ID 时只认同一台 |
 
 → 见 [`design/07-ops-and-install.md §7.3`](design/07-ops-and-install.md)、[`design/09-server-announce.md`](design/09-server-announce.md)、[ADR-0015](decisions/ADR-0015-server-announce.md)。
 
@@ -191,17 +211,32 @@ python scripts/smoke_systemd245.py --keep   # 失败后保留容器与临时目�
 
 1. 「场次管理」→ 该行「题目」→ 登记题目（已登记则跳过）。
 2. 「评测」→「题目」卡片 → 该题「设置」：评测方式选「自带评测」，填时限（ms）/ 内存（MB）/ 输入输出 / 编译参数，上传数据包。预期：数据包上传时即校验，结构不对直接报错。
-3. 「评测」→「评测机」卡片 →「添加评测机」→ 输入名称 →「签发令牌」，复制令牌（只显示一次）写入文件。
-4. 评测机上以专用账号运行：
+3. 「评测」→「评测机」卡片 →「添加评测机」→ 输入名称 →「签发令牌」。预期：对话框给出令牌（只显示一次）与 Linux / Windows 两条安装命令，各带「复制」。
+4. 在评测机上运行对应命令：
 
    ```bash
-   pip install -e server
-   syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
+   # Linux：有 isolate 用 isolate；没有会询问是否用 rlimit（加 --yes 不询问）
+   curl -fsSL http://10.0.0.5:8000/judge/install.sh | sudo bash -s -- <令牌>
    ```
 
-   预期：「评测机」卡片中该评测机状态为在线。
+   ```powershell
+   # Windows：「以管理员身份运行」的 PowerShell；需先装 Python 3.8+ 与 MinGW-w64 g++（加进系统 PATH）
+   $p = Join-Path $env:TEMP syncoj-judge-install.ps1; iwr -UseBasicParsing http://10.0.0.5:8000/judge/install.ps1 -OutFile $p; & $p -Token '<令牌>'
+   ```
+
+   预期：脚本最后打印「评测机已启动」；「评测机」卡片中该评测机为在线，显示后端、主机、版本。已装好 `syncoj-judge` 时也可用对话框里的「手动运行」命令。
+
+   只有服务端一台 Linux 机器时：卡片头「本机评测机」→「启动」。预期：表格多出「本机评测机」一行并在线；「停止」后它评完手上的任务退出。非 Linux 服务端上该按钮禁用，标「仅 Linux」。
 5. 「评测」→「任务」卡片 → 选「全部自带评测题目」或某题 →「评测 / 重测」（或顶栏「快捷操作」→「评测全部题目」）。场次未结束时服务端回 409 `contest_in_progress`，界面弹「仍要评测？」，确认后带 `force` 排队。预期：进度条显示排队 / 评测中 / 完成 / 失败计数；失败行列出考号、题目、失败原因与「重测本题」。
 6. 「成绩」：矩阵出现分数；点格子看测试点明细。
+
+自动评测与版本（§12.9）：
+
+1. 「评测」→「任务」卡片 → 打开「收到新版本自动评测」，按需改「合并 N 秒内的连续改动」（默认 60）。预期：选手保存某题代码后，进度显示「等待改动停止」，到点后评测；改回评过的代码时直接复用结果，评测机不动。
+2. 只评一个人 / 一道题：「任务」卡片选题目与选手 →「评测 / 重测」；要真跑不复用，勾「不复用已有结果」。
+3. 看分数变化：「成绩」→ 选手列「版本与分数」图标（全部题目小图），或格子明细 →「版本」；「评测」→「评测记录」行「版本」。点图上的点或表格行选中版本。
+4. 重测过去的版本：版本表该行「重测」。预期：结果出现在 timeline 与「评测记录」（触发 = 历史版本），成绩矩阵不变。
+5. 改用某个版本的成绩：该行「采用」→ 确认。预期：矩阵该格换成那一版的分数，版本表标「计入成绩」。手工录入的格子先在「成绩」清除再采用。
 
 | `syncoj-judge` 参数 | 默认 | 说明 |
 |---|---|---|
@@ -213,9 +248,19 @@ python scripts/smoke_systemd245.py --keep   # 失败后保留容器与临时目�
 | `--isolate` | `isolate` | isolate 可执行文件路径 |
 | `--cgroups` | 关 | isolate 用 cgroup 统计内存 |
 | `--cache-dir` | `~/.cache/syncoj-judge` | 数据包缓存目录 |
-| `--poll` | `5` 秒 | 无任务时轮询间隔 |
+| `--box-dir` | 系统临时目录 | `rlimit` / `winjob` 的工作目录所在 |
+| `--slots` | `1` | 同时评几个任务（大于 1 只能用 isolate） |
+| `--poll` | `5` 秒 | 轮询间隔（评测中也按它报状态） |
+| `--log-file` | stderr | 日志文件 |
 | `--once` | 关 | 评一个任务后退出 |
 | `--verbose` / `-v` | 关 | 调试日志 |
+
+管理评测机（「评测机」卡片该行）：
+
+1. 「暂停」：不再领新任务，手上的评完照常交；「恢复」重新领。
+2. 「停止」/「重启」：下一次轮询（默认 5 秒内）送达，评完手上的任务后退出 / 以同样参数重启。离线或旧版本评测机上不可用，到那台机器上 `systemctl stop|restart syncoj-judge`（Windows：计划任务「SyncOJ Judge」）。
+3. 「改名」。
+4. 「吊销」→ 输入名称确认。预期：令牌立即失效，它正在评的任务立即回到队列。
 
 ⚠️ 考试进行中评测的是未完成的代码。数据包格式、结果格式、接口 → 见 [`reference/judge-result.md`](reference/judge-result.md) 第 6 节、[`design/10-builtin-judge.md`](design/10-builtin-judge.md)。
 
@@ -257,7 +302,8 @@ syncoj-server db reset --yes [--keep-admin]
 ### 第一步：服务端
 
 1. 「选手状态」或「机器配对」：看「最后心跳」列。离线阈值默认 **90 秒**，在「机器配对」→「运行参数」修改。
-2. 「审计日志」筛 `agent_`：`agent_revoke`（凭据作废）、`agent_unbind`（解除配对）、`agent_uninstall`（请求卸载）；`contest_auto_closed`（场次到点自动结束）。
+2. 「审计日志」筛 `agent_`：`agent_revoke`（凭据作废）、`agent_unbind`（解除配对）、`agent_uninstall`（请求卸载）；`contest_auto_closed`（场次到点自动结束）、`contest_archive`（场次已归档：机器不再进入）。
+   机器回报「这台机器在场次所用的名单里没有绑定」：场次默认名单与机器绑定的名单不同 →「名单库」对场次默认名单「按姓名匹配机器」（[`quickstart.md`](quickstart.md)「一台机器绑多份名单」）。
 3. 服务端日志搜机器名或 `machine_id`：
 
 | 响应 | 含义 | 心跳 |
@@ -289,7 +335,8 @@ df -h /; systemctl show syncoj-agent -p NRestarts -p ExecMainStatus -p User
 | 服务在跑、日志安静、服务端无 tick | 无凭据，等待注册 | `systemctl status syncoj-agent-enroll` |
 | `activating (auto-restart)` | 起不来或起来就崩 | `journalctl -u syncoj-agent -n 50` |
 | 机器时间偏差大 | 配对码 / 令牌时效判断错误 | 校时（开 NTP） |
-| 服务端换了 IP | 机器仍连旧地址 | 「机器配对」→「召集机器」（或顶栏「快捷操作」→「召集机器」） |
+| 服务端换了 IP | 机器仍连旧地址 | 「机器配对」→「召集机器」（或顶栏「快捷操作」→「召集机器」）；不召集也会每约 90 秒自己找一次 |
+| `agent.log` 出现 `实例 ID 与本机记住的不同` / `不认得这台机器` | 局域网里应答的不是原来那台服务端（数据目录重建过、或隔壁考场），或原来那台已删除这台机器 | 确认要连新服务端：改 `agent.ini` 的地址（连上后实例 ID 自动更新）或重装；实例 ID 在 `<data_root>/server-id`，迁移服务端时连数据目录一起搬 |
 
 前台跑一轮：
 

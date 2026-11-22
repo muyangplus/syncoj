@@ -64,6 +64,7 @@ from ..security import hash_token, new_token
 from ..storage import BlobTooLarge, HashMismatch, materialize
 from ..services import (
     announce,
+    builtin_judge,
     diagnostics,
     discovery,
     enrollment,
@@ -343,7 +344,7 @@ def _enroll_response(
     这里的每一档都对应客户端一个不同的动作，混在一起就会出现
     "未配对的机器去扫代码"或者"配好的机器还在显示配对码"这类怪事。
     """
-    paired = agent.roster_entry_id is not None
+    paired = agent.is_paired
     payload = dict(
         token=raw_token,
         agent_id=agent.id,
@@ -544,6 +545,7 @@ def tick(
         # 没必要 —— 那会多一次限速、多一条审计，还多一个可能失败的网络往返。
         player_no=identity.player_no,
         contest_slug=identity.contest_slug,
+        server_uuid=ctx.server_uuid or None,
     )
 
 
@@ -660,6 +662,7 @@ def _tick_pending(
         uninstall_token=uninstall_token,
         diagnostics_request=diagnostics_request,
         config=_agent_config(ctx, live),
+        server_uuid=ctx.server_uuid or None,
     )
 
 
@@ -982,6 +985,7 @@ _SAFE_HOST_RE = re.compile(r"^[A-Za-z0-9.\-]+(?::[0-9]{1,5})?$|^\[[0-9A-Fa-f:.]+
 def whoami(
     request: Request,
     nonce: str = Query(..., min_length=32, max_length=32, pattern="^[0-9a-f]{32}$"),
+    v: int = Query(1),
     ctx: AppContext = Depends(get_ctx),
 ) -> WhoAmIOut:
     """挑战应答（§11）：证明"此刻在这个地址上的，握着发布私钥"。
@@ -1003,12 +1007,20 @@ def whoami(
     url = discovery.describe_advertised_url(ctx, None if client_ip == "unknown" else client_ip)
     if url is None:
         raise ApiError(503, "no_public_url", "这台服务端还不知道自己的对外地址")
-    signature = ctx.signing_key.sign(announce.challenge_text(nonce, url).encode("utf-8"))
+    # v=2（新 Agent）且有实例 ID：签名连 server_uuid 一起签，机器只切到它记住的那台。
+    # 老 Agent 不带 v，仍拿 v1 签名
+    server_uuid = ctx.server_uuid if v >= 2 else ""
+    if server_uuid:
+        text = announce.challenge_text_v2(nonce, url, server_uuid)
+    else:
+        text = announce.challenge_text(nonce, url)
+    signature = ctx.signing_key.sign(text.encode("utf-8"))
     return WhoAmIOut(
         url=url,
         nonce=nonce,
         key_id=getattr(ctx.signing_key, "key_id", "") or "",
         sig=base64.urlsafe_b64encode(signature).decode("ascii").rstrip("="),
+        server_uuid=server_uuid or None,
     )
 
 
@@ -1179,6 +1191,14 @@ def upload_file(
         row.last_seen_at = now
         session.flush()
         revision = row.revision
+
+        # 版本历史（§12.9）：每份新内容记一条；场次开了自动入队就为这道题排一个去抖任务
+        builtin_judge.record_version(
+            session, identity.contest_id, identity.player_id, rel_path, actual_sha, size, now, ctx.settings
+        )
+        contest = session.get(Contest, identity.contest_id)
+        if contest is not None:
+            builtin_judge.auto_enqueue(session, contest, identity.player_id, rel_path, now, ctx.settings)
 
     return UploadResult(path=rel_path, sha256=actual_sha, revision=revision, stored=True)
 

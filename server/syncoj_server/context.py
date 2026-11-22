@@ -16,6 +16,7 @@ from .registry import AgentRegistry
 from .services.diagnostics import DiagnosticsRateLimiter
 from .services.paircodes import PairCodeCache
 from .services.ratelimit import RateLimiter
+from .services.server_id import load_or_create_server_uuid
 from .services.signing import DerError, SigningKey, load_signing_key
 from .services.uninstall import PendingUninstalls
 from .storage import BlobStore
@@ -41,7 +42,7 @@ class AppContext:
     #: 全局注册限速 —— 挡住"从很多 IP 一起刷"。考场内网 IP 数量有限，
     #: 全局上限才是真正的兜底
     enroll_global_limiter: RateLimiter = field(default_factory=lambda: RateLimiter(limit=0))
-    #: 管理端登录、选手页手填查找：按 IP、每分钟计
+    #: 管理端登录、考生页登录：按 IP、每分钟计
     login_limiter: RateLimiter = field(default_factory=lambda: RateLimiter(limit=0))
     player_lookup_limiter: RateLimiter = field(default_factory=lambda: RateLimiter(limit=0))
     #: 未配对机器的配对码明文。**只在内存里** —— 协议要求每一轮 tick 都带上
@@ -67,6 +68,15 @@ class AppContext:
     announcer: Any = field(default_factory=lambda: _new_announcer())
     #: 挑战应答端点按 IP 限速（不鉴权、每次一个 RSA 签名）
     whoami_limiter: RateLimiter = field(default_factory=lambda: RateLimiter(limit=0))
+    #: 服务端实例 ID（``<data_root>/server-id``，见 ``services/server_id.py``）。空串 =
+    #: 读写失败，tick / 发现 / 挑战应答都按不带它的旧格式回
+    server_uuid: str = ""
+    #: 考生页登录令牌的 HMAC 密钥。第一次用到时从 ``<data_root>/player-token.key``
+    #: 读出（没有就生成），见 ``services/player_tokens.py``
+    player_token_secret: Optional[bytes] = None
+    #: 本机评测机子进程（§12.10，``services.local_judge.LocalJudge``）。只在内存里：
+    #: 服务端退出时一并停掉，重启后不自动拉起（教师再点一次「启动」）
+    local_judge: Any = field(default_factory=lambda: _new_local_judge())
 
     @classmethod
     def create(cls, settings: Settings) -> "AppContext":
@@ -85,6 +95,7 @@ class AppContext:
             whoami_limiter=RateLimiter(limit=settings.whoami_per_ip_per_second),
         )
         context.load_signing_key()
+        context.server_uuid = load_or_create_server_uuid(settings.data_root)
         return context
 
     def load_signing_key(self) -> None:
@@ -116,3 +127,9 @@ def _new_announcer():
     from .services.announce import Announcer
 
     return Announcer()
+
+
+def _new_local_judge():
+    from .services.local_judge import LocalJudge
+
+    return LocalJudge()

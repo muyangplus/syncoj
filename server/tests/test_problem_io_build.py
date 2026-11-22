@@ -17,7 +17,12 @@ from syncoj_server.judging import testdata as testdata_mod
 from syncoj_server.judging.testdata import parse_testdata
 from syncoj_server.services.problem_io import checkers, finalize
 from syncoj_server.services.problem_io.archive import SafeArchive
-from syncoj_server.services.problem_io.build import build_testdata_zip, flat_case_names, try_build
+from syncoj_server.services.problem_io.build import (
+    build_testdata_zip,
+    flat_case_names,
+    try_build,
+    try_summarize,
+)
 from syncoj_server.services.problem_io.bundle import (
     BundleCase,
     BundleSubtask,
@@ -403,3 +408,158 @@ def test_native_import_keeps_io_columns_as_is(tmp_path: Path) -> None:
         "q": ("file", "q.in", "q.out", "-O2  -std=c++17", []),
         "bad": ("file", "prog", None, "-std=c++17", ["io_name_invalid"]),
     }
+
+
+# --------------------------------------------------------------------------- #
+# 内存：构建写临时文件、预览不产出完整数据包、请求级预算
+# --------------------------------------------------------------------------- #
+
+
+def _shared_member_bundles(count: int, refs: int):
+    """``count`` 道题，每道题 ``refs`` 个测试点都引用同一对成员 big.in / big.out。"""
+    return [
+        ProblemBundle(key="p%d" % p, ident="p%d" % p, cases=[
+            BundleCase(name=str(i), input=FileRef(member="big.in"), answer=FileRef(member="big.out"), score=1)
+            for i in range(1, refs + 1)
+        ])
+        for p in range(count)
+    ]
+
+
+def test_try_build_writes_a_temp_file_in_tmp_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """构建结果落在给定目录的临时文件里（不是内存里的 BytesIO），从头可读，摘要与回读一致。"""
+    from syncoj_server.services.problem_io import build as build_mod
+
+    dirs = []
+    real = build_mod.tempfile.TemporaryFile
+
+    def spy(*args, **kwargs):
+        dirs.append(kwargs.get("dir"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(build_mod.tempfile, "TemporaryFile", spy)
+    bundle = ProblemBundle(key="k", ident="k", cases=[_case("1", score=40), _case("2", score=60)])
+    built = try_build(bundle, None, tmp_dir=tmp_path)
+    assert built is not None
+    with built:
+        assert dirs == [str(tmp_path)]
+        assert not isinstance(built.file, io.BytesIO) and built.file.fileno() >= 0
+        data = built.file.read()
+    assert built.max_bytes == len(data) and built.sha256 is None
+    parsed, _files = _parse(data)
+    assert built.summary == parsed.summary() == {"cases": 2, "subtasks": 0, "has_checker": False, "total_score": 100}
+
+
+def test_summarize_does_not_write_test_data_and_reads_shared_member_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """预览：测试数据不拷进任何数据包；多道题、多个测试点引用的同一成员整个请求只解压一遍。"""
+    from syncoj_server.services.problem_io import build as build_mod
+
+    path = stage(tmp_path, make_zip({"big.in": b"1 2\n" * 1024, "big.out": "3\n"}))
+    with SafeArchive(path) as archive:
+        expected = []
+        for bundle in _shared_member_bundles(2, 5):
+            built = try_build(bundle, archive)
+            assert built is not None
+            built.close()
+            expected.append(built.summary)
+
+        def no_copy(*args):
+            raise AssertionError("预览不应拷贝测试数据")
+
+        monkeypatch.setattr(build_mod, "_copy_ref", no_copy)
+        opened = []
+        real_open = archive.open
+        monkeypatch.setattr(archive, "open", lambda name: opened.append(name) or real_open(name))
+        budget = build_mod.BuildBudget()
+        got = [try_summarize(bundle, archive, budget) for bundle in _shared_member_bundles(2, 5)]
+    assert got == expected
+    assert sorted(opened) == ["big.in", "big.out"]
+
+
+def test_summarize_reports_corrupt_test_data(tmp_path: Path) -> None:
+    """不写出数据包也要查出压缩数据损坏（与应用时一致），而不是等到应用时才报。"""
+    from problem_io_fixtures import corrupt_member
+
+    data = corrupt_member(make_zip({"1.in": b"1 2\n" * 4096, "1.out": "3\n"}), "1.in")
+    with SafeArchive(stage(tmp_path, data)) as archive:
+        bundle = ProblemBundle(key="k", ident="k", cases=[
+            BundleCase(name="1", input=FileRef(member="1.in"), answer=FileRef(member="1.out"), score=100),
+        ])
+        assert try_summarize(bundle, archive) is None
+    assert [(e.code, e.message) for e in bundle.errors] == [("testdata_invalid", "数据包不对：压缩数据已损坏")]
+
+
+def test_request_budget_rejects_problems_beyond_total(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """每题都在 2 GB 以内，但一次请求按引用累计超过总预算：超出的那道题报错，前面的照常。"""
+    from syncoj_server.services.problem_io import build as build_mod
+
+    path = stage(tmp_path, make_zip({"big.in": b"\0" * 4096, "big.out": "0\n"}))
+    per_problem = 10 * (4096 + 2)
+    monkeypatch.setattr(build_mod, "MAX_REQUEST_BUILD_BYTES", 2 * per_problem)
+    with SafeArchive(path) as archive:
+        for runner in ("summarize", "build"):
+            budget = build_mod.BuildBudget()
+            bundles = _shared_member_bundles(3, 10)
+            for bundle in bundles:
+                if runner == "summarize":
+                    try_summarize(bundle, archive, budget)
+                else:
+                    built = try_build(bundle, archive, budget, tmp_dir=tmp_path)
+                    if built is not None:
+                        built.close()
+            assert [b.errors for b in bundles[:2]] == [[], []]
+            assert [e.code for e in bundles[2].errors] == ["testdata_invalid"]
+            assert "本次导入的数据总量超过" in bundles[2].errors[0].message
+
+
+def test_native_inner_zip_shared_by_problems_is_checked_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """多道题指向同一个内层 testdata.zip：只读、哈希、解析一遍；sha 不符的那道题照样报 sha_mismatch。"""
+    from syncoj_server.services import problem_io
+    from syncoj_server.services.problem_io import native as native_mod
+
+    from problem_io_fixtures import make_testdata_zip, sha256_hex
+
+    inner = make_testdata_zip(4)
+    meta = {"path": "shared/testdata.zip", "name": "t.zip", "sha256": sha256_hex(inner), "size": len(inner)}
+    entries = [dict(ident="p%d" % i, io_mode="stdio", judge_mode="builtin", testdata=dict(meta)) for i in range(3)]
+    entries.append(dict(ident="bad", io_mode="stdio", judge_mode="builtin", testdata=dict(meta, sha256="0" * 64)))
+    data = make_zip({
+        "shared/testdata.zip": inner,
+        "syncoj-problems.json": json.dumps({"format": "syncoj-judge", "version": 1, "problems": entries}),
+    })
+    calls = []
+    real = native_mod._inspect
+    monkeypatch.setattr(native_mod, "_inspect", lambda view, p: calls.append(p) or real(view, p))
+    with problem_io.parse_archive(stage(tmp_path, data)) as parsed:
+        bundles = parsed.result.problems
+        assert calls == ["shared/testdata.zip"]
+        assert [[e.code for e in b.errors] for b in bundles] == [[], [], [], ["sha_mismatch"]]
+        assert bundles[0].raw_sha256 == sha256_hex(inner)
+        assert bundles[0].raw_summary == {"cases": 4, "subtasks": 0, "has_checker": False, "total_score": 100}
+
+
+def test_native_inner_zip_streams_without_reading_into_memory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """构建原生题时直接流式读归档成员（不 read_ref 成 bytes，也不另落临时文件），字节与 sha256 不变。"""
+    from syncoj_server.services import problem_io
+    from syncoj_server.services.problem_io import build as build_mod
+
+    from problem_io_fixtures import make_native_zip, make_testdata_zip, native_problem, sha256_hex
+
+    inner = make_testdata_zip(5)
+    with problem_io.parse_archive(stage(tmp_path, make_native_zip([native_problem("sum", testdata=inner)]))) as parsed:
+        (bundle,) = parsed.result.problems
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("不应整包读进内存或另落临时文件")
+
+        monkeypatch.setattr(build_mod, "read_ref", forbidden)
+        monkeypatch.setattr(build_mod.tempfile, "TemporaryFile", forbidden)
+        summary = try_summarize(bundle, parsed.archive)
+        assert summary is not None and summary["cases"] == 5
+        built = try_build(bundle, parsed.archive)
+        assert built is not None
+        with built:
+            assert built.file.read() == inner
+        assert built.sha256 == sha256_hex(inner) and built.summary["cases"] == 5

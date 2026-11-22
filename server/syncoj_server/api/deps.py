@@ -2,7 +2,7 @@
 
 这个文件是**新配对模型的汇聚点**，值得说清楚它到底在做什么。
 
-机器绑的是**人**（``agent.roster_entry_id`` → 名单条目），不是某场比赛的选手。
+机器绑的是**人**（``agent_binding`` → 名单条目，可以同时绑多份名单），不是某场比赛的选手。
 可"收代码、发文件、记成绩"全都要落到**某一场次里的某个选手**上。于是每个请求
 都要做一次翻译：
 
@@ -15,7 +15,7 @@
 
 解析不出来的情况有三种，各自的含义完全不同，必须分开：
 
-* **未配对**（``roster_entry_id`` 为空）→ 机器刚注册上来，等教师配对
+* **未配对**（一条绑定都没有）→ 机器刚注册上来，等教师配对
 * **没有场次** → 配对好了，但没有一场"进行中、且名单含此人"的比赛
 * **场次不唯一** → 一个考点同时跑多场，需要教师显式指定
 
@@ -35,6 +35,7 @@ from ..context import AppContext
 from ..errors import ApiError
 from ..models import Agent, Contest, ContestStatus, Player, RosterEntry
 from ..security import hash_token
+from ..services import bindings
 
 __all__ = [
     "AgentIdentity",
@@ -166,12 +167,14 @@ def _bearer(request: Request) -> str:
 def resolve_machine(session, agent: Agent) -> Resolution:
     """把一台机器解析到"某场次的某选手"。
 
-    场次的确定顺序：
+    一台机器可以绑多份名单；进入某个场次时用**该场次所用名单**里的那条绑定
+    （规则见 ``services/bindings.pick_binding``）。场次的确定顺序：
 
-    1. ``agent.contest_id`` 显式指定 → 就用它（教师为什么指定就是为什么）
-    2. 否则找**进行中、且名单含此人**的场次：
+    1. ``agent.contest_id`` 显式指定 → 就用它（教师为什么指定就是为什么）；
+       已归档的场次不算数
+    2. 否则在**进行中**的场次里找"能落到某个选手上"的：
        * 恰好一个 → 用它
-       * 一个都没有 → 说清"还没有含你的场次"
+       * 一个都没有 → 说清"还没有含你的场次"（或"你的场次已经结束"）
        * 多于一个 → 说清"需要指定"，**不自己挑一个**（挑错的后果是代码与成绩
          落到另一场比赛里，而两场可能同时在跑）
 
@@ -179,62 +182,89 @@ def resolve_machine(session, agent: Agent) -> Resolution:
     这里**不自动创建** —— 靠机器在线与否去给一个场次添参赛者，
     会让"谁在这场比赛里"变成一件悄悄发生的事。
     """
-    if agent.roster_entry_id is None:
+    persons = bindings.load_bindings(session, [agent.id]).get(agent.id, [])
+    if not persons:
         return Resolution(
             agent=agent, entry=None, contest=None, player=None, code="pairing_required"
         )
+    numbers = {person.player_no for person in persons}
 
-    entry = session.get(RosterEntry, agent.roster_entry_id)
-    if entry is None:  # pragma: no cover - 外键 SET NULL 兜底
-        return Resolution(
-            agent=agent,
-            entry=None,
-            contest=None,
-            player=None,
-            reason="绑定的名单条目已被删除",
-            code="pairing_required",
-        )
+    def entry_of(person) -> Optional[RosterEntry]:
+        return session.get(RosterEntry, person.entry_id)
+
+    first_entry = entry_of(persons[0])
 
     if agent.contest_id is not None:
         contest = session.get(Contest, agent.contest_id)
         if contest is None:
             return Resolution(
                 agent=agent,
-                entry=entry,
+                entry=first_entry,
                 contest=None,
                 player=None,
                 reason="指定的场次已被删除",
                 code="contest_missing",
             )
-        player = session.execute(
-            select(Player).where(
-                Player.contest_id == contest.id, Player.player_no == entry.player_no
-            )
-        ).scalar_one_or_none()
-        if player is None:
+        if contest.is_archived:
+            # 已归档与已结束同一个待遇：机器安静等着（code 沿用 no_active_contest）
             return Resolution(
                 agent=agent,
-                entry=entry,
+                entry=first_entry,
+                contest=None,
+                player=None,
+                reason="指定的场次「%s」已归档" % contest.name,
+                code="no_active_contest",
+            )
+        players = bindings.contest_player_nos(session, [contest.id], numbers).get(contest.id, {})
+        holders = bindings.holder_counts(session, numbers) if contest.default_roster_id is None else {}
+        pick = bindings.pick_binding(contest.default_roster_id, persons, set(players), holders)
+        if not pick.ok or pick.person is None:
+            return Resolution(
+                agent=agent,
+                entry=entry_of(pick.person) if pick.person is not None else first_entry,
                 contest=contest,
                 player=None,
-                reason="指定场次「%s」里没有编号 %s 的选手，请先把这个人的名单应用到场次"
-                % (contest.name, entry.player_no),
+                reason="指定场次「%s」里找不到这台机器对应的选手：%s"
+                % (contest.name, pick.detail),
                 code="contest_player_missing",
             )
-        return Resolution(agent=agent, entry=entry, contest=contest, player=player)
-
-    candidates: List[Tuple[Contest, Player]] = []
-    matches: List[Tuple[Contest, Player]] = list(
-        session.execute(
-            select(Contest, Player)
-            .join(Player, Player.contest_id == Contest.id)
-            .where(Player.player_no == entry.player_no)
-            .order_by(Contest.id)
+        return Resolution(
+            agent=agent,
+            entry=entry_of(pick.person),
+            contest=contest,
+            player=players[pick.person.player_no],
         )
+
+    contests = list(
+        session.execute(
+            select(Contest)
+            .where(
+                Contest.status.in_(
+                    (ContestStatus.RUNNING, ContestStatus.FROZEN, ContestStatus.CLOSED)
+                )
+            )
+            .order_by(Contest.id)
+        ).scalars()
     )
-    for contest, player in matches:
+    players_by_contest = bindings.contest_player_nos(session, [c.id for c in contests], numbers)
+    holders = (
+        bindings.holder_counts(session, numbers)
+        if any(c.default_roster_id is None for c in contests)
+        else {}
+    )
+    candidates: List[Tuple[Contest, Player, RosterEntry]] = []
+    finished: List[Contest] = []
+    for contest in contests:
+        players = players_by_contest.get(contest.id, {})
+        pick = bindings.pick_binding(contest.default_roster_id, persons, set(players), holders)
+        if not pick.ok or pick.person is None:
+            continue
         if contest.is_active:
-            candidates.append((contest, player))
+            entry = entry_of(pick.person)
+            assert entry is not None
+            candidates.append((contest, players[pick.person.player_no], entry))
+        else:
+            finished.append(contest)
 
     if not candidates:
         # "没有进行中的场次"里有两种完全不同的情况，说错了会让现场误判：
@@ -243,14 +273,13 @@ def resolve_machine(session, agent: Agent) -> Resolution:
         #   你的场次"会以为系统坏了、机器掉线了，跑去重启或者重新注册
         # * 压根没有他的场次 —— 教师还没把名单应用到场次，那才是真的"还没有"
         #
-        # 判据只看**已结束**这一个状态：``closed`` 是"这场结束了"，而机器该做的事
-        # 两种情况下完全一样（安静等着，不要重新注册），所以 ``code`` 仍然用
-        # ``no_active_contest`` —— Agent 那边不该为一句措辞多写一个分支。
-        finished = [contest for contest, _ in matches if contest.status == ContestStatus.CLOSED]
+        # 判据只看**已结束**这一个状态（已归档的不算 —— 那是教师收起来的旧场次）。
+        # 机器该做的事两种情况下完全一样（安静等着，不要重新注册），所以 ``code``
+        # 仍然用 ``no_active_contest`` —— Agent 那边不该为一句措辞多写一个分支。
         if finished:
             return Resolution(
                 agent=agent,
-                entry=entry,
+                entry=first_entry,
                 contest=None,
                 player=None,
                 reason="你所在的场次（%s）已经结束了" % "、".join(c.name for c in finished),
@@ -258,24 +287,24 @@ def resolve_machine(session, agent: Agent) -> Resolution:
             )
         return Resolution(
             agent=agent,
-            entry=entry,
+            entry=first_entry,
             contest=None,
             player=None,
-            reason="还没有进行中的、名单里含 %s 的场次" % entry.player_no,
+            reason="还没有进行中的、名单里含 %s 的场次" % "、".join(sorted(numbers)),
             code="no_active_contest",
         )
     if len(candidates) > 1:
-        names = "、".join(contest.name for contest, _ in candidates)
+        names = "、".join(contest.name for contest, _, _ in candidates)
         return Resolution(
             agent=agent,
-            entry=entry,
+            entry=first_entry,
             contest=None,
             player=None,
-            reason="有多个进行中的场次都含 %s（%s），需要指定这一个（在界面上给这台机器选场次）"
-            % (entry.player_no, names),
+            reason="有多个进行中的场次都含这台机器绑定的人（%s），需要指定这一个（在界面上给这台机器选场次）"
+            % names,
             code="ambiguous_contest",
         )
-    contest, player = candidates[0]
+    contest, player, entry = candidates[0]
     return Resolution(agent=agent, entry=entry, contest=contest, player=player)
 
 
@@ -325,7 +354,7 @@ def _client_ip(request: Request) -> Optional[str]:
     """这次请求的来源地址。
 
     ``request.client`` 在极少数情况下是 ``None``（ASGI 服务器没给出对端地址），
-    那时返回 None —— 记不下地址只会让选手页退回手填那一条路，不该让请求失败。
+    那时返回 None —— 记不下地址只会让选手页退回降级预览 / 登录，不该让请求失败。
     """
     return request.client.host if request.client else None
 

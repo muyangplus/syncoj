@@ -3,8 +3,8 @@
 这一页的用途是"选手坐在考场上，确认自己要交什么、老师有什么话要说"，
 于是它有四条硬边界，各由一组测试守着：
 
-1. **只看得到自己的东西**。免登录意味着没有凭据兜底，定位只能靠"这台机器"或者
-   "场次 + 考号"。一旦过滤条件写漏（比如忘了 ``DeployTarget.player_id``），
+1. **只看得到自己的东西**。免登录意味着没有管理端凭据兜底，定位只能靠"这台机器"或者
+   "场次 + 考号 + 场次的考生页密码"（换来的令牌）。一旦过滤条件写漏（比如忘了 ``DeployTarget.player_id``），
    任何选手输自己的考号、或者任何一台机器打开这一页，就能看到**全场**的下发清单 ——
    页面照样正常渲染，没人会发现。``test_别人的资产不会出现在他的清单里`` 与
    ``test_同一个_IP_不会拿到别人的清单`` 就是为这两行过滤条件写的；
@@ -34,7 +34,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, inspect, select, text
 
 from syncoj_server import migrations
-from syncoj_server.models import DeployTarget, DeployTask
+from syncoj_server.models import Contest, DeployTarget, DeployTask
+from syncoj_server.security import hash_password
 
 from conftest import (
     bind_by_code,
@@ -45,6 +46,10 @@ from conftest import (
 )
 
 PLAYER_PATH = "/api/v1/player/context"
+LOGIN_PATH = "/api/v1/player/login"
+TOKEN_HEADER = "X-Player-Token"
+#: 测试里各场次统一用的考生页密码（``fetch`` 按需直接写进库）
+PLAYER_PASSWORD = "kaosheng-123"
 
 
 # --------------------------------------------------------------------------- #
@@ -99,12 +104,29 @@ def deploy_to(client, contest, admin_headers, asset_id, player_ids, dest_dir="")
     return response.json()
 
 
-def fetch(client, contest: str = "mock-1", player_no: str = "S001", headers=None):
-    return client.get(
-        PLAYER_PATH,
-        params={"contest": contest, "player_no": player_no},
-        headers=headers or {},
+def ensure_player_password(client, slug: str) -> None:
+    """场次还没设考生页密码就直接在库里设一个（设置接口本身另有测试）。"""
+    ctx = client.app.state.ctx
+    with ctx.db.session() as session:
+        row = session.execute(select(Contest).where(Contest.slug == slug)).scalar_one()
+        if not row.player_password_hash:
+            row.player_password_hash = hash_password(PLAYER_PASSWORD)
+
+
+def login(client, contest: str = "mock-1", player_no: str = "S001", password=PLAYER_PASSWORD):
+    return client.post(
+        LOGIN_PATH, json={"contest": contest, "player_no": player_no, "password": password}
     )
+
+
+def fetch(client, contest: str = "mock-1", player_no: str = "S001", headers=None):
+    """以"准考证号 + 考生页密码"登录后取上下文 —— 自动匹配本机之外唯一的一条路。"""
+    ensure_player_password(client, contest)
+    response = login(client, contest, player_no)
+    assert response.status_code == 200, response.text
+    merged = {TOKEN_HEADER: response.json()["token"]}
+    merged.update(headers or {})
+    return client.get(PLAYER_PATH, headers=merged)
 
 
 def client_from(app, ip: str) -> TestClient:
@@ -144,7 +166,7 @@ def enroll_bound_machine(
 
 
 # --------------------------------------------------------------------------- #
-# 1. 显式查找（兜底路径）
+# 1. 登录后查看（兜底路径）
 # --------------------------------------------------------------------------- #
 
 
@@ -174,7 +196,7 @@ def test_清单只包含下发给他的资产(client, contest, admin_headers, pl
     # 而那个文件其实就在选手桌面上
     assert asset["dest_dir"] == "桌面"
 
-    assert body["matched_by"] == "explicit"
+    assert body["matched_by"] == "token"
     assert body["contest"] == {
         "slug": "mock-1",
         "name": "校内模拟赛",
@@ -183,12 +205,11 @@ def test_清单只包含下发给他的资产(client, contest, admin_headers, pl
         "starts_at": None,
         "ends_at": None,
     }
-    # 手填查找（explicit）只回考号：知道"场次 + 考号"的不一定是本人，姓名、座位是
-    # 别人的个人信息（曾经一个循环就能拿到全班座位表）。按来源 IP 认出本机才回全部。
+    # 准考证号 + 密码证明了"就是这个人"，回全部 —— 与本机自动匹配一致
     assert body["player"] == {
         "player_no": "S001",
-        "name": None,
-        "seat": None,
+        "name": "张三",
+        "seat": "A1",
         "group_name": None,
     }
     # 没有下发公告：这一份清单里只有题面
@@ -218,30 +239,19 @@ def test_别的选手的资产不会出现在他的清单里(client, contest, ad
     assert [asset["filename"] for asset in theirs["assets"]] == ["b.zip", "a.zip"]
 
 
-def test_场次不存在与考号不存在都是_404_人话(client, contest, player):
-    missing_contest = fetch(client, contest="no-such")
-    assert missing_contest.status_code == 404, missing_contest.text
-    body = missing_contest.json()
-    assert body["code"] == "not_found"
-    assert "no-such" in body["detail"], "报错要说清是哪个场次找不到"
+def test_旧的手填查找已移除_参数被忽略也不泄露任何人(client, contest, admin_headers, player):
+    """曾经 ``?contest=&player_no=`` 不要密码就能看任何人的清单。
 
-    missing_player = fetch(client, player_no="S999")
-    assert missing_player.status_code == 404, missing_player.text
-    body = missing_player.json()
-    assert body["code"] == "not_found"
-    assert "S999" in body["detail"]
-    assert "没有编号" in body["detail"], "要说清是「这个场次里没有这个编号」，而不是「查不到」"
+    现在这两个参数不再有任何含义：不带令牌就是"按来源 IP 自动匹配本机"，
+    TestClient 的来源认不出机器 → 404，响应里没有那个人的任何东西。
+    """
+    asset = upload_asset(client, contest, admin_headers, "题面.zip", b"statement")
+    deploy_to(client, contest, admin_headers, asset["id"], [player["id"]])
 
-
-def test_只填一个参数是_400(client, contest, player):
-    """一个参数定位不到人，而"猜另一半"正是这一页最不该做的事。"""
-    only_contest = client.get(PLAYER_PATH, params={"contest": "mock-1"})
-    assert only_contest.status_code == 400, only_contest.text
-    assert only_contest.json()["code"] == "bad_request"
-
-    only_player = client.get(PLAYER_PATH, params={"player_no": "S001"})
-    assert only_player.status_code == 400, only_player.text
-    assert only_player.json()["code"] == "bad_request"
+    response = client.get(PLAYER_PATH, params={"contest": "mock-1", "player_no": "S001"})
+    assert response.status_code == 404, response.text
+    assert response.json()["details"]["matched_by"] == "machine"
+    assert "题面" not in response.text and "张三" not in response.text
 
 
 # --------------------------------------------------------------------------- #
@@ -491,6 +501,7 @@ def test_响应里没有代码与成绩字段(client, contest, admin_headers, pl
     # 没下发公告时是 null，而不是一个空壳对象
     assert body["notice"] is None
     assert set(body["assets"][0]) == {
+        "id",
         "filename",
         "dest_dir",
         "status",
@@ -994,10 +1005,12 @@ def test_升级库与全新库在两张表上结构一致(workdir: Path):
 
 
 
-def test_手填查找按_ip_限速(client, contest, player, app) -> None:
-    """考号通常连号：不限速的话一个循环就能把整场的下发清单都翻一遍。"""
+def test_登录按_ip_限速(client, contest, player, app) -> None:
+    """考号通常连号：不限速的话一个循环就能把整场的考号和密码都试一遍。"""
+    ensure_player_password(client, "mock-1")
     app.state.ctx.player_lookup_limiter.limit = 3
-    query = {"contest": "mock-1", "player_no": "S001"}
-    codes = [client.get("/api/v1/player/context", params=query).status_code for _ in range(5)]
-    assert codes[:3] == [200, 200, 200]
+    codes = [login(client, password="wrong").status_code for _ in range(3)]
+    codes += [login(client).status_code for _ in range(2)]
+    assert codes[:3] == [403, 403, 403]
+    # 超限之后连正确的密码也不收：先限速、再算 scrypt
     assert codes[3:] == [429, 429]

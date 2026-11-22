@@ -541,3 +541,95 @@ def test_同一个来源会被限速(ctx, signer, monkeypatch: pytest.MonkeyPatc
         discovery._answer_one(ctx, FakeSock(), signer, seen, probe, ("10.0.0.9", 1))
 
     assert len(sent) == 2, "同一个来源一秒内只该应答 2 次"
+
+
+# --------------------------------------------------------------------------- #
+# v2：带实例 ID 与"认不认得这台机器"
+# --------------------------------------------------------------------------- #
+
+
+def _answer_with(ctx, signer, probe: bytes) -> dict:
+    sent = []
+
+    class FakeSock:
+        def sendto(self, data, peer):
+            sent.append(data)
+
+    discovery._answer_one(ctx, FakeSock(), signer, {}, probe, ("10.0.0.9", 1))
+    assert len(sent) == 1, "探测没有得到应答"
+    assert len(sent[0]) <= len(probe), "应答不得大于探测"
+    return json.loads(sent[0].decode("utf-8"))
+
+
+@pytest.fixture()
+def live_ctx(app, client, signer):
+    """真 AppContext（有库、有实例 ID）：``known`` 要查库。"""
+    ctx = app.state.ctx
+    ctx.signing_key = signer._key
+    ctx.settings.public_url = "http://10.0.0.5:8000"
+    ctx.settings.discovery_replies_per_second = 0
+    assert ctx.server_uuid
+    return ctx
+
+
+@requires_openssl
+def test_v2_应答签了实例ID与认得这台机器(live_ctx, signer, machine: dict) -> None:
+    probe = discovery.build_probe(
+        machine_id="m", machine_uuid=machine["machine_uuid"], server_uuid=live_ctx.server_uuid
+    )
+    nonce = discovery.parse_probe(probe)["nonce"]
+    reply = _answer_with(live_ctx, signer, probe)
+
+    assert reply["server_uuid"] == live_ctx.server_uuid
+    assert reply["known"] is True
+    public = RSAPublicKey.from_dict(signer._key.public_key_dict())
+    text = discovery.canonical_text_v2(
+        nonce, reply["url"], reply["server_uuid"], machine["machine_uuid"], True
+    )
+    assert text.startswith("syncoj-discovery-v2\n")
+    assert verify_pkcs1v15_sha256(public, text.encode("utf-8"), _b64decode(reply["sig"])) is True
+    # 改任何一个新字段都验不过：known、实例 ID、机器 UUID；也不能当 v1 签名用
+    for forged in (
+        discovery.canonical_text_v2(nonce, reply["url"], reply["server_uuid"], machine["machine_uuid"], False),
+        discovery.canonical_text_v2(nonce, reply["url"], "f" * 32, machine["machine_uuid"], True),
+        discovery.canonical_text_v2(nonce, reply["url"], reply["server_uuid"], "other-machine", True),
+        discovery.canonical_text(nonce, reply["url"]),
+    ):
+        assert verify_pkcs1v15_sha256(public, forged.encode("utf-8"), _b64decode(reply["sig"])) is False
+
+
+@requires_openssl
+def test_v2_不认得的机器_known_为假(live_ctx, signer) -> None:
+    probe = discovery.build_probe(machine_uuid="never-enrolled-uuid")
+    reply = _answer_with(live_ctx, signer, probe)
+    assert reply["server_uuid"] == live_ctx.server_uuid
+    assert reply["known"] is False
+
+
+@requires_openssl
+def test_旧探测仍按_v1_应答(live_ctx, signer, machine: dict) -> None:
+    probe = discovery.build_probe(machine_id="old-agent")
+    nonce = discovery.parse_probe(probe)["nonce"]
+    reply = _answer_with(live_ctx, signer, probe)
+
+    assert "server_uuid" not in reply and "known" not in reply
+    public = RSAPublicKey.from_dict(signer._key.public_key_dict())
+    assert verify_pkcs1v15_sha256(
+        public, discovery.canonical_text(nonce, reply["url"]).encode("utf-8"), _b64decode(reply["sig"])
+    ) is True
+
+
+@requires_openssl
+def test_v2_探测长度容得下真实域名(signer) -> None:
+    url = "http://exam-server-3f7a19c2.room-201.local:8000"
+    probe = discovery.build_probe(machine_uuid="a" * 32, server_uuid="b" * 32)
+    assert len(probe) == discovery.V2_PROBE_BYTES
+    nonce = discovery.parse_probe(probe)["nonce"]
+
+    reply = discovery.build_reply(
+        nonce, url, signer, max_bytes=len(probe),
+        server_uuid="c" * 32, machine_uuid="a" * 32, known=True,
+    )
+
+    assert reply is not None
+    assert len(probe) - len(reply) > 40

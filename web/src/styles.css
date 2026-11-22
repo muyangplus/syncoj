@@ -303,3 +303,13 @@ body {
 .el-button > span > .el-icon {
   margin-right: 5px;
 }
+
+/* 按钮旁的下拉（「更多」「机器」）：el-dropdown 默认顶对齐、也吃不到 .el-button + .el-button 的间距 */
+.el-button + .el-dropdown,
+.el-dropdown + .el-button,
+.el-dropdown + .el-dropdown {
+  margin-left: 12px;
+}
+.el-table .cell .el-dropdown {
+  vertical-align: middle;
+}

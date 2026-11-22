@@ -34,14 +34,14 @@
 | §3.5 systemd unit | [`docs/design/03-agent.md`](docs/design/03-agent.md) |
 | §3.6 Python 3.8 兼容清单 | [`docs/design/03-agent.md`](docs/design/03-agent.md) |
 | §4.1 目录布局 / §4.2 数据模型 / §4.3 写入策略 / §4.4 评测结果回写 | [`docs/design/04-server.md`](docs/design/04-server.md) |
-| §4.5 代码归题与目录约定 / §4.6 注册与配对 / §4.7 名单 / §4.8 库结构演进 | [`docs/design/04-server.md`](docs/design/04-server.md) |
+| §4.5 代码归题与目录约定 / §4.6 注册与配对 / §4.7 名单 / §4.8 库结构演进 / §4.9 场次归档 | [`docs/design/04-server.md`](docs/design/04-server.md) |
 | §5.1 契约测试 / §5.2 信封与错误体 / §5.3 前端架构 / §5.4 删除语义 | [`docs/design/05-api-and-frontend.md`](docs/design/05-api-and-frontend.md) |
 | §5.5 下发资产不解压 / §5.6 两个免登录页面 / §5.7 公开端口 | [`docs/design/05-api-and-frontend.md`](docs/design/05-api-and-frontend.md) |
 | §6.1 签名算法 / §6.2 信任边界的现状 | [`docs/design/06-security.md`](docs/design/06-security.md) |
 | §7.1 密钥从哪来 / §7.2 发布当前版本 / §7.2.1 安装策略 | [`docs/design/07-ops-and-install.md`](docs/design/07-ops-and-install.md) |
 | §7.3 机器怎么知道服务端在哪 / §7.4 远程卸载 / §7.5 发布（CD） | [`docs/design/07-ops-and-install.md`](docs/design/07-ops-and-install.md) |
 | §10.5 重构遗留 | [`docs/design/08-milestones-and-open.md`](docs/design/08-milestones-and-open.md) |
-| §12.5 评测语义 / §12.8 题目配置导入导出 | [`docs/design/10-builtin-judge.md`](docs/design/10-builtin-judge.md) |
+| §12.5 评测语义 / §12.8 题目配置导入导出 / §12.9 版本历史、自动评测与分数 timeline / §12.10 评测机管理 | [`docs/design/10-builtin-judge.md`](docs/design/10-builtin-judge.md) |
 
 `design/` 记现状，ADR 记否决的方案与代价；§0 每行指向对应 ADR。
 操作步骤：[`docs/quickstart.md`](docs/quickstart.md)、[`docs/install-agent.md`](docs/install-agent.md)、[`docs/operate.md`](docs/operate.md)。文档总入口：[`docs/README.md`](docs/README.md)。

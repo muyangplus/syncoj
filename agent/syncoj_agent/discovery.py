@@ -22,6 +22,14 @@
 同一个局域网里可能同时跑着两台服务端（两个考场共用一层楼）。那时**不能猜**：
 猜错的表现是"代码交上去了但成绩是空的"，而且现场看不出来。多个不同的、都验过签
 的地址 = 歧义，如实报出来让人去手填。
+
+## 认的是"原来那台"
+
+两台服务端可能共用一把发布私钥（同一份 ``.key/`` 拷到隔壁考场），光验签分不清。
+所以运行期的探测带上本机 ``machine_uuid`` 与记住的服务端实例 ID（``server_uuid``，
+第一次 tick 成功时记下），服务端回 v2 应答：签名里有它自己的 ``server_uuid`` 和
+"认不认得这台机器"。记着 ID 时只认 ID 相同、且认得本机的应答；没记着（老状态）
+时照旧只看签名。
 """
 
 from __future__ import annotations
@@ -30,9 +38,10 @@ import json
 import logging
 import secrets
 import socket
+import re
 import time
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from .rsa import RSAPublicKey, SignatureError, verify_pkcs1v15_sha256
 
@@ -44,6 +53,7 @@ __all__ = [
     "PROTOCOL_VERSION",
     "broadcast_targets",
     "canonical_text",
+    "canonical_text_v2",
     "discover",
 ]
 
@@ -58,6 +68,15 @@ DEFAULT_DISCOVERY_PORT = 45871
 
 #: 探测文本前缀，与服务端共用一个字面量（跨协议隔离）。
 SIGNATURE_PREFIX = "syncoj-discovery-v1"
+#: 带实例 ID 的 v2 应答的签名前缀
+SIGNATURE_PREFIX_V2 = "syncoj-discovery-v2"
+
+#: 带 ``machine_uuid`` 的探测凑到的长度（v2 应答多约 60 字节，探测跟着加长，
+#: 才守得住服务端"应答不得大于探测"）。与服务端同名常量一致。
+V2_PROBE_BYTES = 768
+
+#: 服务端实例 ID 的形状（服务端生成的是 32 位十六进制；这里放宽一点只防垃圾）
+SERVER_UUID_RE = re.compile(r"^[0-9A-Za-z-]{8,64}$")
 
 #: 等应答的时间。局域网往返是个位数毫秒，1.5 秒足够；再长就没人愿意等了。
 DEFAULT_TIMEOUT_SECONDS = 1.5
@@ -69,12 +88,16 @@ MAX_REPLIES = 16
 class DiscoveryOutcome(NamedTuple):
     """一次探测的结果。
 
-    ``url`` 只有**恰好一个**验过签的答案时才非空。``candidates`` 用来解释为什么
-    没定下来（有两个服务端 = 歧义；空 = 没人应答）。
+    ``url`` 只有**恰好一个**验过签（且实例 ID 对得上）的答案时才非空。``candidates``
+    用来解释为什么没定下来（有两个服务端 = 歧义；空 = 没人应答）。``foreign`` 是验过签
+    但实例 ID 不是记住的那台（或老服务端没带 ID）的地址；``unknown`` 是 ID 对得上、
+    却说不认得本机的地址 —— 这两类都不切换，只为日志说清楚。
     """
 
     url: Optional[str]
     candidates: List[str]
+    foreign: Tuple[str, ...] = ()
+    unknown: Tuple[str, ...] = ()
 
     @property
     def ambiguous(self) -> bool:
@@ -87,6 +110,14 @@ class DiscoveryOutcome(NamedTuple):
             return "局域网里有多个服务端都回了应答（%s）—— 需要显式指定地址" % (
                 "、".join(self.candidates)
             )
+        if self.unknown:
+            return "原来那台服务端在 %s，但它说不认得这台机器（可能已被删除），不切换" % (
+                "、".join(self.unknown)
+            )
+        if self.foreign:
+            return "只有别的服务端应答（%s），实例 ID 与本机记住的不同，不切换" % (
+                "、".join(self.foreign)
+            )
         return "局域网里没有服务端应答"
 
 
@@ -95,18 +126,39 @@ def canonical_text(nonce: str, url: str) -> str:
     return "%s\n%s\n%s" % (SIGNATURE_PREFIX, nonce, url)
 
 
-def build_probe(nonce: str, machine_id: str = "", min_bytes: int = MIN_PROBE_BYTES) -> bytes:
+def canonical_text_v2(
+    nonce: str, url: str, server_uuid: str, machine_uuid: str, known: bool
+) -> str:
+    """v2 应答的签名对象。与服务端 ``canonical_text_v2`` 逐字节一致。"""
+    return "%s\n%s\n%s\n%s\n%s\n%s" % (
+        SIGNATURE_PREFIX_V2, nonce, url, server_uuid, machine_uuid, "1" if known else "0",
+    )
+
+
+def build_probe(
+    nonce: str,
+    machine_id: str = "",
+    min_bytes: Optional[int] = None,
+    machine_uuid: str = "",
+    server_uuid: str = "",
+) -> bytes:
     """造探测报文，**带填充**凑到 ``min_bytes``。
 
     填充是协议的一部分，不是凑数：服务端立了一条"应答不得大于探测"的规矩来
-    避免自己变成放大器，太短的探测它直接不理。
+    避免自己变成放大器，太短的探测它直接不理。带 ``machine_uuid`` 时服务端回 v2，
+    默认凑到 :data:`V2_PROBE_BYTES`。
     """
+    if min_bytes is None:
+        min_bytes = V2_PROBE_BYTES if machine_uuid else MIN_PROBE_BYTES
     payload: Dict[str, object] = {
         "syncoj": MAGIC,
         "v": PROTOCOL_VERSION,
         "nonce": nonce,
         "machine_id": machine_id,
     }
+    if machine_uuid:
+        payload["machine_uuid"] = machine_uuid
+        payload["server_uuid"] = server_uuid
     raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     if len(raw) < min_bytes:
         payload["pad"] = "0" * max(0, min_bytes - len(raw) - 12)
@@ -173,11 +225,22 @@ def broadcast_targets(route_path: str = "/proc/net/route") -> List[str]:
     return targets
 
 
-def _parse_reply(raw: bytes, nonce: str, public_key: RSAPublicKey) -> Optional[str]:
-    """验一个应答；通过就返回它宣称的地址，否则 ``None``。
+class Reply(NamedTuple):
+    """一个验过签的应答。``server_uuid`` / ``known`` 只有 v2 应答才有（v1 为 ``None``）。"""
+
+    url: str
+    server_uuid: Optional[str] = None
+    known: Optional[bool] = None
+
+
+def _parse_reply(
+    raw: bytes, nonce: str, public_key: RSAPublicKey, machine_uuid: str = ""
+) -> Optional[Reply]:
+    """验一个应答；通过就返回它宣称的地址（及 v2 的实例 ID 与认不认得），否则 ``None``。
 
     四道都要过：能解析、随机数对得上、地址像样、**签名验得过**。少任何一道，
-    这个应答都不能用来决定"把注册密钥发给谁"。
+    这个应答都不能用来决定"把注册密钥发给谁"。带 ``server_uuid`` 的应答按 v2 签名
+    对象验（连同本机 ``machine_uuid`` 与 ``known``），改任何一个字段都验不过。
     """
     if len(raw) > 4096:  # pragma: no cover - 防御性
         return None
@@ -199,11 +262,22 @@ def _parse_reply(raw: bytes, nonce: str, public_key: RSAPublicKey) -> Optional[s
     signature = _decode_signature(str(payload.get("sig") or ""))
     if signature is None:
         return None
-    if not verify_pkcs1v15_sha256(public_key, canonical_text(nonce, url).encode("utf-8"), signature):
+    server_uuid = payload.get("server_uuid")
+    known = payload.get("known")
+    if server_uuid is not None:
+        if not isinstance(server_uuid, str) or not SERVER_UUID_RE.match(server_uuid):
+            return None
+        if not isinstance(known, bool) or not machine_uuid:
+            return None
+        text = canonical_text_v2(nonce, url, server_uuid, machine_uuid, known)
+    else:
+        known = None
+        text = canonical_text(nonce, url)
+    if not verify_pkcs1v15_sha256(public_key, text.encode("utf-8"), signature):
         # 这是整套东西存在的理由：局域网里任何人想冒充服务端，都签不出这一段
         log.warning("发现应答的签名验不过，忽略：%s", url)
         return None
-    return url.rstrip("/")
+    return Reply(url.rstrip("/"), server_uuid, known)
 
 
 def discover(
@@ -213,6 +287,8 @@ def discover(
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     machine_id: str = "",
     targets: Optional[List[str]] = None,
+    machine_uuid: str = "",
+    server_uuid: str = "",
 ) -> DiscoveryOutcome:
     """在局域网里找服务端。**不抛异常**，找不到就返回空结果。
 
@@ -222,15 +298,20 @@ def discover(
     ``targets`` 默认按 :func:`broadcast_targets` 广播。可以显式指定地址：有些
     交换机禁广播，那时教师至少能填一个地址让它直接问；测试也靠它指到 127.0.0.1
     （广播是发不到本机回环的）。
+
+    ``machine_uuid`` 非空时发 v2 探测；``server_uuid``（记住的服务端实例 ID）非空时
+    只认 ID 相同、且 ``known`` 为真的应答，其余记进 ``foreign`` / ``unknown``。
     """
     if public_key is None:
         log.info("没有发布公钥，跳过局域网发现（无法验证应答来源）")
         return DiscoveryOutcome(None, [])
 
     nonce = secrets.token_hex(16)
-    probe = build_probe(nonce, machine_id=machine_id)
+    probe = build_probe(nonce, machine_id=machine_id, machine_uuid=machine_uuid, server_uuid=server_uuid)
     destinations = list(targets) if targets else broadcast_targets()
     seen: Dict[str, int] = {}
+    foreign: Dict[str, int] = {}
+    unknown: Dict[str, int] = {}
     deadline = time.monotonic() + max(0.05, timeout)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -265,16 +346,29 @@ def discover(
             except OSError as exc:  # pragma: no cover - 网卡没了之类
                 log.warning("局域网发现：收应答失败：%s", exc)
                 break
-            url = _parse_reply(raw, nonce, public_key)
-            if url:
-                seen[url] = seen.get(url, 0) + 1
+            reply = _parse_reply(raw, nonce, public_key, machine_uuid)
+            if reply is None:
+                continue
+            if server_uuid and reply.server_uuid != server_uuid:
+                log.info(
+                    "发现应答来自别的服务端（%s，实例 ID %s），不是本机记住的 %s，忽略",
+                    reply.url, reply.server_uuid or "未带", server_uuid,
+                )
+                foreign[reply.url] = 1
+                continue
+            if server_uuid and not reply.known:
+                log.warning("原来那台服务端（%s）说不认得这台机器，不切换", reply.url)
+                unknown[reply.url] = 1
+                continue
+            seen[reply.url] = seen.get(reply.url, 0) + 1
     finally:
         sock.close()
 
     candidates = sorted(seen)
+    extra = (tuple(sorted(foreign)), tuple(sorted(unknown)))
     if len(candidates) == 1:
-        return DiscoveryOutcome(candidates[0], candidates)
-    return DiscoveryOutcome(None, candidates)
+        return DiscoveryOutcome(candidates[0], candidates, *extra)
+    return DiscoveryOutcome(None, candidates, *extra)
 
 
 def load_public_key(path) -> Optional[RSAPublicKey]:

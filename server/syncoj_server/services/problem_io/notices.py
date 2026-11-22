@@ -77,7 +77,7 @@ MESSAGES: Dict[str, str] = {
     "dependency_dropped": "子任务依赖已丢弃，得分可能偏高",
     "limits_collapsed": "各测试点时限/内存不同，已统一为 {time} ms / {memory} MB",
     "limits_defaulted": "{what}未知，已设为 {value}",
-    "mixed_io": "输入与输出方式不一致，按文件 IO 导入",
+    "mixed_io": "{source}已按文件 IO 导入，{affected}的程序全部判错",
     "strict_compare_relaxed": "原为严格逐行比较，现忽略行末空白",
     "diff_compare_relaxed": "原为 diff 比较，现忽略行末空白",
     "real_checker_generated": "已生成实数比较 checker（误差 {eps}）",

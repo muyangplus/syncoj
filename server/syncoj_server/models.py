@@ -43,8 +43,10 @@ __all__ = [
     "Roster",
     "BootstrapKey",
     "Agent",
+    "AgentBinding",
     "AgentDiagnostic",
     "SourceFile",
+    "SourceVersion",
     "Asset",
     "DeployTask",
     "DeployTarget",
@@ -106,8 +108,12 @@ class ContestStatus:
     RUNNING = "running"
     FROZEN = "frozen"
     CLOSED = "closed"
+    #: 已归档：数据全部保留、可查看可导出，但**不再参与任何自动流程** —— 机器动态解析
+    #: 不到它（与 ``closed`` 一样不收代码、不下发）、成绩扫描跳过它、不排自带评测，
+    #: 场次下拉默认不显示。取消归档回到 ``closed``（§4.9）。
+    ARCHIVED = "archived"
 
-    ALL = (DRAFT, RUNNING, FROZEN, CLOSED)
+    ALL = (DRAFT, RUNNING, FROZEN, CLOSED, ARCHIVED)
 
 
 class DeployStatus:
@@ -178,11 +184,22 @@ class Contest(Base, TimestampMixin):
     starts_at = Column(DateTime, nullable=True)
     ends_at = Column(DateTime, nullable=True)
     note = Column(Text, nullable=True)
+    #: 考生页密码（scrypt 哈希，同 ``Admin.password_hash``）。**可空 = 不开放**
+    #: 「准考证号 + 密码」登录考生页 —— 那一页只剩降级预览与本机自动匹配。
+    #: 只写不读：接口只回 ``has_player_password``（迁移 022）。
+    player_password_hash = Column(String(255), nullable=True)
 
     #: 默认名单。建场次时从名单库挑一份，之后可以「一键应用」把名单落到选手表。
-    #: 只是**模板**，不参与鉴权也不参与成绩 —— 改了名单不会动已有选手，
-    #: 得显式应用一次。这样"名单调整"和"比赛数据"永远是两件分开的事。
+    #: 对**选手表**它只是模板 —— 改了名单不会动已有选手，得显式应用一次。
+    #: 但它决定**机器进这一场时用哪条绑定**：一台机器可以同时绑多份名单，
+    #: 场次用的是这份名单里的那条（§4.6）。没指定时退回按考号对应。
     default_roster_id = Column(Integer, ForeignKey("roster.id", ondelete="SET NULL"), nullable=True)
+
+    #: 自带评测的自动入队（§12.9）：``off`` = 不自动评；``on_change`` = 收到某题的新版本就排一个任务。
+    #: 可空只为老库（迁移 020 回填 ``off``），读作 ``off``。
+    auto_judge = Column(String(16), nullable=True, default="off")
+    #: 自动入队的去抖秒数：同一 (选手, 题目) 在这段时间内连续改动只评最后一版。NULL 读作 60。
+    auto_judge_delay = Column(Integer, nullable=True, default=60)
 
     players = relationship("Player", back_populates="contest", cascade="all, delete-orphan")
     default_roster = relationship("Roster")
@@ -197,6 +214,10 @@ class Contest(Base, TimestampMixin):
         把封榜的场次排除掉，会让封榜瞬间所有机器都"找不到场次"而停摆。
         """
         return self.status in (ContestStatus.RUNNING, ContestStatus.FROZEN)
+
+    @property
+    def is_archived(self) -> bool:
+        return self.status == ContestStatus.ARCHIVED
 
 
 # --------------------------------------------------------------------------- #
@@ -280,7 +301,7 @@ class Player(Base, TimestampMixin):
     """某个场次的参赛者。
 
     它是**名单库条目在那个场次的物化**：``player_no`` 与名单条目一致。
-    机器绑的是名单里的人（``Agent.roster_entry_id``），所以同一个人换一场比赛
+    机器绑的是名单里的人（``AgentBinding``），所以同一个人换一场比赛
     不需要重新配对 —— 只要新场次应用了那份名单，他的机器自然就认得路。
     """
 
@@ -375,18 +396,14 @@ class Agent(Base, TimestampMixin):
     老模型里 ``agent.player_id`` 指向某个场次的 ``player``，于是"这台机器是谁的"
     会随场次变化，题库里每换一场就得重新发码、重新认领一次。
 
-    现在绑的是**名单库条目**（``roster_entry_id``）。名单条目代表一个学生，
-    与场次无关；某个场次有没有他，取决于那份名单有没有被应用到场次里。
-    所以今天绑的机器，明天换一场比赛照样能用 —— 这才是"永久配对"该有的样子。
+    现在绑的是**名单库条目**，而且**可以同时绑多份名单**（``agent_binding``，
+    每份名单里至多一人）：同一台机器可以是「班级名单」的 1 号，同时是「考场名单」
+    的 2 号。进入某个场次时用的是**该场次所用名单**里的那条绑定（见
+    ``services/bindings.py``），所以今天绑的机器，明天换一场比赛照样能用。
 
-    ``roster_entry_id`` 为空表示**还没配对**：机器已经注册上来、有凭据，
-    但服务端还不知道它是谁的。这个状态以前放在单独一张 ``machine_claim`` 表里，
-    目的是绕开"改 ``player_id`` 可空性要重建表"这件事；既然这次无论如何都要
-    重建 ``agent``（``player_id`` 整个不要了），就该把两种状态收进同一张表 ——
-    一张表、一次查询、一套状态机，比两张表少一半的分支。
-
-    ``registration_mode`` 一类的场次级开关也随之消失了：只剩一条注册路径，
-    没有"两种模式"可选，也就没有"选错了模式"这种事。
+    一条绑定都没有表示**还没配对**：机器已经注册上来、有凭据，但服务端还不知道
+    它是谁的。曾经是单值列 ``roster_entry_id``（迁移 021 搬进 ``agent_binding``
+    并删掉）；留着它当"主绑定"会出现两份真相，哪一份说了算只能靠约定。
     """
 
     __tablename__ = "agent"
@@ -394,10 +411,6 @@ class Agent(Base, TimestampMixin):
     id = Column(Integer, primary_key=True)
 
     # ---- 身份 ----
-    #: 绑定的名单条目（人）。为空 = 已注册但未配对
-    roster_entry_id = Column(
-        Integer, ForeignKey("roster_entry.id", ondelete="SET NULL"), nullable=True
-    )
     #: 显式指定的场次。为空 = **动态解析**：找一个"进行中且名单含此人"的场次。
     #: 一个考点同时跑多场比赛、同一个人两边都在时才需要显式指定
     contest_id = Column(Integer, ForeignKey("contest.id", ondelete="SET NULL"), nullable=True)
@@ -457,20 +470,65 @@ class Agent(Base, TimestampMixin):
     #:
     #: 它**不是**身份依据（IP 可以变、可以共享、局域网里也可以伪造）：真正的身份
     #: 是凭据 + 配对关系，这里只回答"打开这一页的浏览器大概在哪台机器上"。
-    #: 匹配不上时页面会退回到手填场次与考号，那条路才是兜底。
+    #: 匹配不上时页面会退回到降级预览与「准考证号 + 考生页密码」登录。
     last_seen_ip = Column(String(64), nullable=True)
     revoked_at = Column(DateTime, nullable=True)
     #: 完成配对的时间
     claimed_at = Column(DateTime, nullable=True)
 
-    roster_entry = relationship("RosterEntry")
     contest = relationship("Contest")
+    #: 这台机器在各份名单里的绑定（每份名单至多一条）。空 = 未配对
+    bindings = relationship(
+        "AgentBinding",
+        back_populates="agent",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="AgentBinding.id",
+    )
 
     __table_args__ = (
         UniqueConstraint("machine_uuid", name="uq_agent_uuid"),
         Index("ix_agent_machine", "machine_id"),
         Index("ix_agent_fingerprint", "machine_fingerprint"),
-        Index("ix_agent_roster_entry", "roster_entry_id"),
+    )
+
+    @property
+    def is_paired(self) -> bool:
+        """至少绑了一份名单里的一个人。"""
+        return bool(self.bindings)
+
+
+class AgentBinding(Base):
+    """机器 ↔ 某份名单里的某个人（§4.6）。
+
+    两条唯一约束就是"一人一机、一机一人"在多名单下的样子：
+
+    * ``(agent_id, roster_id)``：一台机器在**一份名单里**只对应一个人
+    * ``(roster_entry_id)``：一个人只对应一台机器
+
+    ``roster_id`` 是冗余（条目自己知道在哪份名单），留着它只为了让第一条约束能由
+    库来守 —— 靠应用层先查再写，并发配对时守不住。条目、名单、机器任一被删，
+    绑定随之级联删除（条目没了绑定就没了，与以前 ``SET NULL`` 的效果相同）。
+    """
+
+    __tablename__ = "agent_binding"
+
+    id = Column(Integer, primary_key=True)
+    agent_id = Column(Integer, ForeignKey("agent.id", ondelete="CASCADE"), nullable=False)
+    roster_entry_id = Column(
+        Integer, ForeignKey("roster_entry.id", ondelete="CASCADE"), nullable=False
+    )
+    roster_id = Column(Integer, ForeignKey("roster.id", ondelete="CASCADE"), nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+
+    agent = relationship("Agent", back_populates="bindings")
+    entry = relationship("RosterEntry")
+    roster = relationship("Roster")
+
+    __table_args__ = (
+        UniqueConstraint("agent_id", "roster_id", name="uq_agent_binding_roster"),
+        UniqueConstraint("roster_entry_id", name="uq_agent_binding_entry"),
+        Index("ix_agent_binding_roster", "roster_id"),
     )
 
 
@@ -485,13 +543,39 @@ class JudgeWorker(Base):
     created_at = Column(DateTime, default=utcnow, nullable=False)
     last_seen_at = Column(DateTime, nullable=True)
     last_seen_ip = Column(String(64), nullable=True)
+    #: 评测机自报的状态（迁移 023，§12.10）：每次 ``/judge/poll`` 覆盖写。旧评测机只调
+    #: ``/judge/lease``、不报这些，于是全是 NULL —— 界面按"旧版评测机"显示，也收不到远程命令。
+    version = Column(String(32), nullable=True)
+    backend = Column(String(16), nullable=True)
+    isolated = Column(Boolean, nullable=True)
+    hostname = Column(String(128), nullable=True)
+    platform = Column(String(32), nullable=True)
+    slots = Column(Integer, nullable=True)
+    #: 评测机空闲时多久问一次（秒）。在线判定 = 最近联系不超过它的 3 倍
+    poll_seconds = Column(Integer, nullable=True)
+    #: 暂停 = False：领不到新任务，但照常心跳、评完手上的
+    enabled = Column(Boolean, nullable=False, default=True)
+    #: 教师要它做的事：``run`` / ``stop`` / ``restart``。后两者在下一次 poll 里随响应带走，
+    #: 带走即复位成 ``run`` —— 命令是一次性的，评测机日后重新启动不会再被停一次
+    desired = Column(String(16), nullable=False, default="run")
+    #: 评测机进程的随机标识（每次启动换新）；``desired_boot`` = 下命令时它是哪个进程。
+    #: 命令一直重发给那个进程，等换了进程（重启 / 停止后再起）才复位：响应丢了命令不丢
+    boot_id = Column(String(32), nullable=True)
+    desired_boot = Column(String(32), nullable=True)
+    #: 服务端以子进程拉起的「本机评测机」（§12.10）。同时最多一行
+    is_local = Column(Boolean, nullable=False, default=False)
 
 
 class JudgeTask(Base):
-    """一次自带评测（选手 × 题目）。同一对只留最新一条：重测 = 删掉旧的、排一条新的。
+    """一次自带评测（选手 × 题目 × 某一版代码）。任务即历史：完成的任务连同结果留着，
+    分数 timeline 从这里读（§12.9）。
 
     状态：``queued`` → ``running``（带租约，worker 崩了租约过期自动回到队列）→ ``done`` / ``failed``。
     ``done`` 不等于有成绩：没交代码的选手直接 ``done``、不写 ``result.json``（矩阵照旧显示未交）。
+
+    ``trigger``：``auto``（收到新版本自动排）/ ``manual``（教师排，评最新版）/ ``rejudge``
+    （教师指定某个历史版本重测）。前两种领任务时才选代码，结果写进 ``result.json``；
+    ``rejudge`` 钉死 ``source_version_id``，结果只进历史，教师「采用」后才写 ``result.json``。
     """
 
     __tablename__ = "judge_task"
@@ -513,9 +597,34 @@ class JudgeTask(Base):
     created_at = Column(DateTime, default=utcnow, nullable=False)
     finished_at = Column(DateTime, nullable=True)
 
+    # ---- 按版本记（§12.9，迁移 020）----
+    #: auto / manual / rejudge（见类说明）；NULL 读作 manual（迁移前的老任务）
+    trigger = Column(String(16), nullable=True)
+    #: 排任务的管理员用户名；自动入队为 NULL
+    requested_by = Column(String(64), nullable=True)
+    #: 评的是哪一版代码。rejudge 排任务时就定下；auto / manual 领任务时选定。
+    #: 版本被删（清代码、删选手）时置空，任务与结果仍留在历史里
+    source_version_id = Column(Integer, ForeignKey("source_version.id", ondelete="SET NULL"), nullable=True)
+    #: 去抖：这个时刻之前不发给评测机（自动入队用；手动排的为 NULL）
+    not_before = Column(DateTime, nullable=True)
+    #: 教师要求真跑一遍，不复用相同 (数据包, 评测配置, 代码) 的已有结果
+    rerun = Column(Boolean, nullable=True, default=False)
+    #: (数据包 sha, 评测配置, 代码 sha) 的指纹，复用结果按它找
+    judge_key = Column(String(64), nullable=True)
+    #: 结果直接抄自哪个任务（没有占评测机）
+    reused_from = Column(Integer, nullable=True)
+    #: 交回的结果：三项成绩与完整文档（测试点明细，超长时截断）
+    score = Column(Integer, nullable=True)
+    max_score = Column(Integer, nullable=True)
+    result_json = Column(Text, nullable=True)
+    #: 这份结果写进 result.json 的时刻（自动写入或教师「采用」）
+    applied_at = Column(DateTime, nullable=True)
+
     __table_args__ = (
-        UniqueConstraint("contest_id", "player_id", "problem", name="uq_judge_task"),
         Index("ix_judge_task_status", "status", "id"),
+        Index("ix_judge_task_pair", "contest_id", "player_id", "problem"),
+        Index("ix_judge_task_version", "source_version_id"),
+        Index("ix_judge_task_key", "judge_key"),
     )
 
 
@@ -595,6 +704,33 @@ class SourceFile(Base):
     __table_args__ = (
         UniqueConstraint("player_id", "rel_path", name="uq_source_player_path"),
         Index("ix_source_sha", "player_id", "sha256"),
+    )
+
+
+class SourceVersion(Base):
+    """代码的版本历史（§12.9）：Agent 每传上来一份**新内容**就记一条。
+
+    ``SourceFile`` 只记当前版本；这里留下每一版的内容指纹（内容在 ``blobs/`` 里，列入
+    blob 引用清单不被回收），分数 timeline 与"重测过去的版本"都从这里取。选手删除、
+    清空代码台账（含已消失的）时一并删掉并回收内容。
+
+    ``problem`` 是收到时按题目模式归到的题（审计用；读的一侧按**当前**题目模式重新归题，
+    改题目标识或模式不会让历史对不上）。迁移 020 补的初始版本为空。
+    """
+
+    __tablename__ = "source_version"
+
+    id = Column(Integer, primary_key=True)
+    player_id = Column(Integer, ForeignKey("player.id", ondelete="CASCADE"), nullable=False)
+    rel_path = Column(String(1024), nullable=False)
+    sha256 = Column(String(64), nullable=False)
+    size = Column(BigInteger, nullable=False, default=0)
+    received_at = Column(DateTime, default=utcnow, nullable=False)
+    problem = Column(String(64), nullable=True)
+
+    __table_args__ = (
+        Index("ix_source_version_player", "player_id", "rel_path", "id"),
+        Index("ix_source_version_sha", "sha256"),
     )
 
 

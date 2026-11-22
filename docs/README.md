@@ -29,6 +29,7 @@
 | [`reference/api-conventions.md`](reference/api-conventions.md) | 管理端 API 约定：列表信封、错误体、命名、删除语义 |
 | [`reference/judge-result.md`](reference/judge-result.md) | 成绩目录与格式、三条解析规则、自带评测数据包与评测机接口 |
 | [`reference/config-keys.md`](reference/config-keys.md) | `agent.ini` 逐键说明（与 `CONFIG_POLICY_KEYS` 对账） |
+| [`reference/player-api.md`](reference/player-api.md) | 考生页接口：降级预览、准考证号 + 密码登录与令牌、本人上下文、网页下载 |
 | [`reference/problem-formats.md`](reference/problem-formats.md) | 题目配置导入导出：识别顺序、各格式映射、原生格式、提示代码、上限 |
 
 ### 设计（原 `DESIGN.md` 拆分，编号不变）
@@ -39,7 +40,7 @@
 | [`design/01-architecture.md`](design/01-architecture.md) | 架构总览（原 §1） |
 | [`design/02-tick-protocol.md`](design/02-tick-protocol.md) | `tick` 协议取舍（原 §2） |
 | [`design/03-agent.md`](design/03-agent.md) | Agent：主循环、扫描、注册、systemd unit、py38 清单（原 §3） |
-| [`design/04-server.md`](design/04-server.md) | 服务端：数据模型、写入、成绩回写、代码归题、注册配对、名单、迁移（原 §4） |
+| [`design/04-server.md`](design/04-server.md) | 服务端：数据模型、写入、成绩回写、代码归题、注册配对（多名单绑定、同名匹配）、名单、迁移、场次归档（原 §4） |
 | [`design/05-api-and-frontend.md`](design/05-api-and-frontend.md) | 接口与前端：契约测试、信封、文案口径、删除语义、公开端口（原 §5） |
 | [`design/06-security.md`](design/06-security.md) | 安全面、签名算法、信任边界（原 §6） |
 | [`design/07-ops-and-install.md`](design/07-ops-and-install.md) | 运维与装机：`.key/`、发布、安装策略、服务端发现、远程卸载（原 §7） |
@@ -71,6 +72,7 @@
 | [`decisions/ADR-0015-server-announce.md`](decisions/ADR-0015-server-announce.md) | 主动通告只作线索，切换前挑战应答 |
 | [`decisions/ADR-0016-builtin-judge.md`](decisions/ADR-0016-builtin-judge.md) | 自带评测：写 `judge_result/`、独立评测机、isolate 沙箱 |
 | [`decisions/ADR-0017-problem-format-import.md`](decisions/ADR-0017-problem-format-import.md) | 题目配置导入导出：折算成现有数据包、只加 IO 文件名两列 |
+| [`decisions/ADR-0018-multi-roster-binding.md`](decisions/ADR-0018-multi-roster-binding.md) | 一机绑多份名单：按场次名单取人、同名建议 |
 
 ## 文档之间的关系
 
@@ -160,6 +162,8 @@ python server/tools/dump_openapi.py && (cd web && npm run gen:types)
 | 交付视图：「未交」「已待评测」「已出成绩」、交题进度 | ✅ |
 | 名单库：全局名单、场次默认名单、一键应用 | ✅ |
 | 永久配对：统一密钥 + 六位配对码 + 指纹自愈 + 克隆告警 | ✅ |
+| 一机多名单绑定 + 按姓名匹配机器 | ✅ |
+| 场次归档 | ✅ |
 | API 形状统一：列表信封 / 统一错误体 / 名称确认删除 | ✅ |
 | 局域网发现：UDP 探测 + 签名应答 | ✅ |
 | 服务端主动通告：UDP 通告 + 挑战应答 +「召集机器」 | ✅ |

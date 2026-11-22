@@ -462,8 +462,8 @@ def test_clear_roster_entries_keeps_the_roster(
 # --------------------------------------------------------------------------- #
 # 名单条目会连带机器：删名单 / 清空条目 / 删单条
 #
-# 机器绑的是名单里的**人**（``Agent.roster_entry_id``），而条目没了那个外键
-# 会 ``ON DELETE SET NULL`` —— 于是删名单顺手把一批机器变回"未配对"，它们
+# 机器绑的是名单里的**人**（``agent_binding``），而条目没了绑定随之级联删除
+# —— 于是删名单顺手把一批机器变回"未配对"，它们
 # 下次心跳开始显示新的配对码，要教师**一台台重新配**。这条路径此前完全静默，
 # 而且违背的正是名单库存在的理由："配对一次、之后 N 场比赛零人工"。
 #
@@ -493,9 +493,24 @@ def roster_entry_row(client: TestClient, entry_id: int):
 
 
 def agent_row(client: TestClient, agent_id: int):
-    """直接读机器那一行：``roster_entry_id`` 是这条测试唯一有意义的证据。"""
+    """直接读库：这台机器的绑定（``agent_binding``）是这条测试唯一有意义的证据。
+
+    返回一个带 ``roster_entry_id`` 的投影（这些用例里每台机器只绑一份名单；
+    一条绑定都没有时为 ``None``）。
+    """
+    from types import SimpleNamespace
+
+    from syncoj_server.models import AgentBinding
+
     with client.app.state.ctx.db.session() as session:
-        return session.get(Agent, agent_id)
+        if session.get(Agent, agent_id) is None:
+            return None
+        rows = list(
+            session.execute(
+                select(AgentBinding.roster_entry_id).where(AgentBinding.agent_id == agent_id)
+            ).scalars()
+        )
+        return SimpleNamespace(roster_entry_id=rows[0] if rows else None)
 
 
 def bound_machine(
@@ -670,7 +685,7 @@ def test_delete_single_entry_unbinds_the_machine_and_says_so(
     assert roster_entry_row(client, entry["id"]) is None
     agent = agent_row(client, machine["agent_id"])
     assert agent is not None
-    assert agent.roster_entry_id is None, "条目被删，外键该 SET NULL"
+    assert agent.roster_entry_id is None, "条目被删，绑定该随之级联删除"
 
 
 def test_unbound_machine_no_longer_blocks_deletion(

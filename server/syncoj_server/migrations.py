@@ -313,8 +313,15 @@ def _bind_legacy_agents_to_roster(engine: Engine, bindings: List[Tuple[int, str]
                 {"no": player_no},
             ).fetchall()
             if len(candidates) == 1:
+                # 当年写的是 ``agent.roster_entry_id``；那一列在迁移 021 搬进了
+                # ``agent_binding``，而重建按**当前模型**建表 —— 所以这里直接写绑定表
                 conn.execute(
-                    text("UPDATE agent SET roster_entry_id = :rid WHERE id = :aid"),
+                    text(
+                        "INSERT OR IGNORE INTO agent_binding "
+                        "(agent_id, roster_entry_id, roster_id, created_at) "
+                        "SELECT :aid, e.id, e.roster_id, CURRENT_TIMESTAMP "
+                        "FROM roster_entry e WHERE e.id = :rid"
+                    ),
                     {"rid": candidates[0][0], "aid": agent_id},
                 )
                 bound += 1
@@ -656,6 +663,103 @@ def _migration_019_problem_io_files(engine: Engine) -> None:
         _add_column(engine, "problem", name, "VARCHAR(64)")
 
 
+def _migration_020_source_versions(engine: Engine) -> None:
+    """代码版本历史与按版本记的评测结果（§12.9）。
+
+    1. ``contest`` 加自动入队的开关与去抖秒数，老场次回填 ``off`` / 60（不改变行为）；
+    2. ``judge_task`` 按模型重建：去掉"每 (选手, 题目) 只留一条"的唯一约束（任务即历史），
+       补上版本、触发方式、结果等列（全部可空，老任务 ``trigger`` 为空读作 ``manual``）。
+       删约束只能重建，配方见 :func:`_rebuild_table`；
+    3. 新表 ``source_version`` 交给 ``create_all``；这里用 ``source_file`` 里**已存下内容**的
+       当前版本补一条初始版本（``received_at`` 取最近一次见到的时刻，``problem`` 留空，
+       读的一侧按当前题目模式归题）。已有同一 (选手, 路径, 指纹) 的不重复补，可重跑。
+    """
+    tables = _tables(engine)
+    if "contest" in tables:
+        _add_column(engine, "contest", "auto_judge", "VARCHAR(16)")
+        _add_column(engine, "contest", "auto_judge_delay", "INTEGER")
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE contest SET auto_judge = 'off' WHERE auto_judge IS NULL"))
+            conn.execute(text("UPDATE contest SET auto_judge_delay = 60 WHERE auto_judge_delay IS NULL"))
+    if "judge_task" in tables and "trigger" not in _columns(engine, "judge_task"):
+        _rebuild_table(engine, "judge_task")
+    if "source_file" in tables and "source_version" in _tables(engine):
+        with engine.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO source_version (player_id, rel_path, sha256, size, received_at) "
+                "SELECT f.player_id, f.rel_path, f.sha256, f.size, f.last_seen_at FROM source_file f "
+                "WHERE f.content_stored = 1 AND NOT EXISTS ("
+                " SELECT 1 FROM source_version v WHERE v.player_id = f.player_id"
+                " AND v.rel_path = f.rel_path AND v.sha256 = f.sha256) "
+                "ORDER BY f.last_seen_at, f.id"
+            ))
+
+
+def _migration_021_agent_binding(engine: Engine) -> None:
+    """机器可以同时绑多份名单：``agent.roster_entry_id`` 搬进 ``agent_binding`` 后删掉。
+
+    ``agent_binding`` 由 ``create_all`` 建；这里把老的单值绑定逐条搬过去
+    （``roster_id`` 取条目所在的名单），再按 :func:`_rebuild_table` 的配方重建
+    ``agent`` 去掉那一列。``INSERT OR IGNORE`` 让重跑是空操作；老库里"一人一机"
+    由应用层守着，搬过来不会撞 ``(roster_entry_id)`` 唯一约束。
+    """
+    if "agent" not in _tables(engine) or "roster_entry_id" not in _columns(engine, "agent"):
+        return
+    with engine.begin() as conn:
+        moved = conn.execute(
+            text(
+                "INSERT OR IGNORE INTO agent_binding "
+                "(agent_id, roster_entry_id, roster_id, created_at) "
+                "SELECT a.id, e.id, e.roster_id, COALESCE(a.claimed_at, CURRENT_TIMESTAMP) "
+                "FROM agent a JOIN roster_entry e ON e.id = a.roster_entry_id "
+                "WHERE a.roster_entry_id IS NOT NULL ORDER BY a.id"
+            )
+        ).rowcount
+    if moved:
+        log.info("迁移：%d 条机器绑定搬进 agent_binding", moved)
+    _rebuild_table(engine, "agent")
+
+
+def _migration_022_contest_player_password(engine: Engine) -> None:
+    """场次加考生页密码哈希列。
+
+    NULL = 本场不开放「准考证号 + 密码」登录考生页，老场次行为不变。
+    """
+    if "contest" not in _tables(engine):
+        return
+    _add_column(engine, "contest", "player_password_hash", "VARCHAR(255)")
+
+
+def _migration_023_judge_worker_status(engine: Engine) -> None:
+    """评测机记自报状态与管理动作（§12.10）。
+
+    自报状态（版本、沙箱后端、是否隔离、主机名、平台、并发数、轮询间隔）全部可空：
+    旧评测机不报，读的一侧按"旧版"显示。``enabled`` 回填 1（老评测机照常领任务）、
+    ``desired`` 回填 ``run``、``is_local`` 回填 0（迁移之前不存在本机评测机）。
+    """
+    if "judge_worker" not in _tables(engine):
+        return
+    for name, ddl in (
+        ("version", "VARCHAR(32)"),
+        ("backend", "VARCHAR(16)"),
+        ("isolated", "BOOLEAN"),
+        ("hostname", "VARCHAR(128)"),
+        ("platform", "VARCHAR(32)"),
+        ("slots", "INTEGER"),
+        ("poll_seconds", "INTEGER"),
+        ("enabled", "BOOLEAN"),
+        ("desired", "VARCHAR(16)"),
+        ("is_local", "BOOLEAN"),
+        ("boot_id", "VARCHAR(32)"),
+        ("desired_boot", "VARCHAR(32)"),
+    ):
+        _add_column(engine, "judge_worker", name, ddl)
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE judge_worker SET enabled = 1 WHERE enabled IS NULL"))
+        conn.execute(text("UPDATE judge_worker SET desired = 'run' WHERE desired IS NULL"))
+        conn.execute(text("UPDATE judge_worker SET is_local = 0 WHERE is_local IS NULL"))
+
+
 MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
     (1, "统一密钥注册 + 名单库所需的结构", _migration_001_enrollment),
     (2, "机器永久绑定名单条目；去掉注册码链路", _migration_002_roster_binding),
@@ -735,6 +839,26 @@ MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
         19,
         "题目可自定义文件 IO 的输入/输出文件名",
         _migration_019_problem_io_files,
+    ),
+    (
+        20,
+        "代码版本历史；评测任务按版本记结果、可自动入队",
+        _migration_020_source_versions,
+    ),
+    (
+        21,
+        "机器可以同时绑多份名单：绑定搬进 agent_binding",
+        _migration_021_agent_binding,
+    ),
+    (
+        22,
+        "场次加考生页密码",
+        _migration_022_contest_player_password,
+    ),
+    (
+        23,
+        "评测机记自报状态，可暂停、远程停止与重启",
+        _migration_023_judge_worker_status,
     ),
 ]
 

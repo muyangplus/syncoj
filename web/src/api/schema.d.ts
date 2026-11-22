@@ -47,13 +47,35 @@ export interface paths {
          * Unbind Agent
          * @description 解除机器与人的绑定（不是作废凭据）。
          *
-         *     解绑之后机器回到"待配对"，并在下一次心跳里重新拿到一个配对码 ——
+         *     给了 ``roster_id`` 就只解除那份名单里的绑定，其他名单不动；不给则全部解除。
+         *     一条都不剩时机器回到"待配对"，并在下一次心跳里重新拿到一个配对码 ——
          *     这样它能被绑给别人，而不用重新注册（重新注册要读 root 只读的密钥，
          *     在考场上等于要重启）。
          *
          *     要彻底让一台机器下线请用「作废」。
          */
         delete: operations["unbind_agent_api_v1_admin_agents__agent_id__bind_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/agents/{agent_id}/binding-suggestions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Binding Suggestions
+         * @description 这台机器在其他名单里的同名建议：姓名（去首尾空白、全半角统一）完全相等，
+         *     同名多人时用座位号 / 考号收窄，仍不唯一、或对方已有机器就不建议。
+         */
+        get: operations["binding_suggestions_api_v1_admin_agents__agent_id__binding_suggestions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -163,6 +185,10 @@ export interface paths {
          *
          *     目标条目**必须还没有机器**：两台机器绑同一个人，代码会往同一个目录里写，
          *     而且完全静默（成绩矩阵只是看起来"这个人交了两遍"）。
+         *
+         *     一台机器可以绑多份名单：改派只替换**目标所在那份名单**里的绑定（那份名单里
+         *     原来没绑就等于新绑一条），其他名单不动。同名建议见
+         *     ``GET /agents/{id}/binding-suggestions``。
          */
         post: operations["rebind_agent_api_v1_admin_agents__agent_id__rebind_post"];
         delete?: never;
@@ -396,6 +422,26 @@ export interface paths {
         get: operations["list_agents_api_v1_admin_contests__contest_id__agents_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/contests/{contest_id}/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Archive Contest
+         * @description 归档场次。已归档时是空操作。
+         */
+        post: operations["archive_contest_api_v1_admin_contests__contest_id__archive_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -762,6 +808,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/contests/{contest_id}/judge/auto": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set Auto Judge
+         * @description 自动入队（§12.9）：``on_change`` = 收到某题的新版本就排评测，同一 (选手, 题目)
+         *     在 ``auto_judge_delay`` 秒内连续改动只评最后一版。场次进行中也排。
+         */
+        put: operations["set_auto_judge_api_v1_admin_contests__contest_id__judge_auto_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/contests/{contest_id}/judge/builtin": {
         parameters: {
             query?: never;
@@ -777,10 +844,12 @@ export interface paths {
         put?: never;
         /**
          * Queue Builtin Judge
-         * @description 排自带评测：指定的题（或全部用自带评测的题）× 指定的选手（或全部选手）。
+         * @description 排自带评测：指定的题（或全部用自带评测的题）× 指定的选手（或全部选手），评最新版。
          *
          *     场次还在进行时拒绝（``contest_in_progress``）：那时评的是考到一半的代码；教师确认后带
-         *     ``force`` 再来。已有的任务（不管什么状态）会被替换 —— 重测就是重新排。
+         *     ``force`` 再来。同一对还在排队的最新版任务会被替换；跑完的留作历史（§12.9）。
+         *
+         *     带 ``version_id`` = 重测那一个历史版本：结果只进历史与 timeline，不受场次进行中的限制。
          */
         post: operations["queue_builtin_judge_api_v1_admin_contests__contest_id__judge_builtin_post"];
         delete?: never;
@@ -900,6 +969,90 @@ export interface paths {
          *     题目标识已经在这个请求的 `problem` 参数里了，再要求拼一遍只会让人打错。
          */
         delete: operations["clear_judge_score_api_v1_admin_contests__contest_id__judge_score_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/contests/{contest_id}/judge/tasks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Judge Tasks
+         * @description 评测任务（新的在前）。任务即历史：每一次评测（含复用的）都在这里。
+         */
+        get: operations["list_judge_tasks_api_v1_admin_contests__contest_id__judge_tasks_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/contests/{contest_id}/judge/tasks/{task_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Judge Task
+         * @description 一个评测任务及其结果的测试点明细（历史版本的结果从这里看）。
+         */
+        get: operations["get_judge_task_api_v1_admin_contests__contest_id__judge_tasks__task_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/contests/{contest_id}/judge/tasks/{task_id}/adopt": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Adopt Judge Task
+         * @description 采用此版本成绩：把这个任务的结果写成当前 ``result.json`` 并立即重扫，成绩矩阵这一格
+         *     换成它。手工录入的格子不动（409 ``manual_score``，先清除手工成绩）。
+         */
+        post: operations["adopt_judge_task_api_v1_admin_contests__contest_id__judge_tasks__task_id__adopt_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/contests/{contest_id}/judge/versions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Source Versions
+         * @description 一位选手的代码版本历史（旧的在前），每版带最近一次评测结果 —— 分数 timeline 的数据。
+         *
+         *     归题按**当前**题目模式现算（改了题目标识或模式也对得上）。一个人的版本数有界，在
+         *     Python 里切页。
+         */
+        get: operations["list_source_versions_api_v1_admin_contests__contest_id__judge_versions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -1114,6 +1267,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/contests/{contest_id}/unarchive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Unarchive Contest
+         * @description 取消归档：回到「已结束」。不是已归档时是空操作。
+         */
+        post: operations["unarchive_contest_api_v1_admin_contests__contest_id__unarchive_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/deploys/{task_id}": {
         parameters: {
             query?: never;
@@ -1318,6 +1491,66 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/judge-local": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Local Judge Status
+         * @description 本机评测机（服务端子进程）的状态；非 Linux 服务端 ``supported`` = false。
+         */
+        get: operations["local_judge_status_api_v1_admin_judge_local_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/judge-local/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Local Judge Start
+         * @description 启动本机评测机：签一枚新令牌（记为本机评测机那一行），以子进程运行 worker。已在运行则不动。
+         */
+        post: operations["local_judge_start_api_v1_admin_judge_local_start_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/judge-local/stop": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Local Judge Stop
+         * @description 停止本机评测机：评完手上的任务后退出。
+         */
+        post: operations["local_judge_stop_api_v1_admin_judge_local_stop_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/judge-workers": {
         parameters: {
             query?: never;
@@ -1325,12 +1558,15 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Judge Workers */
+        /**
+         * List Judge Workers
+         * @description 评测机与它们自报的状态、在线与否、手上正在评的任务（§12.10）。
+         */
         get: operations["list_judge_workers_api_v1_admin_judge_workers_get"];
         put?: never;
         /**
          * Create Judge Worker
-         * @description 签发一台评测机的令牌。明文只在这一次返回，库里只存哈希。
+         * @description 签发一台评测机的令牌。明文只在这一次返回，库里只存哈希；顺带给出一行安装命令。
          */
         post: operations["create_judge_worker_api_v1_admin_judge_workers_post"];
         delete?: never;
@@ -1351,9 +1587,53 @@ export interface paths {
         post?: never;
         /**
          * Delete Judge Worker
-         * @description 吊销一台评测机（删行）。它手上没交的任务租约到期后回到队列。
+         * @description 吊销一台评测机（删行）。它手上没交的任务立刻退回队列；本机评测机一并停掉。
          */
         delete: operations["delete_judge_worker_api_v1_admin_judge_workers__worker_id__delete"];
+        options?: never;
+        head?: never;
+        /**
+         * Update Judge Worker
+         * @description 改名；暂停（``enabled`` = false：领不到新任务，手上的照常评完）/ 恢复。
+         */
+        patch: operations["update_judge_worker_api_v1_admin_judge_workers__worker_id__patch"];
+        trace?: never;
+    };
+    "/api/v1/admin/judge-workers/{worker_id}/restart": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Restart Judge Worker
+         * @description 重启：评完手上的任务后以同样的参数重新启动自己（换上磁盘上的新程序）。
+         */
+        post: operations["restart_judge_worker_api_v1_admin_judge_workers__worker_id__restart_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/judge-workers/{worker_id}/stop": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Stop Judge Worker
+         * @description 停止：评测机下一次 poll 时取走命令，评完手上的任务后退出（systemd / 计划任务不会再拉起它）。
+         */
+        post: operations["stop_judge_worker_api_v1_admin_judge_workers__worker_id__stop_post"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -1437,6 +1717,26 @@ export interface paths {
          *     配对之后认机器靠 machine_uuid。
          */
         post: operations["bind_machine_by_code_api_v1_admin_machines_bind_by_code_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/machines/bound": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Bound Machines
+         * @description 已配对的机器（至少绑了一份名单），每台带上全部绑定。按主机名排序。
+         */
+        get: operations["list_bound_machines_api_v1_admin_machines_bound_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2003,6 +2303,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/rosters/{roster_id}/match-machines/apply": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Apply Roster Match
+         * @description 应用预览里确认过的对。每一对都按配对规则重新校验（一机在一份名单里一人、
+         *     一人一机），不成的列进 ``failed`` 并说明原因，其余照常绑定。
+         */
+        post: operations["apply_roster_match_api_v1_admin_rosters__roster_id__match_machines_apply_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/rosters/{roster_id}/match-machines/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview Roster Match
+         * @description 「按姓名匹配机器」预览：这份名单里每个未绑定的人，若恰好有一台机器在别的名单里
+         *     绑着同名的人、且那台机器在这份名单里还没绑，就列成一对。不写库。
+         */
+        post: operations["preview_roster_match_api_v1_admin_rosters__roster_id__match_machines_preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/settings/runtime": {
         parameters: {
             query?: never;
@@ -2359,9 +2701,32 @@ export interface paths {
         put?: never;
         /**
          * Lease
-         * @description 领下一个任务；没有就 204。租约 15 分钟，过期没交结果的任务自动回到队列。
+         * @description 领下一个任务；没有（或这台评测机被暂停）就 204。租约 15 分钟，过期没交结果的任务自动回到队列。
          */
         post: operations["lease_api_v1_judge_lease_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/judge/poll": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Poll
+         * @description 自报状态；``want`` = 1 时顺带领一个任务；响应带管理端下的命令（§12.10）。
+         *
+         *     有命令（``stop`` / ``restart``）时不发任务：评测机要做的是评完手上的然后退出。
+         *     暂停时也不发任务，但命令照样送达。
+         */
+        post: operations["poll_api_v1_judge_poll_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2454,6 +2819,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/player/assets/{asset_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Player Download Asset
+         * @description 网页下载一个下发给本人的文件。
+         *
+         *     身份二选一：登录令牌，或来源 IP 自动匹配到本机。之后**必须**确实有一条
+         *     "这个资产 → 这个选手"的下发目标，而且任务没取消、目标也没被取消 ——
+         *     与 Agent 下载（``api/agent.py::download_asset``）同一个判据。
+         *
+         *     * 认不出你是谁 → 403
+         *     * 资产不存在 / 不在你这一场 / 这一场里根本没下发过 → 404
+         *     * 下发过、但不是给你（或已取消）→ 403
+         *     * 内容已被清理 → 410
+         */
+        get: operations["player_download_asset_api_v1_player_assets__asset_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/player/context": {
         parameters: {
             query?: never;
@@ -2463,13 +2857,62 @@ export interface paths {
         };
         /**
          * Player Context
-         * @description 取选手页要显示的全部内容。**不鉴权。**
+         * @description 取考生页上"这个选手"的全部内容。**不需要管理端凭据。**
          *
-         *     不传参数 = 按来源 IP 自动匹配本机；两个参数都传 = 显式查找。
-         *     只传一个直接 400：单独一个 ``contest`` 或单独一个 ``player_no`` 都定位不到人，
-         *     而"猜另一半"正是这一页最不该做的事。
+         *     带 ``X-Player-Token`` = 已登录的考生；不带 = 按来源 IP 自动匹配本机。
+         *     自动匹配失败时回 403/404/409 人话，页面据此退到降级预览（``GET /preview``）。
          */
         get: operations["player_context_api_v1_player_context_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/player/login": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Player Login
+         * @description 准考证号 + 场次考生页密码 → 短期令牌。
+         *
+         *     * 考号**精确匹配**（只去掉首尾空白：从准考证上抄过来多一个空格是常事）
+         *     * 考号不存在与密码错**统一 403** ``player_login_failed``；两种情况都完整地算一遍
+         *       scrypt，响应时间上也分不出来
+         *     * 场次没设密码 → 409 ``player_login_disabled``：这条路关着，页面只剩降级预览
+         *     * 按来源 IP 限速（``player_lookup_per_ip_per_minute``），先限速再算 scrypt
+         */
+        post: operations["player_login_api_v1_player_login_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/player/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Player Preview
+         * @description 降级预览：当前在考的场次与面向全场的公告。**谁都能看，所以不含任何个人信息。**
+         *
+         *     "在考" = 状态是 ``running`` / ``frozen``（不是这两个就不算，以后加的状态也一样），
+         *     并且还没到结束时间。**还没开考的也列出来**：考生提前进场时要看到"距开考"
+         *     倒计时和全场公告，而那份公告本来就已经下发到了每台机器上。
+         */
+        get: operations["player_preview_api_v1_player_preview_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2487,6 +2930,66 @@ export interface paths {
         };
         /** Healthz */
         get: operations["healthz_healthz_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/judge/install.ps1": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Install Ps1
+         * @description Windows 一键安装（PowerShell，UTF-8 BOM）：下载到文件后 ``& $p -Token '<令牌>'``。
+         */
+        get: operations["install_ps1_judge_install_ps1_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/judge/install.sh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Install Sh
+         * @description Linux 一键安装：``curl -fsSL <地址>/judge/install.sh | sudo bash -s -- <令牌>``。
+         */
+        get: operations["install_sh_judge_install_sh_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/judge/worker.pyz": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Worker Pyz
+         * @description 评测机程序（zipapp）：``python3 syncoj-judge.pyz --server … --token-file …``。
+         */
+        get: operations["worker_pyz_judge_worker_pyz_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2520,6 +3023,27 @@ export interface components {
             /** Username */
             username: string;
         };
+        /**
+         * AgentBindingOut
+         * @description 机器的一条绑定：名单 · 考号 · 姓名。
+         */
+        AgentBindingOut: {
+            /** Name */
+            name?: string | null;
+            /** Player No */
+            player_no: string;
+            /** Roster Entry Id */
+            roster_entry_id: number;
+            /** Roster Id */
+            roster_id: number;
+            /**
+             * Roster Name
+             * @default
+             */
+            roster_name: string;
+            /** Seat */
+            seat?: string | null;
+        };
         /** AgentEvent */
         AgentEvent: {
             /** Category */
@@ -2542,6 +3066,8 @@ export interface components {
             agent_id: number;
             /** Agent Version */
             agent_version?: string | null;
+            /** Bindings */
+            bindings?: components["schemas"]["AgentBindingOut"][];
             /** Contest Id */
             contest_id: number;
             /**
@@ -2884,6 +3410,36 @@ export interface components {
              * @default
              */
             roster_name: string;
+            /** Suggestions */
+            suggestions?: components["schemas"]["BindingSuggestionOut"][];
+        };
+        /**
+         * BindingSuggestionOut
+         * @description 一条同名建议：把 ``agent_id`` 也绑到 ``roster_name`` 里的这个人。
+         */
+        BindingSuggestionOut: {
+            /** Agent Id */
+            agent_id: number;
+            /** Name */
+            name?: string | null;
+            /** Player No */
+            player_no: string;
+            /** Roster Entry Id */
+            roster_entry_id: number;
+            /** Roster Id */
+            roster_id: number;
+            /**
+             * Roster Name
+             * @default
+             */
+            roster_name: string;
+            /** Seat */
+            seat?: string | null;
+            /**
+             * Source
+             * @default
+             */
+            source: string;
         };
         /** Body_judge_import_preview_api_v1_admin_contests__contest_id__judge_import_preview_post */
         Body_judge_import_preview_api_v1_admin_contests__contest_id__judge_import_preview_post: {
@@ -3002,6 +3558,26 @@ export interface components {
              */
             use_count: number;
         };
+        /**
+         * BoundMachineOut
+         * @description 已配对的机器（至少绑了一份名单）。
+         */
+        BoundMachineOut: {
+            /** Agent Version */
+            agent_version?: string | null;
+            /** Bindings */
+            bindings?: components["schemas"]["AgentBindingOut"][];
+            /** Contest Id */
+            contest_id?: number | null;
+            /** Hostname */
+            hostname?: string | null;
+            /** Id */
+            id: number;
+            /** Last Seen At */
+            last_seen_at?: string | null;
+            /** Machine Id */
+            machine_id: string;
+        };
         /** BuiltinJudgeFailureOut */
         BuiltinJudgeFailureOut: {
             /** Error */
@@ -3013,7 +3589,10 @@ export interface components {
         };
         /**
          * BuiltinJudgeIn
-         * @description 排自带评测任务。都不填 = 全场所有用自带评测的题 × 所有选手。
+         * @description 排自带评测任务。都不填 = 全场所有用自带评测的题 × 所有选手（评最新版）。
+         *
+         *     给了 ``version_id`` = 重测那一个历史版本（§12.9）：选手与题目由版本定，结果只进历史与
+         *     timeline，不覆盖成绩矩阵（教师「采用」才写）；不受"场次还在进行"的限制。
          */
         BuiltinJudgeIn: {
             /**
@@ -3025,9 +3604,24 @@ export interface components {
             player_id?: number | null;
             /** Problem */
             problem?: string | null;
+            /**
+             * Rerun
+             * @default false
+             */
+            rerun: boolean;
+            /** Version Id */
+            version_id?: number | null;
         };
-        /** BuiltinJudgeProgressOut */
+        /**
+         * BuiltinJudgeProgressOut
+         * @description 排队 / 在评是全数；完成 / 失败只数每 (选手, 题目) 最新的那条任务。
+         */
         BuiltinJudgeProgressOut: {
+            /**
+             * Delayed
+             * @default 0
+             */
+            delayed: number;
             /**
              * Done
              * @default 0
@@ -3123,6 +3717,16 @@ export interface components {
         };
         /** ContestOut */
         ContestOut: {
+            /**
+             * Auto Judge
+             * @default off
+             */
+            auto_judge: string;
+            /**
+             * Auto Judge Delay
+             * @default 60
+             */
+            auto_judge_delay: number;
             /** Created At */
             created_at: string;
             /** Default Roster Id */
@@ -3131,6 +3735,11 @@ export interface components {
             default_roster_name?: string | null;
             /** Ends At */
             ends_at?: string | null;
+            /**
+             * Has Player Password
+             * @default false
+             */
+            has_player_password: boolean;
             /** Id */
             id: number;
             /** Name */
@@ -3169,6 +3778,11 @@ export interface components {
              * @default false
              */
             clear_default_roster: boolean;
+            /**
+             * Clear Player Password
+             * @default false
+             */
+            clear_player_password: boolean;
             /** Default Roster Id */
             default_roster_id?: number | null;
             /** Ends At */
@@ -3177,6 +3791,8 @@ export interface components {
             name?: string | null;
             /** Note */
             note?: string | null;
+            /** Player Password */
+            player_password?: string | null;
             /** Starts At */
             starts_at?: string | null;
             /** Status */
@@ -3569,6 +4185,29 @@ export interface components {
             /** Version */
             version: string;
         };
+        /**
+         * JudgeAutoIn
+         * @description 场次的自动入队设置（§12.9）。
+         */
+        JudgeAutoIn: {
+            /**
+             * Auto Judge
+             * @enum {string}
+             */
+            auto_judge: "off" | "on_change";
+            /**
+             * Auto Judge Delay
+             * @default 60
+             */
+            auto_judge_delay: number;
+        };
+        /** JudgeAutoOut */
+        JudgeAutoOut: {
+            /** Auto Judge */
+            auto_judge: string;
+            /** Auto Judge Delay */
+            auto_judge_delay: number;
+        };
         /** JudgeBlobRefOut */
         JudgeBlobRefOut: {
             /** Name */
@@ -3748,6 +4387,8 @@ export interface components {
         };
         /** JudgeImportPreviewOut */
         JudgeImportPreviewOut: {
+            /** Existing Idents */
+            existing_idents?: string[];
             /** Format */
             format: string;
             /** Problems */
@@ -3773,6 +4414,80 @@ export interface components {
             problem: components["schemas"]["JudgeProblemConfigOut"];
             source: components["schemas"]["JudgeBlobRefOut"];
             testdata: components["schemas"]["JudgeBlobRefOut"];
+        };
+        /**
+         * JudgePollIn
+         * @description 评测机的一次 poll：自报状态，``want`` = 1 时顺带领一个任务（§12.10）。
+         */
+        JudgePollIn: {
+            /** Backend */
+            backend?: string | null;
+            /** Boot Id */
+            boot_id?: string | null;
+            /** Hostname */
+            hostname?: string | null;
+            /** Isolated */
+            isolated?: boolean | null;
+            /** Platform */
+            platform?: string | null;
+            /**
+             * Poll Seconds
+             * @default 5
+             */
+            poll_seconds: number;
+            /**
+             * Slots
+             * @default 1
+             */
+            slots: number;
+            /** Version */
+            version?: string | null;
+            /**
+             * Want
+             * @default 1
+             */
+            want: number;
+        };
+        /**
+         * JudgePollOut
+         * @description ``task`` 为空 = 没领到（没有任务、已暂停或 ``want`` = 0）。``command`` 见 §12.10。
+         */
+        JudgePollOut: {
+            /**
+             * Command
+             * @default run
+             * @enum {string}
+             */
+            command: "run" | "stop" | "restart";
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            task?: components["schemas"]["JudgeLeaseOut"] | null;
+        };
+        /**
+         * JudgePrecheckFindingOut
+         * @description 源码预检的一条预警（规则 code 见 ``judging/precheck.py``）。
+         */
+        JudgePrecheckFindingOut: {
+            /** Code */
+            code: string;
+            /**
+             * Excerpt
+             * @default
+             */
+            excerpt: string;
+            /**
+             * Line
+             * @default 0
+             */
+            line: number;
+            /**
+             * Message
+             * @default
+             */
+            message: string;
         };
         /** JudgeProblemConfigOut */
         JudgeProblemConfigOut: {
@@ -3864,6 +4579,8 @@ export interface components {
             player_id: number;
             /** Player No */
             player_no: string;
+            /** Precheck Warnings */
+            precheck_warnings?: components["schemas"]["JudgePrecheckFindingOut"][];
             /** Problem */
             problem: string;
             /** Score */
@@ -3876,6 +4593,8 @@ export interface components {
             status?: string | null;
             /** Subtasks */
             subtasks?: components["schemas"]["JudgeSubtaskOut"][];
+            /** Task Id */
+            task_id?: number | null;
             /**
              * Truncated
              * @default false
@@ -3955,20 +4674,214 @@ export interface components {
             /** Score */
             score: number;
         };
-        /** JudgeWorkerCreatedOut */
-        JudgeWorkerCreatedOut: {
+        /**
+         * JudgeTaskDetailOut
+         * @description 任务连同结果里的测试点明细（形状同 ``JudgeRunDetailOut`` 的明细部分）。
+         */
+        JudgeTaskDetailOut: {
+            /**
+             * Applied
+             * @default false
+             */
+            applied: boolean;
+            /** Cases */
+            cases?: components["schemas"]["JudgeCaseOut"][];
+            /**
+             * Compile Message
+             * @default
+             */
+            compile_message: string;
             /** Created At */
             created_at: string;
+            /** Error */
+            error?: string | null;
+            /** Finished At */
+            finished_at?: string | null;
+            /**
+             * Has Result
+             * @default false
+             */
+            has_result: boolean;
             /** Id */
             id: number;
+            /**
+             * In Matrix
+             * @default false
+             */
+            in_matrix: boolean;
+            /** Isolated */
+            isolated?: boolean | null;
+            /** Judge */
+            judge?: string | null;
+            /** Judged At */
+            judged_at?: string | null;
+            /** Language */
+            language?: string | null;
+            /** Max Score */
+            max_score?: number | null;
+            /** Not Before */
+            not_before?: string | null;
+            /** Outcome */
+            outcome?: string | null;
+            /** Player Id */
+            player_id: number;
+            /** Player No */
+            player_no: string;
+            /** Precheck Warnings */
+            precheck_warnings?: components["schemas"]["JudgePrecheckFindingOut"][];
+            /** Problem */
+            problem: string;
+            /** Requested By */
+            requested_by?: string | null;
+            /**
+             * Rerun
+             * @default false
+             */
+            rerun: boolean;
+            /** Reused From */
+            reused_from?: number | null;
+            /** Score */
+            score?: number | null;
+            /** Source Path */
+            source_path?: string | null;
+            /** Source Sha256 */
+            source_sha256?: string | null;
+            /** Source Version Id */
+            source_version_id?: number | null;
+            /** Status */
+            status: string;
+            /** Subtasks */
+            subtasks?: components["schemas"]["JudgeSubtaskOut"][];
+            /** Trigger */
+            trigger: string;
+            /**
+             * Truncated
+             * @default false
+             */
+            truncated: boolean;
+        };
+        /**
+         * JudgeTaskOut
+         * @description 一个评测任务（任务即历史，§12.9）。
+         */
+        JudgeTaskOut: {
+            /**
+             * Applied
+             * @default false
+             */
+            applied: boolean;
+            /** Created At */
+            created_at: string;
+            /** Error */
+            error?: string | null;
+            /** Finished At */
+            finished_at?: string | null;
+            /**
+             * Has Result
+             * @default false
+             */
+            has_result: boolean;
+            /** Id */
+            id: number;
+            /**
+             * In Matrix
+             * @default false
+             */
+            in_matrix: boolean;
+            /** Max Score */
+            max_score?: number | null;
+            /** Not Before */
+            not_before?: string | null;
+            /** Outcome */
+            outcome?: string | null;
+            /** Player Id */
+            player_id: number;
+            /** Player No */
+            player_no: string;
+            /** Problem */
+            problem: string;
+            /** Requested By */
+            requested_by?: string | null;
+            /**
+             * Rerun
+             * @default false
+             */
+            rerun: boolean;
+            /** Reused From */
+            reused_from?: number | null;
+            /** Score */
+            score?: number | null;
+            /** Source Path */
+            source_path?: string | null;
+            /** Source Sha256 */
+            source_sha256?: string | null;
+            /** Source Version Id */
+            source_version_id?: number | null;
+            /** Status */
+            status: string;
+            /** Trigger */
+            trigger: string;
+        };
+        /** JudgeWorkerCreatedOut */
+        JudgeWorkerCreatedOut: {
+            /** Backend */
+            backend?: string | null;
+            /** Created At */
+            created_at: string;
+            /**
+             * Desired
+             * @default run
+             * @enum {string}
+             */
+            desired: "run" | "stop" | "restart";
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /** Hostname */
+            hostname?: string | null;
+            /** Id */
+            id: number;
+            /** Isolated */
+            isolated?: boolean | null;
             /** Last Seen At */
             last_seen_at?: string | null;
             /** Last Seen Ip */
             last_seen_ip?: string | null;
+            /** Linux Command */
+            linux_command: string;
+            /**
+             * Local
+             * @default false
+             */
+            local: boolean;
+            /** Manual Command */
+            manual_command: string;
             /** Name */
             name: string;
+            /**
+             * Online
+             * @default false
+             */
+            online: boolean;
+            /** Platform */
+            platform?: string | null;
+            /**
+             * Remote Control
+             * @default false
+             */
+            remote_control: boolean;
+            /** Running */
+            running?: components["schemas"]["JudgeWorkerTaskOut"][];
+            /** Slots */
+            slots?: number | null;
             /** Token */
             token: string;
+            /** Version */
+            version?: string | null;
+            /** Windows Command */
+            windows_command: string;
         };
         /** JudgeWorkerIn */
         JudgeWorkerIn: {
@@ -3977,16 +4890,105 @@ export interface components {
         };
         /** JudgeWorkerOut */
         JudgeWorkerOut: {
+            /** Backend */
+            backend?: string | null;
             /** Created At */
             created_at: string;
+            /**
+             * Desired
+             * @default run
+             * @enum {string}
+             */
+            desired: "run" | "stop" | "restart";
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /** Hostname */
+            hostname?: string | null;
             /** Id */
             id: number;
+            /** Isolated */
+            isolated?: boolean | null;
             /** Last Seen At */
             last_seen_at?: string | null;
             /** Last Seen Ip */
             last_seen_ip?: string | null;
+            /**
+             * Local
+             * @default false
+             */
+            local: boolean;
             /** Name */
             name: string;
+            /**
+             * Online
+             * @default false
+             */
+            online: boolean;
+            /** Platform */
+            platform?: string | null;
+            /**
+             * Remote Control
+             * @default false
+             */
+            remote_control: boolean;
+            /** Running */
+            running?: components["schemas"]["JudgeWorkerTaskOut"][];
+            /** Slots */
+            slots?: number | null;
+            /** Version */
+            version?: string | null;
+        };
+        /**
+         * JudgeWorkerPatchIn
+         * @description 改名 / 暂停与恢复。不给的字段不动。
+         */
+        JudgeWorkerPatchIn: {
+            /** Enabled */
+            enabled?: boolean | null;
+            /** Name */
+            name?: string | null;
+        };
+        /**
+         * JudgeWorkerTaskOut
+         * @description 评测机手上正在评的一个任务。
+         */
+        JudgeWorkerTaskOut: {
+            /** Contest Id */
+            contest_id: number;
+            /** Id */
+            id: number;
+            /** Player No */
+            player_no: string;
+            /** Problem */
+            problem: string;
+        };
+        /**
+         * LocalJudgeOut
+         * @description 本机评测机（服务端以子进程运行的 worker）的状态。
+         */
+        LocalJudgeOut: {
+            /** Backend */
+            backend?: string | null;
+            /** Exit Code */
+            exit_code?: number | null;
+            /** Pid */
+            pid?: number | null;
+            /** Reason */
+            reason?: string | null;
+            /**
+             * Running
+             * @default false
+             */
+            running: boolean;
+            /** Started At */
+            started_at?: string | null;
+            /** Supported */
+            supported: boolean;
+            /** Worker Id */
+            worker_id?: number | null;
         };
         /** LoginRequest */
         LoginRequest: {
@@ -4096,10 +5098,50 @@ export interface components {
              */
             total: number;
         };
+        /** Page[BindingSuggestionOut] */
+        Page_BindingSuggestionOut_: {
+            /** Items */
+            items?: components["schemas"]["BindingSuggestionOut"][];
+            /**
+             * Limit
+             * @default 50
+             */
+            limit: number;
+            /**
+             * Offset
+             * @default 0
+             */
+            offset: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        };
         /** Page[BootstrapKeyOut] */
         Page_BootstrapKeyOut_: {
             /** Items */
             items?: components["schemas"]["BootstrapKeyOut"][];
+            /**
+             * Limit
+             * @default 50
+             */
+            limit: number;
+            /**
+             * Offset
+             * @default 0
+             */
+            offset: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        };
+        /** Page[BoundMachineOut] */
+        Page_BoundMachineOut_: {
+            /** Items */
+            items?: components["schemas"]["BoundMachineOut"][];
             /**
              * Limit
              * @default 50
@@ -4200,6 +5242,26 @@ export interface components {
         Page_JudgeRunOut_: {
             /** Items */
             items?: components["schemas"]["JudgeRunOut"][];
+            /**
+             * Limit
+             * @default 50
+             */
+            limit: number;
+            /**
+             * Offset
+             * @default 0
+             */
+            offset: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        };
+        /** Page[JudgeTaskOut] */
+        Page_JudgeTaskOut_: {
+            /** Items */
+            items?: components["schemas"]["JudgeTaskOut"][];
             /**
              * Limit
              * @default 50
@@ -4356,6 +5418,26 @@ export interface components {
              */
             total: number;
         };
+        /** Page[SourceVersionOut] */
+        Page_SourceVersionOut_: {
+            /** Items */
+            items?: components["schemas"]["SourceVersionOut"][];
+            /**
+             * Limit
+             * @default 50
+             */
+            limit: number;
+            /**
+             * Offset
+             * @default 0
+             */
+            offset: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        };
         /**
          * PendingMachineOut
          * @description 一台注册上来、还没配对到人的机器。
@@ -4393,6 +5475,8 @@ export interface components {
          * PlayerAssetOut
          * @description 清单里的一行：下发了什么、该落在哪个目录、到没到。
          *
+         *     ``id`` 是资产 id，考生页的「下载」按它取文件（``GET /player/assets/{id}``）。
+         *
          *     ``dest_dir`` 是**任务的**目标目录模板展开后的样子（``DeployTask.dest_dir``），
          *     不是某个选手磁盘上的绝对路径 —— 服务端不认识选手机器上的家目录，编一个
          *     绝对路径只会是错的。空串表示"直接落在下发根目录"（默认就是桌面）。
@@ -4407,6 +5491,8 @@ export interface components {
             filename: string;
             /** Finished At */
             finished_at?: string | null;
+            /** Id */
+            id: number;
             /** Sha256 */
             sha256: string;
             /**
@@ -4466,9 +5552,9 @@ export interface components {
          *
          *     * ``matched_by="machine"``：请求没带参数，服务端按来源 IP 认出了这台机器。
          *       这是主路径 —— 选手在考场机器上打开就是一个带参数的快捷方式，一个字都不用填。
-         *     * ``matched_by="explicit"``：请求带了 ``contest`` + ``player_no``，按这两个值
-         *       精确查找。自动匹配不上时（教师的笔记本、Agent 没起来的机器、换了 IP）
-         *       靠它兜底。
+         *     * ``matched_by="token"``：请求带了考生页登录令牌（``X-Player-Token``），
+         *       那是用「准考证号 + 场次考生页密码」换来的（``POST /player/login``）。
+         *       自动匹配不上时（教师的笔记本、Agent 没起来的机器、换了 IP）靠它兜底。
          *
          *     回这个字段是让**页面**能说清"我这份清单是怎么定位到你的"：自动匹配到别人的
          *     机器上时，页面上的考号会当场露馅，而不是安静地显示一份不属于这台机器的清单。
@@ -4506,6 +5592,28 @@ export interface components {
              * @default 0
              */
             updated: number;
+        };
+        /**
+         * PlayerLoginIn
+         * @description 考生页登录：场次标识 + 准考证号（精确匹配）+ 场次的考生页密码。
+         */
+        PlayerLoginIn: {
+            /** Contest */
+            contest: string;
+            /** Password */
+            password: string;
+            /** Player No */
+            player_no: string;
+        };
+        /**
+         * PlayerLoginOut
+         * @description 登录成功签出的短期令牌。之后放进 ``X-Player-Token`` 头取上下文与下载。
+         */
+        PlayerLoginOut: {
+            /** Expires At */
+            expires_at: number;
+            /** Token */
+            token: string;
         };
         /**
          * PlayerNoticeOut
@@ -4555,6 +5663,42 @@ export interface components {
             player_no: string;
             /** Seat */
             seat?: string | null;
+        };
+        /**
+         * PlayerPreviewContestOut
+         * @description 降级预览里的一场：只有场次本身与**面向全场**的公告。
+         *
+         *     降级预览是谁都能打开的（没认出本机、也没登录），所以这里**绝不**出现任何
+         *     选手的信息或个人下发清单。公告只取"目标是全场"的 ``NOTICE.md`` 下发
+         *     （``DeployTask.target_kind == "all"`` 且没取消）—— 只发给部分人的公告不算。
+         */
+        PlayerPreviewContestOut: {
+            /** Ends At */
+            ends_at?: string | null;
+            /**
+             * Login Enabled
+             * @default false
+             */
+            login_enabled: boolean;
+            /** Name */
+            name: string;
+            notice?: components["schemas"]["PlayerNoticeOut"] | null;
+            /** Slug */
+            slug: string;
+            /** Starts At */
+            starts_at?: string | null;
+            /** Status */
+            status: string;
+        };
+        /**
+         * PlayerPreviewOut
+         * @description 考生页的降级预览：当前在考的场次（多场可切换）。
+         */
+        PlayerPreviewOut: {
+            /** Contests */
+            contests?: components["schemas"]["PlayerPreviewContestOut"][];
+            /** Server Time */
+            server_time: number;
         };
         /**
          * PlayerProfileOut
@@ -5033,6 +6177,84 @@ export interface components {
              */
             updated: number;
         };
+        /**
+         * RosterMatchApplyIn
+         * @description 教师在预览里确认过的那些对。逐对重新校验，失败的列进 ``failed``。
+         */
+        RosterMatchApplyIn: {
+            /** Pairs */
+            pairs?: components["schemas"]["RosterMatchPairIn"][];
+        };
+        /** RosterMatchApplyOut */
+        RosterMatchApplyOut: {
+            /**
+             * Bound
+             * @default 0
+             */
+            bound: number;
+            /** Failed */
+            failed?: components["schemas"]["RosterMatchSkipOut"][];
+        };
+        /** RosterMatchPairIn */
+        RosterMatchPairIn: {
+            /** Agent Id */
+            agent_id: number;
+            /** Roster Entry Id */
+            roster_entry_id: number;
+        };
+        /**
+         * RosterMatchPairOut
+         * @description 「按姓名匹配机器」预览里的一对。
+         */
+        RosterMatchPairOut: {
+            /** Agent Id */
+            agent_id: number;
+            /** Hostname */
+            hostname?: string | null;
+            /**
+             * Machine Id
+             * @default
+             */
+            machine_id: string;
+            /** Name */
+            name?: string | null;
+            /** Player No */
+            player_no: string;
+            /** Roster Entry Id */
+            roster_entry_id: number;
+            /**
+             * Source
+             * @default
+             */
+            source: string;
+        };
+        /** RosterMatchPreviewOut */
+        RosterMatchPreviewOut: {
+            /** Conflicts */
+            conflicts?: components["schemas"]["RosterMatchSkipOut"][];
+            /** Pairs */
+            pairs?: components["schemas"]["RosterMatchPairOut"][];
+            /** Roster Id */
+            roster_id: number;
+            /** Roster Name */
+            roster_name: string;
+            /** Skipped */
+            skipped?: components["schemas"]["RosterMatchSkipOut"][];
+        };
+        /**
+         * RosterMatchSkipOut
+         * @description 没有配成对的人及原因。
+         */
+        RosterMatchSkipOut: {
+            /** Name */
+            name?: string | null;
+            /** Player No */
+            player_no: string;
+            /** Reason */
+            reason: string;
+            /** Roster Entry Id */
+            roster_entry_id: number;
+        };
         /** RosterOut */
         RosterOut: {
             /** Created At */
@@ -5242,6 +6464,45 @@ export interface components {
             /** Size */
             size: number;
         };
+        /**
+         * SourceVersionOut
+         * @description 代码的一个历史版本（§12.9），连同它的评测结果。
+         */
+        SourceVersionOut: {
+            /**
+             * Current
+             * @default false
+             */
+            current: boolean;
+            /** Id */
+            id: number;
+            /**
+             * In Matrix
+             * @default false
+             */
+            in_matrix: boolean;
+            judge?: components["schemas"]["VersionJudgeOut"] | null;
+            /** Player Id */
+            player_id: number;
+            /** Problem */
+            problem?: string | null;
+            /** Received At */
+            received_at: string;
+            /** Rel Path */
+            rel_path: string;
+            /** Sha256 */
+            sha256: string;
+            /**
+             * Size
+             * @default 0
+             */
+            size: number;
+            /**
+             * Tasks
+             * @default 0
+             */
+            tasks: number;
+        };
         /** TickRequest */
         TickRequest: {
             /** Agent Version */
@@ -5314,6 +6575,8 @@ export interface components {
             reason?: string | null;
             /** Server Time */
             server_time: number;
+            /** Server Uuid */
+            server_uuid?: string | null;
             /** Uninstall Token */
             uninstall_token?: string | null;
             upgrade?: components["schemas"]["UpgradeInfo"] | null;
@@ -5390,10 +6653,40 @@ export interface components {
             type: string;
         };
         /**
+         * VersionJudgeOut
+         * @description 一个版本最近一次评测的摘要。
+         */
+        VersionJudgeOut: {
+            /**
+             * Applied
+             * @default false
+             */
+            applied: boolean;
+            /** Finished At */
+            finished_at?: string | null;
+            /** Max Score */
+            max_score?: number | null;
+            /** Outcome */
+            outcome?: string | null;
+            /**
+             * Reused
+             * @default false
+             */
+            reused: boolean;
+            /** Score */
+            score?: number | null;
+            /** Status */
+            status: string;
+            /** Task Id */
+            task_id: number;
+            /** Trigger */
+            trigger: string;
+        };
+        /**
          * WhoAmIOut
          * @description 挑战应答（§11）：用发布私钥签 ``syncoj-announce-v1
          *     <nonce>
-         *     <url>``。
+         *     <url>``（v2 见下）。
          *
          *         ``url`` 是**服务端自己认定的**对外地址（§7.3 的三条来源），不是请求里的 Host：
          *         机器切换到的是签名里的这个地址。
@@ -5406,6 +6699,8 @@ export interface components {
             key_id: string;
             /** Nonce */
             nonce: string;
+            /** Server Uuid */
+            server_uuid?: string | null;
             /** Sig */
             sig: string;
             /** Url */
@@ -5456,7 +6751,10 @@ export interface operations {
     };
     unbind_agent_api_v1_admin_agents__agent_id__bind_delete: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description 只解除这份名单里的绑定；不传 = 全部名单 */
+                roster_id?: number | null;
+            };
             header?: never;
             path: {
                 agent_id: number;
@@ -5472,6 +6770,42 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    binding_suggestions_api_v1_admin_agents__agent_id__binding_suggestions_get: {
+        parameters: {
+            query?: {
+                /** @description 每页条数 */
+                limit?: number;
+                /** @description 起始位置 */
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                agent_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_BindingSuggestionOut_"];
                 };
             };
             /** @description Validation Error */
@@ -5849,6 +7183,8 @@ export interface operations {
     list_contests_api_v1_admin_contests_get: {
         parameters: {
             query?: {
+                /** @description true 只列已归档的；false 只列未归档的；不传列全部 */
+                archived?: boolean | null;
                 /** @description 每页条数 */
                 limit?: number;
                 /** @description 起始位置 */
@@ -6005,6 +7341,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Page_AgentRuntimeOut_"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    archive_contest_api_v1_admin_contests__contest_id__archive_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contest_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContestOut"];
                 };
             };
             /** @description Validation Error */
@@ -6619,6 +7986,41 @@ export interface operations {
             };
         };
     };
+    set_auto_judge_api_v1_admin_contests__contest_id__judge_auto_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contest_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JudgeAutoIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JudgeAutoOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     builtin_judge_progress_api_v1_admin_contests__contest_id__judge_builtin_get: {
         parameters: {
             query?: never;
@@ -6878,6 +8280,150 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_judge_tasks_api_v1_admin_contests__contest_id__judge_tasks_get: {
+        parameters: {
+            query?: {
+                player_id?: number | null;
+                problem?: string | null;
+                status?: string | null;
+                trigger?: string | null;
+                /** @description 每页条数 */
+                limit?: number;
+                /** @description 起始位置 */
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                contest_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_JudgeTaskOut_"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_judge_task_api_v1_admin_contests__contest_id__judge_tasks__task_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contest_id: number;
+                task_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JudgeTaskDetailOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    adopt_judge_task_api_v1_admin_contests__contest_id__judge_tasks__task_id__adopt_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contest_id: number;
+                task_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JudgeTaskOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_source_versions_api_v1_admin_contests__contest_id__judge_versions_get: {
+        parameters: {
+            query: {
+                /** @description 选手 */
+                player_id: number;
+                /** @description 只看归到这道题的版本 */
+                problem?: string | null;
+                /** @description 每页条数 */
+                limit?: number;
+                /** @description 起始位置 */
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                contest_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_SourceVersionOut_"];
                 };
             };
             /** @description Validation Error */
@@ -7242,6 +8788,37 @@ export interface operations {
             };
         };
     };
+    unarchive_contest_api_v1_admin_contests__contest_id__unarchive_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contest_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContestOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_deploy_api_v1_admin_deploys__task_id__get: {
         parameters: {
             query?: never;
@@ -7521,6 +9098,66 @@ export interface operations {
             };
         };
     };
+    local_judge_status_api_v1_admin_judge_local_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LocalJudgeOut"];
+                };
+            };
+        };
+    };
+    local_judge_start_api_v1_admin_judge_local_start_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LocalJudgeOut"];
+                };
+            };
+        };
+    };
+    local_judge_stop_api_v1_admin_judge_local_stop_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LocalJudgeOut"];
+                };
+            };
+        };
+    };
     list_judge_workers_api_v1_admin_judge_workers_get: {
         parameters: {
             query?: {
@@ -7609,6 +9246,103 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_judge_worker_api_v1_admin_judge_workers__worker_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                worker_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JudgeWorkerPatchIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JudgeWorkerOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    restart_judge_worker_api_v1_admin_judge_workers__worker_id__restart_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                worker_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JudgeWorkerOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    stop_judge_worker_api_v1_admin_judge_workers__worker_id__stop_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                worker_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JudgeWorkerOut"];
                 };
             };
             /** @description Validation Error */
@@ -7735,6 +9469,40 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BindResultOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_bound_machines_api_v1_admin_machines_bound_get: {
+        parameters: {
+            query?: {
+                /** @description 每页条数 */
+                limit?: number;
+                /** @description 起始位置 */
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_BoundMachineOut_"];
                 };
             };
             /** @description Validation Error */
@@ -8781,6 +10549,72 @@ export interface operations {
             };
         };
     };
+    apply_roster_match_api_v1_admin_rosters__roster_id__match_machines_apply_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                roster_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RosterMatchApplyIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RosterMatchApplyOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    preview_roster_match_api_v1_admin_rosters__roster_id__match_machines_preview_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                roster_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RosterMatchPreviewOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_runtime_settings_api_v1_admin_settings_runtime_get: {
         parameters: {
             query?: never;
@@ -9154,6 +10988,7 @@ export interface operations {
         parameters: {
             query: {
                 nonce: string;
+                v?: number;
             };
             header?: never;
             path?: never;
@@ -9205,6 +11040,39 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    poll_api_v1_judge_poll_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JudgePollIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JudgePollOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
             };
         };
     };
@@ -9330,15 +11198,46 @@ export interface operations {
             };
         };
     };
+    player_download_asset_api_v1_player_assets__asset_id__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-player-token"?: string | null;
+            };
+            path: {
+                asset_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     player_context_api_v1_player_context_get: {
         parameters: {
-            query?: {
-                /** @description 场次标识（slug），自动匹配不上时手填 */
-                contest?: string | null;
-                /** @description 考号，自动匹配不上时手填 */
-                player_no?: string | null;
+            query?: never;
+            header?: {
+                /** @description 考生页登录令牌（POST /player/login 签出）。不带 = 按来源 IP 自动匹配本机 */
+                "x-player-token"?: string | null;
             };
-            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -9364,6 +11263,59 @@ export interface operations {
             };
         };
     };
+    player_login_api_v1_player_login_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PlayerLoginIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlayerLoginOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    player_preview_api_v1_player_preview_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlayerPreviewOut"];
+                };
+            };
+        };
+    };
     healthz_healthz_get: {
         parameters: {
             query?: never;
@@ -9383,6 +11335,60 @@ export interface operations {
                         [key: string]: unknown;
                     };
                 };
+            };
+        };
+    };
+    install_ps1_judge_install_ps1_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    install_sh_judge_install_sh_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    worker_pyz_judge_worker_pyz_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

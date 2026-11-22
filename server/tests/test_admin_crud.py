@@ -333,16 +333,17 @@ def test_one_person_can_only_have_one_machine(client: TestClient, admin_headers:
 
 
 def test_one_machine_cannot_silently_change_owner(client: TestClient, admin_headers: dict,
-                                                  roster_entry: dict, machine: dict) -> None:
-    """一台机器只能属于一个人。
+                                                  roster: dict, roster_entry: dict,
+                                                  machine: dict) -> None:
+    """一台机器在**一份名单里**只能属于一个人。
 
     覆盖已有绑定必须走显式的「改派」—— 让"再输一次配对码"悄悄换掉一个人的身份，
     可能是教师在另一台机器上输错了数字，而后果是成绩归属悄悄换人。
+    （绑到**另一份**名单是允许的，见 test_multi_roster_binding.py。）
     """
     bind_by_code(client, admin_headers, machine["pair_code"], roster_entry["id"])
 
-    other = make_roster(client, admin_headers, name="隔壁班", entries=[{"player_no": "S002"}])
-    other_entry = next(e for e in other["entries"] if e["player_no"] == "S002")
+    other_entry = next(e for e in roster["entries"] if e["player_no"] == "S002")
 
     # 老师又输了一遍同一个码（这正是"在另一台机器上输错数字"的现实版本）
     response = client.post(

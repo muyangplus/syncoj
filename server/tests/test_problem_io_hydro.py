@@ -31,7 +31,11 @@ def load(tmp_path: Path, data: bytes, fmt: str = "auto") -> Tuple[ImportResult, 
         for bundle in parsed.result.problems:
             if not bundle.errors:
                 out = try_build(bundle, parsed.archive)
-                built[bundle.key] = out[0] if out else None
+                if out is None:
+                    built[bundle.key] = None
+                else:
+                    with out:
+                        built[bundle.key] = out.file.read()
         return parsed.result, built
 
 

@@ -3,6 +3,7 @@ import { fileURLToPath, URL } from 'node:url'
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
+import { buildInfo } from './scripts/build-info-plugin.mjs'
 import { thirdPartyLicenses } from './scripts/license-plugin.mjs'
 
 const { version } = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'))
@@ -12,7 +13,8 @@ export default defineConfig({
     __APP_VERSION__: JSON.stringify(version),
   },
   // thirdPartyLicenses：把打进产物的第三方包许可证全文写到 dist/assets/third-party-licenses.txt
-  plugins: [vue(), thirdPartyLicenses()],
+  // buildInfo：写 dist/build-info.json（版本 + 源码指纹），服务端启动时据此判断前端是否需要重新构建
+  plugins: [vue(), thirdPartyLicenses(), buildInfo({ root: fileURLToPath(new URL('.', import.meta.url)) })],
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),

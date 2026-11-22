@@ -140,8 +140,10 @@
 |---|---|
 | 改普通字段 | `PATCH /players/{id}` |
 | 改状态 | `POST /bootstrap-keys/{id}/revoke`、`POST /deploys/{id}/cancel`、`POST /releases/{id}/yank` |
-| 绑定关系 | `POST /machines/{agent_id}/bind` |
-| 解绑关系 | `DELETE /agents/{agent_id}/bind` |
+| 归档 / 取消归档 | `POST /contests/{id}/archive`、`POST /contests/{id}/unarchive`（可逆，不要 `confirm`；进行中 → `409 contest_running`） |
+| 绑定关系 | `POST /machines/{agent_id}/bind`（只动条目所在的那份名单；一机可绑多份名单） |
+| 解绑关系 | `DELETE /agents/{agent_id}/bind`（`?roster_id=` 只解那份名单，不带 = 全部） |
+| 预览 → 应用 | `POST /rosters/{id}/match-machines/preview`（不写库）→ `POST /rosters/{id}/match-machines/apply`（逐对重新校验） |
 | 要一份诊断 | `POST /agents/{id}/diagnostics/request`（机器下一次心跳取走，一次性） |
 | 读最新诊断包 | `GET /agents/{id}/diagnostics`（未收到过 → `404 diagnostics_not_found`） |
 

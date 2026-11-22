@@ -24,7 +24,7 @@
 
 * 预览默认动作：有错误 → `skip`；ident 已存在 → `update`；否则 `create`。有错误的题只能 `skip`（否则 400）。
 * apply：token 不存在 / 过期 / 属于别的场次 → 404 `import_token_expired`；本批 ident 重复或 `create` 撞已有 ident → 409 `ident_conflict`。
-* 新建题目 `judge_mode=builtin`；覆盖已有题目时 `set_builtin=true`（默认）才改成 builtin。覆盖时 `title` 只在包里有值时覆盖，`file_patterns` 不动（原生格式除外）。
+* 新建题目 `judge_mode=builtin`；覆盖已有题目时 `set_builtin=true`（默认）才改成 builtin。覆盖时 `title` 只在包里有值、且不等于来源名或 ident（不分大小写）时覆盖，`file_patterns` 不动（原生格式除外）。
 * 导出不传 `problem_id`：`syncoj` 取全部题目；其他格式取全部带数据包的自带评测题。非原生格式跳过没有数据包或 blob 丢失的题（`included=false`）。
 * 整包级错误：400 `validation_error`，`details.code_detail` = 下表代码；`too_many_problems` 为 413。
 

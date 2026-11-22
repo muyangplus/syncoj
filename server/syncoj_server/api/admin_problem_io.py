@@ -274,6 +274,13 @@ def _load_staged(ctx: AppContext, token: str, contest_id: int) -> Tuple[Path, Di
     return folder, meta
 
 
+def _title_is_just_a_name(bundle: ProblemBundle, ident: str) -> bool:
+    """包里的标题只是来源名 / ident（不分大小写）—— 如 LemonLime 的 problemTitle 就是文件主名。
+    覆盖已有题时这种标题不算"有值"，不拿它换掉教师起的标题。"""
+    title = (bundle.title or "").strip().casefold()
+    return title in {(bundle.source_name or "").strip().casefold(), ident.casefold()}
+
+
 def _effective_io(bundle: ProblemBundle, ident: str) -> Tuple[Optional[str], Optional[str]]:
     """改了 ident 之后，IO 文件名仍指向包里原来的实际文件名。"""
     if bundle.io_mode != "file":
@@ -394,7 +401,7 @@ def judge_import_apply(
                     elif payload.set_builtin:
                         row.judge_mode = "builtin"
                     result.updated += 1
-                if bundle.title:
+                if bundle.title and (action == "create" or not _title_is_just_a_name(bundle, ident)):
                     row.title = bundle.title
                 row.time_limit_ms = bundle.time_limit_ms
                 row.memory_limit_mb = bundle.memory_limit_mb

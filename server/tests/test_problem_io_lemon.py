@@ -138,6 +138,29 @@ def test_real_sample_package_through_api(client: TestClient, contest: dict, admi
     assert all(p["testdata"]["total_score"] == 100 for p in result["problems"])
 
 
+def test_update_keeps_title_when_package_title_is_just_the_name(
+    client: TestClient, contest: dict, admin_headers: dict
+) -> None:
+    """真实 .cdf 的 problemTitle 就是文件主名：覆盖已有题时不拿它换掉教师起的中文标题。"""
+    created = client.post(
+        "/api/v1/admin/contests/%d/problems" % contest["id"],
+        json=[{"ident": "sum", "title": "原标题求和"}, {"ident": "game", "title": "游戏"}],
+        headers=admin_headers,
+    ).json()["problems"]
+    assert [p["title"] for p in created] == ["原标题求和", "游戏"]
+    renamed = lemon_task("game", 2, problemTitle="新游戏")
+    data = make_lemon_zip([lemon_task("sum", 2), lemon_task("SUM2", 2, sourceFileName="sum2"), renamed])
+    body = preview(client, contest, admin_headers, data).json()
+    assert [(p["ident"], p["action"]) for p in body["problems"]] == [
+        ("sum", "update"), ("sum2", "create"), ("game", "update")
+    ]
+    result = apply(client, contest, admin_headers, body["token"], accept_all(body)).json()
+    assert (result["created"], result["updated"]) == (1, 2)
+    titles = {p["ident"]: p["title"] for p in result["problems"]}
+    # 等于 ident 的标题不覆盖；真正的新标题照常覆盖；新建题照常用包里的标题
+    assert titles == {"sum": "原标题求和", "sum2": "SUM2", "game": "新游戏"}
+
+
 # --------------------------------------------------------------------------- #
 # 测试点与子任务
 # --------------------------------------------------------------------------- #

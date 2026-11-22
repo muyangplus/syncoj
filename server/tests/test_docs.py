@@ -100,10 +100,11 @@ KEY_TABLE_ROW_RE = re.compile(r"^\|\s*`([a-z_]+\.[a-z_]+)`\s*\|")
 #: 几万个文件，一次全盘扫描要几十秒 —— 而测试超时看起来像"守卫写坏了"。
 #: `.uv-cache` 也是同类东西（uv 的包缓存，里面有第三方包的源码，
 #: 它们的注释里自然带着 RFC 章节号）。生成物与缓存里不该有我们的文档。
+#: `.claude` 下是 Claude Code 的 worktree（别的分支的整份副本），不属于当前检出。
 SKIP_DIRS = {
     ".git", ".venv", "node_modules", "dist", "__pycache__",
     ".pytest-tmp", ".mypy_cache", ".ruff_cache", ".uv-cache",
-    "build", "releases", ".idea", ".vscode",
+    "build", "releases", ".idea", ".vscode", ".claude",
 }
 
 

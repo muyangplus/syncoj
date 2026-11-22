@@ -180,6 +180,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    if not sys.platform.startswith("linux"):
+        # isolate 与 rlimit 后端都依赖 Linux（命名空间 / fork + setrlimit）；Windows 上用 WSL2 或另一台 Linux
+        print("错误：syncoj-judge 只能在 Linux 上运行（当前 %s）；Windows 上请在 WSL2 或另一台 Linux 机器上运行"
+              % sys.platform, file=sys.stderr)
+        return 2
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(message)s",

@@ -270,3 +270,13 @@ def test_删题回收数据包(client, admin_headers, problem) -> None:
     assert blobs.has(sha)
     client.delete("/api/v1/admin/problems/%d" % problem["id"], params={"confirm": "ab"}, headers=admin_headers)
     assert not blobs.has(sha)
+
+
+def test_worker_refuses_non_linux(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
+    from syncoj_server.judging import worker
+
+    token = tmp_path / "token"
+    token.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(worker.sys, "platform", "win32")
+    assert worker.main(["--server", "http://127.0.0.1:1", "--token-file", str(token)]) == 2
+    assert "只能在 Linux 上运行" in capsys.readouterr().err

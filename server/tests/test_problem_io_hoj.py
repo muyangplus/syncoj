@@ -120,7 +120,7 @@ def test_languages_mapping(tmp_path: Path) -> None:
     doc = hoj_problem_json()
     doc["languages"] = ["C", "C++ 20 With O2", "C++ 17", "Java"]
     bundle, _, _ = _one(tmp_path, doc)
-    assert bundle.compile_flags == "-std=c++20"
+    assert bundle.compile_flags == "-std=c++2a"  # NOI Linux 2.0 的 g++ 9.3 不认 -std=c++20
     doc["languages"] = ["C", "C++", "C++ With O2", "Python3"]
     (tmp_path / "b").mkdir()
     bundle, _, _ = _one(tmp_path / "b", doc)
@@ -497,13 +497,27 @@ def test_export_missing_blob_is_reported() -> None:
     assert [n.code for n in notices[7]] == ["missing_file"]
 
 
-def test_export_cxx20_languages() -> None:
+@pytest.mark.parametrize("flags", ["-std=c++20", "-std=c++2a"])
+def test_export_cxx20_languages(flags: str) -> None:
     blobs = _Blobs()
-    problem = _problem(blobs, 1, "a", make_testdata_zip(count=1), compile_flags="-std=c++20")
+    problem = _problem(blobs, 1, "a", make_testdata_zip(count=1), compile_flags=flags)
     data, notices = _export([problem], blobs)
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         assert "C++ 20" in json.loads(zf.read("problem_1.json"))["languages"]
     assert notices[1] == []
+
+
+def test_imported_cxx20_flag_passes_the_whitelist(tmp_path: Path) -> None:
+    """-std=c++2a 能过编译参数白名单，导入后原样保留（没被当成不合法参数丢掉）。"""
+    from syncoj_server.api.admin_judge import _FLAG_RE
+
+    assert _FLAG_RE.match("-std=c++2a")
+    doc = hoj_problem_json()
+    doc["languages"] = ["C++ 20"]
+    result, _ = _parse(tmp_path, make_hoj_zip([doc]))
+    (bundle,) = result.problems
+    assert bundle.compile_flags == "-std=c++2a"
+    assert "flags_dropped" not in [w.code for w in bundle.warnings]
 
 
 def _semantics(td_bytes: bytes) -> dict:
@@ -622,7 +636,9 @@ def zf_text(data: bytes, name: str) -> bytes:
     ("-O2 -std=c++14", "-O2 -std=c++14", None),
     ("-std=c++17", None, "-std=c++17"),
     ("-O2 -std=c++17", "-O2", "-std=c++17"),
-    ("-std=c++20", None, "-std=c++20"),
+    ("-std=c++20", None, "-std=c++2a"),
+    ("-std=c++2a", None, "-std=c++2a"),
+    ("-O2 -std=c++2a", "-O2", "-std=c++2a"),
 ])
 def test_export_compile_flags_round_trip(tmp_path: Path, flags, dropped, back) -> None:
     """能还原的标准才写进 languages；还原不了的参数给 flags_dropped，不再静默变成 c++17。"""

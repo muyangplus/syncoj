@@ -46,12 +46,14 @@ register({
 })
 
 #: 导出时写的 languages（HOJ 导入要求是数组；只开 C/C++）。C++ 17 / 20 只在编译参数带了对应
-#: 标准时才加 —— 导入时 languages 里有 C++ 17 / 20 就会取 -std=c++17 / 20，否则往返会凭空多出标准
+#: 标准时才加 —— 导入时 languages 里有 C++ 17 / 20 就会取 -std=c++17 / c++2a，否则往返会凭空多出标准
 EXPORT_LANGUAGES = ["C", "C With O2", "C++", "C++ With O2"]
 _CXX17_LANGUAGES = ["C++ 17", "C++ 17 With O2"]
 _CXX20_LANGUAGES = ["C++ 20", "C++ 20 With O2"]
 #: 能由 languages 表达、再导入时能还原的编译参数（其余导出时丢弃并提示）
-_REPRESENTED_FLAGS = {"-std=c++17", "-std=c++20"}
+#: C++ 20 导入写 -std=c++2a：NOI Linux 2.0 的 g++ 9.3 不认 -std=c++20；导出时两种写法都算 C++ 20
+_CXX20_FLAGS = ("-std=c++2a", "-std=c++20")
+_REPRESENTED_FLAGS = {"-std=c++17"} | set(_CXX20_FLAGS)
 #: 有任何一项非空就算带了题面类内容 → 整包给一次 statement_dropped
 _STATEMENT_FIELDS = ("description", "input", "output", "examples", "hint", "source")
 
@@ -192,7 +194,7 @@ def _languages(bundle: ProblemBundle, doc: Dict[str, Any]) -> None:
     normalized = {str(name).strip().upper().replace(" WITH O2", "") for name in names}
     flags = None
     if "C++ 20" in normalized:
-        flags = "-std=c++20"
+        flags = _CXX20_FLAGS[0]
     elif "C++ 17" in normalized:
         flags = "-std=c++17"
     if flags:
@@ -417,9 +419,10 @@ def _languages_for(flags: Optional[str]) -> Tuple[List[str], List[str]]:
     """编译参数 → (languages, 表达不了而丢弃的参数)。"""
     tokens = (flags or "").split()
     languages = list(EXPORT_LANGUAGES)
-    if "-std=c++17" in tokens or "-std=c++20" in tokens:
+    cxx20 = any(flag in tokens for flag in _CXX20_FLAGS)
+    if "-std=c++17" in tokens or cxx20:
         languages += _CXX17_LANGUAGES
-    if "-std=c++20" in tokens:
+    if cxx20:
         languages += _CXX20_LANGUAGES
     return languages, [token for token in tokens if token not in _REPRESENTED_FLAGS]
 

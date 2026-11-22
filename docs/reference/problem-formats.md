@@ -78,7 +78,7 @@
 | `subtask_lowest` | 按 `groupNum` 分组，组分取组内最小；单点组当普通点 | `subtask_scores_uneven` |
 | `subtask_average` | 拆成独立点，组分 `round(Σ/n)` 均分 | `subtask_average_split` |
 | `ergodic_without_error` | 按 default | `ergodic_as_default` |
-| `languages` 含 `C++ 20` / `C++ 17` | `-std=c++20` / `-std=c++17`（取最高）；只有 `C++` 时不设 | `languages_mapped` |
+| `languages` 含 `C++ 20` / `C++ 17` | `-std=c++2a` / `-std=c++17`（取最高；NOI Linux 2.0 的 g++ 9.3 不认 `-std=c++20`）；只有 `C++` 时不设 | `languages_mapped` |
 | 题面、tags、codeTemplates | 忽略 | `statement_dropped` |
 
 ### LemonLime
@@ -189,7 +189,7 @@ syncoj-problems.json
 * `problemId = ident.upper()`，`type=1`，`stackLimit = memoryLimit`，`ioScore` = 满分，`isRemoveEndBlank=true`，题面字段空串。
 * 有 checker：`judgeMode=spj`（顶层与 `problem` 内各一份）、`spjCode`、`spjLanguage="C++"`；testlib.h 以外的 `.h` 写进 `judgeExtraFile`（`hoj_extra_headers`）。
 * 有子任务：`judgeCaseMode=subtask_lowest`，组内每点 score = 子任务分，`groupNum` = 子任务序号；散点各自成组。
-* `languages`：`C`、`C With O2`、`C++`、`C++ With O2`；编译参数带 `-std=c++17` 或 `-std=c++20` 时加 `C++ 17` 两项，`-std=c++20` 再加 `C++ 20` 两项。其余参数（含 `-O2`、`-std=c++14`）→ `flags_dropped`。
+* `languages`：`C`、`C With O2`、`C++`、`C++ With O2`；编译参数带 `-std=c++17`、`-std=c++2a` 或 `-std=c++20` 时加 `C++ 17` 两项，`-std=c++2a` / `-std=c++20` 再加 `C++ 20` 两项。其余参数（含 `-O2`、`-std=c++14`）→ `flags_dropped`。
 * checker 没用 testlib → `checker_not_testlib`。
 
 ### LemonLime

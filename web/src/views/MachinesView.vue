@@ -3,10 +3,14 @@ import { onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
-import { bootstrapKeyApi, machineApi, settingsApi } from '@/api'
+import { agentApi, bootstrapKeyApi, machineApi, settingsApi } from '@/api'
 import { GLOBAL_CONFIRM } from '@/api/endpoints'
 import type {
+  AgentBindingOut,
   AnnounceStatusOut,
+  BindingSuggestionOut,
+  BindResultOut,
+  BoundMachineOut,
   BootstrapKeyIssuedOut,
   BootstrapKeyOut,
   CloneAlertOut,
@@ -19,6 +23,7 @@ import DiagnosticsDialog from '@/components/DiagnosticsDialog.vue'
 import FormDialog from '@/components/FormDialog.vue'
 import PageShell from '@/components/PageShell.vue'
 import SectionCard from '@/components/SectionCard.vue'
+import BindingSuggestionsDialog from '@/components/BindingSuggestionsDialog.vue'
 import RosterPersonPicker from '@/components/RosterPersonPicker.vue'
 import { useList } from '@/composables/useList'
 import { useMutation } from '@/composables/useMutation'
@@ -71,14 +76,81 @@ void loadAlerts()
 // 对话框里只需选人。
 // --------------------------------------------------------------------------- //
 
-const bindTarget = ref<PendingMachineOut | null>(null)
+/** 待配对的机器，或已配对、要再绑一份名单的机器。 */
+type BindTarget = PendingMachineOut | BoundMachineOut
+
+const bindTarget = ref<BindTarget | null>(null)
 const bindOpen = ref(false)
 const bindEntryId = ref<number | null>(null)
 
-function askBind(row: PendingMachineOut): void {
+function askBind(row: BindTarget): void {
   bindTarget.value = row
   bindEntryId.value = null
   bindOpen.value = true
+}
+
+function isPending(row: BindTarget | null): row is PendingMachineOut {
+  return !!row && 'pair_code_expires_in' in row
+}
+
+// --------------------------------------------------------------------------- //
+// 同名建议：配对之后，这台机器在其他名单里同名的人一键「同时绑定」
+// --------------------------------------------------------------------------- //
+
+const suggestOpen = ref(false)
+const suggestAgent = ref<{ id: number; label: string } | null>(null)
+const suggestions = ref<BindingSuggestionOut[]>([])
+
+function offerSuggestions(result: BindResultOut, label: string): void {
+  suggestAgent.value = { id: result.agent_id, label }
+  suggestions.value = result.suggestions ?? []
+  suggestOpen.value = suggestions.value.length > 0
+}
+
+async function askSuggestions(row: BoundMachineOut): Promise<void> {
+  try {
+    const page = await machineApi.suggestions(row.id)
+    suggestAgent.value = { id: row.id, label: row.hostname || row.machine_id }
+    suggestions.value = page.items
+    if (!page.items.length) ElMessage.info('其他名单里没有同名且未绑定的人')
+    suggestOpen.value = page.items.length > 0
+  } catch (err) {
+    ElMessage.error(describeError(err))
+  }
+}
+
+// --------------------------------------------------------------------------- //
+// 已配对的机器：每台列出全部名单绑定，可逐份解绑、再绑一份
+// --------------------------------------------------------------------------- //
+
+const bound = useList<BoundMachineOut>({
+  rowKey: (row) => row.id,
+  loader: ({ limit, offset, signal }) => machineApi.bound({ limit, offset }, signal),
+})
+
+async function reloadAll(): Promise<void> {
+  await Promise.all([pending.reload(), bound.reload()])
+}
+
+const unbindOne = useMutation(
+  (target: { agentId: number; rosterId?: number }) =>
+    agentApi.unbind(target.agentId, target.rosterId),
+  { onDone: reloadAll },
+)
+
+async function askUnbind(row: BoundMachineOut, binding?: AgentBindingOut): Promise<void> {
+  const what = binding ? `${binding.roster_name} · ${binding.player_no}` : '全部名单'
+  const last = !binding || (row.bindings ?? []).length === 1
+  try {
+    await ElMessageBox.confirm(
+      last ? '机器回到待配对，下一轮心跳显示新的配对码。' : '其他名单的绑定不变。',
+      `解除 ${row.hostname || row.machine_id} 的绑定：${what}？`,
+      { type: 'warning', confirmButtonText: '解除绑定', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  await unbindOne.run({ agentId: row.id, rosterId: binding?.roster_id })
 }
 
 const bindFromRow = useMutation(
@@ -94,10 +166,12 @@ const bindFromRow = useMutation(
     // 服务端的回执带着绑到了谁，比界面自己编一句"配对成功"有用
     success: (result) =>
       `已配对：${result.player_no}${result.roster_name ? ` · ${result.roster_name}` : ''}`,
-    onDone: async () => {
+    onDone: async (result) => {
+      const row = bindTarget.value
       bindOpen.value = false
       bindTarget.value = null
-      await pending.reload()
+      await reloadAll()
+      offerSuggestions(result, row?.hostname || row?.machine_id || '')
     },
   },
 )
@@ -129,11 +203,12 @@ const bindByCode = useMutation(
   },
   {
     success: (result) => `已配对：${result.player_no || '—'}`,
-    onDone: async () => {
+    onDone: async (result) => {
       pairCode.value = ''
       pairEntryId.value = null
       byCodeOpen.value = false
-      await pending.reload()
+      await reloadAll()
+      offerSuggestions(result, `${result.roster_name} · ${result.player_no}`)
     },
   },
 )
@@ -577,6 +652,56 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
       </DataTable>
     </SectionCard>
 
+    <SectionCard title="已配对的机器" :meta="`${bound.total.value ?? 0} 台`" flush>
+      <DataTable
+        :rows="bound.rows.value"
+        :row-key="(row: BoundMachineOut) => row.id"
+        :loading="bound.loading.value"
+        :total="bound.total.value"
+        :page="bound.page.value"
+        :page-size="bound.pageSize.value"
+        empty-text="无已配对机器"
+        @update:page="bound.setPage"
+        @update:pageSize="bound.setPageSize"
+      >
+        <template #columns>
+          <el-table-column label="主机名" width="170">
+            <template #default="{ row }">
+              <div>{{ row.hostname || '—' }}</div>
+              <div class="cell-sub mono">{{ row.machine_id.slice(0, 18) }}</div>
+            </template>
+          </el-table-column>
+          <el-table-column label="绑定（名单 · 考号 · 姓名）" min-width="320">
+            <template #default="{ row }">
+              <div class="binding-tags">
+                <el-tag
+                  v-for="item in row.bindings"
+                  :key="item.roster_id"
+                  closable
+                  effect="plain"
+                  @close="askUnbind(row, item)"
+                >
+                  {{ item.roster_name }} · {{ item.player_no }}{{ item.name ? ` · ${item.name}` : '' }}
+                </el-tag>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column label="最后心跳" width="160">
+            <template #default="{ row }">
+              <span class="cell-sub">{{ formatTime(row.last_seen_at) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="250" fixed="right">
+            <template #default="{ row }">
+              <el-button link type="primary" size="small" @click="askBind(row)">再绑一份名单</el-button>
+              <el-button link type="primary" size="small" @click="askSuggestions(row)">同名建议</el-button>
+              <el-button link type="danger" size="small" @click="askUnbind(row)">全部解绑</el-button>
+            </template>
+          </el-table-column>
+        </template>
+      </DataTable>
+    </SectionCard>
+
     <SectionCard title="机房设置">
       <div class="setting-grid">
         <div class="setting-item">
@@ -817,7 +942,10 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
     <el-dialog v-model="bindOpen" title="配对机器" width="580px">
       <p class="cell-sub" style="margin-top: 0">
         机器 <span class="mono">{{ bindTarget?.hostname || bindTarget?.machine_id || '—' }}</span>
-        <template v-if="bindTarget"> · 配对码{{ pairCodeLeft(bindTarget).text }}</template>
+        <template v-if="isPending(bindTarget)"> · 配对码{{ pairCodeLeft(bindTarget).text }}</template>
+        <template v-else-if="bindTarget">
+          · 已绑：{{ (bindTarget.bindings ?? []).map((b) => `${b.roster_name} · ${b.player_no}`).join('，') }}
+        </template>
       </p>
       <RosterPersonPicker
         ref="bindPicker"
@@ -866,6 +994,14 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
         </el-button>
       </template>
     </el-dialog>
+
+    <BindingSuggestionsDialog
+      v-model="suggestOpen"
+      :agent-id="suggestAgent?.id ?? null"
+      :label="suggestAgent?.label"
+      :suggestions="suggestions"
+      @done="reloadAll"
+    />
 
     <DiagnosticsDialog
       v-model="diagOpen"
@@ -965,5 +1101,11 @@ function pairCodeLeft(row: PendingMachineOut): { expired: boolean; text: string 
 
 .danger-item {
   color: var(--el-color-danger);
+}
+
+.binding-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 </style>

@@ -167,6 +167,7 @@ const CONTEST_STATUS_LABELS: Record<string, string> = {
   running: '进行中',
   frozen: '已封榜',
   closed: '已结束',
+  archived: '已归档',
 }
 
 export function contestStatusLabel(status: string): string {

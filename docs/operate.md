@@ -257,7 +257,8 @@ syncoj-server db reset --yes [--keep-admin]
 ### 第一步：服务端
 
 1. 「选手状态」或「机器配对」：看「最后心跳」列。离线阈值默认 **90 秒**，在「机器配对」→「运行参数」修改。
-2. 「审计日志」筛 `agent_`：`agent_revoke`（凭据作废）、`agent_unbind`（解除配对）、`agent_uninstall`（请求卸载）；`contest_auto_closed`（场次到点自动结束）。
+2. 「审计日志」筛 `agent_`：`agent_revoke`（凭据作废）、`agent_unbind`（解除配对）、`agent_uninstall`（请求卸载）；`contest_auto_closed`（场次到点自动结束）、`contest_archive`（场次已归档：机器不再进入）。
+   机器回报「这台机器在场次所用的名单里没有绑定」：场次默认名单与机器绑定的名单不同 →「名单库」对场次默认名单「按姓名匹配机器」（[`quickstart.md`](quickstart.md)「一台机器绑多份名单」）。
 3. 服务端日志搜机器名或 `machine_id`：
 
 | 响应 | 含义 | 心跳 |

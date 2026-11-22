@@ -24,8 +24,14 @@ export const agentApi = {
       body: { contest_id: contestId },
     }),
 
-  /** 解除绑定：机器还回来，人留着。它下一轮心跳会显示新的配对码。 */
-  unbind: (agentId: number) => request<SimpleAck>(paths.agentBind(agentId), { method: 'DELETE' }),
+  /**
+   * 解除绑定。给 `rosterId` 只解那份名单里的绑定；不给则全部解除 ——
+   * 一条不剩时机器回到待配对，下一轮心跳显示新的配对码。
+   */
+  unbind: (agentId: number, rosterId?: number) =>
+    request<SimpleAck>(`${paths.agentBind(agentId)}${query({ roster_id: rosterId })}`, {
+      method: 'DELETE',
+    }),
 
   /**
    * 作废一台机器的凭据。

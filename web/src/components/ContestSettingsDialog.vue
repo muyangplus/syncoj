@@ -32,6 +32,7 @@ const STATUSES: Array<{ value: string; label: string }> = [
   { value: 'draft', label: '筹备中' },
   { value: 'frozen', label: '已封榜 · 停止下发' },
   { value: 'closed', label: '已结束 · 停止扫描成绩' },
+  { value: 'archived', label: '已归档 · 不再解析、扫描、评测' },
 ]
 
 const form = reactive({

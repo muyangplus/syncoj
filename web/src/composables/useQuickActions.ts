@@ -28,6 +28,21 @@ export interface NavItem {
   label: string
   icon: string
   group: string
+  /** 二级项：侧栏里可展开；命令面板逐项可搜 */
+  children?: NavItem[]
+  /** 命令面板额外匹配的词 */
+  keywords?: string
+}
+
+/** 侧栏 / 命令面板里真正能跳转的页面（有二级项的父项只列它的二级项）。 */
+export function navPages(): NavItem[] {
+  return NAV_GROUPS.flatMap((group) =>
+    group.items.flatMap((item) =>
+      item.children?.length
+        ? item.children.map((child) => ({ ...child, label: `${item.label} · ${child.label}` }))
+        : [item],
+    ),
+  )
 }
 
 export const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
@@ -38,7 +53,22 @@ export const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
   {
     title: '考务',
     items: [
-      { name: 'contests', label: '场次管理', icon: 'Calendar', group: '考务' },
+      {
+        name: 'contests',
+        label: '场次管理',
+        icon: 'Calendar',
+        group: '考务',
+        children: [
+          { name: 'contests', label: '全部场次', icon: 'Calendar', group: '考务' },
+          {
+            name: 'contests-archived',
+            label: '已归档',
+            icon: 'Box',
+            group: '考务',
+            keywords: '已归档场次 归档',
+          },
+        ],
+      },
       { name: 'rosters', label: '名单库', icon: 'Notebook', group: '考务' },
       { name: 'overview', label: '选手状态', icon: 'Monitor', group: '考务' },
     ],

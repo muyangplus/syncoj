@@ -14,6 +14,7 @@ import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
 import DataTable from '@/components/DataTable.vue'
 import FormDialog from '@/components/FormDialog.vue'
 import PageShell from '@/components/PageShell.vue'
+import RosterMatchDialog from '@/components/RosterMatchDialog.vue'
 import SectionCard from '@/components/SectionCard.vue'
 import { useList } from '@/composables/useList'
 import { useMutation } from '@/composables/useMutation'
@@ -548,6 +549,9 @@ watch(selectedRosterId, () => {
   keyword.value = ''
 })
 
+// 「按姓名匹配机器」：预览 + 确认在对话框里
+const matchOpen = ref(false)
+
 function onRosterCommand(command: string): void {
   if (command === 'prune') void applyToContest(true)
   else if (command === 'delete') askRemoveRoster()
@@ -576,6 +580,9 @@ function onRosterCommand(command: string): void {
             @click="applyToContest(false)"
           >
             应用到「{{ contest.current?.name ?? '未选场次' }}」
+          </el-button>
+          <el-button :disabled="!entries.total.value" @click="matchOpen = true">
+            <el-icon><Connection /></el-icon>按姓名匹配机器
           </el-button>
           <el-button @click="openEdit(selectedRoster)">
             <el-icon><Edit /></el-icon>编辑
@@ -928,6 +935,11 @@ function onRosterCommand(command: string): void {
         '名单本身与各场次选手保留。'
       "
       @confirm="clearEntries.run(undefined)"
+    />
+    <RosterMatchDialog
+      v-model="matchOpen"
+      :roster-id="selectedRosterId"
+      :roster-name="selectedName"
     />
   </PageShell>
 </template>

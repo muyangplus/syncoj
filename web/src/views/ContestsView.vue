@@ -31,7 +31,8 @@ const route = useRoute()
  */
 const list = useList<ContestOut>({
   rowKey: (row) => row.id,
-  loader: ({ limit, offset, signal }) => contestApi.list({ limit, offset }, signal),
+  // 已归档的场次不在这里列（侧栏「场次管理 → 已归档」）
+  loader: ({ limit, offset, signal }) => contestApi.list({ limit, offset, archived: false }, signal),
 })
 
 /** 表格与顶栏下拉共用同一个"当前场次"，写操作之后两边都得刷。 */
@@ -82,7 +83,21 @@ function openSettings(row: ContestOut): void {
 function onRowCommand(command: string, row: ContestOut): void {
   if (command === 'clear') askClear(row)
   else if (command === 'delete') askDelete(row)
+  else if (command === 'archive') void archive.run(row)
 }
+
+// --------------------------------------------------------------------------- //
+// 归档：可逆，不要名称确认；进行中 / 封榜的场次服务端回 409，界面先禁掉
+// --------------------------------------------------------------------------- //
+
+function canArchive(row: ContestOut): boolean {
+  return row.status !== 'running' && row.status !== 'frozen'
+}
+
+const archive = useMutation((row: ContestOut) => contestApi.archive(row.id), {
+  success: (result) => `「${result.name}」已归档`,
+  onDone: refreshAll,
+})
 
 function useContest(id: number): void {
   contest.select(id)
@@ -197,6 +212,9 @@ function clearDetail(count: number): string {
     <template #toolbar>
       <el-button :loading="list.loading.value" @click="refreshAll">
         <el-icon><Refresh /></el-icon>刷新
+      </el-button>
+      <el-button @click="router.push({ name: 'contests-archived' })">
+        <el-icon><Box /></el-icon>已归档（{{ contest.archived.length }}）
       </el-button>
       <el-button type="primary" @click="createVisible = true">
         <el-icon><Plus /></el-icon>新建场次
@@ -315,6 +333,9 @@ function clearDetail(count: number): string {
                 </el-button>
                 <template #dropdown>
                   <el-dropdown-menu>
+                    <el-dropdown-item command="archive" :disabled="!canArchive(row)">
+                      {{ canArchive(row) ? '归档' : '归档（先结束场次）' }}
+                    </el-dropdown-item>
                     <el-dropdown-item command="clear" :disabled="row.player_count === 0">
                       <span class="danger-text">清空选手</span>
                     </el-dropdown-item>

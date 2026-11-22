@@ -471,3 +471,13 @@ def test_export_then_import_through_api(client: TestClient, contest: dict, admin
     result = apply(client, target, admin_headers, body["token"], accept_all(body)).json()
     assert result["created"] == 1
     assert result["problems"][0]["testdata"]["total_score"] == 100
+
+
+def test_too_many_cases_is_reported_at_parse(tmp_path: Path) -> None:
+    """同一对文件被引用很多次也按测试点计数，解析时就报 too_many_cases，不等构建。"""
+    task = lemon_task("sum", 1)
+    task["testCases"] = [dict(task["testCases"][0]) for _ in range(501)]  # type: ignore[index]
+    bundle = parse_one(tmp_path, task)
+    assert codes(bundle.errors) == ["too_many_cases"]
+    assert "501" in bundle.errors[0].message
+    assert not bundle.cases

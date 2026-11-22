@@ -34,6 +34,7 @@ __all__ = [
     "is_ignored",
     "open_upload",
     "read_head",
+    "human_size",
 ]
 
 MAX_MEMBERS = 20000
@@ -42,7 +43,7 @@ BOMB_RATIO = 1000
 BOMB_MIN_BYTES = 64 * 1024 * 1024
 
 
-def _human(size: int) -> str:
+def human_size(size: int) -> str:
     if size >= 1 << 30:
         return "%d GB" % (size >> 30)
     return "%d MB" % (size >> 20)
@@ -98,7 +99,7 @@ class SafeArchive:
                 continue
             total += info.file_size
             if total > max_total:
-                raise ProblemIoError("archive_too_large", limit=_human(max_total))
+                raise ProblemIoError("archive_too_large", limit=human_size(max_total))
             if (
                 info.file_size > BOMB_MIN_BYTES
                 and info.file_size > BOMB_RATIO * max(info.compress_size, 1)
@@ -127,7 +128,7 @@ class SafeArchive:
         with self.open(name) as handle:
             data = handle.read(limit + 1)
         if len(data) > limit:
-            raise ProblemIoError("member_too_large", path=name, limit=_human(limit))
+            raise ProblemIoError("member_too_large", path=name, limit=human_size(limit))
         return data
 
     def view(self, root: str = "") -> "ArchiveView":
@@ -174,7 +175,7 @@ class SingleFileArchive:
         with self.open(name) as handle:
             data = handle.read(limit + 1)
         if len(data) > limit:
-            raise ProblemIoError("member_too_large", path=name, limit=_human(limit))
+            raise ProblemIoError("member_too_large", path=name, limit=human_size(limit))
         return data
 
     def view(self, root: str = "") -> "ArchiveView":

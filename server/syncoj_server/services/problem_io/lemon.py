@@ -29,6 +29,7 @@ import json
 import shutil
 from typing import Any, Dict, List, Optional, Tuple
 
+from ...judging.testdata import MAX_CASES
 from .archive import ArchiveView
 from .build import flat_case_names
 from .bundle import (
@@ -236,6 +237,16 @@ def _io(bundle: ProblemBundle, task: Dict[str, Any]) -> None:
     bundle.output_file = _str(task.get("outputFileName")) or None
 
 
+def _total_pairs(groups: List[Any]) -> int:
+    """全部 testCase 的输入文件数（去掉依赖标记），只用于报 too_many_cases。"""
+    total = 0
+    for group in groups:
+        inputs = group.get("inputFiles") if isinstance(group, dict) else None
+        if isinstance(inputs, list):
+            total += sum(1 for item in inputs if isinstance(item, str) and not item.endswith(DEPENDENCE_FLAG))
+    return total
+
+
 def _cases(view: ArchiveView, data_dir: str, bundle: ProblemBundle, task: Dict[str, Any]) -> None:
     groups = task.get("testCases")
     if groups is None:
@@ -244,6 +255,7 @@ def _cases(view: ArchiveView, data_dir: str, bundle: ProblemBundle, task: Dict[s
         bundle.fail(notice("bad_manifest", path=bundle.key, reason="testCases 不是数组"))
         return
     units: List[Tuple[int, List[Tuple[str, str]]]] = []
+    count = 0
     times: List[int] = []
     memories: List[int] = []
     for index, group in enumerate(groups, 1):
@@ -268,6 +280,10 @@ def _cases(view: ArchiveView, data_dir: str, bundle: ProblemBundle, task: Dict[s
             pairs.append((_norm(raw_in), _norm(outputs[position])))
         if not pairs:
             continue
+        count += len(pairs)
+        if count > MAX_CASES:
+            bundle.fail(notice("too_many_cases", count=_total_pairs(groups), limit=MAX_CASES))
+            return
         score = group.get("fullScore", 0)
         whole = _int(score)
         if whole is None:

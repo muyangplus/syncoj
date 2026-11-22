@@ -327,3 +327,22 @@ def test_eps_literal() -> None:
         checkers.format_eps(0)
     assert json.dumps(checkers.checker_language_ok("SPJ.CC")) == "true"
     assert not checkers.checker_language_ok("spj.py")
+
+
+def test_repeated_references_count_towards_volume_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """同一个成员被引用 N 次按 N 份解压量算，超限在写数据包之前就拒绝。"""
+    from syncoj_server.services.problem_io import build as build_mod
+
+    path = stage(tmp_path, make_zip({"big.in": b"\0" * 4096, "big.out": "0\n"}))
+    with SafeArchive(path) as archive:
+        bundle = ProblemBundle(key="k", ident="k", cases=[
+            BundleCase(name=str(i), input=FileRef(member="big.in"), answer=FileRef(member="big.out"), score=1)
+            for i in range(1, 41)
+        ])
+        monkeypatch.setattr(build_mod, "MAX_BUILD_BYTES", 40 * 4096)
+        copied = []
+        monkeypatch.setattr(build_mod, "_copy_ref", lambda *args: copied.append(args))
+        assert try_build(bundle, archive) is None
+        assert [e.code for e in bundle.errors] == ["testdata_invalid"]
+        assert "超过" in bundle.errors[0].message
+        assert copied == []

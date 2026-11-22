@@ -18,8 +18,8 @@ import shutil
 import zipfile
 from typing import Dict, List, Optional, Tuple, Union
 
-from ...judging.testdata import TestdataError, parse_testdata
-from .archive import MAX_DESCRIPTOR_BYTES, SafeArchive, SingleFileArchive
+from ...judging.testdata import MAX_UNCOMPRESSED_BYTES, TestdataError, parse_testdata
+from .archive import MAX_DESCRIPTOR_BYTES, SafeArchive, SingleFileArchive, human_size
 from .bundle import FileRef, ProblemBundle
 from .checkers import inject_testlib
 from .notices import ProblemIoError, notice
@@ -35,6 +35,9 @@ __all__ = [
 
 #: 与 ``POST /problems/{id}/testdata`` 的上传上限一致
 MAX_TESTDATA_BYTES = 512 * 1024 * 1024
+#: 写出的数据包解压后总量上限（与 ``parse_testdata`` 一致）。同一个成员被多个测试点引用时
+#: 每次引用都算一次 —— 写之前先累计，超了就不写
+MAX_BUILD_BYTES = MAX_UNCOMPRESSED_BYTES
 
 Archive = Union[SafeArchive, SingleFileArchive, None]
 
@@ -91,6 +94,26 @@ def _copy_ref(ref: FileRef, archive: Archive, zf: zipfile.ZipFile, arcname: str)
         shutil.copyfileobj(source, target, 256 * 1024)
 
 
+def _ref_size(ref: FileRef, archive: Archive) -> int:
+    if ref.data is not None:
+        return len(ref.data)
+    if archive is None:
+        raise TestdataError("缺少归档")
+    try:
+        return archive.size(ref.member)  # type: ignore[arg-type]
+    except KeyError:
+        raise TestdataError("缺少文件 %s" % ref.member)
+
+
+def _check_volume(bundle: ProblemBundle, archive: Archive) -> None:
+    """按引用（含重复引用）累计测试数据的解压量，超过 :data:`MAX_BUILD_BYTES` 就拒绝。"""
+    total = 0
+    for case in bundle.cases:
+        total += _ref_size(case.input, archive) + _ref_size(case.answer, archive)
+        if total > MAX_BUILD_BYTES:
+            raise TestdataError("解压后超过 %s" % human_size(MAX_BUILD_BYTES))
+
+
 def build_testdata_zip(bundle: ProblemBundle, archive: Archive) -> bytes:
     """写出数据包字节。结构不对抛 ``TestdataError``（信息给人看）。
 
@@ -106,6 +129,7 @@ def build_testdata_zip(bundle: ProblemBundle, archive: Archive) -> bytes:
     flat = flat_case_names([case.name for case in bundle.cases])
     if len(flat) != len(bundle.cases):
         raise TestdataError("测试点名重复")
+    _check_volume(bundle, archive)
     config: Dict[str, object] = {
         "cases": [{"name": flat[case.name], "score": int(case.score)} for case in bundle.cases],
     }

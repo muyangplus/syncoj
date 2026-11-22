@@ -712,3 +712,33 @@ def test_too_many_problem_dirs_fail_before_parsing(tmp_path: Path, monkeypatch: 
     with pytest.raises(problem_io.ProblemIoError) as info:
         problem_io.parse_archive(stage(tmp_path, data))
     assert info.value.code == "too_many_problems" and parsed == []
+
+
+@pytest.mark.parametrize("config, code", [
+    ("time: 1e999\n", "bad_manifest"),
+    ("time: '%ss'\n" % ("9" * 400), "bad_manifest"),
+    ("memory: '%sg'\n" % ("9" * 400), "bad_manifest"),
+    ("time: 1e999\nmemory: 1e999\n", "bad_manifest"),
+])
+def test_infinite_limits_are_bad_manifest(tmp_path: Path, config: str, code: str) -> None:
+    bundle, _ = one(tmp_path, hydro_pkg(config))
+    assert codes(bundle.errors) == [code]
+
+
+def test_infinite_subtask_score_counts_as_unset(tmp_path: Path) -> None:
+    config = ("subtasks:\n  - score: 1e400\n    cases: [{input: 1.in, output: 1.out}]\n"
+              "  - score: 40\n    cases: [{input: 2.in, output: 2.out}]\n")
+    bundle, built = one(tmp_path, hydro_pkg(config, "1", "2"))
+    assert bundle.errors == [] and built is not None
+    assert scores(bundle) == {"1": 60, "2": 40}
+
+
+def test_infinite_limits_through_api(client: TestClient, contest: dict, admin_headers: dict) -> None:
+    data = hydro_pkg("time: 1e999\n")
+    response = client.post(
+        "/api/v1/admin/contests/%d/judge-import/preview" % contest["id"],
+        headers=admin_headers, files={"file": ("h.zip", data, "application/zip")},
+    )
+    assert response.status_code == 200, response.text
+    (item,) = response.json()["problems"]
+    assert item["action"] == "skip" and [e["code"] for e in item["errors"]] == ["bad_manifest"]

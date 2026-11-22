@@ -191,3 +191,12 @@ def test_too_many_problem_folders_fail_before_parsing(tmp_path: Path, monkeypatc
     with pytest.raises(ProblemIoError) as info:
         problem_io.parse_archive(stage(tmp_path, data), "qduoj")
     assert info.value.code == "too_many_problems" and parsed == []
+
+
+def test_huge_integers_do_not_crash(tmp_path: Path) -> None:
+    doc = qduoj_problem_json(time_limit=10 ** 400, memory_limit=10 ** 400)
+    doc["test_case_score"][0]["score"] = 10 ** 400  # type: ignore[index]
+    result, built = _parse(tmp_path, make_qduoj_zip([doc]))
+    (bundle,) = result.problems
+    assert bundle.errors == [] and built[0] is not None
+    assert (bundle.time_limit_ms, bundle.memory_limit_mb) == (60000, 4096)

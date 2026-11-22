@@ -80,6 +80,8 @@ _KEPT_TAGS = frozenset(
     + _TEST_TAGS + _TEMPLATE_TAGS + _STATEMENT_TAGS
 )
 _CHUNK = 1024 * 1024
+#: 时限 / 内存换算后的上限（远大于允许范围，只为让 int() 不碰到 inf）
+_HUGE = 1e9
 
 
 class _Builder:
@@ -209,7 +211,8 @@ def _limits(item: ElementTree.Element, bundle: ProblemBundle) -> None:
         bundle.time_limit_ms = DEFAULT_TIME_LIMIT_MS
     else:
         unit = (time_el.get("unit") or "s").strip().lower() if time_el is not None else "s"
-        bundle.time_limit_ms = int(round(time_value if unit == "ms" else time_value * 1000))
+        # 换算后可能溢出成 inf：先压到一个大有限值，再由公共规整夹到范围内（limit_clamped）
+        bundle.time_limit_ms = int(round(min(time_value if unit == "ms" else time_value * 1000, _HUGE)))
     if memory_value is None:
         bundle.memory_limit_mb = DEFAULT_MEMORY_LIMIT_MB
     else:
@@ -218,7 +221,7 @@ def _limits(item: ElementTree.Element, bundle: ProblemBundle) -> None:
             memory_value /= 1024
         elif unit in ("gb", "g"):
             memory_value *= 1024
-        bundle.memory_limit_mb = int(math.ceil(memory_value - 1e-9))
+        bundle.memory_limit_mb = int(math.ceil(min(memory_value, _HUGE) - 1e-9))
 
 
 _Test = Tuple[str, Optional[str], bytes]  # (kind, name, data)

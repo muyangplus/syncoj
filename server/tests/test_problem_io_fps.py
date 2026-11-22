@@ -408,3 +408,11 @@ def test_xml_size_is_capped_while_streaming(monkeypatch: pytest.MonkeyPatch) -> 
     with pytest.raises(ProblemIoError) as info:
         fps._parse_xml(make_fps_xml(), limit=100)
     assert info.value.code == "member_too_large"
+
+
+def test_overflowing_units_are_clamped(tmp_path: Path) -> None:
+    item = fps_item(time="1e306", time_unit="s", memory="1e306", memory_unit="gb")
+    bundle, built = _one(tmp_path, item)
+    assert bundle.errors == [] and built is not None
+    assert (bundle.time_limit_ms, bundle.memory_limit_mb) == (60000, 4096)
+    assert "limit_clamped" in _codes(bundle.warnings)

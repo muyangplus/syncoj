@@ -100,31 +100,40 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _whole(value: float, rounding: Any) -> int:
+    """有限数取整；inf / nan 抛 ``ValueError``（``int(inf)`` 抛的是 OverflowError）。"""
+    if isinstance(value, int):
+        return value
+    if not math.isfinite(value):
+        raise ValueError("数值 %r 不是有限数" % (value,))
+    return int(rounding(value))
+
+
 def parse_time_ms(value: Any) -> int:
     """Hydro ``parseTimeMS``：数字 / 整数字符串按 ms；``1s``、``1000ms``、``500us`` 换算后向下取整。
 
-    不能解析抛 ``ValueError``。"""
+    不能解析（含 inf / nan）抛 ``ValueError``。"""
     if _is_number(value):
-        return int(math.floor(value))
+        return _whole(value, math.floor)
     if isinstance(value, str):
         if _SAFE_INT.match(value):
             return int(value)
         match = _TIME_RE.match(value.strip())
         if match:
-            return int(math.floor(float(match.group(1)) * _TIME_UNITS[match.group(2).lower()]))
+            return _whole(float(match.group(1)) * _TIME_UNITS[match.group(2).lower()], math.floor)
     raise ValueError("时间 %r 无法解析" % (value,))
 
 
 def parse_memory_mb(value: Any) -> int:
     """Hydro ``parseMemoryMB``：数字 / 整数字符串按 MB；``k`` / ``m`` / ``g`` 换算后向上取整。"""
     if _is_number(value):
-        return int(math.ceil(value))
+        return _whole(value, math.ceil)
     if isinstance(value, str):
         if _SAFE_INT.match(value):
             return int(value)
         match = _MEMORY_RE.match(value.strip())
         if match:
-            return int(math.ceil(float(match.group(1)) * _MEMORY_UNITS[match.group(2).lower()]))
+            return _whole(float(match.group(1)) * _MEMORY_UNITS[match.group(2).lower()], math.ceil)
     raise ValueError("内存 %r 无法解析" % (value,))
 
 
@@ -448,8 +457,8 @@ def _auto_subtasks(files: List[str], time: Any, memory: Any) -> List[_RawSubtask
 
 
 def _int_score(bundle: ProblemBundle, value: Any) -> int:
-    """Hydro 里 ``score || 缺省``：0 / 缺失 / 非数字都当没写。小数向下取整。"""
-    if not _is_number(value) or value <= 0:
+    """Hydro 里 ``score || 缺省``：0 / 缺失 / 非数字 / inf 都当没写。小数向下取整。"""
+    if not _is_number(value) or (isinstance(value, float) and not math.isfinite(value)) or value <= 0:
         return 0
     if value != int(value):
         bundle.warn(notice("score_truncated"))

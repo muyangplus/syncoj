@@ -583,3 +583,12 @@ def test_api_round_trip(client: TestClient, contest: dict, admin_headers: dict) 
     assert row["testdata"]["cases"] == original["testdata"]["cases"]
     assert row["testdata"]["total_score"] == original["testdata"]["total_score"]
     assert row["testdata"]["has_checker"] is True
+
+
+def test_infinite_numbers_do_not_crash(tmp_path: Path) -> None:
+    doc = hoj_problem_json(timeLimit="1e999", memoryLimit=float("inf"))
+    doc["samples"][0]["score"] = float("inf")  # json 写成 Infinity，Python 的 json 照收
+    bundle, built, _ = _one(tmp_path, doc)
+    assert _errors(bundle) == [] and built
+    assert "limits_defaulted" in _codes(bundle)
+    assert built["cases"][0][1] == 0

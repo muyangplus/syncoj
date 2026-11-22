@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 from typing import Any, Dict, List, Optional, Tuple
@@ -67,9 +68,10 @@ def _int(value: Any) -> Optional[int]:
         return int(value)
     if isinstance(value, str):
         try:
-            return int(float(value.strip()))
+            parsed = float(value.strip())
         except ValueError:
             return None
+        return int(parsed) if math.isfinite(parsed) and abs(parsed) < 1e12 else None
     return None
 
 
@@ -82,7 +84,7 @@ def _score(value: Any, bundle: ProblemBundle) -> int:
             value = float(value.strip())
         except ValueError:
             return 0
-    if not isinstance(value, (int, float)) or value != value or value < 0:
+    if not isinstance(value, (int, float)) or (isinstance(value, float) and not math.isfinite(value)) or value < 0:
         return 0
     if isinstance(value, float) and value != int(value):
         bundle.warn(notice("score_truncated"))

@@ -56,8 +56,10 @@ _STATEMENT_KEYS = ("description", "input_description", "output_description", "hi
 def _number(value: Any) -> Optional[float]:
     if isinstance(value, bool):
         return None
-    if isinstance(value, (int, float)):
-        return float(value) if math.isfinite(value) else None
+    if isinstance(value, int):
+        return float(max(min(value, 10 ** 12), -(10 ** 12)))  # 超大整数转 float 会溢出
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
     if isinstance(value, str):
         try:
             parsed = float(value.strip())

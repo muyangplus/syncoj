@@ -1,23 +1,33 @@
 <script setup lang="ts">
 /**
- * 一条评测记录的测试点明细（§12）：逐点状态、用时、内存、信息，子任务，编译信息。
+ * 测试点明细（§12）：逐点状态、用时、内存、信息，子任务，编译信息。
+ *
+ * 两种来源：成绩矩阵的一条评测记录（`runId`），或某个评测任务（`taskId`，历史版本的结果，
+ * §12.9）。两者明细形状相同，这里归一成同一个视图。
  */
 import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 
 import { judgingApi } from '@/api'
-import type { JudgeRunDetailOut } from '@/api/types'
+import type { JudgeRunDetailOut, JudgeTaskDetailOut } from '@/api/types'
 import { formatTime } from '@/utils/format'
 
-const props = defineProps<{
-  modelValue: boolean
-  contestId: number | null
-  runId: number | null
-}>()
+const props = withDefaults(
+  defineProps<{
+    modelValue: boolean
+    contestId: number | null
+    runId: number | null
+    /** 给了就看这个评测任务（优先于 runId） */
+    taskId?: number | null
+  }>(),
+  { taskId: null },
+)
 const emit = defineEmits<{
   (e: 'update:modelValue', value: boolean): void
   (e: 'manual', run: JudgeRunDetailOut): void
   (e: 'rejudge', run: JudgeRunDetailOut): void
+  (e: 'timeline', run: JudgeRunDetailOut): void
+  (e: 'adopt', task: JudgeTaskDetailOut): void
 }>()
 
 const visible = computed({
@@ -25,17 +35,65 @@ const visible = computed({
   set: (value: boolean) => emit('update:modelValue', value),
 })
 
-const detail = ref<JudgeRunDetailOut | null>(null)
+const run = ref<JudgeRunDetailOut | null>(null)
+const task = ref<JudgeTaskDetailOut | null>(null)
 const loading = ref(false)
 
+/** 两种来源归一后的视图 */
+const detail = computed(() => {
+  if (task.value) {
+    const t = task.value
+    return {
+      player_no: t.player_no,
+      problem: t.problem,
+      score: t.score,
+      max_score: t.max_score,
+      status: t.outcome,
+      parse_status: null as string | null,
+      isolated: t.isolated,
+      language: t.language,
+      judged_source: t.source_path,
+      judged_at: t.judged_at,
+      compile_message: t.compile_message,
+      subtasks: t.subtasks,
+      cases: t.cases,
+      truncated: t.truncated,
+      sha: t.source_sha256,
+    }
+  }
+  if (run.value) {
+    const r = run.value
+    return {
+      player_no: r.player_no,
+      problem: r.problem,
+      score: r.score,
+      max_score: r.max_score,
+      status: r.status,
+      parse_status: r.parse_status as string | null,
+      isolated: r.isolated,
+      language: r.language,
+      judged_source: r.judged_source,
+      judged_at: r.judged_at,
+      compile_message: r.compile_message,
+      subtasks: r.subtasks,
+      cases: r.cases,
+      truncated: r.truncated,
+      sha: r.source_sha256,
+    }
+  }
+  return null
+})
+
 watch(
-  () => [props.modelValue, props.runId] as const,
-  async ([open, runId]) => {
-    if (!open || !runId || !props.contestId) return
+  () => [props.modelValue, props.runId, props.taskId] as const,
+  async ([open, runId, taskId]) => {
+    if (!open || !props.contestId || (!runId && !taskId)) return
     loading.value = true
-    detail.value = null
+    run.value = null
+    task.value = null
     try {
-      detail.value = await judgingApi.run(props.contestId, runId)
+      if (taskId) task.value = await judgingApi.task(props.contestId, taskId)
+      else if (runId) run.value = await judgingApi.run(props.contestId, runId)
     } catch (err) {
       ElMessage.error((err as Error).message)
     } finally {
@@ -85,6 +143,8 @@ const caseSubtask = computed(() => {
           <div class="summary-tags">
             <el-tag :type="statusType(detail.status)" effect="light">{{ detail.status || '—' }}</el-tag>
             <el-tag v-if="detail.parse_status === 'manual'" type="warning" effect="plain">手工录分</el-tag>
+            <el-tag v-if="task?.in_matrix" type="primary" effect="plain">计入成绩</el-tag>
+            <el-tag v-if="task?.reused_from" type="info" effect="plain">复用 #{{ task.reused_from }}</el-tag>
             <el-tag v-if="detail.isolated === false" type="danger" effect="plain">不隔离</el-tag>
           </div>
         </div>
@@ -95,7 +155,9 @@ const caseSubtask = computed(() => {
           </div>
           <div>
             <dt>评测代码</dt>
-            <dd class="mono">{{ detail.judged_source || '—' }}</dd>
+            <dd class="mono">
+              {{ detail.judged_source || '—' }}<span v-if="detail.sha" class="muted"> · {{ detail.sha.slice(0, 8) }}</span>
+            </dd>
           </div>
           <div>
             <dt>评测时间</dt>
@@ -157,10 +219,22 @@ const caseSubtask = computed(() => {
       </template>
     </div>
     <template #footer>
-      <el-button v-if="detail" @click="emit('rejudge', detail)">
-        <el-icon><RefreshRight /></el-icon>重测
+      <template v-if="run">
+        <el-button @click="emit('timeline', run)">
+          <el-icon><TrendCharts /></el-icon>版本
+        </el-button>
+        <el-button @click="emit('rejudge', run)">
+          <el-icon><RefreshRight /></el-icon>重测
+        </el-button>
+        <el-button @click="emit('manual', run)">手工录分</el-button>
+      </template>
+      <el-button
+        v-if="task"
+        :disabled="!task.has_result || task.in_matrix || task.status !== 'done'"
+        @click="emit('adopt', task)"
+      >
+        采用此版本成绩
       </el-button>
-      <el-button v-if="detail" @click="emit('manual', detail)">手工录分</el-button>
       <el-button type="primary" @click="visible = false">关闭</el-button>
     </template>
   </el-dialog>
@@ -242,5 +316,8 @@ const caseSubtask = computed(() => {
 .message {
   white-space: pre-wrap;
   font-size: 12px;
+}
+.muted {
+  color: var(--sj-text-3);
 }
 </style>

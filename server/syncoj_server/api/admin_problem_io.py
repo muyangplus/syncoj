@@ -3,7 +3,10 @@
 导入分两步：``preview`` 把上传的包暂存到 ``<data_root>/tmp/judge-import/<token>.bin``、解析并试构建
 数据包（不写 blob），返回每题的建议 ident、动作与警告；``apply`` 凭 token **重新解析**暂存包
 （不信任客户端回传的配置，只采用 ident 与动作），写 blob、建题或覆盖。暂存 2 小时过期，
-每个场次最多留 5 份。
+每个场次最多留 5 份。同一 token 的 apply 在进程内串行。
+
+内存：preview 只算摘要（``try_summarize``，不写出完整数据包）；apply 把数据包写到暂存目录下的
+临时文件再流式入库（``try_build`` + ``put_stream``）。两者各有一份整请求共用的构建预算。
 
 格式解析与写出在 ``services/problem_io``；这里只管暂存、鉴权、落库。
 """
@@ -13,14 +16,18 @@ from __future__ import annotations
 import json
 import re
 import secrets
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
+from ..config import Settings
 from ..context import AppContext
 from ..errors import ApiError
 from ..models import Contest, EventLog, Problem
@@ -37,9 +44,11 @@ from ..schemas import (
     NoticeOut,
 )
 from ..services import problem_io
-from ..services.problem_io.build import try_build
+from ..services.problem_io.build import BuildBudget, try_build, try_summarize
 from ..services.problem_io.bundle import ExportProblem, Notice, ProblemBundle
 from ..services.problem_io.notices import ProblemIoError
+from ..services.problem_rules import patterns_for
+from ..storage import BlobTooLarge, HashMismatch
 from .admin import (
     AdminIdentity,
     _attachment_header,
@@ -66,6 +75,28 @@ _TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
 # --------------------------------------------------------------------------- #
 # 暂存
 # --------------------------------------------------------------------------- #
+
+#: 正在 apply 的 token → [锁, 引用数]。同一 token 的 apply 串行：后到的等前一个做完，
+#: 那时暂存已删，拿到 404 ``import_token_expired``，而不是两个请求同时建同名题撞唯一约束
+_apply_locks: Dict[str, list] = {}
+_apply_locks_guard = threading.Lock()
+
+
+@contextmanager
+def _token_lock(token: str) -> Iterator[None]:
+    with _apply_locks_guard:
+        entry = _apply_locks.get(token)
+        if entry is None:
+            entry = _apply_locks[token] = [threading.Lock(), 0]
+        entry[1] += 1
+    try:
+        with entry[0]:
+            yield
+    finally:
+        with _apply_locks_guard:
+            entry[1] -= 1
+            if entry[1] == 0:
+                del _apply_locks[token]
 
 
 def _staging_dir(ctx: AppContext) -> Path:
@@ -224,14 +255,14 @@ def judge_import_preview(
         _drop(folder, token)
         raise
     with parsed:
+        # 预览只要摘要：不写出完整数据包；整个请求共用一份构建预算
+        budget = BuildBudget()
         summaries: Dict[str, Optional[dict]] = {}
         for bundle in parsed.result.problems:
             summaries[bundle.key] = None
             if bundle.errors or not bundle.has_testdata:
                 continue
-            built = try_build(bundle, parsed.archive)
-            if built is not None:
-                summaries[bundle.key] = built[1]
+            summaries[bundle.key] = try_summarize(bundle, parsed.archive, budget)
     (folder / (token + ".json")).write_text(
         json.dumps({
             "contest_id": contest_id,
@@ -250,6 +281,7 @@ def judge_import_preview(
         format=parsed.result.format,
         problems=problems,
         warnings=_notices(parsed.result.warnings),
+        existing_idents=sorted(existing),
     )
 
 
@@ -301,6 +333,11 @@ def judge_import_apply(
     admin: AdminIdentity = Depends(require_admin),
 ) -> JudgeImportOut:
     """按预览时的 token 应用导入。每题只采用客户端给的 ident 与动作（新建 / 覆盖 / 跳过）。"""
+    with _token_lock(payload.token):
+        return _apply(contest_id, payload, ctx)
+
+
+def _apply(contest_id: int, payload: JudgeImportApplyIn, ctx: AppContext) -> JudgeImportOut:
     folder, meta = _load_staged(ctx, payload.token, contest_id)
     fmt = str(meta.get("format") or "auto")
     try:
@@ -349,22 +386,29 @@ def judge_import_apply(
                 raise ApiError(400, "validation_error", "题目 %s 不存在，无法覆盖" % ident, details={"key": key})
             plan.append((bundle, ident, item.action))
 
-        # 先写全部 blob，再在一个会话里建题 / 覆盖
+        # 先写全部 blob，再在一个会话里建题 / 覆盖。数据包一题一题写临时文件（放在暂存目录，
+        # 与数据同盘，不占 /tmp 的内存盘）再流式入库，同一时刻只有一份在盘上
         built: Dict[str, Tuple[str, int, dict]] = {}
+        budget = BuildBudget()
         try:
             for bundle, ident, _action in plan:
                 if not bundle.has_testdata:
                     continue
-                output = try_build(bundle, parsed.archive)
+                output = try_build(bundle, parsed.archive, budget, tmp_dir=folder)
                 if output is None:
                     raise ApiError(
                         400, "validation_error",
                         "%s：%s" % (ident, bundle.errors[-1].message), details={"key": bundle.key},
                     )
-                data, summary = output
-                sha256, size = ctx.blobs.put_bytes(data)
+                with output:
+                    try:
+                        sha256, size = ctx.blobs.put_stream(
+                            output.file, max_bytes=output.max_bytes, expected_sha256=output.sha256,
+                        )
+                    except (BlobTooLarge, HashMismatch) as exc:
+                        raise ApiError(400, "validation_error", "%s：%s" % (ident, exc), details={"key": bundle.key})
                 new_blobs.append(sha256)
-                built[bundle.key] = (sha256, size, summary)
+                built[bundle.key] = (sha256, size, output.summary)
         except Exception:
             _reclaim_blobs(ctx, new_blobs)
             raise
@@ -427,6 +471,10 @@ def judge_import_apply(
                 message="导入题目配置（%s）：新建 %d 道，覆盖 %d 道"
                 % (problem_io.FORMATS[parsed.result.format].label, result.created, result.updated),
             ))
+    except IntegrityError:
+        # 别的请求（另一份导入包、手工建题）在我们查完已有题目之后抢先建了同名题
+        _reclaim_blobs(ctx, new_blobs)
+        raise ApiError(409, "ident_conflict", "题目标识已被占用，重新预览后再导入")
     except Exception:
         _reclaim_blobs(ctx, new_blobs)
         raise
@@ -440,7 +488,7 @@ def judge_import_apply(
 # --------------------------------------------------------------------------- #
 
 
-def _snapshot(row: Problem) -> ExportProblem:
+def _snapshot(row: Problem, settings: Settings) -> ExportProblem:
     try:
         patterns = json.loads(row.file_patterns) if row.file_patterns else None
     except ValueError:
@@ -452,6 +500,7 @@ def _snapshot(row: Problem) -> ExportProblem:
         order_index=int(row.order_index or 0),
         note=row.note,
         file_patterns=patterns if isinstance(patterns, list) else None,
+        effective_patterns=patterns_for(row, settings),
         judge_mode=row.judge_mode or "external",
         time_limit_ms=row.time_limit_ms,
         memory_limit_mb=row.memory_limit_mb,
@@ -478,7 +527,7 @@ def _select(ctx: AppContext, contest_id: int, fmt: str, problem_ids: Optional[Li
                 raise ApiError(404, "not_found", "题目不在本场次")
         elif fmt != "syncoj":
             rows = [row for row in rows if row.judge_mode == "builtin" and row.testdata_sha256]
-        return contest.slug, [_snapshot(row) for row in rows]
+        return contest.slug, [_snapshot(row, ctx.settings) for row in rows]
 
 
 def _export(ctx: AppContext, problems: List[ExportProblem], fmt: str, dry_run: bool) -> problem_io.ExportOutcome:

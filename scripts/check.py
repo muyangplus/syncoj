@@ -5,6 +5,7 @@
     python scripts/check.py --skip-web      # 没装 web/node_modules 时
     python scripts/check.py --fail-fast     # 第一步失败就停
     python scripts/check.py --only agent-tests --only docs   # 只跑某几步（名字见 --list）
+    python scripts/check.py --py38 /path/to/python3.8        # 另用 3.8 解释器跑一遍服务端测试
 
 ``scripts/check.sh`` 与 ``scripts/check.ps1`` 只负责**挑一个能用的 Python** 然后
 把参数原样转给这里。
@@ -59,9 +60,14 @@ class StepFailed(Exception):
     """某一步没过。``str()`` 是给人看的原因。"""
 
 
-def run(argv: Sequence[str], cwd: Optional[Path] = None) -> None:
-    """跑一条命令，输出直接透传；非 0 就抛 :class:`StepFailed`。"""
-    completed = subprocess.run(list(argv), cwd=str(cwd or REPO_ROOT))
+class StepSkipped(Exception):
+    """这一步的前提不满足（如没给 3.8 解释器），记为跳过。``str()`` 是原因。"""
+
+
+def run(argv: Sequence[str], cwd: Optional[Path] = None, env: Optional[dict] = None) -> None:
+    """跑一条命令，输出直接透传；非 0 就抛 :class:`StepFailed`。``env`` 是在当前环境上追加的变量。"""
+    merged = None if env is None else dict(os.environ, **env)
+    completed = subprocess.run(list(argv), cwd=str(cwd or REPO_ROOT), env=merged)
     if completed.returncode != 0:
         raise StepFailed("%s 退出码 %d" % (" ".join(str(a) for a in argv), completed.returncode))
 
@@ -117,6 +123,30 @@ def step_server_tests(ctx: "Context") -> None:
     _parallel_tests(ctx, "server")
 
 
+def step_py38_tests(ctx: "Context") -> None:
+    """用真正的 Python 3.8 跑服务端测试（``--py38`` 或环境变量 ``SYNCOJ_PY38`` 给解释器）。
+
+    ``py38`` 门禁只查语法与标准库用法，查不出 3.8 上行为不同的地方（例如
+    ``SpooledTemporaryFile`` 在 3.11 之前没有 ``seekable``，交给 ``zipfile`` 读就炸）。
+    那个解释器要装好 ``server[dev]`` 依赖；``parallel_tests`` 会把 ``server/`` 放到
+    ``PYTHONPATH`` 最前面，所以即使它的可编辑安装指向别的检出，测的也是这份代码。
+    没给解释器时跳过（CI 的 py38 任务本身就用 3.8 解释器跑全量检查，不需要这一步）。
+
+    与 CI 的 py38 任务一样不对账 ``openapi.json``（``SYNCOJ_SKIP_OPENAPI_PARITY=1``）：3.8 只能装到
+    较老的 pydantic，生成结果有无害差异；对账由默认解释器那一路的 ``server-tests`` 负责。
+    """
+    if not ctx.py38:
+        raise StepSkipped("没给 3.8 解释器（--py38 或 SYNCOJ_PY38）")
+    probe = subprocess.run(
+        [ctx.py38, "-c", "import sys; sys.exit(0 if sys.version_info[:2] == (3, 8) else 1)"],
+        cwd=str(REPO_ROOT),
+    )
+    if probe.returncode != 0:
+        raise StepFailed("%s 不是可用的 Python 3.8" % ctx.py38)
+    run([ctx.py38, "server/tools/parallel_tests.py", "--root", "server", "--jobs", ctx.jobs,
+         "--pattern", ctx.py38_pattern], env={"SYNCOJ_SKIP_OPENAPI_PARITY": "1"})
+
+
 def step_openapi(ctx: "Context") -> None:
     """服务端 schema 改了但 ``web/openapi.json`` 没重新导出时，在这里拦住。"""
     run([ctx.python, "server/tools/dump_openapi.py", "--check"])
@@ -156,6 +186,7 @@ STEPS: List[Tuple[str, str, Callable[["Context"], None], bool]] = [
     ("versions", "各处版本号一致", step_versions, False),
     ("agent-tests", "Agent 测试", step_agent_tests, False),
     ("server-tests", "服务端测试（含协议契约与端到端集成）", step_server_tests, False),
+    ("py38-tests", "服务端测试（Python 3.8，可选）", step_py38_tests, False),
     ("openapi", "OpenAPI 与服务端 schema 是否同步", step_openapi, False),
     ("web-types", "前端类型是否已从 openapi.json 重新生成", step_web_types, True),
     ("licenses", "第三方许可证声明与依赖一致", step_licenses, True),
@@ -169,10 +200,19 @@ STEPS: List[Tuple[str, str, Callable[["Context"], None], bool]] = [
 
 
 class Context:
-    def __init__(self, python: str, jobs: str, npm: Optional[str]) -> None:
+    def __init__(
+        self,
+        python: str,
+        jobs: str,
+        npm: Optional[str],
+        py38: Optional[str] = None,
+        py38_pattern: str = "tests/test_*.py",
+    ) -> None:
         self.python = python
         self.jobs = jobs
         self.npm = npm
+        self.py38 = py38
+        self.py38_pattern = py38_pattern
 
 
 def _prepare_environment() -> None:
@@ -209,6 +249,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--jobs", default=os.environ.get("SYNCOJ_TEST_JOBS", DEFAULT_JOBS),
         help="测试并行 worker 数（默认取 SYNCOJ_TEST_JOBS，再默认 %s）" % DEFAULT_JOBS,
     )
+    parser.add_argument(
+        "--py38", default=os.environ.get("SYNCOJ_PY38") or None, metavar="PYTHON",
+        help="Python 3.8 解释器路径（默认取 SYNCOJ_PY38）；给了才跑 py38-tests",
+    )
+    parser.add_argument(
+        "--py38-pattern", default="tests/test_*.py", metavar="GLOB",
+        help="py38-tests 只跑这些服务端测试文件（相对 server/ 的 glob）",
+    )
     return parser
 
 
@@ -229,7 +277,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     _prepare_environment()
     npm = _find_npm()
     web_ready = not args.skip_web and npm is not None and (WEB / "node_modules").is_dir()
-    ctx = Context(python=sys.executable, jobs=str(args.jobs), npm=npm)
+    ctx = Context(python=sys.executable, jobs=str(args.jobs), npm=npm,
+                  py38=args.py38, py38_pattern=args.py38_pattern)
     print("使用 Python: %s（%s）" % (sys.executable, sys.version.split()[0]))
 
     failed: List[Tuple[str, str]] = []
@@ -247,6 +296,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         _banner("%s  [%s]" % (title, name))
         try:
             fn(ctx)
+        except StepSkipped as exc:
+            print("[跳过] %s：%s" % (name, exc), flush=True)
+            skipped.append(name)
         except StepFailed as exc:
             print("[失败] %s：%s" % (name, exc), flush=True)
             failed.append((name, str(exc)))

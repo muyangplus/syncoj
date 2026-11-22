@@ -1,6 +1,6 @@
 """题目导入导出的中间模型。
 
-每种外来格式先被解析成 :class:`ProblemBundle`，再由 ``build.build_testdata_zip`` 规整成
+每种外来格式先被解析成 :class:`ProblemBundle`，再由 ``build.try_build`` 规整成
 现有的数据包（``X.in`` / ``X.ans`` + ``config.json`` + ``checker.cpp``）。导出方向用
 :class:`ExportProblem`（题目行的快照，脱离 ORM 会话）。
 """
@@ -98,6 +98,9 @@ class ProblemBundle:
     judge_mode: str = "builtin"
     #: native：内层 testdata.zip 原样保留（sha256 不变）
     raw_testdata: Optional[FileRef] = None
+    #: native：解析时已核对过的内层包 sha256 与摘要。都有时构建直接流式取归档成员，不再落临时文件
+    raw_sha256: Optional[str] = None
+    raw_summary: Optional[Dict[str, object]] = None
     #: native：数据包原名
     testdata_name: Optional[str] = None
     warnings: List[Notice] = field(default_factory=list)
@@ -142,6 +145,9 @@ class ExportProblem:
     note: Optional[str] = None
     #: 库里存的原值：None = 用服务端默认模式
     file_patterns: Optional[List[str]] = None
+    #: 收代码时实际生效的模式模板（``problem_rules.patterns_for``：没配时是服务端配置的
+    #: ``default_file_pattern``）。None = 调用方没给，按 ``file_patterns`` 或出厂默认模式
+    effective_patterns: Optional[List[str]] = None
     judge_mode: str = "external"
     time_limit_ms: Optional[int] = None
     memory_limit_mb: Optional[int] = None

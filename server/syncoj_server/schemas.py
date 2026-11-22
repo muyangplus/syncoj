@@ -1162,6 +1162,8 @@ class JudgeImportPreviewOut(_Base):
     problems: List[JudgeImportItemOut] = Field(default_factory=list)
     #: 整包级提示
     warnings: List[NoticeOut] = Field(default_factory=list)
+    #: 本场次已有的题目标识：界面改标识后据此在新建 / 覆盖之间切换
+    existing_idents: List[str] = Field(default_factory=list)
 
 
 class JudgeImportApplyItem(_Base):

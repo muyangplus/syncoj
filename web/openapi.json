@@ -2907,6 +2907,13 @@
       "JudgeImportPreviewOut": {
         "additionalProperties": false,
         "properties": {
+          "existing_idents": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Existing Idents",
+            "type": "array"
+          },
           "format": {
             "title": "Format",
             "type": "string"

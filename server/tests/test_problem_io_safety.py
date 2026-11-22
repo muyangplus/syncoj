@@ -158,7 +158,9 @@ def test_corrupt_case_member_fails_only_that_problem(tmp_path: Path) -> None:
         game, rect = parsed.result.problems
         assert try_build(game, parsed.archive) is None
         assert [e.code for e in game.errors] == ["testdata_invalid"]
-        assert try_build(rect, parsed.archive) is not None
+        built = try_build(rect, parsed.archive)
+        assert built is not None
+        built.close()
 
 
 def test_corrupt_descriptor_is_a_package_error(tmp_path: Path) -> None:

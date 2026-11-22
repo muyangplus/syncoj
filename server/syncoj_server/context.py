@@ -74,6 +74,9 @@ class AppContext:
     #: 考生页登录令牌的 HMAC 密钥。第一次用到时从 ``<data_root>/player-token.key``
     #: 读出（没有就生成），见 ``services/player_tokens.py``
     player_token_secret: Optional[bytes] = None
+    #: 本机评测机子进程（§12.10，``services.local_judge.LocalJudge``）。只在内存里：
+    #: 服务端退出时一并停掉，重启后不自动拉起（教师再点一次「启动」）
+    local_judge: Any = field(default_factory=lambda: _new_local_judge())
 
     @classmethod
     def create(cls, settings: Settings) -> "AppContext":
@@ -124,3 +127,9 @@ def _new_announcer():
     from .services.announce import Announcer
 
     return Announcer()
+
+
+def _new_local_judge():
+    from .services.local_judge import LocalJudge
+
+    return LocalJudge()

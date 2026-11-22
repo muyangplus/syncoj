@@ -27,6 +27,7 @@ from .api import admin_bindings as admin_bindings_api
 from .api import admin_judge as admin_judge_api
 from .api import admin_problem_io as admin_problem_io_api
 from .api import judge as judge_api
+from .api import judge_dist as judge_dist_api
 from .api import agent as agent_api
 from .api import meta as meta_api
 from .api import player as player_api
@@ -67,6 +68,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             for task in background:
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+            # 本机评测机（§12.10）随服务端一起停
+            await asyncio.get_running_loop().run_in_executor(None, ctx.local_judge.shutdown)
             ctx.db.dispose()
             log.info("SyncOJ 已停止")
 
@@ -96,6 +99,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     app.include_router(admin_judge_api.router)
     app.include_router(admin_problem_io_api.router)
     app.include_router(judge_api.router)
+    app.include_router(judge_dist_api.router)
 
     _install_public_port_gate(app)
     _install_agent_body_limits(app)
@@ -193,6 +197,8 @@ _PUBLIC_PORT_HIDDEN = (
     "/api/v1/admin",
     # 评测机只连管理端口（§12）；公开端口是考生网段随手能打开的地址
     "/api/v1/judge",
+    # 评测机程序与一键安装脚本（§12.10）
+    "/judge/",
     "/docs",
     "/redoc",
     "/openapi.json",

@@ -196,6 +196,12 @@ export const paths = {
   /** 数据包原样下载（上传时的 zip）。 */
   problemTestdataFile: (problemId: number) => `${ADMIN}/problems/${problemId}/testdata/file`,
   judgeWorker: (workerId: number) => `${ADMIN}/judge-workers/${workerId}`,
+  judgeWorkerStop: (workerId: number) => `${ADMIN}/judge-workers/${workerId}/stop`,
+  judgeWorkerRestart: (workerId: number) => `${ADMIN}/judge-workers/${workerId}/restart`,
+  /** 本机评测机（服务端子进程，§12.10）。 */
+  judgeLocal: () => `${ADMIN}/judge-local`,
+  judgeLocalStart: () => `${ADMIN}/judge-local/start`,
+  judgeLocalStop: () => `${ADMIN}/judge-local/stop`,
 
   // ---- 成绩 ----
   contestScores: (contestId: number) => `${ADMIN}/contests/${contestId}/scores`,

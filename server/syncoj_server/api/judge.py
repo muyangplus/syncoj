@@ -1,8 +1,10 @@
-"""评测机（worker）接口（§12）：领任务、取内容、交结果。
+"""评测机（worker）接口（§12）：poll（自报状态 + 领任务 + 取命令）、取内容、交结果。
 
 凭据是管理端签发的评测机令牌（``/admin/judge-workers``），库里只存哈希。它只能做这里的
-四件事：领任务、取**这个任务**要用的两份内容（代码、数据包）、交结果、报自己出错。
+几件事：报状态并领任务、取**这个任务**要用的两份内容（代码、数据包）、交结果、报自己出错。
 碰不到数据库、私钥，也读不到别的选手的代码。
+
+``/lease`` 是旧评测机用的（不报状态、收不到命令）；新评测机只调 ``/poll``（§12.10）。
 """
 
 from __future__ import annotations
@@ -13,9 +15,9 @@ from fastapi.responses import FileResponse, Response
 from ..context import AppContext
 from ..errors import ApiError
 from ..models import JudgeWorker, utcnow
-from ..schemas import JudgeFailIn, JudgeLeaseOut, JudgeResultIn, SimpleAck
+from ..schemas import JudgeFailIn, JudgeLeaseOut, JudgePollIn, JudgePollOut, JudgeResultIn, SimpleAck
 from ..security import hash_token
-from ..services import builtin_judge
+from ..services import builtin_judge, judge_workers
 from .deps import _bearer, get_ctx
 
 router = APIRouter(prefix="/api/v1/judge", tags=["judge"])
@@ -35,13 +37,47 @@ def require_judge_worker(request: Request, ctx: AppContext = Depends(get_ctx)) -
         return worker.id
 
 
+def _enabled(ctx: AppContext, worker_id: int) -> bool:
+    with ctx.db.session() as session:
+        row = session.get(JudgeWorker, worker_id)
+        return row is not None and row.enabled is not False
+
+
 @router.post("/lease", response_model=JudgeLeaseOut, responses={204: {"description": "没有待评的任务"}})
 def lease(ctx: AppContext = Depends(get_ctx), worker_id: int = Depends(require_judge_worker)):
-    """领下一个任务；没有就 204。租约 15 分钟，过期没交结果的任务自动回到队列。"""
+    """领下一个任务；没有（或这台评测机被暂停）就 204。租约 15 分钟，过期没交结果的任务自动回到队列。"""
+    if not _enabled(ctx, worker_id):
+        return Response(status_code=204)
     leased = builtin_judge.lease_next(ctx, worker_id)
     if leased is None:
         return Response(status_code=204)
     return JudgeLeaseOut(**leased.to_payload())
+
+
+@router.post("/poll", response_model=JudgePollOut)
+def poll(
+    payload: JudgePollIn,
+    ctx: AppContext = Depends(get_ctx),
+    worker_id: int = Depends(require_judge_worker),
+) -> JudgePollOut:
+    """自报状态；``want`` = 1 时顺带领一个任务；响应带管理端下的命令（§12.10）。
+
+    有命令（``stop`` / ``restart``）时不发任务：评测机要做的是评完手上的然后退出。
+    暂停时也不发任务，但命令照样送达。
+    """
+    with ctx.db.session() as session:
+        row = session.get(JudgeWorker, worker_id)
+        if row is None:  # 恰好在这一刻被吊销
+            raise ApiError(401, "unauthorized", "评测机令牌无效（被吊销了，或者抄错了）")
+        judge_workers.record_poll(row, payload)
+        command = judge_workers.take_command(row)
+        enabled = row.enabled is not False
+    task = None
+    if payload.want and enabled and command == "run":
+        leased = builtin_judge.lease_next(ctx, worker_id)
+        if leased is not None:
+            task = JudgeLeaseOut(**leased.to_payload())
+    return JudgePollOut(task=task, command=command, enabled=enabled)
 
 
 @router.get("/tasks/{task_id}/blobs/{sha256}")

@@ -730,6 +730,34 @@ def _migration_022_contest_player_password(engine: Engine) -> None:
     _add_column(engine, "contest", "player_password_hash", "VARCHAR(255)")
 
 
+def _migration_023_judge_worker_status(engine: Engine) -> None:
+    """评测机记自报状态与管理动作（§12.10）。
+
+    自报状态（版本、沙箱后端、是否隔离、主机名、平台、并发数、轮询间隔）全部可空：
+    旧评测机不报，读的一侧按"旧版"显示。``enabled`` 回填 1（老评测机照常领任务）、
+    ``desired`` 回填 ``run``、``is_local`` 回填 0（迁移之前不存在本机评测机）。
+    """
+    if "judge_worker" not in _tables(engine):
+        return
+    for name, ddl in (
+        ("version", "VARCHAR(32)"),
+        ("backend", "VARCHAR(16)"),
+        ("isolated", "BOOLEAN"),
+        ("hostname", "VARCHAR(128)"),
+        ("platform", "VARCHAR(32)"),
+        ("slots", "INTEGER"),
+        ("poll_seconds", "INTEGER"),
+        ("enabled", "BOOLEAN"),
+        ("desired", "VARCHAR(16)"),
+        ("is_local", "BOOLEAN"),
+    ):
+        _add_column(engine, "judge_worker", name, ddl)
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE judge_worker SET enabled = 1 WHERE enabled IS NULL"))
+        conn.execute(text("UPDATE judge_worker SET desired = 'run' WHERE desired IS NULL"))
+        conn.execute(text("UPDATE judge_worker SET is_local = 0 WHERE is_local IS NULL"))
+
+
 MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
     (1, "统一密钥注册 + 名单库所需的结构", _migration_001_enrollment),
     (2, "机器永久绑定名单条目；去掉注册码链路", _migration_002_roster_binding),
@@ -824,6 +852,11 @@ MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
         22,
         "场次加考生页密码",
         _migration_022_contest_player_password,
+    ),
+    (
+        23,
+        "评测机记自报状态，可暂停、远程停止与重启",
+        _migration_023_judge_worker_status,
     ),
 ]
 

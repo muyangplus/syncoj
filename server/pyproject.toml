@@ -35,6 +35,8 @@ include = ["syncoj_server*"]
 # 题目导入时生成 checker 用的模板与随仓库带的 testlib.h（MIT，见 vendor/LICENSE-testlib）
 [tool.setuptools.package-data]
 "syncoj_server.judging" = ["vendor/*", "checkers/*"]
+# 评测机一键安装脚本模板（§12.10）
+"syncoj_server.services" = ["judge_install/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

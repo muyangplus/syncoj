@@ -1062,17 +1062,84 @@ class JudgeWorkerIn(_Base):
     name: str = Field(min_length=1, max_length=64)
 
 
+class JudgeWorkerPatchIn(_Base):
+    """改名 / 暂停与恢复。不给的字段不动。"""
+
+    name: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    enabled: Optional[bool] = None
+
+
+class JudgeWorkerTaskOut(_Base):
+    """评测机手上正在评的一个任务。"""
+
+    id: int
+    contest_id: int
+    player_no: str
+    problem: str
+
+
 class JudgeWorkerOut(_Base):
     id: int
     name: str
     created_at: str
     last_seen_at: Optional[str] = None
     last_seen_ip: Optional[str] = None
+    #: 最近联系不超过轮询间隔的 3 倍（§12.10）
+    online: bool = False
+    #: 暂停 = False：领不到新任务，照常心跳
+    enabled: bool = True
+    #: ``run`` / ``stop`` / ``restart``：后两者 = 已下令、等评测机下一次 poll 取走
+    desired: Literal["run", "stop", "restart"] = "run"
+    #: 服务端拉起的本机评测机
+    local: bool = False
+    #: 以下为评测机自报；旧评测机不报，全为空
+    version: Optional[str] = None
+    backend: Optional[str] = None
+    isolated: Optional[bool] = None
+    hostname: Optional[str] = None
+    platform: Optional[str] = None
+    slots: Optional[int] = None
+    #: 能收远程停止 / 重启（报过状态的评测机）
+    remote_control: bool = False
+    running: List[JudgeWorkerTaskOut] = Field(default_factory=list)
 
 
 class JudgeWorkerCreatedOut(JudgeWorkerOut):
     #: 明文令牌，**只在这一刻返回一次**；库里只存哈希
     token: str
+    #: 一行安装命令：Linux（bash + systemd）与 Windows（PowerShell + 计划任务），已嵌入令牌与服务端地址
+    linux_command: str
+    windows_command: str
+    #: 已装好 syncoj-judge 时直接运行的命令（令牌写进文件后）
+    manual_command: str
+
+
+class JudgePollIn(_Base):
+    """评测机的一次 poll：自报状态，``want`` = 1 时顺带领一个任务（§12.10）。"""
+
+    version: Optional[str] = Field(default=None, max_length=32)
+    backend: Optional[str] = Field(default=None, max_length=16)
+    isolated: Optional[bool] = None
+    hostname: Optional[str] = Field(default=None, max_length=128)
+    platform: Optional[str] = Field(default=None, max_length=32)
+    slots: int = Field(default=1, ge=1, le=64)
+    poll_seconds: float = Field(default=5.0, ge=0.5, le=3600)
+    want: int = Field(default=1, ge=0, le=1)
+
+
+class LocalJudgeOut(_Base):
+    """本机评测机（服务端以子进程运行的 worker）的状态。"""
+
+    #: 只有 Linux 服务端支持；不支持时 ``reason`` 是一句短标签
+    supported: bool
+    reason: Optional[str] = None
+    running: bool = False
+    pid: Optional[int] = None
+    backend: Optional[str] = None
+    worker_id: Optional[int] = None
+    started_at: Optional[str] = None
+    #: 上一次退出的退出码（启动失败、被停止）
+    exit_code: Optional[int] = None
 
 
 class JudgeProblemConfigOut(_Base):
@@ -1101,6 +1168,14 @@ class JudgeLeaseOut(_Base):
     source: JudgeBlobRefOut
     testdata: JudgeBlobRefOut
     attempt: int
+
+
+class JudgePollOut(_Base):
+    """``task`` 为空 = 没领到（没有任务、已暂停或 ``want`` = 0）。``command`` 见 §12.10。"""
+
+    task: Optional[JudgeLeaseOut] = None
+    command: Literal["run", "stop", "restart"] = "run"
+    enabled: bool = True
 
 
 class JudgeResultIn(_Base):

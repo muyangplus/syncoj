@@ -287,7 +287,30 @@ checker.cpp          # 可选：special judge（testlib 风格），testlib.h �
 
 ### 评测机
 
-「评测」→「评测机」卡片 →「添加评测机」签发令牌（只显示一次；`POST /api/v1/admin/judge-workers`）。评测机可在 Linux（`isolate` / `rlimit`）或 Windows（`winjob`）上运行；装 `server/` 包后在评测机上以专用账号运行：
+「评测」→「评测机」卡片 →「添加评测机」→ 输入名称 →「签发令牌」。令牌只显示一次（`POST /api/v1/admin/judge-workers`，响应带 `token` 与三条命令 `linux_command` / `windows_command` / `manual_command`）。
+
+一行安装（命令里的地址是打开管理界面用的那个；脚本与程序只在管理端口提供）：
+
+```bash
+# Linux（systemd）：root 运行
+curl -fsSL http://10.0.0.5:8000/judge/install.sh | sudo bash -s -- <令牌>
+```
+
+```powershell
+# Windows：在「以管理员身份运行」的 PowerShell 里
+$p = Join-Path $env:TEMP syncoj-judge-install.ps1; iwr -UseBasicParsing http://10.0.0.5:8000/judge/install.ps1 -OutFile $p; & $p -Token '<令牌>'
+```
+
+| 安装脚本 | 装到 | 后端 | 可选参数 |
+|---|---|---|---|
+| `install.sh` | `/opt/syncoj-judge/syncoj-judge.pyz`、`/etc/syncoj-judge/token`（0600）、systemd 单元 `syncoj-judge` | 有 isolate 用 isolate（服务以账号 `syncoj-judge` 运行）；没有则询问后用 rlimit（服务以 root 运行，选手程序用账号 `syncoj-judge-run`） | `--server` / `--backend` / `--run-as` / `--slots` / `--yes`（没有 isolate 不询问） |
+| `install.ps1` | `%ProgramData%\SyncOJ\judge\`（`syncoj-judge.pyz`、`token`、`cache\`、`judge.log`）、计划任务「SyncOJ Judge」（开机启动、SYSTEM、失败每分钟重启） | `winjob` | `-Server` / `-Backend` / `-Slots` / `-Python` / `-InstallDir` |
+
+- 两个脚本都幂等：重跑 = 换令牌 / 换参数 / 升级评测机程序并重启。
+- 前提：Python ≥ 3.8、g++（Windows 上是 MinGW-w64，且在**系统** PATH 里）；脚本检查并提示。
+- `GET /judge/worker.pyz`：评测机程序（zipapp，只用标准库），`python3 syncoj-judge.pyz --server … --token-file …` 直接运行；装了 `server/` 包的机器上等价命令是 `syncoj-judge`。
+
+手动运行：
 
 ```bash
 syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
@@ -299,15 +322,44 @@ syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
 | `--token-file` | 令牌文件（必填） |
 | `--backend` | `isolate`（Linux 默认，需先装 [isolate](https://github.com/ioi/isolate)）/ `rlimit`（只用 `setrlimit`，不隔离网络与文件系统，仅开发自测；结果 `isolated: false`）/ `winjob`（Windows 默认，Job Object 限 CPU / 内存 / 进程数；不隔离网络与文件系统，结果 `isolated: false`） |
 | `--box-id` | isolate box 编号，同机多 worker 各不相同（默认 0） |
+| `--slots` | 同时评几个任务（默认 1）；isolate 的 box 编号从 `--box-id` 起依次占用 |
 | `--cgroups` | isolate 用 cgroup 记内存 |
 | `--isolate` | isolate 可执行文件路径（默认 `isolate`） |
 | `--run-as` | rlimit 后端以 root 运行时必填：选手程序的运行账号；`winjob` 不支持 |
 | `--cache-dir` | 数据包缓存目录（默认 `~/.cache/syncoj-judge`） |
-| `--poll` | 无任务时轮询间隔（默认 5 秒） |
+| `--poll` | 轮询间隔（默认 5 秒）；评测中也按它报状态 |
+| `--log-file` | 日志写到文件（默认 stderr） |
 | `--once` | 评一个任务后退出 |
 | `--verbose` / `-v` | 调试日志 |
 
-- 评测机令牌只能领任务、取本任务的代码与数据包、交结果。
+- 评测机令牌只能报状态、领任务、取本任务的代码与数据包、交结果。
+
+卡片表格（`GET /api/v1/admin/judge-workers`）：
+
+| 列 | 来自 |
+|---|---|
+| 状态 | `online`（最近联系 ≤ 3 × 自报的轮询间隔，下限 15 秒）/ `enabled = false` 为「暂停」/ `running[]` 非空为忙碌并列出任务（考号 · 题目） |
+| 后端 | `backend`；`isolated = false` 标警告色 |
+| 主机 / 平台 | `hostname` / `platform`（`sys.platform`）/ `slots` |
+| 版本 | `version`；为空 = 旧评测机，收不到停止 / 重启（`remote_control = false`） |
+| IP、最近心跳 | `last_seen_ip`、`last_seen_at` |
+
+| 管理动作 | 接口 | 效果 |
+|---|---|---|
+| 暂停 / 恢复 | `PATCH /api/v1/admin/judge-workers/{id}` `{enabled}` | 暂停后领不到新任务，照常心跳，手上的评完照常交 |
+| 改名 | 同上 `{name}` | — |
+| 停止 | `POST /api/v1/admin/judge-workers/{id}/stop` | 下一次 poll 时送达；评完手上的任务后退出，不会被 systemd / 计划任务再拉起。不在线或旧评测机 `409 judge_worker_offline` / `judge_worker_unsupported` |
+| 重启 | `POST /api/v1/admin/judge-workers/{id}/restart` | 同上；评完手上的任务后以同样的参数重启（换上磁盘上的新程序） |
+| 吊销 | `DELETE /api/v1/admin/judge-workers/{id}?confirm=<名称>` | 令牌立即失效，它名下在评的任务立即退回队列；本机评测机一并停止 |
+
+本机评测机（只在 Linux 服务端上）：卡片头「本机评测机」启动 / 停止。
+
+| 接口 | 说明 |
+|---|---|
+| `GET /api/v1/admin/judge-local` | `supported`（非 Linux 为 `false`，`reason` = `仅 Linux`）/ `running` / `pid` / `backend` / `worker_id` / `started_at` / `exit_code` |
+| `POST /api/v1/admin/judge-local/start` | 以子进程运行 worker（连 `127.0.0.1:<管理端口>`）；有 isolate 用 isolate，否则 rlimit（服务端是 root 时选手程序以 `SYNCOJ_JUDGE_LOCAL_RUN_AS` 运行，默认 `nobody`）。令牌每次换新，写 `<数据目录>/judge-local/token`；日志 `<数据目录>/logs/judge-local.log`。已在运行则不动 |
+| `POST /api/v1/admin/judge-local/stop` | SIGTERM：评完手上的任务后退出。服务端退出时一并停止 |
+
 - 平台与后端不匹配（如 Windows 上 `--backend isolate`）时启动即报错退出（退出码 2）。
 
 **Windows（`winjob`）**
@@ -372,7 +424,8 @@ syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
 
 | 接口 | 说明 |
 |---|---|
-| `POST /api/v1/judge/lease` | 领任务（租约 15 分钟，过期回队列）；无任务 `204`。返回 `id`、`contest_slug`、`player_no`、`problem`（`ident` / `time_limit_ms` / `memory_limit_mb` / `io_mode` / `input_file` / `output_file` / `compile_flags`；文件名为 `null` = 用 `<ident>.in` / `<ident>.out`）、`source`（`path` / `sha256`）、`testdata`（`sha256` / `name`）、`attempt` |
+| `POST /api/v1/judge/poll` | 体 `{version, backend, isolated, hostname, platform, slots, poll_seconds, want}`（自报状态；`want` 1 = 顺带领一个任务）。返回 `{task, command, enabled}`：`task` 形状同 `/lease` 的响应，没领到为 `null`（无任务、已暂停、`want` 0 或有命令）；`command` 为 `run` / `stop` / `restart`（一次性） |
+| `POST /api/v1/judge/lease` | 旧评测机用：领任务（租约 15 分钟，过期回队列）；无任务或已暂停 `204`。返回 `id`、`contest_slug`、`player_no`、`problem`（`ident` / `time_limit_ms` / `memory_limit_mb` / `io_mode` / `input_file` / `output_file` / `compile_flags`；文件名为 `null` = 用 `<ident>.in` / `<ident>.out`）、`source`（`path` / `sha256`）、`testdata`（`sha256` / `name`）、`attempt` |
 | `GET /api/v1/judge/tasks/{id}/blobs/{sha256}` | 取本任务的代码或数据包；其他内容 `404` |
 | `POST /api/v1/judge/tasks/{id}/result` | `{score, max_score, status, detail}`（`score` / `max_score` 0–1000000，`status` 1–16 字符），写 `result.json`；`detail` 里认 `judge` / `isolated` / `language` / `compile_message` / `cases` / `subtasks` / `precheck_warnings`，其余丢弃 |
 | `POST /api/v1/judge/tasks/{id}/fail` | `{message}`（≤2000），退回队列 |

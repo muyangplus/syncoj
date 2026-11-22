@@ -543,6 +543,23 @@ class JudgeWorker(Base):
     created_at = Column(DateTime, default=utcnow, nullable=False)
     last_seen_at = Column(DateTime, nullable=True)
     last_seen_ip = Column(String(64), nullable=True)
+    #: 评测机自报的状态（迁移 023，§12.10）：每次 ``/judge/poll`` 覆盖写。旧评测机只调
+    #: ``/judge/lease``、不报这些，于是全是 NULL —— 界面按"旧版评测机"显示，也收不到远程命令。
+    version = Column(String(32), nullable=True)
+    backend = Column(String(16), nullable=True)
+    isolated = Column(Boolean, nullable=True)
+    hostname = Column(String(128), nullable=True)
+    platform = Column(String(32), nullable=True)
+    slots = Column(Integer, nullable=True)
+    #: 评测机空闲时多久问一次（秒）。在线判定 = 最近联系不超过它的 3 倍
+    poll_seconds = Column(Integer, nullable=True)
+    #: 暂停 = False：领不到新任务，但照常心跳、评完手上的
+    enabled = Column(Boolean, nullable=False, default=True)
+    #: 教师要它做的事：``run`` / ``stop`` / ``restart``。后两者在下一次 poll 里随响应带走，
+    #: 带走即复位成 ``run`` —— 命令是一次性的，评测机日后重新启动不会再被停一次
+    desired = Column(String(16), nullable=False, default="run")
+    #: 服务端以子进程拉起的「本机评测机」（§12.10）。同时最多一行
+    is_local = Column(Boolean, nullable=False, default=False)
 
 
 class JudgeTask(Base):

@@ -3009,6 +3009,127 @@
         "title": "JudgeLeaseOut",
         "type": "object"
       },
+      "JudgePollIn": {
+        "additionalProperties": false,
+        "description": "评测机的一次 poll：自报状态，``want`` = 1 时顺带领一个任务（§12.10）。",
+        "properties": {
+          "backend": {
+            "anyOf": [
+              {
+                "maxLength": 16,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Backend"
+          },
+          "hostname": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hostname"
+          },
+          "isolated": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Isolated"
+          },
+          "platform": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Platform"
+          },
+          "poll_seconds": {
+            "default": 5.0,
+            "maximum": 3600.0,
+            "minimum": 0.5,
+            "title": "Poll Seconds",
+            "type": "number"
+          },
+          "slots": {
+            "default": 1,
+            "maximum": 64.0,
+            "minimum": 1.0,
+            "title": "Slots",
+            "type": "integer"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "want": {
+            "default": 1,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Want",
+            "type": "integer"
+          }
+        },
+        "title": "JudgePollIn",
+        "type": "object"
+      },
+      "JudgePollOut": {
+        "additionalProperties": false,
+        "description": "``task`` 为空 = 没领到（没有任务、已暂停或 ``want`` = 0）。``command`` 见 §12.10。",
+        "properties": {
+          "command": {
+            "default": "run",
+            "enum": [
+              "run",
+              "stop",
+              "restart"
+            ],
+            "title": "Command",
+            "type": "string"
+          },
+          "enabled": {
+            "default": true,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "task": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JudgeLeaseOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "JudgePollOut",
+        "type": "object"
+      },
       "JudgePrecheckFindingOut": {
         "additionalProperties": false,
         "description": "源码预检的一条预警（规则 code 见 ``judging/precheck.py``）。",
@@ -3997,13 +4118,61 @@
       "JudgeWorkerCreatedOut": {
         "additionalProperties": false,
         "properties": {
+          "backend": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Backend"
+          },
           "created_at": {
             "title": "Created At",
             "type": "string"
           },
+          "desired": {
+            "default": "run",
+            "enum": [
+              "run",
+              "stop",
+              "restart"
+            ],
+            "title": "Desired",
+            "type": "string"
+          },
+          "enabled": {
+            "default": true,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "hostname": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hostname"
+          },
           "id": {
             "title": "Id",
             "type": "integer"
+          },
+          "isolated": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Isolated"
           },
           "last_seen_at": {
             "anyOf": [
@@ -4027,12 +4196,79 @@
             ],
             "title": "Last Seen Ip"
           },
+          "linux_command": {
+            "title": "Linux Command",
+            "type": "string"
+          },
+          "local": {
+            "default": false,
+            "title": "Local",
+            "type": "boolean"
+          },
+          "manual_command": {
+            "title": "Manual Command",
+            "type": "string"
+          },
           "name": {
             "title": "Name",
             "type": "string"
           },
+          "online": {
+            "default": false,
+            "title": "Online",
+            "type": "boolean"
+          },
+          "platform": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Platform"
+          },
+          "remote_control": {
+            "default": false,
+            "title": "Remote Control",
+            "type": "boolean"
+          },
+          "running": {
+            "items": {
+              "$ref": "#/components/schemas/JudgeWorkerTaskOut"
+            },
+            "title": "Running",
+            "type": "array"
+          },
+          "slots": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slots"
+          },
           "token": {
             "title": "Token",
+            "type": "string"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "windows_command": {
+            "title": "Windows Command",
             "type": "string"
           }
         },
@@ -4040,7 +4276,10 @@
           "id",
           "name",
           "created_at",
-          "token"
+          "token",
+          "linux_command",
+          "windows_command",
+          "manual_command"
         ],
         "title": "JudgeWorkerCreatedOut",
         "type": "object"
@@ -4064,13 +4303,61 @@
       "JudgeWorkerOut": {
         "additionalProperties": false,
         "properties": {
+          "backend": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Backend"
+          },
           "created_at": {
             "title": "Created At",
             "type": "string"
           },
+          "desired": {
+            "default": "run",
+            "enum": [
+              "run",
+              "stop",
+              "restart"
+            ],
+            "title": "Desired",
+            "type": "string"
+          },
+          "enabled": {
+            "default": true,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "hostname": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hostname"
+          },
           "id": {
             "title": "Id",
             "type": "integer"
+          },
+          "isolated": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Isolated"
           },
           "last_seen_at": {
             "anyOf": [
@@ -4094,9 +4381,64 @@
             ],
             "title": "Last Seen Ip"
           },
+          "local": {
+            "default": false,
+            "title": "Local",
+            "type": "boolean"
+          },
           "name": {
             "title": "Name",
             "type": "string"
+          },
+          "online": {
+            "default": false,
+            "title": "Online",
+            "type": "boolean"
+          },
+          "platform": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Platform"
+          },
+          "remote_control": {
+            "default": false,
+            "title": "Remote Control",
+            "type": "boolean"
+          },
+          "running": {
+            "items": {
+              "$ref": "#/components/schemas/JudgeWorkerTaskOut"
+            },
+            "title": "Running",
+            "type": "array"
+          },
+          "slots": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slots"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
           }
         },
         "required": [
@@ -4105,6 +4447,154 @@
           "created_at"
         ],
         "title": "JudgeWorkerOut",
+        "type": "object"
+      },
+      "JudgeWorkerPatchIn": {
+        "additionalProperties": false,
+        "description": "改名 / 暂停与恢复。不给的字段不动。",
+        "properties": {
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          }
+        },
+        "title": "JudgeWorkerPatchIn",
+        "type": "object"
+      },
+      "JudgeWorkerTaskOut": {
+        "additionalProperties": false,
+        "description": "评测机手上正在评的一个任务。",
+        "properties": {
+          "contest_id": {
+            "title": "Contest Id",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "player_no": {
+            "title": "Player No",
+            "type": "string"
+          },
+          "problem": {
+            "title": "Problem",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "contest_id",
+          "player_no",
+          "problem"
+        ],
+        "title": "JudgeWorkerTaskOut",
+        "type": "object"
+      },
+      "LocalJudgeOut": {
+        "additionalProperties": false,
+        "description": "本机评测机（服务端以子进程运行的 worker）的状态。",
+        "properties": {
+          "backend": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Backend"
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exit Code"
+          },
+          "pid": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pid"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "running": {
+            "default": false,
+            "title": "Running",
+            "type": "boolean"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "supported": {
+            "title": "Supported",
+            "type": "boolean"
+          },
+          "worker_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Worker Id"
+          }
+        },
+        "required": [
+          "supported"
+        ],
+        "title": "LocalJudgeOut",
         "type": "object"
       },
       "LoginRequest": {
@@ -11912,8 +12402,75 @@
         ]
       }
     },
+    "/api/v1/admin/judge-local": {
+      "get": {
+        "description": "本机评测机（服务端子进程）的状态；非 Linux 服务端 ``supported`` = false。",
+        "operationId": "local_judge_status_api_v1_admin_judge_local_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocalJudgeOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Local Judge Status",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/judge-local/start": {
+      "post": {
+        "description": "启动本机评测机：签一枚新令牌（记为本机评测机那一行），以子进程运行 worker。已在运行则不动。",
+        "operationId": "local_judge_start_api_v1_admin_judge_local_start_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocalJudgeOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Local Judge Start",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/judge-local/stop": {
+      "post": {
+        "description": "停止本机评测机：评完手上的任务后退出。",
+        "operationId": "local_judge_stop_api_v1_admin_judge_local_stop_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocalJudgeOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Local Judge Stop",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/api/v1/admin/judge-workers": {
       "get": {
+        "description": "评测机与它们自报的状态、在线与否、手上正在评的任务（§12.10）。",
         "operationId": "list_judge_workers_api_v1_admin_judge_workers_get",
         "parameters": [
           {
@@ -11972,7 +12529,7 @@
         ]
       },
       "post": {
-        "description": "签发一台评测机的令牌。明文只在这一次返回，库里只存哈希。",
+        "description": "签发一台评测机的令牌。明文只在这一次返回，库里只存哈希；顺带给出一行安装命令。",
         "operationId": "create_judge_worker_api_v1_admin_judge_workers_post",
         "requestBody": {
           "content": {
@@ -12014,7 +12571,7 @@
     },
     "/api/v1/admin/judge-workers/{worker_id}": {
       "delete": {
-        "description": "吊销一台评测机（删行）。它手上没交的任务租约到期后回到队列。",
+        "description": "吊销一台评测机（删行）。它手上没交的任务立刻退回队列；本机评测机一并停掉。",
         "operationId": "delete_judge_worker_api_v1_admin_judge_workers__worker_id__delete",
         "parameters": [
           {
@@ -12063,6 +12620,143 @@
           }
         },
         "summary": "Delete Judge Worker",
+        "tags": [
+          "admin"
+        ]
+      },
+      "patch": {
+        "description": "改名；暂停（``enabled`` = false：领不到新任务，手上的照常评完）/ 恢复。",
+        "operationId": "update_judge_worker_api_v1_admin_judge_workers__worker_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JudgeWorkerPatchIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JudgeWorkerOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Judge Worker",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/judge-workers/{worker_id}/restart": {
+      "post": {
+        "description": "重启：评完手上的任务后以同样的参数重新启动自己（换上磁盘上的新程序）。",
+        "operationId": "restart_judge_worker_api_v1_admin_judge_workers__worker_id__restart_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JudgeWorkerOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Restart Judge Worker",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/judge-workers/{worker_id}/stop": {
+      "post": {
+        "description": "停止：评测机下一次 poll 时取走命令，评完手上的任务后退出（systemd / 计划任务不会再拉起它）。",
+        "operationId": "stop_judge_worker_api_v1_admin_judge_workers__worker_id__stop_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JudgeWorkerOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stop Judge Worker",
         "tags": [
           "admin"
         ]
@@ -14388,7 +15082,7 @@
     },
     "/api/v1/judge/lease": {
       "post": {
-        "description": "领下一个任务；没有就 204。租约 15 分钟，过期没交结果的任务自动回到队列。",
+        "description": "领下一个任务；没有（或这台评测机被暂停）就 204。租约 15 分钟，过期没交结果的任务自动回到队列。",
         "operationId": "lease_api_v1_judge_lease_post",
         "responses": {
           "200": {
@@ -14406,6 +15100,48 @@
           }
         },
         "summary": "Lease",
+        "tags": [
+          "judge"
+        ]
+      }
+    },
+    "/api/v1/judge/poll": {
+      "post": {
+        "description": "自报状态；``want`` = 1 时顺带领一个任务；响应带管理端下的命令（§12.10）。\n\n有命令（``stop`` / ``restart``）时不发任务：评测机要做的是评完手上的然后退出。\n暂停时也不发任务，但命令照样送达。",
+        "operationId": "poll_api_v1_judge_poll_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JudgePollIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JudgePollOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Poll",
         "tags": [
           "judge"
         ]
@@ -14784,6 +15520,51 @@
         "summary": "Healthz",
         "tags": [
           "meta"
+        ]
+      }
+    },
+    "/judge/install.ps1": {
+      "get": {
+        "description": "Windows 一键安装（PowerShell，UTF-8 BOM）：下载到文件后 ``& $p -Token '<令牌>'``。",
+        "operationId": "install_ps1_judge_install_ps1_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Install Ps1",
+        "tags": [
+          "judge"
+        ]
+      }
+    },
+    "/judge/install.sh": {
+      "get": {
+        "description": "Linux 一键安装：``curl -fsSL <地址>/judge/install.sh | sudo bash -s -- <令牌>``。",
+        "operationId": "install_sh_judge_install_sh_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Install Sh",
+        "tags": [
+          "judge"
+        ]
+      }
+    },
+    "/judge/worker.pyz": {
+      "get": {
+        "description": "评测机程序（zipapp）：``python3 syncoj-judge.pyz --server … --token-file …``。",
+        "operationId": "worker_pyz_judge_worker_pyz_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Worker Pyz",
+        "tags": [
+          "judge"
         ]
       }
     }

@@ -11,6 +11,7 @@ import { ApiError } from '@/api/client'
 import type { BuiltinJudgeProgressOut, JudgeWorkerOut, ProblemOut } from '@/api/types'
 import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
 import PageShell from '@/components/PageShell.vue'
+import SectionCard from '@/components/SectionCard.vue'
 import ProblemJudgeDialog from '@/components/ProblemJudgeDialog.vue'
 import { usePolling } from '@/composables/usePolling'
 import { useContestStore } from '@/stores/contest'
@@ -93,7 +94,7 @@ function ioLabel(row: ProblemOut): string {
 
 // ---- 排任务 ----
 
-const target = ref('')
+const target = ref('*')
 const queueing = ref(false)
 
 async function queue(problem: string | null, force = false): Promise<void> {
@@ -198,9 +199,8 @@ async function confirmRemove(): Promise<void> {
       <el-button size="small" :loading="loading" @click="reload">刷新</el-button>
     </template>
 
-    <!-- 题目 -->
-    <h3 class="section-title">题目</h3>
-    <el-table v-loading="loading" :data="problems" size="small" border>
+    <SectionCard title="题目" :meta="`${builtin.length} / ${problems.length} 道自带评测`" flush>
+    <el-table v-loading="loading" :data="problems">
       <el-table-column label="题目" width="160">
         <template #default="{ row }">
           <div class="mono">{{ row.ident }}</div>
@@ -258,38 +258,35 @@ async function confirmRemove(): Promise<void> {
       <template #empty>
         <div class="empty-block">
           本场次没有题目。
-          <el-button link type="primary" @click="router.push({ name: 'contests' })">去场次管理登记题目</el-button>
+          <el-button link type="primary" @click="router.push({ name: 'contests' })">登记题目</el-button>
         </div>
       </template>
     </el-table>
+    </SectionCard>
 
-    <!-- 任务 -->
-    <h3 class="section-title">任务</h3>
-    <div class="row">
-      <el-select v-model="target" size="small" style="width: 220px">
-        <el-option label="全部自带评测题目" value="" />
+    <SectionCard title="任务" :meta="progress?.total ? `共 ${progress.total}` : ''">
+      <template #extra>
+      <el-select v-model="target" style="width: 200px">
+        <el-option label="全部自带评测题目" value="*" />
         <el-option v-for="p in ready" :key="p.id" :label="p.ident" :value="p.ident" />
       </el-select>
       <el-button
-        size="small"
         type="primary"
         :loading="queueing"
         :disabled="!ready.length"
-        @click="queue(target || null)"
+        @click="queue(target === '*' ? null : target)"
       >
         评测 / 重测
       </el-button>
-      <span v-if="!builtin.length" class="muted">无自带评测题目</span>
-      <span v-else-if="!ready.length" class="muted">自带评测题目均缺数据包</span>
-    </div>
+      </template>
 
     <template v-if="progress && progress.total">
       <el-progress :percentage="percent" :status="progress.failed ? 'warning' : undefined" />
       <div class="counts">
-        共 {{ progress.total }} · 排队 {{ progress.queued }} · 评测中 {{ progress.running }} · 完成
+        排队 {{ progress.queued }} · 评测中 {{ progress.running }} · 完成
         {{ progress.done }} · 失败 {{ progress.failed }}
       </div>
-      <el-table v-if="progress.failures?.length" :data="progress.failures" size="small" max-height="240" border>
+      <el-table v-if="progress.failures?.length" :data="progress.failures" max-height="280">
         <el-table-column prop="player_no" label="考号" width="120" />
         <el-table-column prop="problem" label="题目" width="120" />
         <el-table-column prop="error" label="失败原因" />
@@ -300,27 +297,31 @@ async function confirmRemove(): Promise<void> {
         </el-table-column>
       </el-table>
     </template>
+    <div v-else-if="!builtin.length" class="muted">无自带评测题目：在上方题目「设置」中切换评测方式。</div>
+    <div v-else-if="!ready.length" class="muted">自带评测题目均缺数据包：在上方题目「设置」中上传。</div>
     <div v-else class="muted">无评测任务</div>
+    </SectionCard>
 
-    <!-- 评测机 -->
-    <div class="list-head">
-      <h3 class="section-title">评测机</h3>
-      <el-button size="small" @click="createWorker">添加评测机</el-button>
-    </div>
+    <SectionCard title="评测机" :meta="`${workers.filter(workerOnline).length} 在线 / 共 ${workers.length}`" flush>
+      <template #extra>
+        <el-button type="primary" plain @click="createWorker">
+          <el-icon><Plus /></el-icon>添加评测机
+        </el-button>
+      </template>
     <el-alert
       v-if="issued"
       type="success"
       :closable="true"
       show-icon
-      style="margin-bottom: 12px"
+      style="margin: 12px 20px"
       :title="`评测机 ${issued.name} 的令牌仅显示一次`"
       @close="issued = null"
     >
       <pre class="command">{{ command }}</pre>
       <el-button size="small" @click="copyCommand">复制命令</el-button>
     </el-alert>
-    <el-table :data="workers" size="small" border>
-      <el-table-column prop="name" label="名称" width="160" />
+    <el-table :data="workers">
+      <el-table-column prop="name" label="名称" min-width="160" />
       <el-table-column label="状态" width="90">
         <template #default="{ row }">
           <el-tag v-if="workerOnline(row)" size="small" type="success">在线</el-tag>
@@ -343,6 +344,7 @@ async function confirmRemove(): Promise<void> {
       </el-table-column>
       <template #empty>无评测机</template>
     </el-table>
+    </SectionCard>
 
     <ProblemJudgeDialog v-model="settingOpen" :problem="settingTarget" @saved="loadProblems" />
     <ConfirmByNameDialog
@@ -357,21 +359,6 @@ async function confirmRemove(): Promise<void> {
 </template>
 
 <style scoped>
-.section-title {
-  margin: 20px 0 10px;
-  font-size: 15px;
-}
-.list-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.row {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  margin-bottom: 12px;
-}
 .counts {
   margin: 6px 0 10px;
   color: var(--el-text-color-regular);

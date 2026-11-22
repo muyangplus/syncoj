@@ -29,7 +29,7 @@ async function submit(): Promise<void> {
     await auth.login(form.username.trim(), form.password)
     ElMessage.success('登录成功')
     const redirect = route.query.redirect
-    await router.replace(typeof redirect === 'string' ? redirect : { name: 'overview' })
+    await router.replace(typeof redirect === 'string' ? redirect : { name: 'dashboard' })
   } catch (error) {
     // 服务端不区分"用户名不存在"与"口令错误"（避免枚举用户名），
     // 所以这里原样展示服务端的提示，不要自己加工
@@ -41,7 +41,7 @@ async function submit(): Promise<void> {
 }
 
 onMounted(() => {
-  if (auth.isAuthenticated) void router.replace({ name: 'overview' })
+  if (auth.isAuthenticated) void router.replace({ name: 'dashboard' })
 })
 </script>
 

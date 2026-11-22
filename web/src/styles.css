@@ -1,8 +1,100 @@
+/*
+ * SyncOJ 管理端设计令牌与全局样式。
+ *
+ * 颜色、圆角、阴影只在这里定义；页面里用 var(--sj-*) 或 Element Plus 的 var(--el-*)，
+ * 不写裸色值。暗色由 <html class="dark"> 切换（见 composables/useTheme.ts）。
+ */
+
 :root {
-  --syncoj-bg: #f5f7fa;
-  --syncoj-sidebar-bg: #1f2d3d;
-  --syncoj-sidebar-fg: #c0ccda;
-  --syncoj-sidebar-active: #409eff;
+  --sj-font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
+  --sj-mono: ui-monospace, 'JetBrains Mono', SFMono-Regular, Menlo, Consolas, 'Liberation Mono',
+    monospace;
+
+  --sj-bg: #f6f7fb;
+  --sj-surface: #ffffff;
+  --sj-surface-2: #f9fafc;
+  --sj-border: #e6e8ef;
+  --sj-border-strong: #d5d9e3;
+  --sj-text: #1d2433;
+  --sj-text-2: #5b6478;
+  --sj-text-3: #8a92a6;
+
+  --sj-primary: #4f46e5;
+  --sj-primary-soft: #eef0ff;
+  --sj-success: #16a34a;
+  --sj-success-soft: #e9f8ef;
+  --sj-warning: #d97706;
+  --sj-warning-soft: #fff5e6;
+  --sj-danger: #dc2626;
+  --sj-danger-soft: #fdecec;
+  --sj-info-soft: #f1f3f8;
+
+  --sj-radius: 10px;
+  --sj-radius-sm: 6px;
+  --sj-shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.06);
+  --sj-shadow-lg: 0 8px 24px rgba(16, 24, 40, 0.08);
+
+  --sj-sidebar-w: 232px;
+  --sj-topbar-h: 60px;
+
+  /* Element Plus 主题覆盖 */
+  --el-color-primary: #4f46e5;
+  --el-color-primary-light-3: #8480ee;
+  --el-color-primary-light-5: #a7a3f2;
+  --el-color-primary-light-7: #cac8f7;
+  --el-color-primary-light-8: #dcdafa;
+  --el-color-primary-light-9: #eef0ff;
+  --el-color-primary-dark-2: #3f38b7;
+  --el-color-success: #16a34a;
+  --el-color-warning: #d97706;
+  --el-color-danger: #dc2626;
+  --el-color-error: #dc2626;
+  --el-border-radius-base: 6px;
+  --el-border-radius-small: 4px;
+  --el-font-family: var(--sj-font);
+  --el-border-color: var(--sj-border-strong);
+  --el-border-color-light: var(--sj-border);
+  --el-border-color-lighter: var(--sj-border);
+  --el-text-color-primary: var(--sj-text);
+  --el-text-color-regular: var(--sj-text-2);
+  --el-text-color-secondary: var(--sj-text-3);
+  --el-bg-color-page: var(--sj-bg);
+  --el-fill-color-light: var(--sj-surface-2);
+}
+
+html.dark {
+  --sj-bg: #0f1218;
+  --sj-surface: #171b23;
+  --sj-surface-2: #1d222c;
+  --sj-border: #262c38;
+  --sj-border-strong: #333a48;
+  --sj-text: #e6e9f0;
+  --sj-text-2: #aab1c2;
+  --sj-text-3: #7a8294;
+
+  --sj-primary: #8b85ff;
+  --sj-primary-soft: rgba(139, 133, 255, 0.14);
+  --sj-success: #34d399;
+  --sj-success-soft: rgba(52, 211, 153, 0.12);
+  --sj-warning: #fbbf24;
+  --sj-warning-soft: rgba(251, 191, 36, 0.12);
+  --sj-danger: #f87171;
+  --sj-danger-soft: rgba(248, 113, 113, 0.12);
+  --sj-info-soft: rgba(148, 163, 184, 0.12);
+  --sj-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --sj-shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4);
+
+  --el-color-primary: #7c76f5;
+  --el-color-primary-light-3: #5d58b8;
+  --el-color-primary-light-5: #47448a;
+  --el-color-primary-light-7: #322f5e;
+  --el-color-primary-light-8: #29274b;
+  --el-color-primary-light-9: #201f38;
+  --el-color-primary-dark-2: #a29df8;
+  --el-bg-color: var(--sj-surface);
+  --el-bg-color-overlay: var(--sj-surface);
+  --el-fill-color-blank: var(--sj-surface);
 }
 
 * {
@@ -18,42 +110,58 @@ body,
 }
 
 body {
-  font-family:
-    -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
-    'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
-  background: var(--syncoj-bg);
-  color: #303133;
+  font-family: var(--sj-font);
+  font-size: 14px;
+  line-height: 1.55;
+  background: var(--sj-bg);
+  color: var(--sj-text);
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: 'tnum' 1;
 }
 
-/* 表格里的等宽字体：路径、sha256、机器码用等宽更好扫读 */
+/* ---- 文字 ---- */
+
 .mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
-  font-size: 12px;
+  font-family: var(--sj-mono);
+  font-size: 12.5px;
 }
 
 .muted {
-  color: #909399;
+  color: var(--sj-text-3);
 }
+
+.cell-sub {
+  font-size: 12px;
+  color: var(--sj-text-3);
+  line-height: 1.5;
+}
+
+.error-text {
+  color: var(--sj-danger);
+}
+
+/* ---- 页面骨架（PageShell） ---- */
 
 .page-header {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 16px;
+  gap: 16px;
+  margin-bottom: 20px;
   flex-wrap: wrap;
 }
 
 .page-title {
   margin: 0;
-  font-size: 18px;
-  font-weight: 600;
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
 }
 
 .page-hint {
   margin: 4px 0 0;
-  font-size: 12px;
-  color: #909399;
+  font-size: 13px;
+  color: var(--sj-text-3);
 }
 
 .toolbar {
@@ -63,18 +171,43 @@ body {
   flex-wrap: wrap;
 }
 
-.card-block {
-  background: #fff;
-  border-radius: 4px;
-  padding: 16px;
+/* ---- 卡片 ---- */
+
+.card-block,
+.sj-card {
+  background: var(--sj-surface);
+  border: 1px solid var(--sj-border);
+  border-radius: var(--sj-radius);
+  box-shadow: var(--sj-shadow);
+  padding: 18px 20px;
 }
 
-/* 表格里的次要信息（时间、计数）不抢视线 */
-.cell-sub {
-  font-size: 12px;
-  color: #909399;
-  line-height: 1.5;
+.sj-grid {
+  display: grid;
+  gap: 16px;
 }
+
+.sj-stack > * + * {
+  margin-top: 16px;
+}
+
+/* 区块标题（旧页面沿用的 .section-title / .list-head） */
+.section-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+/* ---- 状态点 ---- */
 
 .status-dot {
   display: inline-block;
@@ -86,17 +219,69 @@ body {
 }
 
 .status-dot.online {
-  background: #67c23a;
-  box-shadow: 0 0 0 3px rgba(103, 194, 58, 0.18);
+  background: var(--sj-success);
+  box-shadow: 0 0 0 3px var(--sj-success-soft);
 }
 
 .status-dot.offline {
-  background: #c0c4cc;
+  background: var(--sj-text-3);
 }
 
-/* 空状态统一留白 */
+.status-dot.warning {
+  background: var(--sj-warning);
+  box-shadow: 0 0 0 3px var(--sj-warning-soft);
+}
+
+/* ---- 空状态 ---- */
+
 .empty-block {
   padding: 40px 0;
   text-align: center;
-  color: #909399;
+  color: var(--sj-text-3);
+}
+
+/* ---- Element Plus 细节覆盖 ---- */
+
+.el-table {
+  --el-table-header-bg-color: var(--sj-surface-2);
+  --el-table-header-text-color: var(--sj-text-2);
+  --el-table-row-hover-bg-color: var(--sj-primary-soft);
+  --el-table-border-color: var(--sj-border);
+  border-radius: var(--sj-radius-sm);
+  font-size: 13px;
+}
+
+.el-table th.el-table__cell {
+  font-weight: 600;
+  font-size: 12.5px;
+}
+
+.el-button {
+  font-weight: 500;
+}
+
+.el-dialog {
+  --el-dialog-border-radius: 14px;
+  border-radius: 14px;
+}
+
+.el-dialog__title {
+  font-weight: 600;
+}
+
+.el-tag {
+  border-radius: 999px;
+}
+
+.el-alert {
+  border-radius: var(--sj-radius-sm);
+}
+
+.el-card {
+  border-radius: var(--sj-radius);
+  border-color: var(--sj-border);
+}
+
+.el-progress-bar__outer {
+  background-color: var(--sj-info-soft);
 }

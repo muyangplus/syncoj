@@ -13,8 +13,8 @@ import { useAuthStore } from '@/stores/auth'
  */
 const publicOnly = publicMode.publicOnly === true
 
-/** 没指定去哪时该去哪一页：公开端口上是考生页，管理端是总览。 */
-const homeRoute = () => (publicOnly ? { name: 'player' } : { name: 'overview' })
+/** 默认页：公开端口是考生页，管理端是工作台。 */
+const homeRoute = () => (publicOnly ? { name: 'player' } : { name: 'dashboard' })
 
 const routes: RouteRecordRaw[] = [
   {
@@ -43,6 +43,12 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/components/AppLayout.vue'),
     children: [
       { path: '', redirect: homeRoute },
+      {
+        path: 'dashboard',
+        name: 'dashboard',
+        component: () => import('@/views/DashboardView.vue'),
+        meta: { title: '工作台' },
+      },
       {
         path: 'contests',
         name: 'contests',

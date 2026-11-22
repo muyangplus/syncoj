@@ -4,20 +4,36 @@ import { RouterView, useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 
 import { authApi } from '@/api'
+import CommandPalette from '@/components/CommandPalette.vue'
 import { usePolling } from '@/composables/usePolling'
+import { NAV_GROUPS, useQuickActions } from '@/composables/useQuickActions'
+import { useTheme } from '@/composables/useTheme'
 import { useAuthStore } from '@/stores/auth'
 import { useContestStore } from '@/stores/contest'
+import { contestStatusLabel, contestStatusType } from '@/utils/format'
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 const contests = useContestStore()
+const { theme, toggle: toggleTheme } = useTheme()
+const { actions } = useQuickActions()
 
 const serverOk = ref<boolean | null>(null)
 const onlineCount = ref(0)
 const totalCount = ref(0)
+const palette = ref<InstanceType<typeof CommandPalette> | null>(null)
+const collapsed = ref(false)
 
+const currentGroup = computed(() => {
+  for (const group of NAV_GROUPS) {
+    if (group.items.some((item) => item.name === route.name)) return group.title
+  }
+  return ''
+})
 const currentTitle = computed(() => (route.meta.title as string | undefined) ?? '')
+
+const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform)
 
 async function refreshHealth(): Promise<void> {
   try {
@@ -30,22 +46,19 @@ async function refreshHealth(): Promise<void> {
   }
 }
 
-function handleContestChange(value: number): void {
-  contests.select(value)
+function runAction(key: string): void {
+  const action = actions.find((item) => item.key === key)
+  if (action) void action.run()
 }
 
-function goContests(): void {
-  void router.push({ name: 'contests' })
+async function handleUser(command: string): Promise<void> {
+  if (command === 'logout') {
+    await auth.logout()
+    ElMessage.success('已退出登录')
+    await router.replace({ name: 'login' })
+  }
 }
 
-async function handleLogout(): Promise<void> {
-  await auth.logout()
-  ElMessage.success('已退出登录')
-  await router.replace({ name: 'login' })
-}
-
-// 健康状态每 10 秒刷一次：顶部那行"在线 3/50"是教师最常瞄的信息。
-// 走 usePolling：卸载时清掉定时器（退出登录再登录不会叠出第二个）、标签页隐藏时暂停。
 const health = usePolling(refreshHealth, { interval: 10000, immediate: false })
 
 onMounted(async () => {
@@ -54,242 +67,453 @@ onMounted(async () => {
 </script>
 
 <template>
-  <el-container class="layout">
-    <el-aside width="200px" class="sidebar">
-      <div class="brand">
-        <span class="brand-name">SyncOJ</span>
-        <span class="brand-sub">在线同步评测</span>
+  <div class="shell" :class="{ collapsed }">
+    <aside class="sidebar">
+      <div class="brand" @click="router.push({ name: 'dashboard' })">
+        <span class="brand-mark">S</span>
+        <span v-if="!collapsed" class="brand-text">
+          <span class="brand-name">SyncOJ</span>
+          <span class="brand-sub">考场同步评测</span>
+        </span>
       </div>
 
-      <el-menu
-        :default-active="String(route.name ?? '')"
-        router
-        background-color="transparent"
-        text-color="var(--syncoj-sidebar-fg)"
-        active-text-color="#fff"
-        class="nav"
-      >
-        <el-menu-item index="contests" :route="{ name: 'contests' }">
-          <el-icon><Calendar /></el-icon><span>场次管理</span>
-        </el-menu-item>
-        <el-menu-item index="overview" :route="{ name: 'overview' }">
-          <el-icon><Monitor /></el-icon><span>选手状态</span>
-        </el-menu-item>
-        <el-menu-item index="rosters" :route="{ name: 'rosters' }">
-          <el-icon><Notebook /></el-icon><span>名单库</span>
-        </el-menu-item>
-        <el-menu-item index="machines" :route="{ name: 'machines' }">
-          <el-icon><Connection /></el-icon><span>机器配对</span>
-        </el-menu-item>
-        <el-menu-item index="files" :route="{ name: 'files' }">
-          <el-icon><Document /></el-icon><span>代码台账</span>
-        </el-menu-item>
-        <el-menu-item index="deploys" :route="{ name: 'deploys' }">
-          <el-icon><UploadFilled /></el-icon><span>文件下发</span>
-        </el-menu-item>
-        <el-menu-item index="judge" :route="{ name: 'judge' }">
-          <el-icon><Cpu /></el-icon><span>评测</span>
-        </el-menu-item>
-        <el-menu-item index="scores" :route="{ name: 'scores' }">
-          <el-icon><Trophy /></el-icon><span>成绩</span>
-        </el-menu-item>
-        <el-menu-item index="events" :route="{ name: 'events' }">
-          <el-icon><Bell /></el-icon><span>审计日志</span>
-        </el-menu-item>
-        <el-menu-item index="releases" :route="{ name: 'releases' }">
-          <el-icon><Refresh /></el-icon><span>Agent 发布</span>
-        </el-menu-item>
-      </el-menu>
-    </el-aside>
+      <nav class="nav">
+        <div v-for="group in NAV_GROUPS" :key="group.title" class="nav-group">
+          <div v-if="!collapsed" class="nav-group-title">{{ group.title }}</div>
+          <RouterLink
+            v-for="item in group.items"
+            :key="item.name"
+            :to="{ name: item.name }"
+            class="nav-item"
+            :class="{ active: route.name === item.name }"
+            :title="collapsed ? item.label : undefined"
+          >
+            <el-icon class="nav-icon"><component :is="item.icon" /></el-icon>
+            <span v-if="!collapsed" class="nav-label">{{ item.label }}</span>
+          </RouterLink>
+        </div>
+      </nav>
 
-    <el-container>
-      <el-header class="topbar">
-        <div class="topbar-left">
-          <h1 class="topbar-title">{{ currentTitle }}</h1>
-          <el-tag v-if="contests.current" size="small" type="info" effect="plain">
-            {{ contests.current.name }}
-          </el-tag>
+      <div class="sidebar-foot">
+        <button type="button" class="foot-btn" :title="collapsed ? '展开侧栏' : '收起侧栏'" @click="collapsed = !collapsed">
+          <el-icon><component :is="collapsed ? 'Expand' : 'Fold'" /></el-icon>
+        </button>
+      </div>
+    </aside>
+
+    <div class="main">
+      <header class="topbar">
+        <div class="crumbs">
+          <span v-if="currentGroup" class="crumb-group">{{ currentGroup }}</span>
+          <el-icon v-if="currentGroup" class="crumb-sep"><ArrowRight /></el-icon>
+          <span class="crumb-page">{{ currentTitle }}</span>
         </div>
 
-        <div class="topbar-right">
-          <el-tooltip
-            :content="
-              serverOk === false
-                ? '服务端无响应'
-                : `在线 ${onlineCount} / 共 ${totalCount} 台`
-            "
-          >
-            <span class="health">
-              <span
-                class="status-dot"
-                :class="serverOk === false ? 'offline' : 'online'"
-              />
-              <span class="muted">{{ onlineCount }}/{{ totalCount }}</span>
-            </span>
-          </el-tooltip>
+        <button type="button" class="search" @click="palette?.show()">
+          <el-icon><Search /></el-icon>
+          <span>搜索页面或操作</span>
+          <kbd>{{ isMac ? '⌘' : 'Ctrl' }} K</kbd>
+        </button>
 
+        <div class="topbar-right">
           <el-select
             v-if="contests.contests.length"
             :model-value="contests.currentId ?? undefined"
-            size="small"
-            style="width: 180px"
+            class="contest-select"
             placeholder="选择场次"
-            @update:model-value="handleContestChange"
+            @update:model-value="(value: number) => contests.select(value)"
           >
-            <el-option
-              v-for="contest in contests.contests"
-              :key="contest.id"
-              :label="contest.name"
-              :value="contest.id"
-            />
-            <!-- 下拉框底部给一个出口：从任何页面都能直接去建场次，
-                 不用先想起来"场次管理"在哪 -->
+            <template #prefix>
+              <el-icon><Calendar /></el-icon>
+            </template>
+            <el-option v-for="item in contests.contests" :key="item.id" :label="item.name" :value="item.id">
+              <div class="contest-option">
+                <span>{{ item.name }}</span>
+                <el-tag size="small" :type="contestStatusType(item.status)" effect="plain">
+                  {{ contestStatusLabel(item.status) }}
+                </el-tag>
+              </div>
+            </el-option>
             <template #footer>
-              <el-button link type="primary" size="small" @click="goContests">
-                ＋ 新建 / 管理场次
+              <el-button link type="primary" size="small" @click="router.push({ name: 'contests', query: { do: 'new' } })">
+                <el-icon><Plus /></el-icon>新建场次
               </el-button>
             </template>
           </el-select>
           <el-button
             v-else-if="contests.error"
-            size="small"
             type="warning"
             plain
             @click="contests.load().catch(() => undefined)"
           >
             场次加载失败，重试
           </el-button>
-          <el-button v-else-if="!contests.loading" size="small" type="primary" @click="goContests">
+          <el-button
+            v-else-if="!contests.loading"
+            type="primary"
+            @click="router.push({ name: 'contests', query: { do: 'new' } })"
+          >
             新建场次
           </el-button>
 
-          <el-dropdown @command="handleLogout">
-            <span class="user">
-              <el-icon><User /></el-icon>
-              {{ auth.username ?? '未登录' }}
-            </span>
+          <el-tooltip :content="serverOk === false ? '服务端无响应' : '在线机器 / 已注册机器'">
+            <button type="button" class="pill" @click="router.push({ name: 'overview' })">
+              <span class="status-dot" :class="serverOk === false ? 'offline' : 'online'" />
+              {{ onlineCount }} / {{ totalCount }}
+            </button>
+          </el-tooltip>
+
+          <el-dropdown trigger="click" @command="runAction">
+            <el-button type="primary">
+              <el-icon><Lightning /></el-icon>
+              <span>快捷操作</span>
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu class="quick-menu">
+                <el-dropdown-item
+                  v-for="(action, index) in actions"
+                  :key="action.key"
+                  :command="action.key"
+                  :disabled="action.needsContest && !contests.currentId"
+                  :divided="index > 0 && actions[index - 1].group !== action.group"
+                >
+                  <el-icon><component :is="action.icon" /></el-icon>{{ action.label }}
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+
+          <el-tooltip :content="theme === 'dark' ? '切换到浅色' : '切换到深色'">
+            <button type="button" class="icon-btn" @click="toggleTheme">
+              <el-icon><component :is="theme === 'dark' ? 'Sunny' : 'Moon'" /></el-icon>
+            </button>
+          </el-tooltip>
+
+          <el-dropdown trigger="click" @command="handleUser">
+            <button type="button" class="avatar" :title="auth.username ?? ''">
+              {{ (auth.username ?? '?').slice(0, 1).toUpperCase() }}
+            </button>
             <template #dropdown>
               <el-dropdown-menu>
-                <el-dropdown-item command="logout">退出登录</el-dropdown-item>
+                <el-dropdown-item disabled>{{ auth.username ?? '未登录' }}</el-dropdown-item>
+                <el-dropdown-item command="logout" divided>
+                  <el-icon><SwitchButton /></el-icon>退出登录
+                </el-dropdown-item>
               </el-dropdown-menu>
             </template>
           </el-dropdown>
         </div>
-      </el-header>
+      </header>
 
-      <el-main class="content">
-        <!--
-          这里必须**始终**渲染 RouterView。
-
-          早先的写法是 `v-if="没有场次" 显示提示，v-else 渲染页面`，结果一进
-          系统就被挡在一个纯提示上 —— 连「场次管理」页都进不去，更别说创建场次。
-          首次部署时那是一个死路：唯一的出路是去敲 curl 或 /docs。
-
-          正确做法是把提示做成一条横幅，页面照常渲染；各页面自己处理"没有场次"
-          的情况（它们的列表本来就是空的）。
-        -->
+      <main class="content">
+        <!-- 始终渲染 RouterView：没有场次时也要能进「场次管理」新建 -->
         <el-alert
-          v-if="!contests.loading && contests.contests.length === 0"
+          v-if="!contests.loading && contests.contests.length === 0 && route.name !== 'contests'"
           type="warning"
           :closable="false"
           show-icon
-          title="还没有任何场次"
-          style="margin-bottom: 16px"
+          class="no-contest"
         >
-          先创建一个场次，再导入选手。
+          <template #title>
+            尚无场次。
+            <el-button link type="primary" @click="router.push({ name: 'contests', query: { do: 'new' } })">
+              新建场次
+            </el-button>
+          </template>
         </el-alert>
         <RouterView />
-      </el-main>
-    </el-container>
-  </el-container>
+      </main>
+    </div>
+
+    <CommandPalette ref="palette" />
+  </div>
 </template>
 
 <style scoped>
-.layout {
+.shell {
+  display: flex;
   height: 100%;
 }
 
+/* ---- 侧栏 ---- */
+
 .sidebar {
-  background: var(--syncoj-sidebar-bg);
+  width: var(--sj-sidebar-w);
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
+  background: var(--sj-surface);
+  border-right: 1px solid var(--sj-border);
+  transition: width 0.18s ease;
+}
+.collapsed .sidebar {
+  width: 68px;
 }
 
 .brand {
-  padding: 18px 20px 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: var(--sj-topbar-h);
+  padding: 0 18px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--sj-border);
+}
+.brand-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 9px;
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  color: #fff;
+  font-weight: 700;
+  font-size: 16px;
+}
+.brand-text {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  line-height: 1.2;
 }
-
 .brand-name {
-  color: #fff;
-  font-size: 18px;
   font-weight: 700;
-  letter-spacing: 0.5px;
+  font-size: 16px;
+  letter-spacing: -0.01em;
 }
-
 .brand-sub {
-  color: #7d8fa3;
-  font-size: 11px;
+  font-size: 11.5px;
+  color: var(--sj-text-3);
 }
 
 .nav {
-  border-right: none;
   flex: 1;
+  overflow-y: auto;
+  padding: 10px 12px;
+}
+.nav-group + .nav-group {
+  margin-top: 14px;
+}
+.nav-group-title {
+  padding: 0 10px 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--sj-text-3);
+}
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 38px;
+  padding: 0 10px;
+  border-radius: 8px;
+  color: var(--sj-text-2);
+  text-decoration: none;
+  font-size: 14px;
+  transition: background 0.12s, color 0.12s;
+}
+.collapsed .nav-item {
+  justify-content: center;
+  padding: 0;
+}
+.nav-item:hover {
+  background: var(--sj-surface-2);
+  color: var(--sj-text);
+}
+.nav-item.active {
+  background: var(--sj-primary-soft);
+  color: var(--sj-primary);
+  font-weight: 600;
+}
+.nav-icon {
+  font-size: 17px;
 }
 
-.nav :deep(.el-menu-item.is-active) {
-  background: rgba(64, 158, 255, 0.16) !important;
-  border-left: 3px solid var(--syncoj-sidebar-active);
+.sidebar-foot {
+  padding: 10px 12px;
+  border-top: 1px solid var(--sj-border);
+}
+.foot-btn {
+  all: unset;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 32px;
+  border-radius: 8px;
+  color: var(--sj-text-3);
+  cursor: pointer;
+}
+.foot-btn:hover {
+  background: var(--sj-surface-2);
+  color: var(--sj-text);
+}
+
+/* ---- 顶栏 ---- */
+
+.main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .topbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  background: #fff;
-  border-bottom: 1px solid #e4e7ed;
-  height: 56px;
+  gap: 16px;
+  height: var(--sj-topbar-h);
+  padding: 0 24px;
+  background: var(--sj-surface);
+  border-bottom: 1px solid var(--sj-border);
+  flex-shrink: 0;
+}
+.crumbs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  white-space: nowrap;
+}
+.crumb-group {
+  color: var(--sj-text-3);
+}
+.crumb-sep {
+  color: var(--sj-text-3);
+  font-size: 12px;
+}
+.crumb-page {
+  font-weight: 600;
 }
 
-.topbar-left {
+.search {
+  all: unset;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  width: 260px;
+  padding: 0 10px;
+  margin-left: 12px;
+  border: 1px solid var(--sj-border);
+  border-radius: 8px;
+  background: var(--sj-surface-2);
+  color: var(--sj-text-3);
+  font-size: 13px;
+  cursor: pointer;
+}
+.search span {
+  flex: 1;
+}
+.search:hover {
+  border-color: var(--sj-border-strong);
+}
+.search kbd {
+  font-family: var(--sj-mono);
+  font-size: 11px;
+  padding: 1px 6px;
+  border: 1px solid var(--sj-border-strong);
+  border-radius: 4px;
+}
+
+.topbar-right {
+  margin-left: auto;
   display: flex;
   align-items: center;
   gap: 10px;
 }
-
-.topbar-title {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 600;
+.contest-select {
+  width: 220px;
 }
-
-.topbar-right {
+.contest-option {
   display: flex;
   align-items: center;
-  gap: 14px;
+  justify-content: space-between;
+  gap: 12px;
 }
-
-.health {
+.pill {
+  all: unset;
   display: inline-flex;
   align-items: center;
-  cursor: default;
-}
-
-.user {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  cursor: pointer;
-  color: #606266;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--sj-border);
+  border-radius: 999px;
   font-size: 13px;
-  outline: none;
+  font-variant-numeric: tabular-nums;
+  color: var(--sj-text-2);
+  cursor: pointer;
+}
+.pill:hover {
+  border-color: var(--sj-border-strong);
+}
+.icon-btn {
+  all: unset;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  color: var(--sj-text-2);
+  cursor: pointer;
+  font-size: 17px;
+}
+.icon-btn:hover {
+  background: var(--sj-surface-2);
+}
+.avatar {
+  all: unset;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--sj-primary-soft);
+  color: var(--sj-primary);
+  font-weight: 600;
+  cursor: pointer;
 }
 
 .content {
-  background: var(--syncoj-bg);
-  padding: 16px;
+  flex: 1;
   overflow: auto;
+  padding: 24px 28px 40px;
+}
+.no-contest {
+  margin-bottom: 16px;
+}
+
+@media (max-width: 1100px) {
+  .search {
+    display: none;
+  }
+}
+@media (max-width: 860px) {
+  .sidebar {
+    width: 68px;
+  }
+  .nav-label,
+  .nav-group-title,
+  .brand-text {
+    display: none;
+  }
+  .contest-select {
+    width: 150px;
+  }
+  .content {
+    padding: 16px;
+  }
+}
+</style>
+
+<style>
+.quick-menu .el-dropdown-menu__item {
+  gap: 2px;
+  min-width: 180px;
 }
 </style>

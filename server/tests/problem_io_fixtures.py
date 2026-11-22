@@ -217,7 +217,14 @@ def make_hoj_zip(
 # --------------------------------------------------------------------------- #
 
 
-def lemon_task(pid: str = "game", count: int = 3, **overrides: object) -> dict:
+def lemon_task(
+    pid: str = "game",
+    count: int = 3,
+    *,
+    time_limit: int = 1000,
+    memory_limit: int = 512,
+    **overrides: object,
+) -> dict:
     """与真实样例 .cdf 的 task 同形（文件 IO、每点 1 对、时限 ms、内存 MB）。"""
     base, rest = divmod(100, count)
     task: Dict[str, object] = {
@@ -240,8 +247,8 @@ def lemon_task(pid: str = "game", count: int = 3, **overrides: object) -> dict:
                 "fullScore": base + (1 if i > count - rest else 0),
                 "inputFiles": ["%s/%s%d.in" % (pid, pid, i)],
                 "outputFiles": ["%s/%s%d.out" % (pid, pid, i)],
-                "memoryLimit": 512,
-                "timeLimit": 1000,
+                "memoryLimit": memory_limit,
+                "timeLimit": time_limit,
             }
             for i in range(1, count + 1)
         ],
@@ -254,7 +261,8 @@ def make_lemon_zip(
     tasks: Optional[List[dict]] = None,
     *,
     contest: str = "sample",
-    version: str = "1.0",
+    version: Optional[str] = "1.0",
+    contestants: Optional[List[dict]] = None,
     cdf: Optional[bytes] = None,
     shell: Optional[str] = None,
     extra: Optional[Dict[str, Content]] = None,
@@ -262,7 +270,9 @@ def make_lemon_zip(
 ) -> bytes:
     """数据文件按每个 testCase 的 inputFiles/outputFiles 生成（依赖标记跳过）。``cdf`` 直接给字节时原样写。"""
     tasks = tasks if tasks is not None else [lemon_task()]
-    doc = {"contestTitle": contest, "contestants": [], "tasks": tasks, "version": version}
+    doc: Dict[str, object] = {"contestTitle": contest, "contestants": contestants or [], "tasks": tasks}
+    if version is not None:
+        doc["version"] = version
     files: Dict[str, Content] = {
         "%s.cdf" % contest: cdf if cdf is not None else json.dumps(doc, ensure_ascii=False, separators=(",", ":")),
         "README.txt": "比赛说明",
@@ -276,6 +286,48 @@ def make_lemon_zip(
                 files["data/" + inp.replace("\\", "/")] = "%d %d\n" % (counter, counter)
                 files["data/" + out.replace("\\", "/")] = "%d\n" % (counter * 2)
     return make_zip(files, shell=shell, extra=extra, drop=drop)
+
+
+#: 真实 LemonLime 比赛包结构 的六道题与时限（ms）；内存都是 512 MB，每题 20 点 × 5 分
+LEMON_SAMPLE_TASKS = (("game", 1000), ("rect", 1000), ("match", 1500), ("digit", 1000), ("queue", 1000), ("number", 2000))
+LEMON_SAMPLE_CONTESTANTS = ("std", "p1", "p2", "p3")
+
+
+def lemon_contestant(name: str, pids: Sequence[str]) -> dict:
+    """真实 .cdf 里 contestants[] 的一项（按题的数组；``compileMesaage`` 是原文拼写）。"""
+    n = len(pids)
+    return {
+        "checkJudged": [True] * n,
+        "compileMesaage": [""] * n,
+        "compileState": [0] * n,
+        "contestantName": name,
+        "inputFiles": [[] for _ in pids],
+        "judgingTime_date": "2024-07-01",
+        "judgingTime_time": "10:00:00.000",
+        "judgingTime_timespec": 1,
+        "memoryUsed": [[[1024]] for _ in pids],
+        "message": [[[""]] for _ in pids],
+        "result": [[[0]] for _ in pids],
+        "score": [[[5]] for _ in pids],
+        "sourceFile": ["%s.cpp" % pid for pid in pids],
+        "timeUsed": [[[10]] for _ in pids],
+    }
+
+
+def make_lemon_sample_zip(shell: Optional[str] = "sample") -> bytes:
+    """复刻真实包：sample/sample.cdf + data/<pid>/<pid><i>.in/.out + source/<选手>/<pid>.cpp + README.txt。"""
+    pids = [pid for pid, _ in LEMON_SAMPLE_TASKS]
+    tasks = [lemon_task(pid, 20, time_limit=limit, memory_limit=512) for pid, limit in LEMON_SAMPLE_TASKS]
+    sources: Dict[str, Content] = {
+        "source/%s/%s.cpp" % (who, pid): "int main(){return 0;}\n" for who in LEMON_SAMPLE_CONTESTANTS for pid in pids
+    }
+    return make_lemon_zip(
+        tasks,
+        contest="sample",
+        contestants=[lemon_contestant(who, pids) for who in LEMON_SAMPLE_CONTESTANTS],
+        shell=shell,
+        extra=sources,
+    )
 
 
 # --------------------------------------------------------------------------- #

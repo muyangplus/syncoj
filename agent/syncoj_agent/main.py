@@ -20,6 +20,7 @@ import json
 import logging
 import logging.handlers
 import os
+import random
 import signal
 import socket
 import sys
@@ -107,8 +108,13 @@ __all__ = [
 
 log = logging.getLogger("syncoj.agent")
 
-#: 出错后的退避上限。网络长时间不通时不要疯狂重连
+#: 出错后的退避上限（限速、密钥被拒、协议错误等**非网络**错误）。
+#: 连不上服务端不走它：见 ``_network_retry_delay``。
 MAX_BACKOFF = 300.0
+
+#: 连不上服务端时每轮等待的抖动上限（秒，另不超过基准间隔的 10%）。整间机房
+#: 同时失联、又同时恢复时，别让 50 台在同一秒撞上来。
+NETWORK_RETRY_JITTER = 3.0
 
 #: "为切换版本而退出"的进程退出码（BSD ``EX_TEMPFAIL``）。
 #:
@@ -121,12 +127,17 @@ EXIT_RESTART = 75
 #: 事件积压上限，防止长时间离线导致内存里堆一堆事件
 MAX_PENDING_EVENTS = 200
 
-#: 连续多少轮连不上服务端之后，去局域网里问一次它在哪。
+#: 连不上服务端时，每连续失败多少轮去局域网里问一次它在哪（**不封顶、不停**）。
 #:
 #: 攒够再问是因为"连不上"的常见原因不是地址变了（服务端重启、网线抖动、
-#: Wi-Fi 重连都会连不上），而发现要往整个局域网广播。三轮配合指数退避大约是
-#: 5+10+20 秒 —— 够排除抖动，也不会让一台换了网段的机器干等太久。
+#: Wi-Fi 重连都会连不上），而发现要往整个局域网广播。失联时按默认间隔
+#: （``scan.interval``，默认 30 秒）重试，三轮约 90 秒一次：够排除抖动，50 台一起
+#: 失联也只是每秒半个探测。
 REDISCOVER_AFTER_FAILURES = 3
+
+#: 连续连不上时，第 1 轮与之后每多少轮记一条 WARNING（其余记 DEBUG）。按默认 30 秒
+#: 重试约 10 分钟一条 —— 不再拉长间隔之后，每轮一条会把日志刷满。
+NETWORK_WARN_EVERY = 20
 
 #: 连续多少个成功周期后才认为新版本可信、清掉回滚状态。
 #: 不用"启动成功"作为判据 —— 起得来但一 tick 就崩的版本同样必须回滚。
@@ -463,6 +474,10 @@ class Agent:
         #: 服务端重启一下、网线抖一下都会连不上，而那些情况下地址并没有变，
         #: 每轮都广播只会打扰整个局域网（见 REDISCOVER_AFTER_FAILURES）
         self._network_failures = 0
+        #: 连续连不上的总轮数（只用来决定日志级别；成功一轮清零）
+        self._offline_rounds = 0
+        #: 上一次局域网发现没结果的说法：同样的结论只在变化时记 WARNING
+        self._last_rediscover_note: Optional[str] = None
         #: 上一次 tick 成功的那台服务端的实例 ID（``<state_dir>/server_uuid``）。
         #: 失联时的局域网发现 / 主动通告只切到同一个 ID 的服务端；空 = 老状态，只验签
         self.server_uuid = load_server_uuid(config.state_dir)
@@ -1886,6 +1901,16 @@ class Agent:
         self.server_uuid = str(value)
         save_server_uuid(self.config.state_dir, self.server_uuid)
 
+    def _network_retry_delay(self) -> float:
+        """连不上服务端时下一轮等多久：**默认间隔**（``scan.interval``）加一点抖动。
+
+        曾经是指数退避到 300 秒 —— 服务端恢复后机器要再过最多 5 分钟才回来，考场里
+        这 5 分钟就是"交了代码没收上来"。按默认间隔重试的代价只是每台机器每 30 秒
+        一次连不上的 TCP 握手。
+        """
+        base = self._clamp_wait(None)
+        return base + random.uniform(0.0, min(NETWORK_RETRY_JITTER, base * 0.1))
+
     def _clamp_wait(self, seconds: object) -> float:
         """把服务端给的间隔收进 [5, 3600]。
 
@@ -2154,6 +2179,8 @@ class Agent:
                 self._consider_announcement()
                 delay = self.cycle()
                 self._backoff = 0.0
+                self._network_failures = 0
+                self._offline_rounds = 0
                 round_ok = True
             except RoundTimeout as exc:
                 # 看门狗掐掉这一轮：**不退出进程**，把话说清楚后照常进入下一轮。
@@ -2193,13 +2220,23 @@ class Agent:
                 raise
             except NetworkError as exc:
                 external_failure = True
-                self._backoff = min(MAX_BACKOFF, max(5.0, self._backoff * 2 or 5.0))
-                log.warning("网络不可用，%.0f 秒后重试：%s", self._backoff, exc)
-                delay = self._backoff
+                # 不退避：按默认间隔接着试（见 _network_retry_delay）
+                delay = self._network_retry_delay()
+                self._offline_rounds += 1
+                level = (
+                    logging.WARNING
+                    if self._offline_rounds == 1 or self._offline_rounds % NETWORK_WARN_EVERY == 0
+                    else logging.DEBUG
+                )
+                log.log(
+                    level,
+                    "网络不可用（连续第 %d 轮），%.0f 秒后重试：%s",
+                    self._offline_rounds, delay, exc,
+                )
                 self._network_failures += 1
                 if self._network_failures >= REDISCOVER_AFTER_FAILURES:
-                    # 计数在**尝试之后**清零：发现失败也要再等 N 轮才重试，
-                    # 否则退避就白做了（每轮都往局域网里广播一次）。
+                    # 计数在**尝试之后**清零：发现失败也要再等 N 轮才重试 ——
+                    # 每 N 轮一次、一直问下去，但不每轮都往局域网里广播。
                     self._network_failures = 0
                     self._try_rediscover()
             except AgentError as exc:
@@ -2260,7 +2297,7 @@ class Agent:
         实例 ID（``self.server_uuid``）时还要 ID 相同、且服务端认得本机（双向 UUID）。
         """
         if self._public_key is None:
-            log.info("连不上服务端，但机器上没有发布公钥 —— 无法验证应答来源，不做发现")
+            self._note_rediscover("连不上服务端，但机器上没有发布公钥 —— 无法验证应答来源，不做发现")
             return
 
         outcome = discovery.discover(
@@ -2270,17 +2307,23 @@ class Agent:
             server_uuid=self.server_uuid,
         )
         if not outcome.url:
-            log.warning("局域网发现没结果：%s", outcome.explain())
+            self._note_rediscover("局域网发现没结果：%s" % outcome.explain())
             return
 
         current = (self.config.server_url or "").rstrip("/")
         if outcome.url == current:
             # 最常见的结局：地址没变，是网络或服务端本身的问题。这条日志能省掉
             # 一次"是不是地址配错了"的怀疑。
-            log.warning("局域网发现的地址与配置一致（%s）：问题不在地址上", outcome.url)
+            self._note_rediscover("局域网发现的地址与配置一致（%s）：问题不在地址上" % outcome.url)
             return
+        self._last_rediscover_note = None
 
         self._switch_server(outcome.url, "局域网发现")
+
+    def _note_rediscover(self, note: str) -> None:
+        """发现的结论：与上一次相同就只记 DEBUG（失联期间每 N 轮问一次，别刷屏）。"""
+        log.log(logging.DEBUG if note == self._last_rediscover_note else logging.WARNING, "%s", note)
+        self._last_rediscover_note = note
 
     def _switch_server(self, new_url: str, how: str) -> None:
         """改用新的服务端地址（只在本进程内生效，不写回 ``agent.ini``）。"""

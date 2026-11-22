@@ -65,7 +65,7 @@ Agent 的分支（先看状态码，再看 `code`）：
 | `409` | 静默丢弃 |
 | `413` | 跳过该文件 |
 | `426` / `agent_outdated` | 记日志，按协议错误退避；不重新注册 |
-| `5xx` | 指数退避（5 秒起，上限 300 秒） |
+| `5xx` / 连不上（连接失败、超时） | 不退避：按 `scan.interval`（默认 30 秒）加 ≤3 秒抖动重试；每连续 3 轮做一次局域网发现（第 9 节），不封顶 |
 | 其他 | 记日志，退避后下一轮 |
 
 - 只有 `401` 清凭据重新注册；`403` 只更新状态。
@@ -87,7 +87,7 @@ Agent 的分支（先看状态码，再看 `code`）：
 | 422 | `validation_error` | 报文缺字段 / 超长 / 多字段 | 记日志 |
 | 426 | `agent_outdated` | `/enroll` / `/tick` 的 `protocol_version` 低于最低要求（缺省按 0）；优先于 422 判定；`details.protocol_version` = 上报值 | 只能重装 |
 | 429 | `rate_limited` | 限速，带 `Retry-After` | 按 `Retry-After` 退避 |
-| 5xx | `internal_error` / `unavailable` | 服务端故障 | 指数退避 |
+| 5xx | `internal_error` / `unavailable` | 服务端故障 | 按默认间隔重试（同连不上） |
 
 ---
 
@@ -673,7 +673,7 @@ syncoj-discovery-v2\n<nonce>\n<url>\n<server_uuid>\n<machine_uuid>\n<1|0>
 ### 机器侧使用时机
 
 - 装机（`install.py`）：`--server` > 包内 `server.json` > 发现 > 默认值 `127.0.0.1`（打印警告）。
-- 运行时：连续 3 轮网络失败（约 5 + 10 + 20 秒）后发现一次；新地址只在本进程内生效，不写回 `agent.ini`。
+- 运行时：连不上时每连续 3 轮发现一次（默认间隔下约 90 秒一次），一直持续到连上为止，成功一轮计数清零；新地址只在本进程内生效，不写回 `agent.ini`。
 
 ## 9.1 服务端主动通告（UDP 广播 + 挑战应答）
 

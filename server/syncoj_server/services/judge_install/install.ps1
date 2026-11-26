@@ -20,7 +20,11 @@ SyncOJ 评测机一键安装（Windows，§12.10）。服务端 GET /judge/insta
     <安装目录>\cache              数据包缓存（LOCAL SERVICE 可改；低完整性进程不可读）
     <安装目录>\boxes              评测工作目录（LOCAL SERVICE 可改）
     <安装目录>\judge.log          日志
+    <安装目录>\uninstall.ps1      卸载脚本（只有 SYSTEM、Administrators 能改）：管理员运行即卸载
+    <安装目录>\install.json       安装方式（评测机远程卸载时据此清理自己）
     计划任务「SyncOJ Judge」：开机启动、以 LOCAL SERVICE 运行（不是 SYSTEM）、失败后每分钟重启
+    计划任务「SyncOJ Judge Cleanup」：以 SYSTEM 运行，开机与每 2 分钟看一眼 cache\.uninstall-requested，
+        在（评测机收到远程卸载、告别服务端后写的）才执行 uninstall.ps1；标记只看在不在，不读内容
 
 安全：评测机以 LOCAL SERVICE 运行；选手程序与 checker 再降为受限令牌 + 低完整性级别，
 读不了令牌与数据包缓存（NO_READ_UP 标签）、写不了工作目录以外、读不了评测机进程内存。不隔离网络。
@@ -47,6 +51,7 @@ if ($EmbeddedServer -like '__SYNCOJ_*__') { $EmbeddedServer = '' }
 if ($PyzSha256 -like '__SYNCOJ_*__') { $PyzSha256 = '' }
 
 $TaskName = 'SyncOJ Judge'
+$CleanupTaskName = 'SyncOJ Judge Cleanup'
 # 按 SID 授权与指定账号，不依赖系统语言
 $LocalServiceSid = 'S-1-5-19'
 $LocalServiceSidObject = New-Object Security.Principal.SecurityIdentifier $LocalServiceSid
@@ -85,6 +90,8 @@ if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrat
     Fail '需要管理员权限：右键「以管理员身份运行」PowerShell 后重试'
 }
 if (-not $InstallDir) { $InstallDir = Join-Path $env:ProgramData 'SyncOJ\judge' }
+# 清理任务经 cmd.exe 判断标记在不在：路径里的 % 会被 cmd 展开
+if ($InstallDir.Contains('%')) { Fail "安装目录不能含 %：$InstallDir" }
 
 # ---- Python（3.8 或更新）----
 function Find-Python {
@@ -174,6 +181,32 @@ if ($existing) {
 }
 Move-Item -Force -Path $Tmp -Destination $Pyz
 
+# ---- 卸载脚本与安装清单 ----
+# 卸载脚本由服务端发脚本时嵌进下面的 here-string；从仓库里直接跑时占位符原样留着，取旁边那份
+$UninstallScript = @'
+__SYNCOJ_UNINSTALL_PS1__
+'@
+if ($UninstallScript.Trim() -eq ('__SYNCOJ_' + 'UNINSTALL_PS1__')) {
+    $localUninstaller = Join-Path $PSScriptRoot 'uninstall.ps1'
+    if (-not (Test-Path -LiteralPath $localUninstaller)) { Fail '缺少卸载脚本（从服务端下载 install.ps1 再跑）' }
+    $UninstallScript = [IO.File]::ReadAllText($localUninstaller)
+}
+$UninstallPs1 = Join-Path $InstallDir 'uninstall.ps1'
+# UTF-8 BOM：PowerShell 5.1 没有 BOM 时按 ANSI 读
+[IO.File]::WriteAllText($UninstallPs1, $UninstallScript.TrimStart([char]0xFEFF), (New-Object Text.UTF8Encoding $true))
+# 只有 SYSTEM 与 Administrators 能改（它以 SYSTEM 执行）；LOCAL SERVICE 连读都不需要
+& icacls.exe $UninstallPs1 /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' | Out-Null
+if ($LASTEXITCODE -ne 0) { Fail "卸载脚本权限没有设上（icacls 失败）：$UninstallPs1" }
+$Marker = Join-Path $CacheDir '.uninstall-requested'
+# 重装：上一次远程卸载没做完留下的标记会让清理任务把新装的也删掉，清掉
+if (Test-Path -LiteralPath $Marker) { Remove-Item -LiteralPath $Marker -Force }
+$Manifest = Join-Path $InstallDir 'install.json'
+$manifestJson = [ordered]@{
+    kind = 'schtask'; service = $TaskName; marker = $Marker
+    paths = @($InstallDir); tasks = @($TaskName, $CleanupTaskName); accounts = @()
+} | ConvertTo-Json -Compress
+[IO.File]::WriteAllText($Manifest, $manifestJson, (New-Object Text.UTF8Encoding $false))
+
 # ---- 令牌：SYSTEM、Administrators 完全控制，LOCAL SERVICE 只读（按 SID 授权，不依赖系统语言）----
 $TokenFile = Join-Path $InstallDir 'token'
 Set-Content -Path $TokenFile -Value $Token -Encoding Ascii
@@ -195,7 +228,8 @@ $arguments = @(
     '--slots', $Slots,
     '--cache-dir', "`"$CacheDir`"",
     '--box-dir', "`"$BoxDir`"",
-    '--log-file', "`"$LogFile`""
+    '--log-file', "`"$LogFile`"",
+    '--install-manifest', "`"$Manifest`""
 ) -join ' '
 $action = New-ScheduledTaskAction -Execute $PythonExe -Argument $arguments -WorkingDirectory $InstallDir
 $trigger = New-ScheduledTaskTrigger -AtStartup
@@ -207,11 +241,29 @@ Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Se
     -Principal $principal -Description 'SyncOJ judge worker' -Force | Out-Null
 Start-ScheduledTask -TaskName $TaskName
 
+# ---- 清理任务（SYSTEM）：评测机以 LOCAL SERVICE 运行，删不了计划任务与安装目录 ----
+# 平常只是 cmd.exe 判断一下文件在不在（不起 PowerShell，评测机 CPU 不受打扰）；在了才执行 uninstall.ps1
+$cleanupArgs = "/d /c if exist `"$Marker`" %SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe " +
+    "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$UninstallPs1`" -IfRequested"
+$cleanupAction = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\cmd.exe" -Argument $cleanupArgs
+# 每天 0 点起、每 2 分钟一次、持续 1 天 = 一直每 2 分钟（不写「无限期」：各版本 Windows 对它的写法不一）
+$everyTwoMinutes = New-ScheduledTaskTrigger -Daily -At '00:00'
+$everyTwoMinutes.Repetition = (New-ScheduledTaskTrigger -Once -At '00:00' -RepetitionInterval (New-TimeSpan -Minutes 2) `
+    -RepetitionDuration (New-TimeSpan -Days 1)).Repetition
+$cleanupTriggers = @((New-ScheduledTaskTrigger -AtStartup), $everyTwoMinutes)
+$cleanupSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
+    -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -MultipleInstances IgnoreNew
+$System = (New-Object Security.Principal.SecurityIdentifier 'S-1-5-18').Translate([Security.Principal.NTAccount]).Value
+$cleanupPrincipal = New-ScheduledTaskPrincipal -UserId $System -LogonType ServiceAccount -RunLevel Highest
+Register-ScheduledTask -TaskName $CleanupTaskName -Action $cleanupAction -Trigger $cleanupTriggers `
+    -Settings $cleanupSettings -Principal $cleanupPrincipal -Description 'SyncOJ judge remote uninstall' -Force | Out-Null
+
 Start-Sleep -Seconds 3
 $state = (Get-ScheduledTask -TaskName $TaskName).State
 if ("$state" -eq 'Running') {
     Say "评测机已启动：后端 $Backend，并发 $Slots，服务端 $Server"
     Say "日志：$LogFile"
+    Say "卸载：以管理员身份运行 $UninstallPs1"
 } else {
     Warn "计划任务状态：$state"
     if (Test-Path $LogFile) { Get-Content -Tail 20 $LogFile }

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /**
- * 添加评测机（§12.10）：输入名称 → 签发令牌 → 给出 Linux / Windows 一行安装命令与手动命令。
+ * 添加评测机（§12.10）：输入名称 → 签发令牌 → 给出 Linux / Windows 一行安装命令与手动命令，
+ * 以及装好之后在那台机器上手动卸载的命令（远程卸载见评测机卡片「更多 → 卸载」）。
  *
  * 命令由服务端拼好（地址取自这次请求的 Host 头，就是教师打开管理界面用的那个），
  * 前端不自己拼：开发时页面在 Vite 的端口上，自己拼会拼出一个评测机连不上的地址。
@@ -65,8 +66,20 @@ const commands = computed(() => {
   const item = issued.value
   if (!item) return []
   return [
-    { key: 'linux', label: 'Linux', hint: 'root', text: item.linux_command },
-    { key: 'windows', label: 'Windows', hint: '管理员 PowerShell', text: item.windows_command },
+    {
+      key: 'linux',
+      label: 'Linux',
+      hint: 'root',
+      text: item.linux_command,
+      uninstall: 'sudo /opt/syncoj-judge/uninstall.sh',
+    },
+    {
+      key: 'windows',
+      label: 'Windows',
+      hint: '管理员 PowerShell',
+      text: item.windows_command,
+      uninstall: '& "$env:ProgramData\\SyncOJ\\judge\\uninstall.ps1"',
+    },
   ]
 })
 </script>
@@ -95,6 +108,9 @@ const commands = computed(() => {
           </el-button>
         </div>
         <pre class="command">{{ cmd.text }}</pre>
+        <div class="command-uninstall">
+          卸载 <code>{{ cmd.uninstall }}</code>
+        </div>
       </div>
       <el-button link type="primary" class="manual-toggle" @click="showManual = !showManual">
         手动运行<el-icon class="el-icon--right"><component :is="showManual ? 'ArrowUp' : 'ArrowDown'" /></el-icon>
@@ -163,6 +179,16 @@ const commands = computed(() => {
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-all;
+}
+.command-uninstall {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--sj-text-3);
+}
+.command-uninstall code {
+  font-family: var(--sj-mono);
+  color: var(--sj-text-2);
+  user-select: all;
 }
 .manual-toggle {
   margin-top: 12px;

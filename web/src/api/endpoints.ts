@@ -203,6 +203,7 @@ export const paths = {
   judgeWorker: (workerId: number) => `${ADMIN}/judge-workers/${workerId}`,
   judgeWorkerStop: (workerId: number) => `${ADMIN}/judge-workers/${workerId}/stop`,
   judgeWorkerRestart: (workerId: number) => `${ADMIN}/judge-workers/${workerId}/restart`,
+  judgeWorkerUninstall: (workerId: number) => `${ADMIN}/judge-workers/${workerId}/uninstall`,
   /** 本机评测机（服务端子进程，§12.10）。 */
   judgeLocal: () => `${ADMIN}/judge-local`,
   judgeLocalStart: () => `${ADMIN}/judge-local/start`,

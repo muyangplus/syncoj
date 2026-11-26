@@ -210,6 +210,10 @@ ERROR_CODES = {
     "judge_worker_offline": "评测机不在线",
     #: 评测机远程停止 / 重启：旧版评测机不报状态，也不认命令
     "judge_worker_unsupported": "评测机版本太旧，不支持远程命令",
+    #: 评测机告别（§12.10）：管理端没有下令卸载它，不删
+    "judge_worker_not_uninstalling": "没有要求这台评测机卸载",
+    #: 评测机停止 / 重启：已经下令卸载（卸载命令一直保持到评测机告别），不能被盖掉
+    "judge_worker_uninstalling": "评测机正在卸载",
     #: 改评测机并发数（§12.10）：后端不是 isolate 的只能单并发
     "judge_worker_slots": "这台评测机的沙箱后端只能单并发",
     #: 本机评测机（§12.10）只在 Linux 服务端上提供

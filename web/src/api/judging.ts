@@ -5,7 +5,7 @@
  * 结果写进 `judge_result/`，由成绩扫描收进矩阵 —— 所以成绩照旧从 `scoreApi` 读。
  */
 
-import { request } from './client'
+import { query, request } from './client'
 import { listPage, removeItem } from './crud'
 import type { ListParams } from './crud'
 import { paths } from './endpoints'
@@ -27,6 +27,7 @@ import type {
   LocalJudgeOut,
   ProblemJudgeIn,
   ProblemOut,
+  SimpleAck,
   SourceVersionOut,
 } from './types'
 
@@ -106,6 +107,16 @@ export const judgingApi = {
   /** 重启：评完手上的任务后以同样的参数重启。 */
   restartWorker: (workerId: number) =>
     request<JudgeWorkerOut>(paths.judgeWorkerRestart(workerId), { method: 'POST' }),
+
+  /**
+   * 卸载：评测机评完手上的任务后告别（服务端删行、令牌失效），再删掉自己的服务 / 计划任务、程序、
+   * 令牌与缓存。`confirm` 必须逐字等于评测机名称。离线 / 不支持卸载的旧评测机 409；
+   * 本机评测机没在跑时直接删。
+   */
+  uninstallWorker: (workerId: number, name: string) =>
+    request<SimpleAck>(`${paths.judgeWorkerUninstall(workerId)}${query({ confirm: name })}`, {
+      method: 'POST',
+    }),
 
   /** 「评测服务」开关与全部场次的排队 / 在评数。 */
   service: () => request<JudgeServiceOut>(paths.judgeService()),

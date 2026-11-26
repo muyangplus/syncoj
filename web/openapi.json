@@ -2766,6 +2766,25 @@
         "title": "JudgeFailIn",
         "type": "object"
       },
+      "JudgeGoodbyeIn": {
+        "additionalProperties": false,
+        "description": "评测机收到 ``uninstall``、评完手上的任务后的告别（§12.10）：服务端删掉这一行。",
+        "properties": {
+          "kind": {
+            "default": "manual",
+            "enum": [
+              "systemd",
+              "schtask",
+              "local",
+              "manual"
+            ],
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "title": "JudgeGoodbyeIn",
+        "type": "object"
+      },
       "JudgeImportApplyIn": {
         "additionalProperties": false,
         "properties": {
@@ -3249,7 +3268,8 @@
             "enum": [
               "run",
               "stop",
-              "restart"
+              "restart",
+              "uninstall"
             ],
             "title": "Command",
             "type": "string"
@@ -4530,7 +4550,8 @@
             "enum": [
               "run",
               "stop",
-              "restart"
+              "restart",
+              "uninstall"
             ],
             "title": "Desired",
             "type": "string"
@@ -4664,6 +4685,11 @@
             "title": "Token",
             "type": "string"
           },
+          "uninstall_control": {
+            "default": false,
+            "title": "Uninstall Control",
+            "type": "boolean"
+          },
           "version": {
             "anyOf": [
               {
@@ -4731,7 +4757,8 @@
             "enum": [
               "run",
               "stop",
-              "restart"
+              "restart",
+              "uninstall"
             ],
             "title": "Desired",
             "type": "string"
@@ -4851,6 +4878,11 @@
           "slots_control": {
             "default": false,
             "title": "Slots Control",
+            "type": "boolean"
+          },
+          "uninstall_control": {
+            "default": false,
+            "title": "Uninstall Control",
             "type": "boolean"
           },
           "version": {
@@ -13399,6 +13431,62 @@
         ]
       }
     },
+    "/api/v1/admin/judge-workers/{worker_id}/uninstall": {
+      "post": {
+        "description": "卸载：评测机下一次 poll 时取走命令，评完手上的任务、告别（服务端删行，令牌失效），\n再按安装方式删掉自己的服务 / 计划任务、程序、令牌与缓存（§12.10）。\n\n不在线 409 ``judge_worker_offline``；没报 ``uninstall`` 能力（旧评测机）409\n``judge_worker_unsupported``。本机评测机没在跑时直接卸：删行、删 ``<数据目录>/judge-local``。\n评测机一直不回来时，照样可以直接吊销。",
+        "operationId": "uninstall_judge_worker_api_v1_admin_judge_workers__worker_id__uninstall_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "原样输入评测机名称",
+            "in": "query",
+            "name": "confirm",
+            "required": true,
+            "schema": {
+              "description": "原样输入评测机名称",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Confirm",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Uninstall Judge Worker",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/api/v1/admin/login": {
       "post": {
         "operationId": "login_api_v1_admin_login_post",
@@ -15714,6 +15802,48 @@
         "summary": "Whoami",
         "tags": [
           "agent"
+        ]
+      }
+    },
+    "/api/v1/judge/goodbye": {
+      "post": {
+        "description": "卸载前的告别：只在管理端下过 ``uninstall`` 时认（否则 409 ``judge_worker_not_uninstalling``）。\n删行（令牌随之失效）、名下还在评的任务退回队列、记审计；本机评测机一并删 ``judge-local`` 目录。\n``kind`` 是评测机接下来的清理方式，只进审计日志。",
+        "operationId": "goodbye_api_v1_judge_goodbye_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JudgeGoodbyeIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Goodbye",
+        "tags": [
+          "judge"
         ]
       }
     },

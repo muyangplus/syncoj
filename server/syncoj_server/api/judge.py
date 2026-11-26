@@ -5,6 +5,7 @@
 碰不到数据库、私钥，也读不到别的选手的代码。
 
 ``/lease`` 是旧评测机用的（不报状态、收不到命令）；新评测机只调 ``/poll``（§12.10）。
+收到 ``uninstall`` 的评测机评完手上的任务后调 ``/goodbye``：服务端删掉它这一行（令牌随之失效）。
 两者都遵守暂停与全局的「评测服务」开关：关着时不发任务。
 """
 
@@ -16,7 +17,9 @@ from fastapi.responses import FileResponse, Response
 from ..context import AppContext
 from ..errors import ApiError
 from ..models import JudgeWorker, utcnow
-from ..schemas import JudgeFailIn, JudgeLeaseOut, JudgePollIn, JudgePollOut, JudgeResultIn, SimpleAck
+from ..schemas import (
+    JudgeFailIn, JudgeGoodbyeIn, JudgeLeaseOut, JudgePollIn, JudgePollOut, JudgeResultIn, SimpleAck,
+)
 from ..security import hash_token
 from ..services import builtin_judge, judge_workers
 from .deps import _bearer, get_ctx
@@ -84,6 +87,29 @@ def poll(
         if leased is not None:
             task = JudgeLeaseOut(**leased.to_payload())
     return JudgePollOut(task=task, command=command, enabled=enabled, slots=slots, service=service)
+
+
+@router.post("/goodbye", response_model=SimpleAck)
+def goodbye(
+    payload: JudgeGoodbyeIn,
+    ctx: AppContext = Depends(get_ctx),
+    worker_id: int = Depends(require_judge_worker),
+) -> SimpleAck:
+    """卸载前的告别：只在管理端下过 ``uninstall`` 时认（否则 409 ``judge_worker_not_uninstalling``）。
+    删行（令牌随之失效）、名下还在评的任务退回队列、记审计；本机评测机一并删 ``judge-local`` 目录。
+    ``kind`` 是评测机接下来的清理方式，只进审计日志。"""
+    with ctx.db.session() as session:
+        row = session.get(JudgeWorker, worker_id)
+        if row is None:
+            raise ApiError(401, "unauthorized", "评测机令牌无效（被吊销了，或者抄错了）")
+        if row.desired != "uninstall":
+            raise ApiError(409, "judge_worker_not_uninstalling", "管理端没有要求这台评测机卸载")
+        local = bool(row.is_local)
+        kind = "local" if local else payload.kind
+        judge_workers.forget_uninstalled(session, row, kind)
+    if local:
+        ctx.local_judge.remove_files(ctx.settings)
+    return SimpleAck(ok=True, detail="已删除")
 
 
 @router.get("/tasks/{task_id}/blobs/{sha256}")

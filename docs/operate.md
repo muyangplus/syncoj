@@ -255,6 +255,7 @@ python scripts/smoke_systemd245.py --keep   # 失败后保留容器与临时目�
 | `--backend` | `isolate` | `isolate`（需先装 isolate）/ `rlimit`（不隔离网络与文件系统，仅开发自测） |
 | `--run-as` | — | `rlimit` 以 root 运行时必需：选手程序用此账号跑 |
 | `--box-id` | `0` | isolate box 编号，同机多个 worker 各不相同 |
+| `--trusted-box-id` | `--box-id` + 500 | isolate 评测侧 box（checker / interactor / grader）的起始编号，并发位依次 +1；要在 0..999、与选手 box 号段不重叠，同机各 worker 的号段也不能重叠 |
 | `--isolate` | `isolate` | isolate 可执行文件路径 |
 | `--cgroups` | 关 | isolate 用 cgroup 统计内存 |
 | `--cache-dir` | `~/.cache/syncoj-judge` | 数据包缓存目录 |

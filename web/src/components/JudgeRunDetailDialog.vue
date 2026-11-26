@@ -13,6 +13,8 @@ import { judgingApi } from '@/api'
 import { ApiError } from '@/api/client'
 import type { JudgeRunDetailOut, JudgeSourceOut, JudgeTaskDetailOut } from '@/api/types'
 import { formatTime } from '@/utils/format'
+import { problemTypeLabel } from '@/utils/judgeStatus'
+import JudgeStatusTag from '@/components/JudgeStatusTag.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -64,6 +66,7 @@ const detail = computed(() => {
       truncated: t.truncated,
       sha: t.source_sha256,
       task_id: t.id as number | null,
+      problem_type: t.problem_type ?? null,
     }
   }
   if (run.value) {
@@ -87,6 +90,7 @@ const detail = computed(() => {
       truncated: r.truncated,
       sha: r.source_sha256,
       task_id: (r.task_id ?? null) as number | null,
+      problem_type: r.problem_type ?? null,
     }
   }
   return null
@@ -115,19 +119,24 @@ watch(
   { immediate: true },
 )
 
-const STATUS_TYPE: Record<string, 'success' | 'warning' | 'danger' | 'info'> = {
-  AC: 'success',
-  WA: 'danger',
-  TLE: 'warning',
-  MLE: 'warning',
-  OLE: 'warning',
-  RE: 'danger',
-  CE: 'info',
-  SE: 'info',
+const compileBlock = ref<HTMLElement | null>(null)
+
+/** CE 标签：滚到编译信息（§12.16「点击链接查看编译器的输出」） */
+function showCompile(): void {
+  compileBlock.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
-function statusType(status: string | null | undefined): 'success' | 'warning' | 'danger' | 'info' {
-  return STATUS_TYPE[status ?? ''] ?? 'info'
+const caseColumns = computed(() => {
+  const cases = detail.value?.cases ?? []
+  return {
+    ratio: cases.some((c) => c.ratio !== null && c.ratio !== undefined),
+    file: cases.some((c) => !!c.file),
+    interactor: cases.some((c) => c.interactor_time_ms !== null && c.interactor_time_ms !== undefined),
+  }
+})
+
+function percent(ratio: number | null | undefined): string {
+  return ratio === null || ratio === undefined ? '' : `${Math.round(ratio * 1000) / 10}%`
 }
 
 // ---- 风险与疑似违规（§12.11；级别由服务端给）----
@@ -252,7 +261,8 @@ const caseSubtask = computed(() => {
             <span class="score-max">/ {{ detail.max_score ?? '—' }}</span>
           </div>
           <div class="summary-tags">
-            <el-tag :type="statusType(detail.status)" effect="light">{{ detail.status || '—' }}</el-tag>
+            <JudgeStatusTag :code="detail.status" size="default" :clickable="detail.status === 'CE'" @click="showCompile" />
+            <el-tag v-if="detail.problem_type" type="info" effect="plain">{{ problemTypeLabel(detail.problem_type) }}</el-tag>
             <el-tag v-if="detail.parse_status === 'manual'" type="warning" effect="plain">手工录分</el-tag>
             <el-tag v-if="task?.in_matrix" type="primary" effect="plain">计入成绩</el-tag>
             <el-tag v-if="task?.reused_from" type="info" effect="plain">复用 #{{ task.reused_from }}</el-tag>
@@ -281,7 +291,7 @@ const caseSubtask = computed(() => {
         </dl>
 
         <template v-if="detail.compile_message">
-          <div class="section-label">编译信息</div>
+          <div ref="compileBlock" class="section-label">编译信息</div>
           <pre class="compile">{{ detail.compile_message }}</pre>
         </template>
 
@@ -365,15 +375,28 @@ const caseSubtask = computed(() => {
           </el-table-column>
           <el-table-column label="结果" width="80" align="center">
             <template #default="{ row }">
-              <el-tag :type="statusType(row.status)" size="small" effect="light">{{ row.status }}</el-tag>
+              <JudgeStatusTag :code="row.status" />
             </template>
           </el-table-column>
-          <el-table-column label="得分" width="64" align="right" prop="score" />
+          <el-table-column label="得分" width="80" align="right">
+            <template #default="{ row }">
+              {{ row.score }}<span v-if="row.max_score" class="muted"> / {{ row.max_score }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column v-if="caseColumns.ratio" label="比例" width="72" align="right">
+            <template #default="{ row }">{{ percent(row.ratio) }}</template>
+          </el-table-column>
+          <el-table-column v-if="caseColumns.file" label="答案文件" width="120">
+            <template #default="{ row }"><span class="mono">{{ row.file }}</span></template>
+          </el-table-column>
           <el-table-column label="用时（ms）" width="100" align="right">
             <template #default="{ row }">{{ row.time_ms ?? '—' }}</template>
           </el-table-column>
           <el-table-column label="内存（KB）" width="110" align="right">
             <template #default="{ row }">{{ row.memory_kb ?? '—' }}</template>
+          </el-table-column>
+          <el-table-column v-if="caseColumns.interactor" label="交互器（ms）" width="110" align="right">
+            <template #default="{ row }">{{ row.interactor_time_ms ?? '—' }}</template>
           </el-table-column>
           <el-table-column label="信息" min-width="160">
             <template #default="{ row }">

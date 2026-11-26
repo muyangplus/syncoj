@@ -118,14 +118,22 @@ CASE_CONTAINER_KEYS = _keyset([
 _STATUS_SEVERITY = {
     "ac": 0, "ok": 0, "passed": 0, "pass": 0, "correct": 0, "accepted": 0,
     "skipped": 0, "judging": 0, "pending": 0, "": 0,
-    "pe": 1, "presentationerror": 1, "format": 1,
-    "wa": 2, "wrong": 2, "wronganswer": 2, "fail": 2, "failed": 2,
-    "tle": 3, "timeout": 3, "timelimitexceeded": 3,
-    "mle": 3, "memorylimitexceeded": 3,
-    "ole": 3, "outputlimitexceeded": 3,
-    "re": 4, "runtimeerror": 4, "crash": 4, "abort": 4,
-    "ce": 5, "compileerror": 5, "compilefailed": 5,
-    "se": 6, "systemerror": 6, "internalerror": 6,
+    "pa": 1, "pc": 1, "partial": 1, "partiallycorrect": 1, "partialaccepted": 1, "partiallyaccepted": 1,
+    "pe": 2, "presentationerror": 2, "format": 2,
+    "wa": 3, "wrong": 3, "wronganswer": 3, "fail": 3, "failed": 3,
+    "tle": 4, "timeout": 4, "timelimitexceeded": 4,
+    "mle": 4, "memorylimitexceeded": 4,
+    "ole": 4, "outputlimitexceeded": 4,
+    "re": 5, "runtimeerror": 5, "crash": 5, "abort": 5,
+    "ce": 6, "compileerror": 6, "compilefailed": 6,
+    "se": 7, "systemerror": 7, "internalerror": 7,
+}
+
+#: 外部评测器的状态别名 → 本系统的状态词（§12.5）。只规整这几种：别的原样保留（教师认得自己评测器的词）
+_STATUS_ALIASES = {
+    "pc": "PA", "pa": "PA", "partial": "PA", "partiallycorrect": "PA", "partialaccepted": "PA",
+    "partiallyaccepted": "PA",
+    "presentationerror": "PE",
 }
 
 
@@ -172,7 +180,9 @@ def _as_status(value: Any) -> Optional[str]:
     if not isinstance(value, str):
         return None
     text = value.strip()
-    return text[:32] if text else None
+    if not text:
+        return None
+    return _STATUS_ALIASES.get(_norm(text), text[:32])
 
 
 def _pick(mapping: Dict[str, Any], keys: frozenset) -> Any:
@@ -200,7 +210,7 @@ def _worst_status(statuses: Iterable[str]) -> Optional[str]:
     best_rank = -1
     for status in statuses:
         key = _norm(status)
-        rank = _STATUS_SEVERITY.get(key, 7)  # 不认识的状态按"最严重"处理
+        rank = _STATUS_SEVERITY.get(key, 8)  # 不认识的状态按"最严重"处理
         if rank > best_rank:
             best_rank = rank
             best = status

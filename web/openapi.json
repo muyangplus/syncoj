@@ -1242,9 +1242,72 @@
         "title": "BoundMachineOut",
         "type": "object"
       },
+      "BuiltinJudgeCancelIn": {
+        "additionalProperties": false,
+        "description": "取消排队中 / 在评的任务（CA）。都不填 = 全场。",
+        "properties": {
+          "player_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Player Id"
+          },
+          "problem": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Problem"
+          },
+          "task_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Id"
+          }
+        },
+        "title": "BuiltinJudgeCancelIn",
+        "type": "object"
+      },
+      "BuiltinJudgeCancelOut": {
+        "additionalProperties": false,
+        "properties": {
+          "cancelled": {
+            "default": 0,
+            "title": "Cancelled",
+            "type": "integer"
+          }
+        },
+        "title": "BuiltinJudgeCancelOut",
+        "type": "object"
+      },
       "BuiltinJudgeFailureOut": {
         "additionalProperties": false,
         "properties": {
+          "code": {
+            "default": "SF",
+            "enum": [
+              "SF",
+              "SE"
+            ],
+            "title": "Code",
+            "type": "string"
+          },
           "error": {
             "title": "Error",
             "type": "string"
@@ -1322,6 +1385,16 @@
         "additionalProperties": false,
         "description": "排队 / 在评是全数；完成 / 失败只数每 (选手, 题目) 最新的那条任务。",
         "properties": {
+          "cancelled": {
+            "default": 0,
+            "title": "Cancelled",
+            "type": "integer"
+          },
+          "compiling": {
+            "default": 0,
+            "title": "Compiling",
+            "type": "integer"
+          },
           "delayed": {
             "default": 0,
             "title": "Delayed",
@@ -1344,6 +1417,11 @@
             "title": "Failures",
             "type": "array"
           },
+          "judging": {
+            "default": 0,
+            "title": "Judging",
+            "type": "integer"
+          },
           "queued": {
             "default": 0,
             "title": "Queued",
@@ -1354,10 +1432,27 @@
             "title": "Running",
             "type": "integer"
           },
+          "submit_failed": {
+            "default": 0,
+            "title": "Submit Failed",
+            "type": "integer"
+          },
+          "system_error": {
+            "default": 0,
+            "title": "System Error",
+            "type": "integer"
+          },
           "total": {
             "default": 0,
             "title": "Total",
             "type": "integer"
+          },
+          "unservable": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Unservable",
+            "type": "object"
           }
         },
         "title": "BuiltinJudgeProgressOut",
@@ -2478,6 +2573,48 @@
         "title": "InstallLedgerOut",
         "type": "object"
       },
+      "JudgeAnswerRefOut": {
+        "additionalProperties": false,
+        "description": "提交答案题的一个答案文件（``path`` / ``sha256`` 为空 = 这个点没交）。",
+        "properties": {
+          "case": {
+            "title": "Case",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path"
+          },
+          "sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sha256"
+          }
+        },
+        "required": [
+          "case",
+          "name"
+        ],
+        "title": "JudgeAnswerRefOut",
+        "type": "object"
+      },
       "JudgeAutoIn": {
         "additionalProperties": false,
         "description": "场次的自动入队设置（§12.9、§12.12）。智能模式的阈值不传 = 不改。",
@@ -2653,6 +2790,39 @@
       "JudgeCaseOut": {
         "additionalProperties": false,
         "properties": {
+          "file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "File"
+          },
+          "interactor_time_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interactor Time Ms"
+          },
+          "max_score": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Score"
+          },
           "memory_kb": {
             "anyOf": [
               {
@@ -2672,6 +2842,17 @@
           "name": {
             "title": "Name",
             "type": "string"
+          },
+          "ratio": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ratio"
           },
           "score": {
             "default": 0,
@@ -3128,6 +3309,13 @@
           "source": {
             "$ref": "#/components/schemas/JudgeBlobRefOut"
           },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/JudgeAnswerRefOut"
+            },
+            "title": "Sources",
+            "type": "array"
+          },
           "testdata": {
             "$ref": "#/components/schemas/JudgeBlobRefOut"
           }
@@ -3142,6 +3330,25 @@
           "attempt"
         ],
         "title": "JudgeLeaseOut",
+        "type": "object"
+      },
+      "JudgePhaseIn": {
+        "additionalProperties": false,
+        "description": "评测机报告在评任务的阶段（编译中 / 评测中）。",
+        "properties": {
+          "phase": {
+            "enum": [
+              "compiling",
+              "judging"
+            ],
+            "title": "Phase",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phase"
+        ],
+        "title": "JudgePhaseIn",
         "type": "object"
       },
       "JudgePollIn": {
@@ -3351,6 +3558,11 @@
       "JudgeProblemConfigOut": {
         "additionalProperties": false,
         "properties": {
+          "compare_mode": {
+            "default": "both",
+            "title": "Compare Mode",
+            "type": "string"
+          },
           "compile_flags": {
             "anyOf": [
               {
@@ -3395,6 +3607,11 @@
               }
             ],
             "title": "Output File"
+          },
+          "problem_type": {
+            "default": "traditional",
+            "title": "Problem Type",
+            "type": "string"
           },
           "time_limit_ms": {
             "title": "Time Limit Ms",
@@ -3658,6 +3875,17 @@
           "problem": {
             "title": "Problem",
             "type": "string"
+          },
+          "problem_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Problem Type"
           },
           "risk_count": {
             "default": 0,
@@ -4159,6 +4387,17 @@
             ],
             "title": "Outcome"
           },
+          "phase": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phase"
+          },
           "player_id": {
             "title": "Player Id",
             "type": "integer"
@@ -4182,6 +4421,17 @@
           "problem": {
             "title": "Problem",
             "type": "string"
+          },
+          "problem_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Problem Type"
           },
           "reason": {
             "anyOf": [
@@ -4396,6 +4646,17 @@
               }
             ],
             "title": "Outcome"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phase"
           },
           "player_id": {
             "title": "Player Id",
@@ -4685,6 +4946,13 @@
             "title": "Token",
             "type": "string"
           },
+          "types": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Types",
+            "type": "array"
+          },
           "uninstall_control": {
             "default": false,
             "title": "Uninstall Control",
@@ -4879,6 +5147,13 @@
             "default": false,
             "title": "Slots Control",
             "type": "boolean"
+          },
+          "types": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Types",
+            "type": "array"
           },
           "uninstall_control": {
             "default": false,
@@ -6493,6 +6768,23 @@
         "additionalProperties": false,
         "description": "题目的自带评测配置（§12）。``compile_flags`` 只接受白名单里的几类参数（服务端校验）。",
         "properties": {
+          "compare_mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "strict",
+                  "trailing_spaces",
+                  "trailing_newlines",
+                  "both"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Compare Mode"
+          },
           "compile_flags": {
             "anyOf": [
               {
@@ -6521,7 +6813,8 @@
             "default": "stdio",
             "enum": [
               "stdio",
-              "file"
+              "file",
+              "auto"
             ],
             "title": "Io Mode",
             "type": "string"
@@ -6559,6 +6852,23 @@
               }
             ],
             "title": "Output File"
+          },
+          "problem_type": {
+            "anyOf": [
+              {
+                "enum": [
+                  "traditional",
+                  "grader",
+                  "answer_only",
+                  "interactive"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Problem Type"
           },
           "time_limit_ms": {
             "anyOf": [
@@ -6636,6 +6946,17 @@
       "ProblemOut": {
         "additionalProperties": false,
         "properties": {
+          "compare_mode": {
+            "default": "both",
+            "enum": [
+              "strict",
+              "trailing_spaces",
+              "trailing_newlines",
+              "both"
+            ],
+            "title": "Compare Mode",
+            "type": "string"
+          },
           "compile_flags": {
             "anyOf": [
               {
@@ -6725,6 +7046,17 @@
             ],
             "title": "Output File"
           },
+          "problem_type": {
+            "default": "traditional",
+            "enum": [
+              "traditional",
+              "grader",
+              "answer_only",
+              "interactive"
+            ],
+            "title": "Problem Type",
+            "type": "string"
+          },
           "testdata": {
             "anyOf": [
               {
@@ -6770,13 +7102,81 @@
         "additionalProperties": false,
         "description": "题目的数据包（§12）：上传时校验出的摘要。",
         "properties": {
+          "answer_count": {
+            "default": 0,
+            "title": "Answer Count",
+            "type": "integer"
+          },
+          "answer_exts": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Answer Exts",
+            "type": "array"
+          },
           "cases": {
             "title": "Cases",
             "type": "integer"
           },
+          "checker_points": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checker Points"
+          },
+          "checker_protocol": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checker Protocol"
+          },
+          "declared_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Declared Type"
+          },
+          "detected_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detected Type"
+          },
+          "grader_files": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Grader Files",
+            "type": "array"
+          },
           "has_checker": {
             "default": false,
             "title": "Has Checker",
+            "type": "boolean"
+          },
+          "has_interactor": {
+            "default": false,
+            "title": "Has Interactor",
             "type": "boolean"
           },
           "name": {
@@ -6800,6 +7200,13 @@
             "default": 0,
             "title": "Total Score",
             "type": "integer"
+          },
+          "warnings": {
+            "items": {
+              "$ref": "#/components/schemas/TestdataWarningOut"
+            },
+            "title": "Warnings",
+            "type": "array"
           }
         },
         "required": [
@@ -8159,6 +8566,25 @@
           "received_at"
         ],
         "title": "SourceVersionOut",
+        "type": "object"
+      },
+      "TestdataWarningOut": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "default": "",
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "title": "TestdataWarningOut",
         "type": "object"
       },
       "TickRequest": {
@@ -11096,6 +11522,59 @@
           }
         },
         "summary": "Queue Builtin Judge",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/contests/{contest_id}/judge/builtin/cancel": {
+      "post": {
+        "description": "取消排队中 / 在评的任务（CA）：不写成绩；正在评的评测机交回的结果会被丢掉。",
+        "operationId": "cancel_builtin_judge_api_v1_admin_contests__contest_id__judge_builtin_cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BuiltinJudgeCancelIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BuiltinJudgeCancelOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Builtin Judge",
         "tags": [
           "admin"
         ]
@@ -14203,7 +14682,7 @@
     },
     "/api/v1/admin/problems/{problem_id}/judge": {
       "put": {
-        "description": "题目的评测方式：外部评测器 / 自带评测，以及时限、内存、IO 方式与文件名、编译参数。",
+        "description": "题目的评测方式：外部评测器 / 自带评测，以及题型、时限、内存、IO 方式与文件名、编译参数、比较方式。\n\n改题型时已有数据包按新题型重新校验，不合格 422 ``testdata_invalid_for_type``；交互题只能用\n标准输入输出（422 ``io_mode_conflict``）；提交答案题不存时限、内存与编译参数。",
         "operationId": "set_problem_judge_api_v1_admin_problems__problem_id__judge_put",
         "parameters": [
           {
@@ -14353,7 +14832,7 @@
         ]
       },
       "post": {
-        "description": "上传数据包（zip）。**上传时就校验结构**：缺答案、路径不安全、配置写错当场报出来。",
+        "description": "上传数据包（zip）。**上传时就校验结构**：缺答案、路径不安全、配置写错当场报出来。\n\n按题目的题型校验（给了 ``problem_type`` 就按它、并在成功后改题目的题型）；config.json 写的\n``type`` 与之不一致时 422 ``testdata_type_mismatch``（``details``：problem_type / declared）。",
         "operationId": "upload_testdata_api_v1_admin_problems__problem_id__testdata_post",
         "parameters": [
           {
@@ -14363,6 +14842,25 @@
             "schema": {
               "title": "Problem Id",
               "type": "integer"
+            }
+          },
+          {
+            "description": "同时把题目改成这个题型（「改为 X 并上传」）",
+            "in": "query",
+            "name": "problem_type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "同时把题目改成这个题型（「改为 X 并上传」）",
+              "title": "Problem Type"
             }
           }
         ],
@@ -15916,7 +16414,7 @@
     },
     "/api/v1/judge/tasks/{task_id}/blobs/{sha256}": {
       "get": {
-        "description": "取任务要用的内容：只认这个任务的代码与它那道题的数据包。",
+        "description": "取任务要用的内容：只认这个任务的代码（提交答案题是清单里的答案文件）与它那道题的数据包。",
         "operationId": "task_blob_api_v1_judge_tasks__task_id__blobs__sha256__get",
         "parameters": [
           {
@@ -16012,6 +16510,59 @@
           }
         },
         "summary": "Report Failure",
+        "tags": [
+          "judge"
+        ]
+      }
+    },
+    "/api/v1/judge/tasks/{task_id}/phase": {
+      "post": {
+        "description": "评测机报告在评任务的阶段：``compiling``（编译中）/ ``judging``（评测中）。旧评测机不报。",
+        "operationId": "report_phase_api_v1_judge_tasks__task_id__phase_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JudgePhaseIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Report Phase",
         "tags": [
           "judge"
         ]

@@ -27,6 +27,7 @@ from sqlalchemy import select
 
 from ..models import EventLog, JudgeTask, JudgeWorker, Player, RuntimeSetting, iso_utc, utcnow
 from ..schemas import JudgePollIn, JudgeServiceOut, JudgeWorkerOut, JudgeWorkerTaskOut
+from .builtin_judge import worker_types
 
 DEFAULT_POLL_SECONDS = 5
 #: 在线判定的下限：轮询间隔很短时也给网络抖动留余地
@@ -198,6 +199,7 @@ def worker_out(row: JudgeWorker, now: datetime, running: Optional[List[JudgeWork
         remote_control=remote_control(row),
         slots_control=remote_control(row) and slots_control(row),
         uninstall_control=bool(row.is_local) or (remote_control(row) and uninstall_control(row)),
+        types=list(worker_types((row.features or "").split(","))),
         running=list(running or []),
     )
 

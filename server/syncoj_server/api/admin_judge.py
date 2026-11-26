@@ -30,6 +30,8 @@ from ..models import (
     utcnow,
 )
 from ..schemas import (
+    BuiltinJudgeCancelIn,
+    BuiltinJudgeCancelOut,
     BuiltinJudgeIn,
     BuiltinJudgeProgressOut,
     BuiltinJudgeQueuedOut,
@@ -127,7 +129,10 @@ def set_problem_judge(
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> ProblemOut:
-    """题目的评测方式：外部评测器 / 自带评测，以及时限、内存、IO 方式与文件名、编译参数。"""
+    """题目的评测方式：外部评测器 / 自带评测，以及题型、时限、内存、IO 方式与文件名、编译参数、比较方式。
+
+    改题型时已有数据包按新题型重新校验，不合格 422 ``testdata_invalid_for_type``；交互题只能用
+    标准输入输出（422 ``io_mode_conflict``）；提交答案题不存时限、内存与编译参数。"""
     flags = _validate_flags(payload.compile_flags)
     input_file = _validate_io_name(payload.input_file, "输入文件名")
     output_file = _validate_io_name(payload.output_file, "输出文件名")
@@ -135,43 +140,115 @@ def set_problem_judge(
         row = _load_problem(session, problem_id)
         if (input_file or "%s.in" % row.ident) == (output_file or "%s.out" % row.ident):
             raise ApiError(400, "validation_error", "输入文件名和输出文件名不能相同")
+        kind = payload.problem_type or builtin_judge.problem_type_of(row)
+        if kind == "interactive" and payload.io_mode != "stdio":
+            raise ApiError(422, "io_mode_conflict", "交互题只能用标准输入输出",
+                           details={"problem_type": kind, "io_mode": payload.io_mode})
+        if kind != builtin_judge.problem_type_of(row) and row.testdata_sha256:
+            summary = _parse_stored(ctx, row, kind)
+            row.testdata_info = json.dumps(summary)
+        _check_grader_names(row, kind)
+        row.problem_type = None if kind == builtin_judge.TRADITIONAL else kind
+        if payload.compare_mode is not None:
+            row.compare_mode = None if payload.compare_mode == "both" else payload.compare_mode
         row.judge_mode = payload.judge_mode
-        row.time_limit_ms = payload.time_limit_ms
-        row.memory_limit_mb = payload.memory_limit_mb
+        answer_only = kind == "answer_only"
+        row.time_limit_ms = None if answer_only else payload.time_limit_ms
+        row.memory_limit_mb = None if answer_only else payload.memory_limit_mb
         row.io_mode = payload.io_mode
         row.input_file = input_file
         row.output_file = output_file
-        row.compile_flags = flags
+        row.compile_flags = None if answer_only else flags
         session.flush()
         return _problem_out(row, ctx.settings)
+
+
+def _parse_stored(ctx: AppContext, row: Problem, kind: str) -> Dict[str, object]:
+    """已存的数据包按 ``kind`` 重新校验，返回新摘要；不合格 422。"""
+    try:
+        with zipfile.ZipFile(str(ctx.blobs.path_for(row.testdata_sha256))) as archive:
+            data = parse_testdata(archive, kind)
+    except (zipfile.BadZipFile, TestdataError, OSError) as exc:
+        raise ApiError(422, "testdata_invalid_for_type", "已有的数据包不符合新题型：%s" % exc,
+                       details={"problem_type": kind})
+    if data.declared_type and data.declared_type != kind:
+        raise ApiError(422, "testdata_invalid_for_type", "已有数据包的 config.json 写的是 %s 题" % data.declared_type,
+                       details={"problem_type": kind, "declared": data.declared_type})
+    return data.summary()
+
+
+def _check_grader_names(row: Problem, kind: str) -> None:
+    """grader 的文件不能与选手代码同名（``<ident>.cpp`` / ``<ident>.c``）。"""
+    if kind != "grader" or not row.testdata_info:
+        return
+    try:
+        info = json.loads(row.testdata_info)
+    except ValueError:
+        return
+    names = set(info.get("grader_names") or []) | set(info.get("grader_files") or [])
+    clash = sorted(names & {"%s.cpp" % row.ident, "%s.c" % row.ident, "%s.cc" % row.ident})
+    if clash:
+        raise ApiError(422, "testdata_invalid_for_type", "grader 的文件不能和选手代码同名：%s" % ", ".join(clash),
+                       details={"problem_type": kind})
 
 
 @router.post("/problems/{problem_id}/testdata", response_model=ProblemOut)
 def upload_testdata(
     problem_id: int,
     file: UploadFile = File(...),
+    problem_type: Optional[str] = Query(default=None, max_length=16,
+                                        description="同时把题目改成这个题型（「改为 X 并上传」）"),
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> ProblemOut:
-    """上传数据包（zip）。**上传时就校验结构**：缺答案、路径不安全、配置写错当场报出来。"""
+    """上传数据包（zip）。**上传时就校验结构**：缺答案、路径不安全、配置写错当场报出来。
+
+    按题目的题型校验（给了 ``problem_type`` 就按它、并在成功后改题目的题型）；config.json 写的
+    ``type`` 与之不一致时 422 ``testdata_type_mismatch``（``details``：problem_type / declared）。"""
+    if problem_type is not None and problem_type not in builtin_judge.PROBLEM_TYPES:
+        raise ApiError(400, "validation_error", "不认识的题型：%s" % problem_type)
+    with ctx.db.session() as session:
+        current = builtin_judge.problem_type_of(_load_problem(session, problem_id))
+    kind = problem_type or current
     try:
         sha256, size = ctx.blobs.put_stream(file.file, max_bytes=MAX_TESTDATA_BYTES)
     except BlobTooLarge as exc:
         raise ApiError(413, "payload_too_large", str(exc))
     try:
         with zipfile.ZipFile(str(ctx.blobs.path_for(sha256))) as archive:
-            summary = parse_testdata(archive).summary()
+            data = parse_testdata(archive, kind)
+            summary = data.summary()
     except (zipfile.BadZipFile, TestdataError) as exc:
         _reclaim_blobs(ctx, [sha256])
         message = "不是合法的 zip" if isinstance(exc, zipfile.BadZipFile) else str(exc)
         raise ApiError(400, "validation_error", "数据包不对：%s" % message)
+    if data.declared_type and data.declared_type != kind:
+        _reclaim_blobs(ctx, [sha256])
+        raise ApiError(422, "testdata_type_mismatch",
+                       "数据包写的是 %s 题，题目是 %s 题" % (data.declared_type, kind),
+                       details={"problem_type": kind, "declared": data.declared_type})
     with ctx.db.session() as session:
         row = _load_problem(session, problem_id)
+        if kind == "interactive" and (row.io_mode or "stdio") != "stdio":
+            _reclaim_blobs(ctx, [sha256])
+            raise ApiError(422, "io_mode_conflict", "交互题只能用标准输入输出",
+                           details={"problem_type": kind, "io_mode": row.io_mode})
+        if problem_type is not None:
+            row.problem_type = None if kind == builtin_judge.TRADITIONAL else kind
+            if kind == "answer_only":
+                row.time_limit_ms = row.memory_limit_mb = None
+                row.compile_flags = None
         old = row.testdata_sha256
         row.testdata_sha256 = sha256
         row.testdata_name = (file.filename or "testdata.zip")[:255]
         row.testdata_size = size
         row.testdata_info = json.dumps(summary)
+        try:
+            _check_grader_names(row, kind)
+        except ApiError:
+            session.rollback()
+            _reclaim_blobs(ctx, [sha256])
+            raise
         session.flush()
         out = _problem_out(row, ctx.settings)
     if old and old != sha256:
@@ -343,6 +420,7 @@ def _task_out(task: JudgeTask, player_no: str, matrix: Dict[Tuple[int, str], int
         problem=task.problem,
         status=task.status,
         trigger=builtin_judge.trigger_of(task),
+        phase=task.phase if task.status == builtin_judge.RUNNING else None,
         reason=task.reason,
         priority=int(task.priority or 0),
         requested_by=task.requested_by,
@@ -598,6 +676,26 @@ def list_source_versions(
                 in_matrix=any(task.id in matrix_ids for task in mine),
             ))
     return page_of(items, total, page)
+
+
+@router.post("/contests/{contest_id}/judge/builtin/cancel", response_model=BuiltinJudgeCancelOut)
+def cancel_builtin_judge(
+    contest_id: int,
+    payload: BuiltinJudgeCancelIn,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> BuiltinJudgeCancelOut:
+    """取消排队中 / 在评的任务（CA）：不写成绩；正在评的评测机交回的结果会被丢掉。"""
+    with ctx.db.session() as session:
+        if session.get(Contest, contest_id) is None:
+            raise ApiError(404, "not_found", "场次不存在")
+        count = builtin_judge.cancel(session, contest_id, payload.problem, payload.player_id, payload.task_id)
+        if count:
+            session.add(EventLog(
+                level="info", category="judge_queue", contest_id=contest_id,
+                message="取消 %d 个评测任务（%s）" % (count, admin.username),
+            ))
+    return BuiltinJudgeCancelOut(cancelled=count)
 
 
 @router.get("/contests/{contest_id}/judge/builtin", response_model=BuiltinJudgeProgressOut)

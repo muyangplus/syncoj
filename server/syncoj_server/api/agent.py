@@ -38,6 +38,7 @@ from ..models import (
     DeployTask,
     EventLog,
     Player,
+    Problem,
     SourceFile,
     iso_utc,
     local_clock,
@@ -203,7 +204,8 @@ def _reject_outside_window(ctx: AppContext, identity: AgentIdentity, now) -> Non
 
 
 def _agent_config(
-    ctx: AppContext, settings: Optional[runtime_settings.RuntimeSettings] = None
+    ctx: AppContext, settings: Optional[runtime_settings.RuntimeSettings] = None,
+    contest_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """下发给 Agent 的运行时策略。服务端是权威，客户端不得自行决定。
 
@@ -213,10 +215,18 @@ def _agent_config(
     """
     if settings is None:
         settings = _runtime_settings(ctx)
+    extra: List[str] = []
+    if contest_id is not None:
+        # 场次里有提交答案题：答案文件（.out 之类）也要扫描（§12.13）
+        with ctx.db.session() as session:
+            extra = problem_rules.answer_extensions(
+                session.execute(select(Problem).where(Problem.contest_id == contest_id)).scalars()
+            )
     cfg = build_policy(
         max_file_size=ctx.settings.max_file_size,
         scan_interval=settings.tick_idle_seconds,
         max_files=ctx.settings.max_files_per_scan,
+        extra_extensions=extra,
     )
     cfg["tick_idle_seconds"] = settings.tick_idle_seconds
     cfg["tick_active_seconds"] = settings.tick_active_seconds
@@ -535,7 +545,7 @@ def tick(
         upgrade=upgrade,
         uninstall_token=uninstall_token,
         diagnostics_request=diagnostics_request,
-        config=_agent_config(ctx, live),
+        config=_agent_config(ctx, live, identity.contest_id),
         claimed=True,
         # 走到这一支就说明场次与选手都解析出来了 —— 这正是三态里的"能干活"那一档。
         # 漏掉它会让 Agent 自己都以为"还没轮到"，于是永远不去扫代码。

@@ -16,6 +16,8 @@ import ScoreTimelineChart from '@/components/ScoreTimelineChart.vue'
 import { usePolling } from '@/composables/usePolling'
 import { formatBytes, formatTime } from '@/utils/format'
 import { triggerLabel } from '@/utils/judgeTrigger'
+import { taskStatusCode } from '@/utils/judgeStatus'
+import JudgeStatusTag from '@/components/JudgeStatusTag.vue'
 
 const props = defineProps<{
   modelValue: boolean
@@ -126,14 +128,6 @@ function rowClass({ row }: { row: SourceVersionOut }): string {
   return row.id === selectedId.value ? 'is-selected' : ''
 }
 
-const STATUS_TYPE: Record<string, 'success' | 'warning' | 'danger' | 'info'> = {
-  AC: 'success',
-  WA: 'danger',
-  RE: 'danger',
-  TLE: 'warning',
-  MLE: 'warning',
-  OLE: 'warning',
-}
 
 
 // ---- 动作 ----
@@ -270,14 +264,11 @@ const selected = computed(() => focused.value.find((v) => v.id === selectedId.va
               <template v-if="!row.judge"><span class="muted">未评测</span></template>
               <template v-else-if="row.judge.status === 'done' && row.judge.score !== null">
                 <span class="score">{{ row.judge.score }} / {{ row.judge.max_score }}</span>
-                <el-tag :type="STATUS_TYPE[row.judge.outcome ?? ''] ?? 'info'" size="small" effect="light" class="tag">
-                  {{ row.judge.outcome }}
-                </el-tag>
+                <JudgeStatusTag :code="row.judge.outcome" class="tag" />
                 <el-tag v-if="row.in_matrix" size="small" type="primary" effect="plain" class="tag">计入成绩</el-tag>
               </template>
-              <template v-else-if="row.judge.status === 'failed'"><span class="error-text">评测失败</span></template>
               <template v-else-if="row.judge.status === 'done'"><span class="muted">未交</span></template>
-              <template v-else><span class="muted">{{ row.judge.status === 'running' ? '评测中' : '排队中' }}</span></template>
+              <template v-else><JudgeStatusTag :code="taskStatusCode(row.judge)" class="tag" /></template>
             </template>
           </el-table-column>
           <el-table-column label="评测" min-width="110">

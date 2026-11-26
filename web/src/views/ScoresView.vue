@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 
 import { ElMessage, ElMessageBox } from 'element-plus'
 
@@ -86,7 +86,6 @@ const runs = useList<JudgeRunOut>({
   watches: [() => contest.currentId, () => parseFilter.value],
 })
 
-const runsSection = ref<HTMLElement | null>(null)
 const scanReport = ref<JudgeScanOut | null>(null)
 const scanErrors = computed(() => scanReport.value?.errors ?? [])
 
@@ -121,12 +120,6 @@ const rescan = useMutation(
     },
   },
 )
-
-/** 把"未解析"作为筛选条件带到记录区，并滚过去 —— 不滚的话长页面上等于点了没反应。 */
-function showUnparsedRuns(): void {
-  parseFilter.value = 'unparsed'
-  void nextTick(() => runsSection.value?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
-}
 
 // --------------------------------------------------------------------------- //
 // 清空成绩记录（范围删除）
@@ -229,52 +222,6 @@ function cellView(cell: ScoreCellOut | undefined): {
 function cellOf(row: ScoreRowOut, ident: string): ScoreCellOut | undefined {
   return row.cells?.find((cell) => cell.problem === ident)
 }
-
-interface CellRef {
-  row: ScoreRowOut
-  cell: ScoreCellOut
-}
-
-/** 按题目筛出符合条件的所有格子。 */
-function pickCells(predicate: (cell: ScoreCellOut) => boolean): CellRef[] {
-  const result: CellRef[] = []
-  for (const row of view.value?.rows ?? []) {
-    for (const cell of row.cells) {
-      if (predicate(cell)) result.push({ row, cell })
-    }
-  }
-  return result
-}
-
-const unparsedCells = computed(() => pickCells((cell) => cell.parse_status === 'unparsed'))
-
-/**
- * 「交了，但评测还没出结果」。
- *
- * 这一栏是给教师吃定心丸用的：机器在跑、文件收到了，等着就行 ——
- * 以前这种格子显示成「—」，和"根本没交"长得一模一样，只能逐个点开看。
- */
-const pendingCells = computed(() =>
-  pickCells((cell) => cell.parse_status === 'missing' && cell.submitted === true),
-)
-
-/**
- * 「一题都没交」。真正需要人去催的那一栏。
- *
- * 只统计**清单里登记过的题目** —— 未登记的题目可能只是历史遗留，
- * 拿它去质问选手是错的。
- */
-const missingCells = computed(() => {
-  const declared = new Set(
-    (view.value?.columns ?? []).filter((column) => column.declared).map((c) => c.ident),
-  )
-  return pickCells(
-    (cell) =>
-      cell.parse_status === 'missing' &&
-      cell.submitted !== true &&
-      declared.has(cell.problem),
-  )
-})
 
 // --------------------------------------------------------------------------- //
 // 手工录分（矩阵与记录共用同一个弹窗）
@@ -440,10 +387,6 @@ function runStatusLabel(parseStatus: string): string {
   return map[parseStatus] ?? parseStatus
 }
 
-const pendingTotal = computed(
-  () => unparsedCells.value.length + pendingCells.value.length + missingCells.value.length,
-)
-
 // --------------------------------------------------------------------------- //
 // 测试点明细（§12）
 // --------------------------------------------------------------------------- //
@@ -559,70 +502,6 @@ async function rejudge(run: JudgeRunDetailOut, force = false): Promise<void> {
       </template>
     </el-alert>
 
-    <SectionCard v-if="pendingTotal" title="待处理" :meta="`${pendingTotal} 格`">
-      <div class="todo-list">
-        <div v-if="unparsedCells.length" class="todo-row">
-          <div class="todo-label">
-            <span class="todo-dot unparsed" />未解析
-            <span class="todo-count">{{ unparsedCells.length }} 格</span>
-          </div>
-          <div class="todo-chips">
-            <el-tag
-              v-for="item in unparsedCells.slice(0, 20)"
-              :key="`${item.row.player_id}-${item.cell.problem}`"
-              size="small"
-              type="danger"
-              effect="plain"
-              class="clickable"
-              @click="openManual(item.row, item.cell.problem, item.cell)"
-            >
-              {{ item.row.player_no }} / {{ item.cell.problem }}
-            </el-tag>
-            <span v-if="unparsedCells.length > 20" class="muted">等 {{ unparsedCells.length }} 格</span>
-            <el-button link type="primary" @click="showUnparsedRuns">筛选评测记录</el-button>
-          </div>
-        </div>
-
-        <div v-if="pendingCells.length" class="todo-row">
-          <div class="todo-label">
-            <span class="todo-dot pending" />待评测
-            <span class="todo-count">{{ pendingCells.length }} 格</span>
-          </div>
-          <div class="todo-chips">
-            <el-tag
-              v-for="item in pendingCells.slice(0, 20)"
-              :key="`${item.row.player_id}-${item.cell.problem}`"
-              size="small"
-              type="primary"
-              effect="plain"
-            >
-              {{ item.row.player_no }} / {{ item.cell.problem }}
-            </el-tag>
-            <span v-if="pendingCells.length > 20" class="muted">等 {{ pendingCells.length }} 格</span>
-          </div>
-        </div>
-
-        <div v-if="missingCells.length" class="todo-row">
-          <div class="todo-label">
-            <span class="todo-dot missing" />未交
-            <span class="todo-count">{{ missingCells.length }} 格</span>
-          </div>
-          <div class="todo-chips">
-            <el-tag
-              v-for="item in missingCells.slice(0, 20)"
-              :key="`${item.row.player_id}-${item.cell.problem}`"
-              size="small"
-              type="warning"
-              effect="plain"
-            >
-              {{ item.row.player_no }} / {{ item.cell.problem }}
-            </el-tag>
-            <span v-if="missingCells.length > 20" class="muted">等 {{ missingCells.length }} 格</span>
-          </div>
-        </div>
-      </div>
-    </SectionCard>
-
     <SectionCard
       title="成绩矩阵"
       :meta="view && view.columns.length ? `${view.rows.length} 名选手 · ${view.columns.length} 道题` : ''"
@@ -710,7 +589,7 @@ async function rejudge(run: JudgeRunDetailOut, force = false): Promise<void> {
       </div>
     </SectionCard>
 
-    <div ref="runsSection" class="runs-anchor">
+    <div class="runs-anchor">
       <SectionCard title="评测记录" :meta="`共 ${runs.total.value} 条`" flush>
         <template #extra>
           <el-select v-model="parseFilter" style="width: 140px">
@@ -905,62 +784,6 @@ async function rejudge(run: JudgeRunDetailOut, force = false): Promise<void> {
   display: inline-flex;
   align-items: center;
   color: var(--sj-danger);
-}
-
-/* ---- 待处理 ---- */
-
-.todo-list {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.todo-row {
-  display: flex;
-  gap: 16px;
-  align-items: flex-start;
-}
-
-.todo-label {
-  flex: none;
-  width: 120px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-weight: 600;
-  line-height: 24px;
-}
-
-.todo-count {
-  font-weight: 400;
-  font-size: 12.5px;
-  color: var(--sj-text-3);
-}
-
-.todo-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-}
-
-.todo-dot.unparsed {
-  background: var(--sj-danger);
-}
-
-.todo-dot.pending {
-  background: var(--sj-primary);
-}
-
-.todo-dot.missing {
-  background: var(--sj-warning);
-}
-
-.todo-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
-  min-width: 0;
 }
 
 /* ---- 图例 ---- */

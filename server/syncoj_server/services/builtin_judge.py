@@ -40,12 +40,19 @@ MAX_RESULT_BYTES = 2 * 1024 * 1024
 
 QUEUED, RUNNING, DONE, FAILED = "queued", "running", "done", "failed"
 
-#: 触发方式：收到新版本自动排 / 教师排（评最新版）/ 教师指定历史版本重测
-AUTO, MANUAL, REJUDGE = "auto", "manual", "rejudge"
-TRIGGERS = (AUTO, MANUAL, REJUDGE)
+#: 触发方式：收到新版本自动排 / 智能模式判断"可能写完了"才排（§12.12）/ 教师排（评最新版）/
+#: 教师指定历史版本重测
+AUTO, SMART, MANUAL, REJUDGE = "auto", "smart", "manual", "rejudge"
+TRIGGERS = (AUTO, SMART, MANUAL, REJUDGE)
 
-#: 场次的自动入队开关
-AUTO_OFF, AUTO_ON_CHANGE = "off", "on_change"
+#: 领任务的优先级（大的先领，§12.12）。智能模式各信号的优先级在 ``smart_judge.PRIORITY``，
+#: 都落在手动与收到新版本即评之间
+PRIORITY_MANUAL = 100
+PRIORITY_AUTO = 10
+
+#: 场次的自动入队开关：关闭 / 收到新版本即评 / 智能（§12.12）
+AUTO_OFF, AUTO_ON_CHANGE, AUTO_SMART = "off", "on_change", "smart"
+AUTO_MODES = (AUTO_OFF, AUTO_ON_CHANGE, AUTO_SMART)
 DEFAULT_AUTO_DELAY = 60
 MAX_AUTO_DELAY = 3600
 
@@ -143,6 +150,7 @@ def enqueue(
             session.add(JudgeTask(
                 contest_id=contest_id, player_id=player_id, problem=ident, status=QUEUED,
                 trigger=trigger, requested_by=requested_by, rerun=bool(rerun),
+                priority=PRIORITY_AUTO if trigger == AUTO else PRIORITY_MANUAL,
             ))
             count += 1
     return count
@@ -168,7 +176,7 @@ def enqueue_version(
     )
     task = JudgeTask(
         contest_id=contest_id, player_id=version.player_id, problem=ident, status=QUEUED,
-        trigger=REJUDGE, requested_by=requested_by, rerun=bool(rerun),
+        trigger=REJUDGE, requested_by=requested_by, rerun=bool(rerun), priority=PRIORITY_MANUAL,
         source_version_id=version.id, source_path=version.rel_path, source_sha256=version.sha256,
     )
     session.add(task)
@@ -242,7 +250,7 @@ def auto_enqueue(session, contest: Contest, player_id: int, rel_path: str, now: 
         return ident
     session.add(JudgeTask(
         contest_id=contest.id, player_id=player_id, problem=ident, status=QUEUED,
-        trigger=AUTO, not_before=due,
+        trigger=AUTO, not_before=due, priority=PRIORITY_AUTO,
     ))
     return ident
 
@@ -359,7 +367,8 @@ def _lease_next(ctx, worker_id: int, now: datetime) -> Optional[Lease]:
                      & (JudgeTask.not_before.is_(None) | (JudgeTask.not_before <= now)))
                     | ((JudgeTask.status == RUNNING) & (JudgeTask.lease_until < now))
                 )
-                .order_by(JudgeTask.id)
+                # 优先级高的先领（§12.12），同级先排先领
+                .order_by(JudgeTask.priority.desc(), JudgeTask.id)
                 .limit(1)
             ).scalar_one_or_none()
             if task is None:

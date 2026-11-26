@@ -496,9 +496,15 @@ class ContestOut(_Base):
     #: ``null`` = 这一端不限制。
     starts_at: Optional[str] = None
     ends_at: Optional[str] = None
-    #: 自带评测的自动入队（§12.9）：``off`` / ``on_change``；去抖秒数
+    #: 自带评测的自动入队（§12.9）：``off`` / ``on_change`` / ``smart``（§12.12）；去抖秒数
     auto_judge: str = "off"
     auto_judge_delay: int = 60
+    #: 智能模式的阈值（§12.12；没设过的回显默认值）
+    smart_stable_seconds: int = 180
+    smart_idle_seconds: int = 600
+    smart_near_end_seconds: int = 900
+    smart_cooldown_seconds: int = 300
+    smart_queue_factor: int = 20
     #: 是否设了考生页密码。密码本身**只写不读**（库里也只有哈希）。
     has_player_password: bool = False
 
@@ -964,16 +970,31 @@ class BuiltinJudgeProgressOut(_Base):
 
 
 class JudgeAutoIn(_Base):
-    """场次的自动入队设置（§12.9）。"""
+    """场次的自动入队设置（§12.9、§12.12）。智能模式的阈值不传 = 不改。"""
 
-    auto_judge: Literal["off", "on_change"]
-    #: 去抖秒数：同一 (选手, 题目) 在这段时间内连续改动只评最后一版
+    auto_judge: Literal["off", "on_change", "smart"]
+    #: 去抖秒数：同一 (选手, 题目) 在这段时间内连续改动只评最后一版（``on_change`` 用）
     auto_judge_delay: int = Field(default=60, ge=0, le=3600)
+    #: 智能：最新版本稳定这么久、且之后改了别的题 → 排（「换题」）
+    smart_stable_seconds: Optional[int] = Field(default=None, ge=30, le=3600)
+    #: 智能：最新版本稳定这么久 → 排（「空闲」）
+    smart_idle_seconds: Optional[int] = Field(default=None, ge=60, le=7200)
+    #: 智能：距结束时间不超过这么久时，未评的最新版本各排一次（「将结束」）；0 = 不用
+    smart_near_end_seconds: Optional[int] = Field(default=None, ge=0, le=7200)
+    #: 智能：同一 (选手, 题目) 两次「换题」/「空闲」排任务的最短间隔
+    smart_cooldown_seconds: Optional[int] = Field(default=None, ge=0, le=3600)
+    #: 智能：排队任务数超过「在线评测机并发总数 × 它」时只接受将结束 / 掉线 / 已结束
+    smart_queue_factor: Optional[int] = Field(default=None, ge=1, le=1000)
 
 
 class JudgeAutoOut(_Base):
     auto_judge: str
     auto_judge_delay: int
+    smart_stable_seconds: int
+    smart_idle_seconds: int
+    smart_near_end_seconds: int
+    smart_cooldown_seconds: int
+    smart_queue_factor: int
 
 
 class JudgeTaskOut(_Base):
@@ -985,8 +1006,12 @@ class JudgeTaskOut(_Base):
     problem: str
     #: queued / running / done / failed
     status: str
-    #: auto / manual / rejudge
+    #: auto / smart / manual / rejudge
     trigger: str
+    #: 智能模式的信号（§12.12）：moved_on / long_stable / near_end / offline / contest_end；其余为 null
+    reason: Optional[str] = None
+    #: 领任务的优先级，大的先领
+    priority: int = 0
     requested_by: Optional[str] = None
     source_version_id: Optional[int] = None
     source_path: Optional[str] = None
@@ -1060,6 +1085,8 @@ class VersionJudgeOut(_Base):
     task_id: int
     status: str
     trigger: str
+    #: 智能模式的信号（§12.12），其余触发方式为 null
+    reason: Optional[str] = None
     score: Optional[int] = None
     max_score: Optional[int] = None
     outcome: Optional[str] = None

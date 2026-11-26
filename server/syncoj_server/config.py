@@ -169,6 +169,9 @@ class Settings:
     # ---- 评测成绩扫描 ----
     # 周期扫描 judge_result/ 目录并回写成绩。对延迟不敏感，所以放得比较宽
     judge_scan_interval: float = 10.0
+    #: 智能自动评测（§12.12）多久评估一轮：对 ``auto_judge = smart`` 的场次判断谁的哪道题
+    #: "可能已经写完"。阈值按场次配，这里只管节奏
+    smart_tick_seconds: float = 30.0
 
     #: 本机评测机（§12.10）用 rlimit 后端、且服务端以 root 运行时，选手程序换成这个账号跑。
     #: 装了 isolate 时用不到它；服务端不是 root 时也用不到（以服务端账号跑）。

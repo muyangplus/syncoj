@@ -363,7 +363,7 @@ syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
 | `GET /api/v1/admin/judge-service` | `{enabled, queued, delayed, running}`；`queued` 含还在去抖的（`delayed`），跨全部场次 |
 | `PUT /api/v1/admin/judge-service` | `{enabled}`。关 = 所有评测机领不到新任务（`/poll` 与 `/lease` 都遵守，poll 响应 `service: false`）；手上的照常评完交回；排队的任务留着，打开后接着发。存在 `runtime_setting` 的 `judge_service` 键（没有 = 开） |
 
-- 自动入队（`auto_judge = on_change`）在评测服务关闭时**照常入队**，只是不发给评测机。
+- 自动入队（`auto_judge = on_change` / `smart`）在评测服务关闭时**照常入队**，只是不发给评测机。
 
 本机评测机（只在 Linux 服务端上）：卡片头「本机评测机」启动 / 停止。已设过并发数（`desired_slots` > 1）且用 isolate 时直接带 `--slots` 启动。
 
@@ -427,9 +427,9 @@ syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
 
 | 接口 | 说明 |
 |---|---|
-| `PUT /api/v1/admin/contests/{id}/judge/auto` | `{auto_judge: "off"\|"on_change", auto_judge_delay: 0–3600}`；场次列表回显这两项 |
-| `GET /api/v1/admin/contests/{id}/judge/versions?player_id=&problem=` | 选手的代码版本（旧的在前，列表信封）：`id` / `rel_path` / `sha256` / `size` / `received_at` / `problem`（按当前题目模式）/ `current` / `tasks` / `judge{task_id, status, trigger, score, max_score, outcome, reused, applied, finished_at}` / `in_matrix` |
-| `GET /api/v1/admin/contests/{id}/judge/tasks?player_id=&problem=&status=&trigger=&flag=` | 评测任务（新的在前，列表信封），含复用的；每行带 `warning_count` / `risk_count`，`flag` 见第 8 节 |
+| `PUT /api/v1/admin/contests/{id}/judge/auto` | `{auto_judge: "off"\|"on_change"\|"smart", auto_judge_delay: 0–3600, smart_stable_seconds?: 30–3600, smart_idle_seconds?: 60–7200, smart_near_end_seconds?: 0–7200, smart_cooldown_seconds?: 0–3600, smart_queue_factor?: 1–1000}`；`smart_*` 不传 = 不改；响应与场次列表回显全部七项（没设过的阈值回显默认值 180 / 600 / 900 / 300 / 20）。智能模式见 §12.12 |
+| `GET /api/v1/admin/contests/{id}/judge/versions?player_id=&problem=` | 选手的代码版本（旧的在前，列表信封）：`id` / `rel_path` / `sha256` / `size` / `received_at` / `problem`（按当前题目模式）/ `current` / `tasks` / `judge{task_id, status, trigger, reason, score, max_score, outcome, reused, applied, finished_at}` / `in_matrix` |
+| `GET /api/v1/admin/contests/{id}/judge/tasks?player_id=&problem=&status=&trigger=&reason=&flag=` | 评测任务（新的在前，列表信封），含复用的；每行带 `trigger`（`auto` / `smart` / `manual` / `rejudge`）、`reason`（智能模式的信号 `moved_on` / `long_stable` / `near_end` / `offline` / `contest_end`，其余为 `null`）、`priority`（大的先领）、`warning_count` / `risk_count`，`flag` 见第 8 节 |
 | `GET /api/v1/admin/contests/{id}/judge/tasks/{task_id}` | 任务与测试点明细（含 `precheck_warnings[].level`、`risk_events`） |
 | `GET /api/v1/admin/contests/{id}/judge/tasks/{task_id}/source` | 这次评测的代码 `{task_id, path, sha256, size, content}`（按任务记下的 sha256 取，UTF-8 解码）；还没选定代码或内容已清掉 `404`，超过 1 MB `413 payload_too_large` |
 | `POST /api/v1/admin/contests/{id}/judge/tasks/{task_id}/adopt` | 采用此版本成绩：写成当前 `result.json` 并立即重扫；无结果 `409 judge_task_no_result`，手工录入的格子 `409 manual_score` |

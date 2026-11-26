@@ -39,6 +39,7 @@ from .services.announce import run_announcer
 from .services.discovery import run_discovery_responder
 from .tasks.flush import run_maintenance_loop
 from .tasks.judge import run_judge_scan_loop
+from .tasks.smart_judge import run_smart_judge_loop
 
 __all__ = ["create_app"]
 
@@ -57,6 +58,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         background = [
             asyncio.ensure_future(run_maintenance_loop(ctx)),
             asyncio.ensure_future(run_judge_scan_loop(ctx)),
+            asyncio.ensure_future(run_smart_judge_loop(ctx)),
             asyncio.ensure_future(run_discovery_responder(ctx)),
             asyncio.ensure_future(run_announcer(ctx)),
         ]

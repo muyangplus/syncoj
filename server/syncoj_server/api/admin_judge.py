@@ -56,7 +56,7 @@ from ..schemas import (
 )
 from ..security import hash_token, new_token
 from ..storage import BlobTooLarge
-from ..services import builtin_judge, judge_dist, judge_workers
+from ..services import builtin_judge, judge_dist, judge_workers, smart_judge
 from ..services.judge import SCAN_LOCK, scan_contest_results
 from .admin import (
     AdminIdentity,
@@ -287,19 +287,35 @@ def set_auto_judge(
     admin: AdminIdentity = Depends(require_admin),
 ) -> JudgeAutoOut:
     """自动入队（§12.9）：``on_change`` = 收到某题的新版本就排评测，同一 (选手, 题目)
-    在 ``auto_judge_delay`` 秒内连续改动只评最后一版。场次进行中也排。"""
+    在 ``auto_judge_delay`` 秒内连续改动只评最后一版。场次进行中也排。
+
+    ``smart``（§12.12）= 判断"可能已经写完"才排（换题 / 空闲 / 将结束 / 掉线 / 已结束），
+    阈值随请求改，不传的不改。"""
     with ctx.db.session() as session:
         contest = session.get(Contest, contest_id)
         if contest is None:
             raise ApiError(404, "not_found", "场次不存在")
         contest.auto_judge = payload.auto_judge
         contest.auto_judge_delay = payload.auto_judge_delay
+        for column in smart_judge.FIELDS:
+            value = getattr(payload, column)
+            if value is not None:
+                setattr(contest, column, value)
+        if payload.auto_judge == builtin_judge.AUTO_SMART:
+            current = smart_judge.thresholds_of(contest)
+            detail = "智能（稳定 %d 秒、空闲 %d 秒、结束前 %d 秒、冷却 %d 秒、队列倍数 %d）" % (
+                current.stable, current.idle, current.near_end, current.cooldown, current.queue_factor)
+        elif payload.auto_judge == builtin_judge.AUTO_ON_CHANGE:
+            detail = "收到新版本即评（去抖 %d 秒）" % payload.auto_judge_delay
+        else:
+            detail = "关闭"
         session.add(EventLog(
-            level="info", category="judge_auto", contest_id=contest_id,
-            message="自动评测：%s（去抖 %d 秒）" % (
-                "收到新版本即评" if payload.auto_judge == "on_change" else "关闭", payload.auto_judge_delay),
+            level="info", category="judge_auto", contest_id=contest_id, message="自动评测：%s" % detail,
         ))
-        return JudgeAutoOut(auto_judge=contest.auto_judge, auto_judge_delay=contest.auto_judge_delay)
+        return JudgeAutoOut(
+            auto_judge=contest.auto_judge, auto_judge_delay=contest.auto_judge_delay,
+            **smart_judge.threshold_fields(contest),
+        )
 
 
 def _matrix_task_ids(session, contest_id: int, player_ids=None) -> Dict[Tuple[int, str], int]:
@@ -327,6 +343,8 @@ def _task_out(task: JudgeTask, player_no: str, matrix: Dict[Tuple[int, str], int
         problem=task.problem,
         status=task.status,
         trigger=builtin_judge.trigger_of(task),
+        reason=task.reason,
+        priority=int(task.priority or 0),
         requested_by=task.requested_by,
         source_version_id=task.source_version_id,
         source_path=task.source_path,
@@ -355,6 +373,7 @@ def list_judge_tasks(
     problem: Optional[str] = Query(default=None, max_length=64),
     status: Optional[str] = Query(default=None, max_length=16),
     trigger: Optional[str] = Query(default=None, max_length=16),
+    reason: Optional[str] = Query(default=None, max_length=16, description="智能模式的信号（§12.12）"),
     flag: Optional[FlagFilter] = Query(default=None, description="any / warning（有疑似违规）/ risk（有风险）"),
     page: PageParams = Depends(),
     ctx: AppContext = Depends(get_ctx),
@@ -363,6 +382,7 @@ def list_judge_tasks(
     """评测任务（新的在前）。任务即历史：每一次评测（含复用的）都在这里。
 
     ``flag``（§12.11）：``risk`` 有风险、``warning`` 有疑似违规（不论有没有风险）、``any`` 两者之一。
+    ``reason``（§12.12）：智能模式的信号，配 ``trigger=smart`` 用。
     """
     conditions = [JudgeTask.contest_id == contest_id]
     if player_id is not None:
@@ -376,6 +396,8 @@ def list_judge_tasks(
             conditions.append(JudgeTask.trigger.is_(None) | (JudgeTask.trigger == trigger))
         else:
             conditions.append(JudgeTask.trigger == trigger)
+    if reason:
+        conditions.append(JudgeTask.reason == reason)
     flagged = flag_condition(JudgeTask.warning_count, JudgeTask.risk_count, flag)
     if flagged is not None:
         conditions.append(flagged)
@@ -565,6 +587,7 @@ def list_source_versions(
                     task_id=chosen.id,
                     status=chosen.status,
                     trigger=builtin_judge.trigger_of(chosen),
+                    reason=chosen.reason,
                     score=chosen.score,
                     max_score=chosen.max_score,
                     outcome=chosen.outcome,

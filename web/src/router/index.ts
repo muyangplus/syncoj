@@ -59,7 +59,7 @@ const routes: RouteRecordRaw[] = [
         path: 'contests/archived',
         name: 'contests-archived',
         component: () => import('@/views/ArchivedContestsView.vue'),
-        meta: { title: '已归档场次' },
+        meta: { title: '场次管理 · 已归档' },
       },
       {
         path: 'rosters',

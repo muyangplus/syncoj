@@ -29,7 +29,11 @@ const collapsed = ref(false)
 const aboutOpen = ref(false)
 
 function covers(item: NavItem, name: unknown): boolean {
-  return item.name === name || !!item.children?.some((child) => child.name === name)
+  return (
+    item.name === name ||
+    !!item.children?.some((child) => child.name === name) ||
+    !!item.match?.includes(String(name))
+  )
 }
 
 const currentGroup = computed(() => {
@@ -159,7 +163,7 @@ onMounted(async () => {
               v-else
               :to="{ name: item.name }"
               class="nav-item"
-              :class="{ active: route.name === item.name }"
+              :class="{ active: covers(item, route.name) }"
               :title="collapsed ? item.label : undefined"
             >
               <el-icon class="nav-icon"><component :is="item.icon" /></el-icon>

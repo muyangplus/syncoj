@@ -32,6 +32,8 @@ export interface NavItem {
   children?: NavItem[]
   /** 命令面板额外匹配的词 */
   keywords?: string
+  /** 这些路由也算在这一项下（侧栏高亮用；不单独出现在侧栏与命令面板） */
+  match?: string[]
 }
 
 /** 侧栏 / 命令面板里真正能跳转的页面（有二级项的父项只列它的二级项）。 */
@@ -58,16 +60,8 @@ export const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
         label: '场次管理',
         icon: 'Calendar',
         group: '考务',
-        children: [
-          { name: 'contests', label: '全部场次', icon: 'Calendar', group: '考务' },
-          {
-            name: 'contests-archived',
-            label: '已归档',
-            icon: 'Box',
-            group: '考务',
-            keywords: '已归档场次 归档',
-          },
-        ],
+        // 已归档只从场次页的二级菜单进入
+        match: ['contests-archived'],
       },
       { name: 'rosters', label: '名单库', icon: 'Notebook', group: '考务' },
       { name: 'overview', label: '选手状态', icon: 'Monitor', group: '考务' },

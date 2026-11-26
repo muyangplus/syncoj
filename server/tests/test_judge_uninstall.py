@@ -476,7 +476,10 @@ def test_uninstall_ps1_BOM_CRLF_不读标记内容_不跟随联接() -> None:
     assert "Unregister-ScheduledTask -TaskName $TaskName" in body
     assert "Unregister-ScheduledTask -TaskName $CleanupTaskName" in body
     assert "rmdir /s /q" in body and "Remove-Item -Recurse -" not in body and "Remove-Item -LiteralPath" not in body
-    assert "Get-Content" not in body and "Invoke-Expression" not in body
+    # 标记文件只看在不在：唯一读内容的是 install.json（只有 SYSTEM / Administrators 能写），只当 JSON 解析
+    reads = [line for line in body.split("\r\n") if "Get-Content" in line]
+    assert reads and all("$ManifestPath" in line and "ConvertFrom-Json" in line for line in reads)
+    assert "Invoke-Expression" not in body and "$Marker -Raw" not in body
     assert not [line for line in body.split("\r\n") if line.startswith("'@")]
 
 
@@ -488,3 +491,12 @@ def test_卸载脚本不能提前结束嵌入它的heredoc(monkeypatch, tmp_path
     (tmp_path / "uninstall.ps1").write_text("'@\n", encoding="utf-8")
     with pytest.raises(RuntimeError):
         judge_dist.uninstall_script("uninstall.ps1")
+
+
+
+def test_uninstall_ps1_只删真正的安装目录() -> None:
+    """脚本被复制到别处运行时不能把那个目录整个删掉：删除之前先认 install.json（schtask）与 pyz。"""
+    text = (TEMPLATES / "uninstall.ps1").read_bytes().decode("utf-8-sig")
+    guard = text.index("$IsInstallDir")
+    assert guard < text.index("rmdir /s /q")
+    assert "'schtask'" in text and "syncoj-judge.pyz" in text

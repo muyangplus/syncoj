@@ -32,6 +32,20 @@ function Warn([string]$Message) { Write-Host "!!  $Message" -ForegroundColor Yel
 
 if ($IfRequested -and -not (Test-Path -LiteralPath $Marker)) { exit 0 }
 
+# 只删真正的评测机安装目录：脚本被复制到别处（下载目录、仓库检出）运行时，这里的整目录删除
+# 会删错地方。安装目录里必有 install.ps1 写的 install.json（kind = schtask）与评测机程序
+$ManifestPath = Join-Path $InstallDir 'install.json'
+$IsInstallDir = $false
+if ((Test-Path -LiteralPath $ManifestPath) -and (Test-Path -LiteralPath (Join-Path $InstallDir 'syncoj-judge.pyz'))) {
+    try {
+        $IsInstallDir = ((Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json).kind -eq 'schtask')
+    } catch { $IsInstallDir = $false }
+}
+if (-not $IsInstallDir) {
+    Write-Host "错误：$InstallDir 不是评测机的安装目录（没有 install.json / syncoj-judge.pyz）：请运行安装目录里的 uninstall.ps1" -ForegroundColor Red
+    exit 1
+}
+
 $identity = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host '错误：需要管理员权限：右键「以管理员身份运行」PowerShell 后重试' -ForegroundColor Red

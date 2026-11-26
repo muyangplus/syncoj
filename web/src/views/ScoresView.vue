@@ -67,8 +67,8 @@ const view = computed(() => {
 // 都列出来"。
 // --------------------------------------------------------------------------- //
 
-/** 空串 = 全部。服务端只认 `parse_status` 这个参数名。 */
-const parseFilter = ref('')
+/** `all` = 全部（el-select 把空串当成"没选"，只显示占位符）。服务端只认 `parse_status` 这个参数名。 */
+const parseFilter = ref('all')
 /** 风险标注筛选（§12.11） */
 const flagFilter = ref('all')
 
@@ -80,7 +80,7 @@ const runs = useList<JudgeRunOut>({
     if (!contestId) return Promise.resolve(null)
     return scoreApi.runs(
       contestId,
-      { limit, offset, parse_status: parseFilter.value || undefined, flag: flagParam(flagFilter.value) },
+      { limit, offset, parse_status: parseFilter.value === 'all' ? undefined : parseFilter.value, flag: flagParam(flagFilter.value) },
       signal,
     )
   },
@@ -609,7 +609,7 @@ async function rejudge(run: JudgeRunDetailOut, force = false): Promise<void> {
             <el-option v-for="f in FLAG_FILTERS" :key="f.value" :label="f.label" :value="f.value" />
           </el-select>
           <el-select v-model="parseFilter" style="width: 140px">
-            <el-option label="全部记录" value="" />
+            <el-option label="全部记录" value="all" />
             <el-option label="未解析" value="unparsed" />
             <el-option label="已解析" value="ok" />
             <el-option label="手工录入" value="manual" />
@@ -626,7 +626,7 @@ async function rejudge(run: JudgeRunDetailOut, force = false): Promise<void> {
           :total="runs.total.value"
           :page="runs.page.value"
           :page-size="runs.pageSize.value"
-          :filtered="!!parseFilter || flagFilter !== 'all'"
+          :filtered="parseFilter !== 'all' || flagFilter !== 'all'"
           :row-class="flagRowClass"
           empty-text="无评测记录"
           empty-filtered-text="无匹配的评测记录"

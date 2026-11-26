@@ -12,6 +12,7 @@ import type { JudgeExportFormat } from '@/api'
 import { ApiError } from '@/api/client'
 import type { BuiltinJudgeProgressOut, JudgeTaskOut, PlayerOut, ProblemOut } from '@/api/types'
 import DataTable from '@/components/DataTable.vue'
+import JudgeFlagTags from '@/components/JudgeFlagTags.vue'
 import JudgeRunDetailDialog from '@/components/JudgeRunDetailDialog.vue'
 import JudgeWorkersCard from '@/components/JudgeWorkersCard.vue'
 import ScoreTimelineDialog from '@/components/ScoreTimelineDialog.vue'
@@ -24,6 +25,7 @@ import JudgeImportDialog from '@/components/JudgeImportDialog.vue'
 import { usePolling } from '@/composables/usePolling'
 import { useContestStore } from '@/stores/contest'
 import { formatTime } from '@/utils/format'
+import { FLAG_FILTERS, flagParam, flagRowClass } from '@/utils/judgeFlags'
 
 const contest = useContestStore()
 const router = useRouter()
@@ -214,16 +216,27 @@ async function saveAuto(): Promise<void> {
 
 /** all = 全部触发方式 */
 const taskTrigger = ref('all')
+/** 风险标注筛选（§12.11） */
+const taskFlag = ref('all')
 
 const tasks = useList<JudgeTaskOut>({
   rowKey: (row) => row.id,
   loader: ({ limit, offset, signal }) => {
     const contestId = contest.currentId
     if (!contestId) return Promise.resolve(null)
-    return judgingApi.tasks(contestId, { limit, offset, trigger: taskTrigger.value === 'all' ? undefined : taskTrigger.value }, signal)
+    return judgingApi.tasks(
+      contestId,
+      {
+        limit,
+        offset,
+        trigger: taskTrigger.value === 'all' ? undefined : taskTrigger.value,
+        flag: flagParam(taskFlag.value),
+      },
+      signal,
+    )
   },
   pageSize: 20,
-  watches: [() => contest.currentId, () => taskTrigger.value],
+  watches: [() => contest.currentId, () => taskTrigger.value, () => taskFlag.value],
 })
 
 const TRIGGER_LABEL: Record<string, string> = { auto: '自动', manual: '手动', rejudge: '历史版本' }
@@ -438,6 +451,9 @@ function openPlayerTimeline(): void {
 
     <SectionCard title="评测记录" :meta="`共 ${tasks.total.value} 次`" flush>
       <template #extra>
+        <el-select v-model="taskFlag" style="width: 130px" aria-label="风险标注">
+          <el-option v-for="f in FLAG_FILTERS" :key="f.value" :label="f.label" :value="f.value" />
+        </el-select>
         <el-select v-model="taskTrigger" style="width: 140px">
           <el-option label="全部触发方式" value="all" />
           <el-option label="自动" value="auto" />
@@ -455,7 +471,8 @@ function openPlayerTimeline(): void {
         :total="tasks.total.value"
         :page="tasks.page.value"
         :page-size="tasks.pageSize.value"
-        :filtered="taskTrigger !== 'all'"
+        :filtered="taskTrigger !== 'all' || taskFlag !== 'all'"
+        :row-class="flagRowClass"
         empty-text="无评测记录"
         empty-filtered-text="无匹配的评测记录"
         @update:page="tasks.setPage"
@@ -490,6 +507,7 @@ function openPlayerTimeline(): void {
                 </el-tag>
                 <el-tag v-if="row.reused_from" size="small" type="info" effect="plain" class="tag">复用</el-tag>
                 <el-tag v-if="row.in_matrix" size="small" type="primary" effect="plain" class="tag">计入成绩</el-tag>
+                <JudgeFlagTags :warning="row.warning_count" :risk="row.risk_count" class="tag" />
               </template>
               <span v-else-if="row.status === 'done' && row.outcome === 'missing'" class="muted">未交</span>
               <span v-else-if="row.status === 'failed'" class="error-text">{{ row.error || '失败' }}</span>

@@ -760,6 +760,38 @@ def _migration_023_judge_worker_status(engine: Engine) -> None:
         conn.execute(text("UPDATE judge_worker SET is_local = 0 WHERE is_local IS NULL"))
 
 
+def _migration_024_judge_flags(engine: Engine) -> None:
+    """评测机可远程改并发数；评测结果记疑似违规 / 风险条数（§12.10、§12.11）。
+
+    1. ``judge_worker`` 加 ``desired_slots``（NULL = 没设过）与 ``features``（旧评测机 NULL）；
+    2. ``judge_task`` / ``judge_run`` 加 ``warning_count`` / ``risk_count``，回填：把已有的
+       ``result_json`` / ``raw_json`` 解析一次按 :func:`precheck.count_flags_json` 计数，其余为 0。
+       只改仍为 NULL 的行，可重跑；
+    3. 「评测服务」开关存在已有的 ``runtime_setting`` 表里（键 ``judge_service``），不用加表。
+    """
+    from .judging.precheck import count_flags_json
+
+    tables = _tables(engine)
+    if "judge_worker" in tables:
+        _add_column(engine, "judge_worker", "desired_slots", "INTEGER")
+        _add_column(engine, "judge_worker", "features", "VARCHAR(128)")
+    for table, column in (("judge_task", "result_json"), ("judge_run", "raw_json")):
+        if table not in tables:
+            continue
+        _add_column(engine, table, "warning_count", "INTEGER")
+        _add_column(engine, table, "risk_count", "INTEGER")
+        with engine.begin() as conn:
+            rows = conn.execute(text(
+                "SELECT id, %s FROM %s WHERE warning_count IS NULL OR risk_count IS NULL" % (column, table)
+            )).all()
+            for row_id, raw in rows:
+                warnings, risks = count_flags_json(raw)
+                conn.execute(
+                    text("UPDATE %s SET warning_count = :w, risk_count = :r WHERE id = :id" % table),
+                    {"w": warnings, "r": risks, "id": row_id},
+                )
+
+
 MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
     (1, "统一密钥注册 + 名单库所需的结构", _migration_001_enrollment),
     (2, "机器永久绑定名单条目；去掉注册码链路", _migration_002_roster_binding),
@@ -859,6 +891,11 @@ MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
         23,
         "评测机记自报状态，可暂停、远程停止与重启",
         _migration_023_judge_worker_status,
+    ),
+    (
+        24,
+        "评测机可远程改并发数；评测结果记疑似违规与风险条数",
+        _migration_024_judge_flags,
     ),
 ]
 

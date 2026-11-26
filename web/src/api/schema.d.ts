@@ -984,6 +984,8 @@ export interface paths {
         /**
          * List Judge Tasks
          * @description 评测任务（新的在前）。任务即历史：每一次评测（含复用的）都在这里。
+         *
+         *     ``flag``（§12.11）：``risk`` 有风险、``warning`` 有疑似违规（不论有没有风险）、``any`` 两者之一。
          */
         get: operations["list_judge_tasks_api_v1_admin_contests__contest_id__judge_tasks_get"];
         put?: never;
@@ -1029,6 +1031,29 @@ export interface paths {
          *     换成它。手工录入的格子不动（409 ``manual_score``，先清除手工成绩）。
          */
         post: operations["adopt_judge_task_api_v1_admin_contests__contest_id__judge_tasks__task_id__adopt_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/contests/{contest_id}/judge/tasks/{task_id}/source": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Judge Task Source
+         * @description 这个评测任务评的那份代码（按任务记下的 sha256 从内容存储取；只读，≤ 1 MB）。
+         *
+         *     明细里按行显示、把预检 / 风险标注的行高亮。还没选定代码（排队中）或内容已被清掉时 404，
+         *     超过 1 MB 时 413。
+         */
+        get: operations["get_judge_task_source_api_v1_admin_contests__contest_id__judge_tasks__task_id__source_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1551,6 +1576,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/judge-service": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Judge Service Status
+         * @description 「评测服务」开关与全部场次的排队 / 在评数（§12.10）。
+         */
+        get: operations["judge_service_status_api_v1_admin_judge_service_get"];
+        /**
+         * Set Judge Service
+         * @description 开 / 关评测服务。关 = 所有评测机都领不到新任务：手上的照常评完交回，排队的任务留着
+         *     （自动入队也照常入队），打开后接着发。
+         */
+        put: operations["set_judge_service_api_v1_admin_judge_service_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/judge-workers": {
         parameters: {
             query?: never;
@@ -1594,7 +1644,11 @@ export interface paths {
         head?: never;
         /**
          * Update Judge Worker
-         * @description 改名；暂停（``enabled`` = false：领不到新任务，手上的照常评完）/ 恢复。
+         * @description 改名；暂停（``enabled`` = false：领不到新任务，手上的照常评完）/ 恢复；改并发数
+         *     （``slots``：随下一次 poll 下发，评测机评完手上的任务后以新的 ``--slots`` 重启）。
+         *
+         *     改并发数：旧评测机（不认下发的并发数）409 ``judge_worker_unsupported``；后端不是 isolate
+         *     而 ``slots`` > 1 时 409 ``judge_worker_slots``。
          */
         patch: operations["update_judge_worker_api_v1_admin_judge_workers__worker_id__patch"];
         trace?: never;
@@ -2701,7 +2755,7 @@ export interface paths {
         put?: never;
         /**
          * Lease
-         * @description 领下一个任务；没有（或这台评测机被暂停）就 204。租约 15 分钟，过期没交结果的任务自动回到队列。
+         * @description 领下一个任务；没有（或这台评测机被暂停、评测服务关着）就 204。租约 15 分钟，过期没交结果的任务自动回到队列。
          */
         post: operations["lease_api_v1_judge_lease_post"];
         delete?: never;
@@ -2724,7 +2778,7 @@ export interface paths {
          * @description 自报状态；``want`` = 1 时顺带领一个任务；响应带管理端下的命令（§12.10）。
          *
          *     有命令（``stop`` / ``restart``）时不发任务：评测机要做的是评完手上的然后退出。
-         *     暂停时也不发任务，但命令照样送达。
+         *     暂停或评测服务关着时也不发任务，但命令照样送达。``slots`` 是管理端设定的并发数。
          */
         post: operations["poll_api_v1_judge_poll_post"];
         delete?: never;
@@ -4424,6 +4478,8 @@ export interface components {
             backend?: string | null;
             /** Boot Id */
             boot_id?: string | null;
+            /** Features */
+            features?: string[] | null;
             /** Hostname */
             hostname?: string | null;
             /** Isolated */
@@ -4464,6 +4520,13 @@ export interface components {
              * @default true
              */
             enabled: boolean;
+            /**
+             * Service
+             * @default true
+             */
+            service: boolean;
+            /** Slots */
+            slots?: number | null;
             task?: components["schemas"]["JudgeLeaseOut"] | null;
         };
         /**
@@ -4478,6 +4541,12 @@ export interface components {
              * @default
              */
             excerpt: string;
+            /**
+             * Level
+             * @default warning
+             * @enum {string}
+             */
+            level: "risk" | "warning";
             /**
              * Line
              * @default 0
@@ -4521,6 +4590,42 @@ export interface components {
             score: number;
             /** Status */
             status: string;
+        };
+        /**
+         * JudgeRiskEventOut
+         * @description 一条风险事件（§12.11）：运行选手程序后发现的逃逸 / 篡改痕迹，或源码预检的拦截项。
+         */
+        JudgeRiskEventOut: {
+            /** Case */
+            case?: string | null;
+            /** Code */
+            code: string;
+            /**
+             * Excerpt
+             * @default
+             */
+            excerpt: string;
+            /**
+             * Level
+             * @default risk
+             * @enum {string}
+             */
+            level: "risk" | "warning";
+            /**
+             * Line
+             * @default 0
+             */
+            line: number;
+            /**
+             * Message
+             * @default
+             */
+            message: string;
+            /**
+             * Rule
+             * @default
+             */
+            rule: string;
         };
         /**
          * JudgeRunClearIn
@@ -4583,6 +4688,13 @@ export interface components {
             precheck_warnings?: components["schemas"]["JudgePrecheckFindingOut"][];
             /** Problem */
             problem: string;
+            /**
+             * Risk Count
+             * @default 0
+             */
+            risk_count: number;
+            /** Risk Events */
+            risk_events?: components["schemas"]["JudgeRiskEventOut"][];
             /** Score */
             score?: number | null;
             /** Source Path */
@@ -4602,6 +4714,11 @@ export interface components {
             truncated: boolean;
             /** Updated At */
             updated_at: string;
+            /**
+             * Warning Count
+             * @default 0
+             */
+            warning_count: number;
         };
         /** JudgeRunOut */
         JudgeRunOut: {
@@ -4624,6 +4741,11 @@ export interface components {
             player_no: string;
             /** Problem */
             problem: string;
+            /**
+             * Risk Count
+             * @default 0
+             */
+            risk_count: number;
             /** Score */
             score?: number | null;
             /** Source Path */
@@ -4632,6 +4754,11 @@ export interface components {
             status?: string | null;
             /** Updated At */
             updated_at: string;
+            /**
+             * Warning Count
+             * @default 0
+             */
+            warning_count: number;
         };
         /** JudgeScanOut */
         JudgeScanOut: {
@@ -4662,6 +4789,53 @@ export interface components {
              * @default 0
              */
             unparsed: number;
+        };
+        /**
+         * JudgeServiceIn
+         * @description 「评测服务」开关：关 = 所有评测机都领不到新任务（手上的照常评完，排队的留着）。
+         */
+        JudgeServiceIn: {
+            /** Enabled */
+            enabled: boolean;
+        };
+        /** JudgeServiceOut */
+        JudgeServiceOut: {
+            /**
+             * Delayed
+             * @default 0
+             */
+            delayed: number;
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /**
+             * Queued
+             * @default 0
+             */
+            queued: number;
+            /**
+             * Running
+             * @default 0
+             */
+            running: number;
+        };
+        /**
+         * JudgeSourceOut
+         * @description 评测任务评的那份代码（按任务记下的 sha256 从内容存储取，§12.11）。
+         */
+        JudgeSourceOut: {
+            /** Content */
+            content: string;
+            /** Path */
+            path?: string | null;
+            /** Sha256 */
+            sha256: string;
+            /** Size */
+            size: number;
+            /** Task Id */
+            task_id: number;
         };
         /** JudgeSubtaskOut */
         JudgeSubtaskOut: {
@@ -4740,6 +4914,13 @@ export interface components {
             rerun: boolean;
             /** Reused From */
             reused_from?: number | null;
+            /**
+             * Risk Count
+             * @default 0
+             */
+            risk_count: number;
+            /** Risk Events */
+            risk_events?: components["schemas"]["JudgeRiskEventOut"][];
             /** Score */
             score?: number | null;
             /** Source Path */
@@ -4759,6 +4940,11 @@ export interface components {
              * @default false
              */
             truncated: boolean;
+            /**
+             * Warning Count
+             * @default 0
+             */
+            warning_count: number;
         };
         /**
          * JudgeTaskOut
@@ -4809,6 +4995,11 @@ export interface components {
             rerun: boolean;
             /** Reused From */
             reused_from?: number | null;
+            /**
+             * Risk Count
+             * @default 0
+             */
+            risk_count: number;
             /** Score */
             score?: number | null;
             /** Source Path */
@@ -4821,6 +5012,11 @@ export interface components {
             status: string;
             /** Trigger */
             trigger: string;
+            /**
+             * Warning Count
+             * @default 0
+             */
+            warning_count: number;
         };
         /** JudgeWorkerCreatedOut */
         JudgeWorkerCreatedOut: {
@@ -4834,6 +5030,8 @@ export interface components {
              * @enum {string}
              */
             desired: "run" | "stop" | "restart";
+            /** Desired Slots */
+            desired_slots?: number | null;
             /**
              * Enabled
              * @default true
@@ -4876,6 +5074,11 @@ export interface components {
             running?: components["schemas"]["JudgeWorkerTaskOut"][];
             /** Slots */
             slots?: number | null;
+            /**
+             * Slots Control
+             * @default false
+             */
+            slots_control: boolean;
             /** Token */
             token: string;
             /** Version */
@@ -4900,6 +5103,8 @@ export interface components {
              * @enum {string}
              */
             desired: "run" | "stop" | "restart";
+            /** Desired Slots */
+            desired_slots?: number | null;
             /**
              * Enabled
              * @default true
@@ -4938,6 +5143,11 @@ export interface components {
             running?: components["schemas"]["JudgeWorkerTaskOut"][];
             /** Slots */
             slots?: number | null;
+            /**
+             * Slots Control
+             * @default false
+             */
+            slots_control: boolean;
             /** Version */
             version?: string | null;
         };
@@ -4950,6 +5160,8 @@ export interface components {
             enabled?: boolean | null;
             /** Name */
             name?: string | null;
+            /** Slots */
+            slots?: number | null;
         };
         /**
          * JudgeWorkerTaskOut
@@ -6366,6 +6578,11 @@ export interface components {
             parse_status: string;
             /** Problem */
             problem: string;
+            /**
+             * Risk Count
+             * @default 0
+             */
+            risk_count: number;
             /** Run Id */
             run_id?: number | null;
             /** Score */
@@ -6379,6 +6596,11 @@ export interface components {
             submitted: boolean;
             /** Updated At */
             updated_at?: string | null;
+            /**
+             * Warning Count
+             * @default 0
+             */
+            warning_count: number;
         };
         /** ScoreMatrixOut */
         ScoreMatrixOut: {
@@ -8122,6 +8344,8 @@ export interface operations {
         parameters: {
             query?: {
                 parse_status?: string | null;
+                /** @description any / warning（有疑似违规）/ risk（有风险） */
+                flag?: ("any" | "warning" | "risk") | null;
                 /** @description 每页条数 */
                 limit?: number;
                 /** @description 起始位置 */
@@ -8300,6 +8524,8 @@ export interface operations {
                 problem?: string | null;
                 status?: string | null;
                 trigger?: string | null;
+                /** @description any / warning（有疑似违规）/ risk（有风险） */
+                flag?: ("any" | "warning" | "risk") | null;
                 /** @description 每页条数 */
                 limit?: number;
                 /** @description 起始位置 */
@@ -8384,6 +8610,38 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["JudgeTaskOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_judge_task_source_api_v1_admin_contests__contest_id__judge_tasks__task_id__source_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contest_id: number;
+                task_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JudgeSourceOut"];
                 };
             };
             /** @description Validation Error */
@@ -9154,6 +9412,59 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["LocalJudgeOut"];
+                };
+            };
+        };
+    };
+    judge_service_status_api_v1_admin_judge_service_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JudgeServiceOut"];
+                };
+            };
+        };
+    };
+    set_judge_service_api_v1_admin_judge_service_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JudgeServiceIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JudgeServiceOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

@@ -152,6 +152,13 @@ export type JudgeWorkerOut = S['JudgeWorkerOut']
 export type JudgeWorkerCreatedOut = S['JudgeWorkerCreatedOut']
 export type JudgeWorkerPatchIn = S['JudgeWorkerPatchIn']
 export type LocalJudgeOut = S['LocalJudgeOut']
+export type JudgeServiceOut = S['JudgeServiceOut']
+export type JudgeServiceIn = S['JudgeServiceIn']
+export type JudgeSourceOut = S['JudgeSourceOut']
+export type JudgeRiskEventOut = S['JudgeRiskEventOut']
+export type JudgePrecheckFindingOut = S['JudgePrecheckFindingOut']
+/** 评测记录的风险筛选（§12.11）：any = 两者之一，warning = 有疑似违规，risk = 有风险 */
+export type JudgeFlagFilter = 'any' | 'warning' | 'risk'
 /** 自动入队设置、评测任务（任务即历史）、代码版本与 timeline（§12.9） */
 export type JudgeAutoIn = S['JudgeAutoIn']
 export type JudgeAutoOut = S['JudgeAutoOut']

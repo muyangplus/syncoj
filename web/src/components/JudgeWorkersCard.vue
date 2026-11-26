@@ -1,13 +1,13 @@
 <script setup lang="ts">
 /**
- * 「评测」页的评测机卡片（§12.10）：状态、正在评的任务、暂停 / 停止 / 重启 / 改名 / 吊销，
- * 添加评测机（一行安装命令）与本机评测机启停。
+ * 「评测」页的评测机卡片（§12.10）：「评测服务」总开关与排队数，每台的领任务开关、并发数、
+ * 状态与正在评的任务、停止 / 重启 / 改名 / 吊销，添加评测机（一行安装命令）与本机评测机启停。
  */
-import { computed, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 import { judgingApi } from '@/api'
-import type { JudgeWorkerOut, LocalJudgeOut } from '@/api/types'
+import type { JudgeServiceOut, JudgeWorkerOut, LocalJudgeOut } from '@/api/types'
 import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
 import JudgeWorkerAddDialog from '@/components/JudgeWorkerAddDialog.vue'
 import SectionCard from '@/components/SectionCard.vue'
@@ -16,12 +16,18 @@ import { formatTime } from '@/utils/format'
 
 const workers = ref<JudgeWorkerOut[]>([])
 const local = ref<LocalJudgeOut | null>(null)
+const service = ref<JudgeServiceOut | null>(null)
 const loading = ref(false)
 
 async function load(): Promise<void> {
-  const [list, localStatus] = await Promise.all([judgingApi.workers(), judgingApi.localJudge()])
+  const [list, localStatus, serviceStatus] = await Promise.all([
+    judgingApi.workers(),
+    judgingApi.localJudge(),
+    judgingApi.service(),
+  ])
   workers.value = list.items
   local.value = localStatus
+  service.value = serviceStatus
 }
 
 async function reload(): Promise<void> {
@@ -60,6 +66,33 @@ function stateOf(row: JudgeWorkerOut): { label: string; type: TagType; plain: bo
 }
 
 const DESIRED_LABEL: Record<string, string> = { stop: '停止中', restart: '重启中' }
+
+// ---- 评测服务总开关 ----
+
+const serviceBusy = ref(false)
+
+async function toggleService(enabled: boolean): Promise<void> {
+  const current = service.value
+  if (!enabled && current) {
+    try {
+      await ElMessageBox.confirm(
+        `排队 ${current.queued} 个任务停止分发，评测中 ${current.running} 个照常评完。`,
+        '关闭评测服务？',
+        { type: 'warning', confirmButtonText: '关闭', cancelButtonText: '取消' },
+      )
+    } catch {
+      return
+    }
+  }
+  serviceBusy.value = true
+  try {
+    service.value = await judgingApi.setService({ enabled })
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  } finally {
+    serviceBusy.value = false
+  }
+}
 
 // ---- 添加 ----
 
@@ -100,8 +133,39 @@ async function act(row: JudgeWorkerOut, action: () => Promise<JudgeWorkerOut>, d
   }
 }
 
-function togglePause(row: JudgeWorkerOut): void {
-  void act(row, () => judgingApi.updateWorker(row.id, { enabled: !row.enabled }), row.enabled ? '已暂停' : '已恢复')
+function toggleEnabled(row: JudgeWorkerOut, enabled: boolean): void {
+  void act(row, () => judgingApi.updateWorker(row.id, { enabled }), enabled ? '已恢复' : '已暂停')
+}
+
+// ---- 并发数：改完 600 ms 再提交，评测机评完手上的任务后以新值重启 ----
+
+const slotDraft = reactive(new Map<number, number>())
+const slotTimers = new Map<number, ReturnType<typeof setTimeout>>()
+
+function slotsValue(row: JudgeWorkerOut): number {
+  return slotDraft.get(row.id) ?? row.desired_slots ?? row.slots ?? 1
+}
+
+function slotsEditable(row: JudgeWorkerOut): boolean {
+  return row.slots_control && row.backend === 'isolate'
+}
+
+function onSlots(row: JudgeWorkerOut, value: number | undefined): void {
+  if (!value) return
+  slotDraft.set(row.id, value)
+  const timer = slotTimers.get(row.id)
+  if (timer) clearTimeout(timer)
+  slotTimers.set(
+    row.id,
+    setTimeout(() => {
+      slotTimers.delete(row.id)
+      const slots = slotDraft.get(row.id)
+      if (!slots) return
+      void act(row, () => judgingApi.updateWorker(row.id, { slots }), `并发数 ${slots}`).finally(() =>
+        slotDraft.delete(row.id),
+      )
+    }, 600),
+  )
 }
 
 async function rename(row: JudgeWorkerOut): Promise<void> {
@@ -186,6 +250,15 @@ async function confirmRemove(): Promise<void> {
 <template>
   <SectionCard title="评测机" :meta="`在线 ${onlineCount} / ${workers.length}`" flush>
     <template #extra>
+      <span v-if="service" class="service">
+        <el-switch
+          :model-value="service.enabled"
+          :loading="serviceBusy"
+          active-text="评测服务"
+          @change="(value: string | number | boolean) => toggleService(Boolean(value))"
+        />
+        <span class="service-count">排队 {{ service.queued }}</span>
+      </span>
       <span v-if="local && !local.supported" class="local-off">
         <el-button disabled>
           <el-icon><Monitor /></el-icon>本机评测机
@@ -208,6 +281,17 @@ async function confirmRemove(): Promise<void> {
     </template>
 
     <el-table v-loading="loading" :data="workers" row-key="id">
+      <el-table-column label="领任务" width="80" align="center">
+        <template #default="{ row }">
+          <el-switch
+            :model-value="row.enabled"
+            size="small"
+            :loading="acting === row.id"
+            :aria-label="`${row.name} 领任务`"
+            @change="(value: string | number | boolean) => toggleEnabled(row, Boolean(value))"
+          />
+        </template>
+      </el-table-column>
       <el-table-column label="名称" min-width="150">
         <template #default="{ row }">
           <div class="name">
@@ -249,10 +333,44 @@ async function confirmRemove(): Promise<void> {
           <template v-if="row.hostname">
             <div class="mono">{{ row.hostname }}</div>
             <div class="cell-sub">
-              {{ row.platform }}<template v-if="row.slots"> · 并发 {{ row.slots }}</template>
+              {{ row.platform }}
             </div>
           </template>
           <span v-else class="muted">—</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="并发" width="130">
+        <template #default="{ row }">
+          <template v-if="slotsEditable(row)">
+            <el-input-number
+              :model-value="slotsValue(row)"
+              :min="1"
+              :max="64"
+              size="small"
+              controls-position="right"
+              class="slots-input"
+              :aria-label="`${row.name} 并发数`"
+              @change="(value: number | undefined) => onSlots(row, value)"
+            />
+            <div
+              v-if="row.desired_slots && row.slots && row.desired_slots !== row.slots"
+              class="cell-sub"
+            >
+              当前 {{ row.slots }}
+            </div>
+          </template>
+          <template v-else>
+            <span class="mono">{{ row.slots ?? '—' }}</span>
+            <el-tag
+              v-if="row.slots_control && row.backend !== 'isolate'"
+              size="small"
+              type="info"
+              effect="plain"
+              class="slots-tag"
+            >
+              仅 isolate
+            </el-tag>
+          </template>
         </template>
       </el-table-column>
       <el-table-column label="版本" width="90">
@@ -272,17 +390,8 @@ async function confirmRemove(): Promise<void> {
           <span class="cell-sub">{{ row.last_seen_at ? formatTime(row.last_seen_at) : '从未' }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="130" fixed="right">
+      <el-table-column label="操作" width="80" fixed="right">
         <template #default="{ row }">
-          <el-button
-            link
-            type="primary"
-            size="small"
-            :loading="acting === row.id"
-            @click="togglePause(row)"
-          >
-            {{ row.enabled ? '暂停' : '恢复' }}
-          </el-button>
           <el-dropdown trigger="click" @command="(cmd: string) => onMore(row, cmd)">
             <el-button link type="primary" size="small">
               更多<el-icon class="el-icon--right"><ArrowDown /></el-icon>
@@ -325,6 +434,24 @@ async function confirmRemove(): Promise<void> {
 </template>
 
 <style scoped>
+.service {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: 4px;
+}
+.service-count {
+  font-size: 13px;
+  color: var(--sj-text-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.slots-input {
+  width: 92px;
+}
+.slots-tag {
+  margin-left: 6px;
+}
 .local-off {
   display: inline-flex;
   align-items: center;

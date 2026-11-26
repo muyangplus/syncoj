@@ -5,6 +5,7 @@
 碰不到数据库、私钥，也读不到别的选手的代码。
 
 ``/lease`` 是旧评测机用的（不报状态、收不到命令）；新评测机只调 ``/poll``（§12.10）。
+两者都遵守暂停与全局的「评测服务」开关：关着时不发任务。
 """
 
 from __future__ import annotations
@@ -23,7 +24,9 @@ from .deps import _bearer, get_ctx
 router = APIRouter(prefix="/api/v1/judge", tags=["judge"])
 
 #: 交回的结果里，除了三项成绩之外原样落进 result.json 的键
-DETAIL_KEYS = ("judge", "isolated", "language", "compile_message", "cases", "subtasks", "precheck_warnings")
+DETAIL_KEYS = (
+    "judge", "isolated", "language", "compile_message", "cases", "subtasks", "precheck_warnings", "risk_events",
+)
 
 
 def require_judge_worker(request: Request, ctx: AppContext = Depends(get_ctx)) -> int:
@@ -38,14 +41,15 @@ def require_judge_worker(request: Request, ctx: AppContext = Depends(get_ctx)) -
 
 
 def _enabled(ctx: AppContext, worker_id: int) -> bool:
+    """这台评测机现在能不能领任务：没被暂停、评测服务开着。"""
     with ctx.db.session() as session:
         row = session.get(JudgeWorker, worker_id)
-        return row is not None and row.enabled is not False
+        return row is not None and row.enabled is not False and judge_workers.service_enabled(session)
 
 
 @router.post("/lease", response_model=JudgeLeaseOut, responses={204: {"description": "没有待评的任务"}})
 def lease(ctx: AppContext = Depends(get_ctx), worker_id: int = Depends(require_judge_worker)):
-    """领下一个任务；没有（或这台评测机被暂停）就 204。租约 15 分钟，过期没交结果的任务自动回到队列。"""
+    """领下一个任务；没有（或这台评测机被暂停、评测服务关着）就 204。租约 15 分钟，过期没交结果的任务自动回到队列。"""
     if not _enabled(ctx, worker_id):
         return Response(status_code=204)
     leased = builtin_judge.lease_next(ctx, worker_id)
@@ -63,7 +67,7 @@ def poll(
     """自报状态；``want`` = 1 时顺带领一个任务；响应带管理端下的命令（§12.10）。
 
     有命令（``stop`` / ``restart``）时不发任务：评测机要做的是评完手上的然后退出。
-    暂停时也不发任务，但命令照样送达。
+    暂停或评测服务关着时也不发任务，但命令照样送达。``slots`` 是管理端设定的并发数。
     """
     with ctx.db.session() as session:
         row = session.get(JudgeWorker, worker_id)
@@ -72,12 +76,14 @@ def poll(
         judge_workers.record_poll(row, payload)
         command = judge_workers.take_command(row, payload.boot_id)
         enabled = row.enabled is not False
+        slots = judge_workers.slots_for_poll(row)
+        service = judge_workers.service_enabled(session)
     task = None
-    if payload.want and enabled and command == "run":
+    if payload.want and enabled and service and command == "run":
         leased = builtin_judge.lease_next(ctx, worker_id)
         if leased is not None:
             task = JudgeLeaseOut(**leased.to_payload())
-    return JudgePollOut(task=task, command=command, enabled=enabled)
+    return JudgePollOut(task=task, command=command, enabled=enabled, slots=slots, service=service)
 
 
 @router.get("/tasks/{task_id}/blobs/{sha256}")

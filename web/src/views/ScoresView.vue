@@ -10,6 +10,7 @@ import JudgeRunDetailDialog from '@/components/JudgeRunDetailDialog.vue'
 import ScoreTimelineDialog from '@/components/ScoreTimelineDialog.vue'
 import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
 import DataTable from '@/components/DataTable.vue'
+import JudgeFlagTags from '@/components/JudgeFlagTags.vue'
 import FormDialog from '@/components/FormDialog.vue'
 import PageShell from '@/components/PageShell.vue'
 import SectionCard from '@/components/SectionCard.vue'
@@ -20,6 +21,7 @@ import { useRoute, useRouter } from 'vue-router'
 
 import { useContestStore } from '@/stores/contest'
 import { formatTime } from '@/utils/format'
+import { FLAG_FILTERS, flagParam, flagRowClass } from '@/utils/judgeFlags'
 
 const contest = useContestStore()
 const router = useRouter()
@@ -65,8 +67,10 @@ const view = computed(() => {
 // 都列出来"。
 // --------------------------------------------------------------------------- //
 
-/** 空串 = 全部。服务端只认 `parse_status` 这个参数名。 */
-const parseFilter = ref('')
+/** `all` = 全部（el-select 把空串当成"没选"，只显示占位符）。服务端只认 `parse_status` 这个参数名。 */
+const parseFilter = ref('all')
+/** 风险标注筛选（§12.11） */
+const flagFilter = ref('all')
 
 const runs = useList<JudgeRunOut>({
   rowKey: (row) => row.id,
@@ -76,14 +80,14 @@ const runs = useList<JudgeRunOut>({
     if (!contestId) return Promise.resolve(null)
     return scoreApi.runs(
       contestId,
-      { limit, offset, parse_status: parseFilter.value || undefined },
+      { limit, offset, parse_status: parseFilter.value === 'all' ? undefined : parseFilter.value, flag: flagParam(flagFilter.value) },
       signal,
     )
   },
   // 与矩阵同一个节奏：两边看到的是同一批数据
   interval: 10000,
   // 筛选变化要回到第一页 —— `watches` 负责这件事，页面不再自己 watch
-  watches: [() => contest.currentId, () => parseFilter.value],
+  watches: [() => contest.currentId, () => parseFilter.value, () => flagFilter.value],
 })
 
 const scanReport = ref<JudgeScanOut | null>(null)
@@ -207,6 +211,8 @@ function cellView(cell: ScoreCellOut | undefined): {
   const parts = [`${cell.score}${hasMax ? ` / ${cell.max_score}` : ''} 分`]
   if (cell.status) parts.push(cell.status)
   if (cell.parse_status === 'manual') parts.push('手工录入')
+  if (cell.risk_count) parts.push(`风险 ${cell.risk_count}`)
+  if (cell.warning_count) parts.push(`疑似违规 ${cell.warning_count}`)
   if (detail) parts.push(detail)
 
   return {
@@ -217,6 +223,13 @@ function cellView(cell: ScoreCellOut | undefined): {
     manual: cell.parse_status === 'manual',
     tooltip: parts.join(' · '),
   }
+}
+
+/** 格子的风险细边框（不改分数颜色）：风险红、疑似违规黄 */
+function cellFlagClass(cell: ScoreCellOut | undefined): string {
+  if (cell?.risk_count) return 'flag-risk'
+  if (cell?.warning_count) return 'flag-warning'
+  return ''
 }
 
 function cellOf(row: ScoreRowOut, ident: string): ScoreCellOut | undefined {
@@ -558,7 +571,7 @@ async function rejudge(run: JudgeRunDetailOut, force = false): Promise<void> {
               <button
                 type="button"
                 class="score-block"
-                :class="`is-${cellView(cellOf(row, column.ident)).kind}`"
+                :class="[`is-${cellView(cellOf(row, column.ident)).kind}`, cellFlagClass(cellOf(row, column.ident))]"
                 @click="openCell(row, column.ident)"
               >
                 <span class="score-main">{{ cellView(cellOf(row, column.ident)).text }}</span>
@@ -592,8 +605,11 @@ async function rejudge(run: JudgeRunDetailOut, force = false): Promise<void> {
     <div class="runs-anchor">
       <SectionCard title="评测记录" :meta="`共 ${runs.total.value} 条`" flush>
         <template #extra>
+          <el-select v-model="flagFilter" style="width: 130px" aria-label="风险标注">
+            <el-option v-for="f in FLAG_FILTERS" :key="f.value" :label="f.label" :value="f.value" />
+          </el-select>
           <el-select v-model="parseFilter" style="width: 140px">
-            <el-option label="全部记录" value="" />
+            <el-option label="全部记录" value="all" />
             <el-option label="未解析" value="unparsed" />
             <el-option label="已解析" value="ok" />
             <el-option label="手工录入" value="manual" />
@@ -610,7 +626,8 @@ async function rejudge(run: JudgeRunDetailOut, force = false): Promise<void> {
           :total="runs.total.value"
           :page="runs.page.value"
           :page-size="runs.pageSize.value"
-          :filtered="!!parseFilter"
+          :filtered="parseFilter !== 'all' || flagFilter !== 'all'"
+          :row-class="flagRowClass"
           empty-text="无评测记录"
           empty-filtered-text="无匹配的评测记录"
           @update:page="runs.setPage"
@@ -626,10 +643,13 @@ async function rejudge(run: JudgeRunDetailOut, force = false): Promise<void> {
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="得分" width="100" align="right">
+            <el-table-column label="得分" width="130" align="right">
               <template #default="{ row }">
                 <span v-if="row.score === null || row.score === undefined" class="muted">—</span>
                 <span v-else>{{ row.score }} / {{ row.max_score ?? '?' }}</span>
+                <div v-if="row.risk_count || row.warning_count" class="run-flags">
+                  <JudgeFlagTags :warning="row.warning_count" :risk="row.risk_count" />
+                </div>
               </template>
             </el-table-column>
             <el-table-column label="来源文件" min-width="220">
@@ -978,7 +998,28 @@ async function rejudge(run: JudgeRunDetailOut, force = false): Promise<void> {
   --block-border: var(--sj-border-strong);
 }
 
+/* 风险标注（§12.11）：细边框，不改分数颜色 */
+.score-block.flag-warning {
+  box-shadow: 0 0 0 2px var(--sj-warning-line);
+}
+
+.score-block.flag-risk {
+  box-shadow: 0 0 0 2px var(--sj-danger-line);
+}
+
+.score-block.flag-warning:hover {
+  box-shadow: 0 0 0 2px var(--sj-warning-line), var(--sj-shadow-lg);
+}
+
+.score-block.flag-risk:hover {
+  box-shadow: 0 0 0 2px var(--sj-danger-line), var(--sj-shadow-lg);
+}
+
 /* ---- 评测记录 ---- */
+
+.run-flags {
+  margin-top: 4px;
+}
 
 .runs-anchor {
   margin-top: 16px;

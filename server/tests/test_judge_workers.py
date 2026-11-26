@@ -123,7 +123,7 @@ def test_签发时给出两条安装命令_含地址与令牌(issued) -> None:
 
 def test_poll_记下自报状态_算在线(client, admin_headers, issued) -> None:
     reply = poll(client, issued["token"])
-    assert reply == {"task": None, "command": "run", "enabled": True}
+    assert reply == {"task": None, "command": "run", "enabled": True, "slots": None, "service": True}
     row = workers(client, admin_headers)["评测机1"]
     assert row["online"] is True and row["remote_control"] is True
     assert (row["version"], row["backend"], row["isolated"], row["hostname"], row["platform"], row["slots"]) == (
@@ -166,7 +166,8 @@ def test_暂停领不到任务_照常心跳_恢复后领到(client, admin_header
     url = "/api/v1/admin/judge-workers/%d" % issued["id"]
     paused = client.patch(url, json={"enabled": False}, headers=admin_headers).json()
     assert paused["enabled"] is False
-    assert poll(client, issued["token"], want=1) == {"task": None, "command": "run", "enabled": False}
+    assert poll(client, issued["token"], want=1) == {
+        "task": None, "command": "run", "enabled": False, "slots": None, "service": True}
     assert client.post("/api/v1/judge/lease", headers=bearer(issued["token"])).status_code == 204
     assert workers(client, admin_headers)["评测机1"]["online"] is True
 
@@ -546,3 +547,152 @@ def test_本机评测机连回服务端的地址跟着监听地址走() -> None:
     assert loopback_host("::") == "127.0.0.1"
     assert loopback_host("192.168.1.5") == "192.168.1.5"
     assert loopback_host("fe80::1") == "[fe80::1]"
+
+
+# --------------------------------------------------------------------------- #
+# 并发数与「评测服务」开关（迁移 024）
+# --------------------------------------------------------------------------- #
+
+
+def test_改并发数_isolate允许_随poll下发(client, admin_headers, issued) -> None:
+    url = "/api/v1/admin/judge-workers/%d" % issued["id"]
+    poll(client, issued["token"], features=["slots"])
+    row = workers(client, admin_headers)["评测机1"]
+    assert row["slots_control"] is True and row["desired_slots"] is None
+
+    changed = client.patch(url, json={"slots": 4}, headers=admin_headers)
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["desired_slots"] == 4 and changed.json()["slots"] == 2
+    assert poll(client, issued["token"], features=["slots"])["slots"] == 4
+    for bad in (0, 65):
+        assert client.patch(url, json={"slots": bad}, headers=admin_headers).status_code == 422
+
+
+def test_改并发数_非isolate只能是1(client, admin_headers, issued) -> None:
+    url = "/api/v1/admin/judge-workers/%d" % issued["id"]
+    poll(client, issued["token"], backend="rlimit", isolated=False, slots=1, features=["slots"])
+    response = client.patch(url, json={"slots": 2}, headers=admin_headers)
+    assert response.status_code == 409 and response.json()["code"] == "judge_worker_slots"
+    assert "isolate" in response.json()["detail"]
+    assert client.patch(url, json={"slots": 1}, headers=admin_headers).status_code == 200
+
+    # 库里留着大于 1 的设定（后端换了）：不下发，免得评测机以非法参数重启
+    ctx = client.app.state.ctx
+    with ctx.db.session() as session:
+        session.query(JudgeWorker).one().desired_slots = 3
+    assert poll(client, issued["token"], backend="rlimit", slots=1, features=["slots"])["slots"] is None
+
+
+def test_改并发数_旧评测机409(client, admin_headers, issued) -> None:
+    url = "/api/v1/admin/judge-workers/%d" % issued["id"]
+    never = client.patch(url, json={"slots": 2}, headers=admin_headers)
+    assert never.status_code == 409 and never.json()["code"] == "judge_worker_unsupported"
+    poll(client, issued["token"])  # 报了状态，但没报 slots 能力（0.3.0 的评测机）
+    response = client.patch(url, json={"slots": 2}, headers=admin_headers)
+    assert response.status_code == 409 and response.json()["code"] == "judge_worker_unsupported"
+    assert workers(client, admin_headers)["评测机1"]["slots_control"] is False
+
+
+def test_worker收到新并发数_评完手上的以新slots重启(client, admin_headers, issued, tmp_path, monkeypatch) -> None:
+    judge = worker.Worker(ClientTransport(client, issued["token"]), lambda slot=0: None, tmp_path / "cache",
+                          backend="isolate", poll_seconds=0.5)
+    assert judge.run_once() is False
+    assert workers(client, admin_headers)["评测机1"]["slots_control"] is True
+    client.patch("/api/v1/admin/judge-workers/%d" % issued["id"], json={"slots": 3}, headers=admin_headers)
+    assert judge.run_forever() == 0
+    assert judge.restart_requested is True and judge.restart_slots == 3
+
+    pyz = tmp_path / "syncoj-judge.pyz"
+    with zipfile.ZipFile(str(pyz), "w") as archive:
+        archive.writestr("__main__.py", "")
+    monkeypatch.setattr(sys, "argv", [str(pyz), "--server", "http://x", "--slots", "1", "--backend", "isolate"])
+    assert worker.restart_argv(3) == [sys.executable, str(pyz), "--server", "http://x", "--backend", "isolate",
+                                      "--slots", "3"]
+    monkeypatch.setattr(sys, "argv", ["/usr/local/bin/syncoj-judge", "--slots=2", "--server", "http://x"])
+    assert worker.restart_argv(3) == [sys.executable, "-m", "syncoj_server.judging.worker", "--server", "http://x",
+                                      "--slots", "3"]
+    monkeypatch.setattr(sys, "argv", ["/usr/local/bin/syncoj-judge", "--server", "http://x"])
+    assert worker.restart_argv(2)[-2:] == ["--slots", "2"]
+    assert worker.restart_argv() == [sys.executable, "-m", "syncoj_server.judging.worker", "--server", "http://x"]
+
+
+def test_非isolate的worker不理会大于1的并发数(tmp_path) -> None:
+    import json
+
+    class Server(worker.Transport):
+        def __init__(self) -> None:
+            pass
+
+        def request(self, method, path, body=None):
+            return 200, json.dumps({"task": None, "command": "run", "slots": 4}).encode()
+
+    judge = worker.Worker(Server(), lambda: None, tmp_path / "cache", backend="rlimit")
+    assert judge.run_once() is False
+    assert judge.command == "run" and judge.restart_slots is None
+
+
+def test_worker对不认features的旧服务端退回(tmp_path) -> None:
+    import json
+
+    bodies = []
+
+    class OldServer(worker.Transport):
+        def __init__(self) -> None:
+            pass
+
+        def request(self, method, path, body=None):
+            bodies.append(dict(body))
+            if "features" in body:
+                return 422, b'{"detail": "extra"}'
+            return 200, json.dumps({"task": None, "command": "run", "enabled": True}).encode()
+
+    judge = worker.Worker(OldServer(), lambda: None, tmp_path / "cache", backend="isolate")
+    assert judge.run_once() is False
+    assert judge.run_once() is False
+    assert ["features" in body for body in bodies] == [True, False, False]
+
+
+def test_本机评测机以设定的并发数启动(client, admin_headers, monkeypatch) -> None:
+    spawned = []
+
+    def fake_popen(argv, **kwargs):
+        spawned.append(FakeProc(argv, **kwargs))
+        return spawned[-1]
+
+    ctx = client.app.state.ctx
+    ctx.local_judge = LocalJudge(popen=fake_popen, platform="linux")
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/isolate")
+    client.post("/api/v1/admin/judge-local/start", headers=admin_headers)
+    assert "--slots" not in spawned[0].argv
+    client.post("/api/v1/admin/judge-local/stop", headers=admin_headers)
+    with ctx.db.session() as session:
+        session.query(JudgeWorker).one().desired_slots = 3
+    client.post("/api/v1/admin/judge-local/start", headers=admin_headers)
+    argv = spawned[1].argv
+    assert argv[argv.index("--slots") + 1] == "3"
+
+
+def test_评测服务关闭_poll与lease都不发任务_打开后恢复(client, admin_headers, issued, queued) -> None:
+    status = client.get("/api/v1/admin/judge-service", headers=admin_headers).json()
+    assert status == {"enabled": True, "queued": 1, "delayed": 0, "running": 0}
+
+    off = client.put("/api/v1/admin/judge-service", json={"enabled": False}, headers=admin_headers)
+    assert off.status_code == 200 and off.json()["enabled"] is False
+    reply = poll(client, issued["token"], want=1)
+    assert reply["task"] is None and reply["service"] is False and reply["enabled"] is True
+    assert client.post("/api/v1/judge/lease", headers=bearer(issued["token"])).status_code == 204
+    assert client.get("/api/v1/admin/judge-service", headers=admin_headers).json()["queued"] == 1
+
+    client.put("/api/v1/admin/judge-service", json={"enabled": True}, headers=admin_headers)
+    reply = poll(client, issued["token"], want=1)
+    assert reply["task"] is not None and reply["service"] is True
+    status = client.get("/api/v1/admin/judge-service", headers=admin_headers).json()
+    assert (status["queued"], status["running"]) == (0, 1)
+
+
+def test_评测服务关闭时手上的结果照常交(client, admin_headers, issued, queued) -> None:
+    task = poll(client, issued["token"], want=1)["task"]
+    client.put("/api/v1/admin/judge-service", json={"enabled": False}, headers=admin_headers)
+    response = client.post("/api/v1/judge/tasks/%d/result" % task["id"],
+                           json={"score": 100, "max_score": 100, "status": "AC"}, headers=bearer(issued["token"]))
+    assert response.status_code == 200

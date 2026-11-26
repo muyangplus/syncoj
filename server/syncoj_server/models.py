@@ -564,6 +564,11 @@ class JudgeWorker(Base):
     desired_boot = Column(String(32), nullable=True)
     #: 服务端以子进程拉起的「本机评测机」（§12.10）。同时最多一行
     is_local = Column(Boolean, nullable=False, default=False)
+    #: 管理端设定的并发数（迁移 024）：随 poll 响应下发，与评测机自报的 ``slots`` 不同时它评完
+    #: 手上的任务、换成这个 ``--slots`` 重启自己。NULL = 没设过，按评测机自己的启动参数
+    desired_slots = Column(Integer, nullable=True)
+    #: 评测机报的能力（逗号分隔，迁移 024）：``slots`` = 认下发的并发数。旧评测机为 NULL
+    features = Column(String(128), nullable=True)
 
 
 class JudgeTask(Base):
@@ -619,6 +624,10 @@ class JudgeTask(Base):
     result_json = Column(Text, nullable=True)
     #: 这份结果写进 result.json 的时刻（自动写入或教师「采用」）
     applied_at = Column(DateTime, nullable=True)
+    #: 结果里疑似违规 / 风险的条数（迁移 024，§12.11）：入库时按 ``precheck.count_flags`` 算好，
+    #: 列表按它筛选，不必每次解析 ``result_json``
+    warning_count = Column(Integer, nullable=True, default=0)
+    risk_count = Column(Integer, nullable=True, default=0)
 
     __table_args__ = (
         Index("ix_judge_task_status", "status", "id"),
@@ -841,6 +850,9 @@ class JudgeRun(Base):
     #: 解析器名称 / 未解析原因
     detail = Column(String(512), nullable=True)
     raw_json = Column(Text, nullable=True)
+    #: ``raw_json`` 里疑似违规 / 风险的条数（迁移 024，§12.11）：扫描入库时算好，列表按它筛选
+    warning_count = Column(Integer, nullable=True, default=0)
+    risk_count = Column(Integer, nullable=True, default=0)
     scanned_at = Column(DateTime, default=utcnow, nullable=False)
     updated_at = Column(DateTime, default=utcnow, nullable=False)
 

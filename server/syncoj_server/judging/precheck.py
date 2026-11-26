@@ -31,6 +31,12 @@ __all__ = [
     "PrecheckConfig",
     "PrecheckReport",
     "check_source",
+    "RISK_EVENT_CODES",
+    "LEVEL_RISK",
+    "LEVEL_WARNING",
+    "level_of",
+    "count_flags",
+    "count_flags_json",
 ]
 
 #: 拦截项：code → 说明（文档的规则表与这里一致）
@@ -57,6 +63,59 @@ WARN_RULES: Dict[str, str] = {
     "file_dynamic": "打开文件的文件名不是字面量",
 }
 MODES = ("off", "warn", "block")
+
+#: 评测时运行选手程序后发现的风险事件（``runner`` 写进结果的 ``risk_events``）：code → 说明
+RISK_EVENT_CODES: Dict[str, str] = {
+    "workdir_symlink": "工作目录里出现符号链接、FIFO、设备文件或硬链接",
+    "tamper_checker": "工作目录里出现 checker 同名文件，或程序自身被改写",
+    "escaped_process": "运行结束后仍有逃出进程组的进程（已清掉）",
+    "precheck_blocked": "源码预检拦截",
+}
+
+#: 分级（界面上的颜色只按这里给的 ``level``，前端不维护 code 表）：
+#: ``risk`` = 风险事件全部 + 拦截类规则（题目配置成 ``warn`` 时它们出现在预警里，级别不降）；
+#: ``warning`` = 疑似违规（预警类规则）。不认识的 code 按 ``warning``。
+LEVEL_RISK, LEVEL_WARNING = "risk", "warning"
+
+
+def level_of(code: str) -> str:
+    """一条预检结果 / 风险事件的级别。"""
+    if code in RISK_EVENT_CODES or code in BLOCK_RULES:
+        return LEVEL_RISK
+    return LEVEL_WARNING
+
+
+def count_flags(document: object) -> Tuple[int, int]:
+    """结果文档（``result.json``）里的 ``(疑似违规条数, 风险条数)``。
+
+    风险 = ``risk_events`` 全部 + ``precheck_warnings`` 里拦截类 code；疑似违规 = 其余预警。
+    形状不对的项跳过；不是自带评测的结果（没有这两个键）为 ``(0, 0)``。
+    """
+    if not isinstance(document, dict):
+        return 0, 0
+    warnings = risks = 0
+    for item in document.get("precheck_warnings") or []:
+        if isinstance(item, dict) and item.get("code"):
+            if level_of(str(item["code"])) == LEVEL_RISK:
+                risks += 1
+            else:
+                warnings += 1
+    for item in document.get("risk_events") or []:
+        if isinstance(item, dict) and item.get("code"):
+            risks += 1
+    return warnings, risks
+
+
+def count_flags_json(raw: Optional[str]) -> Tuple[int, int]:
+    """同 :func:`count_flags`，入参是结果文档的 JSON 原文；解析不了为 ``(0, 0)``。"""
+    if not raw or ('"precheck_warnings"' not in raw and '"risk_events"' not in raw):
+        return 0, 0
+    import json
+
+    try:
+        return count_flags(json.loads(raw))
+    except ValueError:
+        return 0, 0
 
 #: 每条规则最多报几处（拦截信息要能读完）
 MAX_FINDINGS_PER_CODE = 20

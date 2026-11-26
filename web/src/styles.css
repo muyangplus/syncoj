@@ -28,6 +28,11 @@
   --sj-warning-soft: #fff5e6;
   --sj-danger: #dc2626;
   --sj-danger-soft: #fdecec;
+  /* 风险标注（§12.11）：行左边框 / 格子细边框用 line，源码高亮行用 mark */
+  --sj-warning-line: #f59e0b;
+  --sj-warning-mark: rgba(245, 158, 11, 0.18);
+  --sj-danger-line: #ef4444;
+  --sj-danger-mark: rgba(239, 68, 68, 0.16);
   --sj-info-soft: #f1f3f8;
 
   --sj-radius: 10px;
@@ -83,6 +88,10 @@ html.dark {
   --sj-warning-soft: rgba(251, 191, 36, 0.12);
   --sj-danger: #f87171;
   --sj-danger-soft: rgba(248, 113, 113, 0.12);
+  --sj-warning-line: #fbbf24;
+  --sj-warning-mark: rgba(251, 191, 36, 0.2);
+  --sj-danger-line: #f87171;
+  --sj-danger-mark: rgba(248, 113, 113, 0.22);
   --sj-info-soft: rgba(148, 163, 184, 0.12);
   --sj-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
   --sj-shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4);
@@ -312,4 +321,12 @@ body {
 }
 .el-table .cell .el-dropdown {
   vertical-align: middle;
+}
+
+/* ---- 风险标注（§12.11）：评测记录行的左边框，风险优先 ---- */
+.el-table .sj-row-warning > td:first-child {
+  box-shadow: inset 3px 0 0 var(--sj-warning-line);
+}
+.el-table .sj-row-risk > td:first-child {
+  box-shadow: inset 3px 0 0 var(--sj-danger-line);
 }

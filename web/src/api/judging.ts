@@ -16,6 +16,9 @@ import type {
   JudgeAutoIn,
   JudgeAutoOut,
   JudgeRunDetailOut,
+  JudgeServiceIn,
+  JudgeServiceOut,
+  JudgeSourceOut,
   JudgeTaskDetailOut,
   JudgeTaskOut,
   JudgeWorkerCreatedOut,
@@ -55,13 +58,17 @@ export const judgingApi = {
   setAuto: (contestId: number, payload: JudgeAutoIn) =>
     request<JudgeAutoOut>(paths.contestJudgeAuto(contestId), { method: 'PUT', body: payload }),
 
-  /** 评测任务，新的在前；可按选手、题目、状态、触发方式筛。 */
+  /** 评测任务，新的在前；可按选手、题目、状态、触发方式、风险标注（`flag`）筛。 */
   tasks: (contestId: number, params: ListParams = {}, signal?: AbortSignal) =>
     listPage<JudgeTaskOut>(paths.contestJudgeTasks(contestId), params, signal),
 
   /** 一个任务及其测试点明细（历史版本的结果从这里看）。 */
   task: (contestId: number, taskId: number) =>
     request<JudgeTaskDetailOut>(paths.contestJudgeTask(contestId, taskId)),
+
+  /** 这次评测的代码（明细里按行显示、标注行高亮）。超过 1 MB 413，没领到代码 404。 */
+  taskSource: (contestId: number, taskId: number) =>
+    request<JudgeSourceOut>(paths.contestJudgeTaskSource(contestId, taskId)),
 
   /** 采用此版本成绩：成绩矩阵这一格换成该任务的结果。手工录入的格子 409 `manual_score`。 */
   adopt: (contestId: number, taskId: number) =>
@@ -82,7 +89,10 @@ export const judgingApi = {
   createWorker: (name: string) =>
     request<JudgeWorkerCreatedOut>(paths.judgeWorkers(), { method: 'POST', body: { name } }),
 
-  /** 改名；暂停（`enabled: false`，领不到新任务、照常心跳）/ 恢复。 */
+  /**
+   * 改名；暂停（`enabled: false`，领不到新任务、照常心跳）/ 恢复；改并发数（`slots`，评完手上的
+   * 任务后以新值重启）。非 isolate 改成大于 1 时 409 `judge_worker_slots`，旧评测机 409。
+   */
   updateWorker: (workerId: number, payload: JudgeWorkerPatchIn) =>
     request<JudgeWorkerOut>(paths.judgeWorker(workerId), { method: 'PATCH', body: payload }),
 
@@ -93,6 +103,13 @@ export const judgingApi = {
   /** 重启：评完手上的任务后以同样的参数重启。 */
   restartWorker: (workerId: number) =>
     request<JudgeWorkerOut>(paths.judgeWorkerRestart(workerId), { method: 'POST' }),
+
+  /** 「评测服务」开关与全部场次的排队 / 在评数。 */
+  service: () => request<JudgeServiceOut>(paths.judgeService()),
+
+  /** 关 = 所有评测机领不到新任务（手上的照常评完，排队的留着）。 */
+  setService: (payload: JudgeServiceIn) =>
+    request<JudgeServiceOut>(paths.judgeService(), { method: 'PUT', body: payload }),
 
   /** 本机评测机状态；非 Linux 服务端 `supported: false`。 */
   localJudge: () => request<LocalJudgeOut>(paths.judgeLocal()),

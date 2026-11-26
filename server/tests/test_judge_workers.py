@@ -643,7 +643,7 @@ def test_worker对不认features的旧服务端退回(tmp_path) -> None:
         def request(self, method, path, body=None):
             bodies.append(dict(body))
             if "features" in body:
-                return 422, b'{"detail": "extra"}'
+                return 422, b'{"detail": [{"type": "extra_forbidden", "loc": ["body", "features"]}]}'
             return 200, json.dumps({"task": None, "command": "run", "enabled": True}).encode()
 
     judge = worker.Worker(OldServer(), lambda: None, tmp_path / "cache", backend="isolate")
@@ -696,3 +696,21 @@ def test_评测服务关闭时手上的结果照常交(client, admin_headers, is
     response = client.post("/api/v1/judge/tasks/%d/result" % task["id"],
                            json={"score": 100, "max_score": 100, "status": "AC"}, headers=bearer(issued["token"]))
     assert response.status_code == 200
+
+
+
+def test_别的422不会丢掉能力位(tmp_path) -> None:
+    """只有服务端点名 features 的 422 才是「服务端太旧」；其他校验失败照常报错，能力位保留。"""
+    from syncoj_server.judging import worker
+
+    class Flaky(worker.Transport):
+        def __init__(self) -> None:
+            pass
+
+        def request(self, method, path, body=None):
+            return 422, b'{"detail": [{"type": "string_too_long", "loc": ["body", "hostname"]}]}'
+
+    judge = worker.Worker(Flaky(), lambda: None, tmp_path / "cache", backend="isolate")
+    with pytest.raises(RuntimeError):
+        judge.run_once()
+    assert "features" in judge.status

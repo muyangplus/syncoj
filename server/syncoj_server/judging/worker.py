@@ -154,8 +154,9 @@ class Worker:
         """
         body = dict(self.status, slots=self.slots, poll_seconds=self.poll_seconds, want=1 if want else 0)
         status, raw = self.transport.request("POST", "/api/v1/judge/poll", body)
-        if status == 422 and "features" in self.status:
-            # 服务端比评测机旧，不认 ``features``（请求体多一个键就 422）：不报能力，照常 poll
+        if status == 422 and "features" in self.status and b"features" in raw:
+            # 服务端比评测机旧，不认 ``features``（请求体多一个键就 422，错误里点名这个字段）：
+            # 不报能力，照常 poll。别的 422 不是这个原因，不能因此丢掉能力
             self.status.pop("features")
             body.pop("features")
             status, raw = self.transport.request("POST", "/api/v1/judge/poll", body)

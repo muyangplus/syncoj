@@ -1121,8 +1121,9 @@ class JudgeWorkerOut(_Base):
     online: bool = False
     #: 暂停 = False：领不到新任务，照常心跳
     enabled: bool = True
-    #: ``run`` / ``stop`` / ``restart``：后两者 = 已下令、等评测机下一次 poll 取走
-    desired: Literal["run", "stop", "restart"] = "run"
+    #: ``run`` / ``stop`` / ``restart`` / ``uninstall``：后三者 = 已下令、等评测机取走；
+    #: ``uninstall`` 一直保持到评测机告别（这一行随之删除）
+    desired: Literal["run", "stop", "restart", "uninstall"] = "run"
     #: 服务端拉起的本机评测机
     local: bool = False
     #: 以下为评测机自报；旧评测机不报，全为空
@@ -1138,6 +1139,8 @@ class JudgeWorkerOut(_Base):
     remote_control: bool = False
     #: 能远程改并发数（评测机报了 ``slots`` 能力）
     slots_control: bool = False
+    #: 能远程卸载（评测机报了 ``uninstall`` 能力；本机评测机恒为 true）
+    uninstall_control: bool = False
     running: List[JudgeWorkerTaskOut] = Field(default_factory=list)
 
 
@@ -1166,6 +1169,14 @@ class JudgePollIn(_Base):
     boot_id: Optional[str] = Field(default=None, max_length=32)
     #: 评测机的能力：``slots`` = 认响应里下发的并发数
     features: Optional[List[str]] = Field(default=None, max_length=16)
+
+
+class JudgeGoodbyeIn(_Base):
+    """评测机收到 ``uninstall``、评完手上的任务后的告别（§12.10）：服务端删掉这一行。"""
+
+    #: 它接下来怎么清理自己：``systemd`` / ``schtask``（安装脚本装的）、``local``（本机评测机）、
+    #: ``manual``（手动运行：只删令牌与缓存，程序文件要到那台机器上手动删）
+    kind: Literal["systemd", "schtask", "local", "manual"] = "manual"
 
 
 class LocalJudgeOut(_Base):
@@ -1215,7 +1226,7 @@ class JudgePollOut(_Base):
     """``task`` 为空 = 没领到（没有任务、已暂停或 ``want`` = 0）。``command`` 见 §12.10。"""
 
     task: Optional[JudgeLeaseOut] = None
-    command: Literal["run", "stop", "restart"] = "run"
+    command: Literal["run", "stop", "restart", "uninstall"] = "run"
     enabled: bool = True
     #: 管理端设定的并发数；与评测机当前的不同时评测机评完手上的任务、以它重启。null = 没设
     slots: Optional[int] = None

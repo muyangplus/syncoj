@@ -1693,6 +1693,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/judge-workers/{worker_id}/uninstall": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Uninstall Judge Worker
+         * @description 卸载：评测机下一次 poll 时取走命令，评完手上的任务、告别（服务端删行，令牌失效），
+         *     再按安装方式删掉自己的服务 / 计划任务、程序、令牌与缓存（§12.10）。
+         *
+         *     不在线 409 ``judge_worker_offline``；没报 ``uninstall`` 能力（旧评测机）409
+         *     ``judge_worker_unsupported``。本机评测机没在跑时直接卸：删行、删 ``<数据目录>/judge-local``。
+         *     评测机一直不回来时，照样可以直接吊销。
+         */
+        post: operations["uninstall_judge_worker_api_v1_admin_judge_workers__worker_id__uninstall_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/login": {
         parameters: {
             query?: never;
@@ -2738,6 +2763,28 @@ export interface paths {
         get: operations["whoami_api_v1_agent_whoami_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/judge/goodbye": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Goodbye
+         * @description 卸载前的告别：只在管理端下过 ``uninstall`` 时认（否则 409 ``judge_worker_not_uninstalling``）。
+         *     删行（令牌随之失效）、名下还在评的任务退回队列、记审计；本机评测机一并删 ``judge-local`` 目录。
+         *     ``kind`` 是评测机接下来的清理方式，只进审计日志。
+         */
+        post: operations["goodbye_api_v1_judge_goodbye_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -4318,6 +4365,18 @@ export interface components {
              */
             message: string;
         };
+        /**
+         * JudgeGoodbyeIn
+         * @description 评测机收到 ``uninstall``、评完手上的任务后的告别（§12.10）：服务端删掉这一行。
+         */
+        JudgeGoodbyeIn: {
+            /**
+             * Kind
+             * @default manual
+             * @enum {string}
+             */
+            kind: "systemd" | "schtask" | "local" | "manual";
+        };
         /** JudgeImportApplyIn */
         JudgeImportApplyIn: {
             /** Items */
@@ -4514,7 +4573,7 @@ export interface components {
              * @default run
              * @enum {string}
              */
-            command: "run" | "stop" | "restart";
+            command: "run" | "stop" | "restart" | "uninstall";
             /**
              * Enabled
              * @default true
@@ -5029,7 +5088,7 @@ export interface components {
              * @default run
              * @enum {string}
              */
-            desired: "run" | "stop" | "restart";
+            desired: "run" | "stop" | "restart" | "uninstall";
             /** Desired Slots */
             desired_slots?: number | null;
             /**
@@ -5081,6 +5140,11 @@ export interface components {
             slots_control: boolean;
             /** Token */
             token: string;
+            /**
+             * Uninstall Control
+             * @default false
+             */
+            uninstall_control: boolean;
             /** Version */
             version?: string | null;
             /** Windows Command */
@@ -5102,7 +5166,7 @@ export interface components {
              * @default run
              * @enum {string}
              */
-            desired: "run" | "stop" | "restart";
+            desired: "run" | "stop" | "restart" | "uninstall";
             /** Desired Slots */
             desired_slots?: number | null;
             /**
@@ -5148,6 +5212,11 @@ export interface components {
              * @default false
              */
             slots_control: boolean;
+            /**
+             * Uninstall Control
+             * @default false
+             */
+            uninstall_control: boolean;
             /** Version */
             version?: string | null;
         };
@@ -9667,6 +9736,40 @@ export interface operations {
             };
         };
     };
+    uninstall_judge_worker_api_v1_admin_judge_workers__worker_id__uninstall_post: {
+        parameters: {
+            query: {
+                /** @description 原样输入评测机名称 */
+                confirm: string;
+            };
+            header?: never;
+            path: {
+                worker_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     login_api_v1_admin_login_post: {
         parameters: {
             query?: never;
@@ -11314,6 +11417,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WhoAmIOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    goodbye_api_v1_judge_goodbye_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JudgeGoodbyeIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimpleAck"];
                 };
             };
             /** @description Validation Error */

@@ -5,6 +5,9 @@
   （``want`` = 0），所以评一个长任务不会被误判离线。
 * 暂停（``enabled`` = False）：领不到新任务，心跳照常，手上的评完照常交。
 * 停止 / 重启：记进 ``desired``，在下一次 poll 的响应里带走并复位成 ``run``。
+* 卸载（``uninstall``）：同样记进 ``desired``，但**不复位** —— 一直下发到评测机告别
+  （``POST /judge/goodbye``）、服务端删掉这一行为止；中途评测机崩了被 systemd / 计划任务
+  拉起，新进程照样收到。只对报了 ``uninstall`` 能力的评测机下。
 * 并发数（``desired_slots``）：管理端设定，随 poll 响应下发；评测机发现与自己的 ``--slots``
   不同时评完手上的任务、以新值重启。只有报了 ``slots`` 能力的评测机才能改；后端不是 isolate
   的只能是 1（rlimit / winjob 的并发任务以同一个账号运行，能互相读写工作目录）。
@@ -22,14 +25,14 @@ from typing import Dict, List, Optional
 
 from sqlalchemy import select
 
-from ..models import JudgeTask, JudgeWorker, Player, RuntimeSetting, iso_utc, utcnow
+from ..models import EventLog, JudgeTask, JudgeWorker, Player, RuntimeSetting, iso_utc, utcnow
 from ..schemas import JudgePollIn, JudgeServiceOut, JudgeWorkerOut, JudgeWorkerTaskOut
 
 DEFAULT_POLL_SECONDS = 5
 #: 在线判定的下限：轮询间隔很短时也给网络抖动留余地
 MIN_ONLINE_SECONDS = 15
 
-COMMANDS = ("run", "stop", "restart")
+COMMANDS = ("run", "stop", "restart", "uninstall")
 MAX_SLOTS = 64
 #: ``runtime_setting`` 里「评测服务」开关的键；值 ``on`` / ``off``，没有这一行 = 开
 SERVICE_KEY = "judge_service"
@@ -52,6 +55,11 @@ def remote_control(row: JudgeWorker) -> bool:
 def slots_control(row: JudgeWorker) -> bool:
     """报了 ``slots`` 能力的评测机才认下发的并发数。"""
     return "slots" in (row.features or "").split(",")
+
+
+def uninstall_control(row: JudgeWorker) -> bool:
+    """报了 ``uninstall`` 能力的评测机才认卸载命令（会告别、按安装方式清理自己）。"""
+    return "uninstall" in (row.features or "").split(",")
 
 
 def slots_problem(row: JudgeWorker, slots: int) -> Optional[str]:
@@ -140,7 +148,8 @@ def take_command(row: JudgeWorker, boot_id: Optional[str] = None) -> str:
     不带的（或下命令时还没报过）按一次性送达。
     """
     command = row.desired if row.desired in COMMANDS else "run"
-    if command == "run":
+    if command in ("run", "uninstall"):
+        # 卸载不复位：告别时这一行就删了；在那之前换了进程（崩溃后被拉起）也要接着卸
         return command
     if boot_id and row.desired_boot:
         if boot_id == row.desired_boot:
@@ -188,6 +197,7 @@ def worker_out(row: JudgeWorker, now: datetime, running: Optional[List[JudgeWork
         desired_slots=row.desired_slots,
         remote_control=remote_control(row),
         slots_control=remote_control(row) and slots_control(row),
+        uninstall_control=bool(row.is_local) or (remote_control(row) and uninstall_control(row)),
         running=list(running or []),
     )
 
@@ -206,3 +216,24 @@ def release_tasks(session, worker_id: int) -> int:
         task.worker_id = None
         task.lease_until = None
     return len(tasks)
+
+
+#: 告别时报的清理方式 → 审计日志里的说明
+UNINSTALL_KIND_LABEL = {
+    "systemd": "systemd 服务、程序、令牌与缓存随后由 root 删除",
+    "schtask": "计划任务、程序与令牌随后由清理任务（SYSTEM）删除",
+    "local": "本机评测机目录已删除",
+    "manual": "手动运行：已删令牌与缓存，程序文件需到那台机器上手动删除",
+}
+
+
+def forget_uninstalled(session, row: JudgeWorker, kind: str, actor: Optional[str] = None) -> int:
+    """卸载完成（评测机告别，或本机评测机直接卸）：名下在评的任务退回队列、记审计、删行。
+    返回退回队列的任务数。"""
+    released = release_tasks(session, row.id)
+    message = "评测机已卸载：%s（%s）" % (row.name, UNINSTALL_KIND_LABEL.get(kind, kind))
+    if actor:
+        message += "，%s 操作" % actor
+    session.add(EventLog(level="info", category="judge_worker_uninstall", message=message))
+    session.delete(row)
+    return released

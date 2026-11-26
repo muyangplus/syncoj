@@ -64,7 +64,7 @@ syncoj-server（服务端账号）         syncoj-judge worker（专用账号，
 
 * 「评测」页「题目」卡片：每题「设置」——上传数据包、设时空限制与 IO 方式、选择「自带评测 / 外部评测器」。
 * 「评测」页「任务」卡片：题目（全部 / 单题）× 选手（全部 / 单人）「评测 / 重测」，可勾「不复用已有结果」；自动评测开关与去抖秒数；失败行「重测本题」；进度沿用已有聚合进度接口形状。顶栏「快捷操作」→「评测全部题目」等价。「评测记录」卡片列出每次评测（含复用的）。
-* 「评测」页「评测机」卡片：签发令牌（附一行安装命令）、状态与正在评的任务、暂停 / 停止 / 重启 / 改名 / 吊销、本机评测机启停（§12.10）。
+* 「评测」页「评测机」卡片：签发令牌（附一行安装命令）、状态与正在评的任务、暂停 / 停止 / 重启 / 改名 / 卸载 / 吊销、本机评测机启停（§12.10）。
 * 「成绩」：格子点开看每个测试点明细，可重测、看版本；选手列「版本与分数」看这位选手全部题目的 timeline。
 * 评测用**领任务时 `source/` 里按题目模式选定的那份代码**（记下路径与 sha256）。场次仍在进行（`is_active` 或未到结束时间）时排任务回 409 `contest_in_progress`（评的是考到一半的代码）；教师确认后带 `force` 再排。
 
@@ -106,6 +106,11 @@ syncoj-server（服务端账号）         syncoj-judge worker（专用账号，
 
 * **一个循环**：评测机每个轮询间隔 `POST /api/v1/judge/poll` 一次，自报 `version` / `backend` / `isolated` / `hostname` / `platform` / `slots` / `poll_seconds`，有空位时 `want = 1` 顺带领一个任务；评测中照样 poll（`want = 0`）。服务端记进 `judge_worker` 的新列（迁移 023），在线 = 最近联系不超过 3 × 轮询间隔（下限 15 秒）。正在评什么不靠自报，直接看任务表里租约在它名下的 `running` 任务。旧评测机只调 `/lease`：照常领任务、算心跳，自报列为空，收不到命令。
 * **管理动作**：暂停（`enabled = false`：领不到新任务、照常心跳、手上的评完照常交）；停止 / 重启记进 `desired`，在下一次 poll 的响应 `command` 里带走并复位成 `run`（一次性，评测机日后被重新拉起不会再停一次）。评测机收到后不再领任务，评完手上的：停止 = 退出码 0（systemd 的 `Restart=on-failure` 不再拉起）；重启 = 以同样的参数重启自己（Linux 原地 exec，进程号不变；Windows 起新进程后退出）。只对在线、报过状态的评测机下命令（否则 409），免得命令在库里放到下次开机才生效。吊销 = 删行，它名下在评的任务**立刻**退回队列（令牌已失效，交不回结果，不必等 15 分钟租约）。
+* **远程卸载**：`POST /admin/judge-workers/{id}/uninstall`（输名称确认）把 `desired` 记成 `uninstall`。与停止 / 重启不同，它**不复位**：一直下发到评测机告别、这一行被删为止，中途崩溃被拉起的新进程照样收到；也不能被停止 / 重启盖掉（409）。只对在线且报了 `features: ["uninstall"]` 的评测机下。评测机不再领任务，评完手上的、交完结果，`POST /judge/goodbye` → 服务端删行（令牌失效、名下任务回队列、记审计），然后按安装脚本写在 pyz 旁的 `install.json`（`--install-manifest`）清理自己：
+  * systemd：服务可能以非 root 账号运行，删不了单元。评测机只在缓存目录写标记、以 0 退出；单元的 `ExecStopPost=+/opt/syncoj-judge/uninstall.sh --if-requested`（`+` = root，systemd ≥ 231）看到标记，用 `systemd-run --on-active=2` 起临时单元去停服务、删单元、目录与账号（本单元此刻正在停止，不能在 ExecStopPost 里停它自己）。uninstall.sh 由 install.sh 写出、root 所有 0755，也供手动运行。
+  * Windows：计划任务以 LOCAL SERVICE 运行，删不了任务。评测机在它可写的 `cache\` 写标记后退出；install.ps1 另注册以 SYSTEM 运行的「SyncOJ Judge Cleanup」，开机与每 2 分钟用 `cmd /c if exist` 看标记（平常不起 PowerShell），在才执行 `uninstall.ps1`（只有 SYSTEM / Administrators 可改，安装目录 = 脚本所在目录，不收参数）。标记只看在不在，内容不被执行；删目录用 `rmdir /s`（不跟随 LOCAL SERVICE 可能放的目录联接）。
+  * 本机评测机：服务端告别时删 `<数据目录>/judge-local`；没在跑时管理端直接删。没有 `install.json`（手动运行）：删自己的令牌与缓存里自己写的文件，程序文件留给人删。
+  * 告别失败（连不上）不清理、以 1 退出，等被拉起重来；告别得到 401（已吊销）照样清理，不陷入循环。评测机一直不回来时仍可直接吊销。
 * **并发**：`--slots N` 起 N 个评测线程，各领各的任务；isolate 的 box 编号从 `--box-id` 起依次占用。只有 isolate 可以大于 1（每个 box 一个账号）；rlimit / winjob 共用一个运行账号，并发任务能互相读写工作目录，启动即拒绝。
   * **管理端改并发数**：`PATCH /admin/judge-workers/{id}` 带 `slots`（1–64），存进 `judge_worker.desired_slots`（迁移 024），随每次 poll 响应的 `slots` 下发。评测机发现与自己的 `--slots` 不同时不再领新任务，评完手上的、把命令行里的 `--slots` 换成新值重启（复用上面的重启路径；pyz 与 `-m` 两种启动方式都改 argv）。只有报了 `features: ["slots"]` 的评测机能改（旧评测机 409 `judge_worker_unsupported`）；后端不是 isolate 的只能是 1（409 `judge_worker_slots`），服务端也不给它下发大于 1 的值。本机评测机直接以设定的并发数启动。
 * **「评测服务」开关**：全局一个（`runtime_setting` 里的 `judge_service`，没有这一行 = 开），`GET / PUT /admin/judge-service`。关 = 所有评测机都领不到新任务（`/poll` 与 `/lease` 都遵守，poll 响应 `service = false`），手上的照常评完交回，排队的任务留着；自动入队照常入队、只是不发出去，打开后按原顺序接着发。

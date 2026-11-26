@@ -376,7 +376,7 @@ def test_install_sh_参数解析_令牌可以以短横线开头(client, tmp_path
 
 def test_install_sh_不嵌入形状可疑的Host(client) -> None:
     body = client.get("/judge/install.sh", headers={"Host": "evil\";rm -rf /;\""}).content.decode("utf-8")
-    assert "rm -rf" not in body
+    assert "evil" not in body and "rm -rf /;" not in body
     assert 'EMBEDDED_SERVER="http://127.0.0.1:' in body
 
 

@@ -205,7 +205,7 @@ python scripts/smoke_systemd245.py          # 需要 docker 与已安装的服�
 python scripts/smoke_systemd245.py --keep   # 失败后保留容器与临时目录
 ```
 
-覆盖：umask 0 安装、日志与配对码、注册单元不跟随符号链接、升级切换、启动守卫回滚、主动通告切换、授权卸载。CI 同样运行。
+覆盖：umask 0 安装、日志与配对码、注册单元不跟随符号链接、升级切换、启动守卫回滚、主动通告切换、授权卸载、评测机一键安装与远程卸载（`ExecStopPost=+` 经 `systemd-run` 卸干净）。CI 同样运行。
 
 ## 自带评测
 
@@ -252,6 +252,7 @@ python scripts/smoke_systemd245.py --keep   # 失败后保留容器与临时目�
 | `--slots` | `1` | 同时评几个任务（大于 1 只能用 isolate）；管理端改了并发数时评测机会以新值重启自己 |
 | `--poll` | `5` 秒 | 轮询间隔（评测中也按它报状态） |
 | `--log-file` | stderr | 日志文件 |
+| `--install-manifest` | pyz 旁的 `install.json` | 安装方式；远程卸载时据此清理（安装脚本自动传） |
 | `--once` | 关 | 评一个任务后退出 |
 | `--verbose` / `-v` | 关 | 调试日志 |
 
@@ -261,7 +262,8 @@ python scripts/smoke_systemd245.py --keep   # 失败后保留容器与临时目�
 2. 改并发数：「并发」列的数字框改成 N（1–64）。预期：0.6 秒后提交，下一次轮询（默认 5 秒内）送达，评测机评完手上的任务后以 `--slots N` 重启，列里「当前」消失。只有 isolate 后端可改；rlimit / winjob 显示「仅 isolate」；旧版本评测机只显示数字（到那台机器上改 `--slots` 后重启，或先升级）。
 3. 「更多」→「停止」/「重启」：下一次轮询（默认 5 秒内）送达，评完手上的任务后退出 / 以同样参数重启。离线或旧版本评测机上不可用，到那台机器上 `systemctl stop|restart syncoj-judge`（Windows：计划任务「SyncOJ Judge」）。
 4. 「更多」→「改名」。
-5. 「更多」→「吊销」→ 输入名称确认。预期：令牌立即失效，它正在评的任务立即回到队列。
+5. 「更多」→「卸载」→ 输入名称确认。预期：状态列出现「卸载中」；评测机评完手上的任务后从表格里消失（审计日志「评测机卸载」）。之后那台机器上：Linux 几秒内 `systemctl status syncoj-judge` 报单元不存在，`/opt/syncoj-judge`、`/etc/syncoj-judge`、`/var/cache/syncoj-judge` 与账号 `syncoj-judge` / `syncoj-judge-run` 都删了；Windows 2 分钟内两个计划任务「SyncOJ Judge」「SyncOJ Judge Cleanup」与 `%ProgramData%\SyncOJ\judge` 都删了。离线或旧版本评测机上不可用：到那台机器上手动卸载（Linux `sudo /opt/syncoj-judge/uninstall.sh`；Windows 以管理员运行 `%ProgramData%\SyncOJ\judge\uninstall.ps1`），再回来「吊销」。本机评测机没在跑时直接删掉这一行与 `<数据目录>/judge-local`。
+6. 「更多」→「吊销」→ 输入名称确认。预期：令牌立即失效，它正在评的任务立即回到队列。评测机程序留在那台机器上（之后连不上服务端，日志一直报 401）。
 
 暂停全部评测（例如考试中途要把 CPU 让给别的事）：「评测机」卡片头「评测服务」开关 → 关 → 确认。预期：所有评测机都不再领新任务，手上的评完照常交回；旁边「排队 N」保留不减（自动评测照常入队）。打开后按原顺序接着评。
 

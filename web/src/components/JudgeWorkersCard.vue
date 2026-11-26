@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * 「评测」页的评测机卡片（§12.10）：「评测服务」总开关与排队数，每台的领任务开关、并发数、
- * 状态与正在评的任务、停止 / 重启 / 改名 / 吊销，添加评测机（一行安装命令）与本机评测机启停。
+ * 状态与正在评的任务、停止 / 重启 / 改名 / 卸载 / 吊销，添加评测机（一行安装命令）与本机评测机启停。
  */
 import { computed, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -65,7 +65,17 @@ function stateOf(row: JudgeWorkerOut): { label: string; type: TagType; plain: bo
   return { label: '在线', type: 'success', plain: false }
 }
 
-const DESIRED_LABEL: Record<string, string> = { stop: '停止中', restart: '重启中' }
+const DESIRED_LABEL: Record<string, string> = { stop: '停止中', restart: '重启中', uninstall: '卸载中' }
+
+function commandable(row: JudgeWorkerOut): boolean {
+  return row.online && row.remote_control && row.desired !== 'uninstall'
+}
+
+/** 本机评测机没在跑时也能卸（服务端直接删）；远程的要在线且报了卸载能力。 */
+function uninstallable(row: JudgeWorkerOut): boolean {
+  if (row.desired === 'uninstall' || !row.uninstall_control) return false
+  return row.local || row.online
+}
 
 // ---- 评测服务总开关 ----
 
@@ -211,7 +221,44 @@ async function command(row: JudgeWorkerOut, kind: 'stop' | 'restart'): Promise<v
 function onMore(row: JudgeWorkerOut, cmd: string): void {
   if (cmd === 'restart' || cmd === 'stop') void command(row, cmd)
   else if (cmd === 'rename') void rename(row)
+  else if (cmd === 'uninstall') askUninstall(row)
   else if (cmd === 'revoke') askRemove(row)
+}
+
+// ---- 卸载：评完手上的任务后告别、删掉自己的服务与文件 ----
+
+const uninstalling = ref<JudgeWorkerOut | null>(null)
+const uninstallOpen = ref(false)
+const uninstallSubmitting = ref(false)
+
+function askUninstall(worker: JudgeWorkerOut): void {
+  uninstalling.value = worker
+  uninstallOpen.value = true
+}
+
+const uninstallImpact = computed(() => {
+  const row = uninstalling.value
+  if (!row) return []
+  const lines: string[] = []
+  if (row.running?.length) lines.push(`评完手上 ${row.running?.length} 个任务后执行`)
+  if (row.local) lines.push('删除 <数据目录>/judge-local')
+  return lines
+})
+
+async function confirmUninstall(): Promise<void> {
+  const row = uninstalling.value
+  if (!row) return
+  uninstallSubmitting.value = true
+  try {
+    const reply = await judgingApi.uninstallWorker(row.id, row.name)
+    uninstallOpen.value = false
+    ElMessage.success(reply.detail || '已下令卸载')
+    await load()
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  } finally {
+    uninstallSubmitting.value = false
+  }
 }
 
 const removing = ref<JudgeWorkerOut | null>(null)
@@ -306,7 +353,12 @@ async function confirmRemove(): Promise<void> {
             <el-tag size="small" :type="stateOf(row).type" :effect="stateOf(row).plain ? 'plain' : 'light'">
               {{ stateOf(row).label }}
             </el-tag>
-            <el-tag v-if="DESIRED_LABEL[row.desired]" size="small" type="warning" effect="plain">
+            <el-tag
+              v-if="DESIRED_LABEL[row.desired]"
+              size="small"
+              :type="row.desired === 'uninstall' ? 'danger' : 'warning'"
+              effect="plain"
+            >
               {{ DESIRED_LABEL[row.desired] }}
             </el-tag>
           </div>
@@ -398,14 +450,13 @@ async function confirmRemove(): Promise<void> {
             </el-button>
             <template #dropdown>
               <el-dropdown-menu>
-                <el-dropdown-item command="restart" :disabled="!row.online || !row.remote_control">
-                  重启
-                </el-dropdown-item>
-                <el-dropdown-item command="stop" :disabled="!row.online || !row.remote_control">
-                  停止
-                </el-dropdown-item>
+                <el-dropdown-item command="restart" :disabled="!commandable(row)">重启</el-dropdown-item>
+                <el-dropdown-item command="stop" :disabled="!commandable(row)">停止</el-dropdown-item>
                 <el-dropdown-item command="rename">改名</el-dropdown-item>
-                <el-dropdown-item command="revoke" divided class="danger-item">吊销</el-dropdown-item>
+                <el-dropdown-item command="uninstall" divided class="danger-item" :disabled="!uninstallable(row)">
+                  卸载
+                </el-dropdown-item>
+                <el-dropdown-item command="revoke" class="danger-item">吊销</el-dropdown-item>
               </el-dropdown-menu>
             </template>
           </el-dropdown>
@@ -429,6 +480,16 @@ async function confirmRemove(): Promise<void> {
       :impact="removeImpact"
       :submitting="removeSubmitting"
       @confirm="confirmRemove"
+    />
+    <ConfirmByNameDialog
+      v-model="uninstallOpen"
+      title="卸载评测机？"
+      :expected="uninstalling?.name ?? ''"
+      confirm-text="卸载"
+      detail="删除程序、服务、令牌与缓存，不可恢复。"
+      :impact="uninstallImpact"
+      :submitting="uninstallSubmitting"
+      @confirm="confirmUninstall"
     />
   </SectionCard>
 </template>

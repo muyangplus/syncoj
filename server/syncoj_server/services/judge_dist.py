@@ -5,7 +5,7 @@
   不必装服务端包与它的第三方依赖。按需生成，以「版本号 + 源码指纹」为键缓存在
   ``<数据目录>/cache/judge-worker/``；源码一改（开发时）自动换一份。
 * ``install.sh`` / ``install.ps1``：模板在 ``services/judge_install/``，发出时嵌进服务端
-  地址与 pyz 的 sha256。地址取自请求的 Host 头（这几条路由只在管理端口上，所以就是
+  地址、pyz 的 sha256 与同目录的卸载脚本（``uninstall.sh`` / ``uninstall.ps1``，安装时写到安装目录）。地址取自请求的 Host 头（这几条路由只在管理端口上，所以就是
   管理端口地址），只收形状安全的 —— 它要被嵌进以 root / 管理员执行的脚本。
 """
 
@@ -101,17 +101,43 @@ def base_url(host: Optional[str], scheme: str, fallback_port: int) -> str:
     return "http://127.0.0.1:%d" % fallback_port
 
 
+#: 卸载脚本嵌进安装脚本的位置：sh 是一个带引号的 heredoc（内容不展开），ps1 是单引号 here-string
+SH_UNINSTALL_SLOT = "\n__SYNCOJ_UNINSTALL_SH__\nSYNCOJ_UNINSTALL_EOF\n"
+PS1_UNINSTALL_SLOT = "@'\n__SYNCOJ_UNINSTALL_PS1__\n'@\n"
+
+
+def _template(name: str) -> str:
+    return (TEMPLATES / name).read_bytes().decode("utf-8-sig").replace("\r\n", "\n")
+
+
+def uninstall_script(name: str) -> str:
+    """``uninstall.sh`` / ``uninstall.ps1`` 的内容（LF，无 BOM），检查它能原样嵌进安装脚本。"""
+    text = _template(name)
+    if not text.endswith("\n"):
+        text += "\n"
+    lines = text.split("\n")
+    if name.endswith(".sh") and "SYNCOJ_UNINSTALL_EOF" in lines:
+        raise RuntimeError("uninstall.sh 里不能有 heredoc 的结束行 SYNCOJ_UNINSTALL_EOF")
+    if name.endswith(".ps1") and [line for line in lines if line.startswith("'@")]:
+        raise RuntimeError("uninstall.ps1 里不能有以 '@ 开头的行（会提前结束 here-string）")
+    return text
+
+
 def render_script(name: str, server: str, pyz_sha256: str) -> bytes:
-    """``install.sh`` / ``install.ps1``：嵌入地址与 pyz 指纹。ps1 带 UTF-8 BOM（PowerShell 5.1 要它）。"""
-    raw = (TEMPLATES / name).read_bytes()
-    text = raw.decode("utf-8-sig")
+    """``install.sh`` / ``install.ps1``：嵌入地址、pyz 指纹与卸载脚本。ps1 带 UTF-8 BOM（PowerShell 5.1 要它）。"""
+    text = _template(name)
     if name.endswith(".sh"):
         text = text.replace('EMBEDDED_SERVER="__SYNCOJ_SERVER__"', 'EMBEDDED_SERVER="%s"' % server, 1)
         text = text.replace('PYZ_SHA256="__SYNCOJ_PYZ_SHA256__"', 'PYZ_SHA256="%s"' % pyz_sha256, 1)
-        return text.replace("\r\n", "\n").encode("utf-8")
+        if SH_UNINSTALL_SLOT in text:
+            text = text.replace(
+                SH_UNINSTALL_SLOT, "\n" + uninstall_script("uninstall.sh") + "SYNCOJ_UNINSTALL_EOF\n", 1)
+        return text.encode("utf-8")
     text = text.replace("$EmbeddedServer = '__SYNCOJ_SERVER__'", "$EmbeddedServer = '%s'" % server, 1)
     text = text.replace("$PyzSha256 = '__SYNCOJ_PYZ_SHA256__'", "$PyzSha256 = '%s'" % pyz_sha256, 1)
-    return b"\xef\xbb\xbf" + text.replace("\r\n", "\n").replace("\n", "\r\n").encode("utf-8")
+    if PS1_UNINSTALL_SLOT in text:
+        text = text.replace(PS1_UNINSTALL_SLOT, "@'\n" + uninstall_script("uninstall.ps1") + "'@\n", 1)
+    return b"\xef\xbb\xbf" + text.replace("\n", "\r\n").encode("utf-8")
 
 
 def install_commands(server: str, token: str) -> Tuple[str, str, str]:

@@ -707,6 +707,9 @@ def _command(ctx: AppContext, worker_id: int, command: str) -> JudgeWorkerOut:
             raise ApiError(409, "judge_worker_unsupported", "这台评测机版本太旧，收不到远程命令；请在那台机器上操作")
         if not judge_workers.is_online(row, utcnow()):
             raise ApiError(409, "judge_worker_offline", "评测机不在线")
+        if row.desired == "uninstall":
+            # 卸载命令不复位，不能被停止 / 重启盖掉；不想等了就直接吊销
+            raise ApiError(409, "judge_worker_uninstalling", "评测机正在卸载")
         judge_workers.issue_command(row, command)
         session.flush()
         return _workers_out(session, [row])[0]
@@ -730,6 +733,43 @@ def restart_judge_worker(
 ) -> JudgeWorkerOut:
     """重启：评完手上的任务后以同样的参数重新启动自己（换上磁盘上的新程序）。"""
     return _command(ctx, worker_id, "restart")
+
+
+@router.post("/judge-workers/{worker_id}/uninstall", response_model=SimpleAck)
+def uninstall_judge_worker(
+    worker_id: int,
+    confirm: str = Query(..., min_length=1, max_length=200, description="原样输入评测机名称"),
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> SimpleAck:
+    """卸载：评测机下一次 poll 时取走命令，评完手上的任务、告别（服务端删行，令牌失效），
+    再按安装方式删掉自己的服务 / 计划任务、程序、令牌与缓存（§12.10）。
+
+    不在线 409 ``judge_worker_offline``；没报 ``uninstall`` 能力（旧评测机）409
+    ``judge_worker_unsupported``。本机评测机没在跑时直接卸：删行、删 ``<数据目录>/judge-local``。
+    评测机一直不回来时，照样可以直接吊销。
+    """
+    with ctx.db.session() as session:
+        row = _load_worker(session, worker_id)
+        require_confirm(row.name, confirm, "评测机名称")
+        if row.is_local and not ctx.local_judge.running():
+            released = judge_workers.forget_uninstalled(session, row, "local", admin.username)
+            session.flush()
+            local_now = True
+        else:
+            local_now = False
+            if not row.is_local:
+                if not judge_workers.remote_control(row) or not judge_workers.uninstall_control(row):
+                    raise ApiError(409, "judge_worker_unsupported",
+                                   "这台评测机版本太旧，不能远程卸载；请先升级，或到那台机器上手动卸载")
+                if not judge_workers.is_online(row, utcnow()):
+                    raise ApiError(409, "judge_worker_offline", "评测机不在线")
+            judge_workers.issue_command(row, "uninstall")
+            session.flush()
+    if local_now:
+        ctx.local_judge.remove_files(ctx.settings)
+        return SimpleAck(ok=True, detail="已卸载" + ("，%d 个任务已退回队列" % released if released else ""))
+    return SimpleAck(ok=True, detail="已下令卸载")
 
 
 @router.delete("/judge-workers/{worker_id}", response_model=SimpleAck)

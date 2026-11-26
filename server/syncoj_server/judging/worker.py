@@ -9,7 +9,8 @@
 
 和服务端的往来只有一个循环（§12.10）：每个轮询间隔 ``POST /judge/poll`` 一次 —— 自报状态
 （版本、后端、主机、并发数），有空位就顺带领一个任务，响应里带管理端下的命令
-（``stop``：评完手上的退出；``restart``：评完手上的、以同样的参数重启自己），以及管理端设定的
+（``stop``：评完手上的退出；``restart``：评完手上的、以同样的参数重启自己；``uninstall``：评完
+手上的、告别服务端、按安装方式清理自己，见 ``uninstall.py``），以及管理端设定的
 并发数（与当前 ``--slots`` 不同时评完手上的、换成新的 ``--slots`` 重启自己）。评测中也照常
 poll（``want`` = 0），服务端据此判断在线。``--slots N`` 时 N 个任务并发评（各用一个线程，
 isolate 的 box 编号依次 +1）。
@@ -39,6 +40,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import runner
 from . import sandbox as sb
+from . import uninstall
 
 log = logging.getLogger("syncoj.judge")
 
@@ -49,8 +51,9 @@ MAX_BLOB_BYTES = 1024 * 1024 * 1024
 #: 评完第一个任务后按结果里的 ``isolated`` 更正。
 BACKEND_ISOLATED = {"isolate": True, "rlimit": False, "winjob": False}
 
-#: 报给服务端的能力：``slots`` = 认 poll 响应里的并发数（服务端据此决定能不能远程改并发）
-FEATURES = ["slots"]
+#: 报给服务端的能力：``slots`` = 认 poll 响应里的并发数（服务端据此决定能不能远程改并发）；
+#: ``uninstall`` = 认卸载命令（告别并清理自己）
+FEATURES = ["slots", "uninstall"]
 MAX_SLOTS = 64
 
 
@@ -114,7 +117,8 @@ class Worker:
         }
         self.backend = backend
         self._stop = False
-        #: 服务端下的命令（``stop`` / ``restart``）；``main`` 据此决定退出后是否重启自己
+        #: 服务端下的命令（``stop`` / ``restart`` / ``uninstall``）；``main`` 据此决定退出后重启自己
+        #: 还是告别并清理自己
         self.command = "run"
         #: 服务端要求的新并发数；与 ``slots`` 不同时 ``main`` 以它重启
         self.restart_slots: Optional[int] = None
@@ -168,7 +172,13 @@ class Worker:
             raise RuntimeError("和服务端通信失败：HTTP %d %s" % (status, raw[:200].decode("utf-8", "replace")))
         reply = json.loads(raw.decode("utf-8"))
         command = reply.get("command") or "run"
-        if command in ("stop", "restart") and self.command == "run":
+        if command == "uninstall" and self.command != "uninstall":
+            # 比停止 / 重启优先：手上有重启在等也改成卸载
+            log.info("服务端要求卸载：不再领新任务，评完手上的任务后告别并清理")
+            self.command = command
+            self.restart_slots = None
+            self.stop()
+        elif command in ("stop", "restart") and self.command == "run":
             log.info("服务端要求%s：评完手上的任务后%s", "停止" if command == "stop" else "重启",
                      "退出" if command == "stop" else "重启")
             self.command = command
@@ -386,6 +396,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--slots", type=int, default=1,
                         help="同时评几个任务（isolate 的 box 编号从 --box-id 起依次占用；管理端改了会以新值重启）")
     parser.add_argument("--log-file", default=None, help="日志写到这个文件（默认 stderr）")
+    parser.add_argument("--install-manifest", default=None,
+                        help="安装脚本写的 install.json（记安装方式，远程卸载时据此清理；默认在 pyz 同目录找）")
     parser.add_argument("--once", action="store_true", help="只评一个任务就退出（调试）")
     parser.add_argument("--verbose", "-v", action="store_true")
     return parser
@@ -410,8 +422,15 @@ def main(argv=None) -> int:
         format="%(asctime)s %(levelname)-7s %(message)s",
         filename=args.log_file,
     )
-    token = Path(args.token_file).read_text(encoding="utf-8").strip()
     cache = Path(args.cache_dir) if args.cache_dir else Path.home() / ".cache" / "syncoj-judge"
+    manifest = uninstall.load_manifest(
+        Path(args.install_manifest) if args.install_manifest else uninstall.default_manifest_path()
+    )
+    if uninstall.already_requested(manifest, cache):
+        # 告别过、等 root / SYSTEM 来清理（令牌可能已经删了）：别起来，更别反复重启
+        log.info("已告别服务端、等待清理（%s）：不再启动", manifest.marker_path(cache))
+        return 0
+    token = Path(args.token_file).read_text(encoding="utf-8").strip()
 
     def factory(slot: int = 0) -> sb.Sandbox:
         return sb.make_sandbox(
@@ -436,6 +455,9 @@ def main(argv=None) -> int:
     if args.once:
         return 0 if worker.run_once() else 1
     code = worker.run_forever()
+    if worker.command == "uninstall":
+        return uninstall.finish(worker.transport, manifest, Path(args.token_file), cache,
+                                program=sys.argv[0] if sys.argv else None)
     if worker.restart_requested:
         restart_self(worker.restart_slots)
     return code

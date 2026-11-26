@@ -255,7 +255,7 @@ onMounted(async () => {
           <el-dropdown trigger="click" @command="runAction">
             <el-button type="primary">
               <el-icon><Lightning /></el-icon>
-              <span>快捷操作</span>
+              <span class="quick-label">快捷操作</span>
             </el-button>
             <template #dropdown>
               <el-dropdown-menu class="quick-menu">
@@ -643,6 +643,29 @@ onMounted(async () => {
   }
   .content {
     padding: 16px;
+  }
+}
+/* 手机宽度：面包屑让位，场次框收窄，快捷操作只留图标 */
+@media (max-width: 520px) {
+  .crumbs,
+  .quick-label {
+    display: none;
+  }
+  .contest-select {
+    width: 104px;
+  }
+  .topbar {
+    padding: 0 10px;
+  }
+  .topbar-right {
+    gap: 6px;
+  }
+  .pill {
+    padding: 0 8px;
+    white-space: nowrap;
+  }
+  .content {
+    padding: 12px;
   }
 }
 </style>

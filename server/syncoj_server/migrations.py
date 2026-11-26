@@ -780,16 +780,32 @@ def _migration_024_judge_flags(engine: Engine) -> None:
             continue
         _add_column(engine, table, "warning_count", "INTEGER")
         _add_column(engine, table, "risk_count", "INTEGER")
+        # 结果文档可能很大（单份上限 2 MB）：不一次全读进内存。只有含这两个键的才可能非零，
+        # 先用 LIKE 挑出来按 id 分批解析，其余一条 UPDATE 置 0
+        candidates = (
+            "(warning_count IS NULL OR risk_count IS NULL) AND "
+            "(%s LIKE '%%\"precheck_warnings\"%%' OR %s LIKE '%%\"risk_events\"%%')" % (column, column)
+        )
+        last_id = 0
+        while True:
+            with engine.begin() as conn:
+                rows = conn.execute(text(
+                    "SELECT id, %s FROM %s WHERE %s AND id > :last ORDER BY id LIMIT 200" % (column, table, candidates)
+                ), {"last": last_id}).all()
+                for row_id, raw in rows:
+                    warnings, risks = count_flags_json(raw)
+                    conn.execute(
+                        text("UPDATE %s SET warning_count = :w, risk_count = :r WHERE id = :id" % table),
+                        {"w": warnings, "r": risks, "id": row_id},
+                    )
+            if not rows:
+                break
+            last_id = rows[-1][0]
         with engine.begin() as conn:
-            rows = conn.execute(text(
-                "SELECT id, %s FROM %s WHERE warning_count IS NULL OR risk_count IS NULL" % (column, table)
-            )).all()
-            for row_id, raw in rows:
-                warnings, risks = count_flags_json(raw)
-                conn.execute(
-                    text("UPDATE %s SET warning_count = :w, risk_count = :r WHERE id = :id" % table),
-                    {"w": warnings, "r": risks, "id": row_id},
-                )
+            conn.execute(text(
+                "UPDATE %s SET warning_count = COALESCE(warning_count, 0), risk_count = COALESCE(risk_count, 0) "
+                "WHERE warning_count IS NULL OR risk_count IS NULL" % table
+            ))
 
 
 def _migration_025_smart_judge(engine: Engine) -> None:

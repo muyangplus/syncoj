@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Optional, Set
 
 from .config import Settings
 from .db import Database
@@ -77,6 +77,9 @@ class AppContext:
     #: 本机评测机子进程（§12.10，``services.local_judge.LocalJudge``）。只在内存里：
     #: 服务端退出时一并停掉，重启后不自动拉起（教师再点一次「启动」）
     local_judge: Any = field(default_factory=lambda: _new_local_judge())
+    #: 自带评测刚交回结果的场次 id。后台成绩扫描平时跳过已结束（closed）的场次，
+    #: 但考后评测（智能模式「已结束」、手动重测）的结果要进矩阵：在这里的场次照扫一次
+    judge_dirty_contests: Set[int] = field(default_factory=set)
 
     @classmethod
     def create(cls, settings: Settings) -> "AppContext":

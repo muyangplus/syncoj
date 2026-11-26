@@ -542,6 +542,9 @@ def complete(ctx, task_id: int, worker_id: int, document: Dict[str, Any], now: O
         contest = session.get(Contest, task.contest_id)
         player = session.get(Player, task.player_id)
         _store_result(ctx, session, task, contest, player, document, now)
+        dirty = getattr(ctx, "judge_dirty_contests", None)
+        if dirty is not None:
+            dirty.add(task.contest_id)
     return True
 
 

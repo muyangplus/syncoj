@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Set
 
 from sqlalchemy import select
 
@@ -44,12 +45,18 @@ def scan_all_contests(ctx: AppContext, force: bool = False) -> int:
     把心跳、上传、管理端写操作都挡在 busy_timeout 上。与"重新扫描"接口共用
     ``SCAN_LOCK``。
     """
+    dirty: Set[int] = set()
+    pending = getattr(ctx, "judge_dirty_contests", None)
+    if pending:
+        dirty = set(pending)
+        pending.difference_update(dirty)
     with ctx.db.session() as session:
         contests = [
             (contest.id, contest.slug)
             for contest in session.execute(
                 select(Contest).where(
-                    Contest.status.notin_((ContestStatus.CLOSED, ContestStatus.ARCHIVED))
+                    Contest.status != ContestStatus.ARCHIVED,
+                    (Contest.status != ContestStatus.CLOSED) | Contest.id.in_(sorted(dirty) or [-1]),
                 )
             ).scalars()
         ]

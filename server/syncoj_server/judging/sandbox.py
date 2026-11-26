@@ -31,6 +31,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 __all__ = [
     "Limits",
     "RunResult",
+    "Running",
+    "boot_ticks",
     "Sandbox",
     "SandboxError",
     "RlimitSandbox",
@@ -43,6 +45,9 @@ __all__ = [
 ]
 
 OK, TLE, MLE, RE, OLE, SE = "OK", "TLE", "MLE", "RE", "OLE", "SE"
+
+#: isolate 评测侧 box 编号默认比选手 box 大这么多（§12.15）
+TRUSTED_BOX_OFFSET = 500
 
 #: rlimit 后端每个运行账号的进程数上限（见 RlimitSandbox.run 里的说明）
 RLIMIT_NPROC_CAP = 64
@@ -149,6 +154,22 @@ class Sandbox:
         """新建文件的属主（uid, gid）；None = 评测机自己。"""
         return None
 
+    #: 能不能 :meth:`spawn`（两个程序同时跑、用管道连起来；交互题要用）
+    supports_spawn = False
+
+    def spawn(self, argv, limits, *, stdin=None, stdout=None, stderr=None, stdin_fd=None, stdout_fd=None,
+              kill_strays: Optional[bool] = None) -> "Running":
+        """起一个程序、不等它结束；``stdin_fd`` / ``stdout_fd`` 是调用方给的管道端。"""
+        raise SandboxError("这个沙箱后端不支持同时运行两个程序（交互题）")
+
+    def reap_strays(self, since: Optional[int]) -> int:
+        return 0
+
+    def peer(self) -> "Sandbox":
+        """评测侧的另一个工作目录（trusted box，§12.15）：checker / interactor / grader 在这里
+        编译与运行，选手程序的工作目录里只有它自己。用完由调用方 ``close``。"""
+        raise SandboxError("这个沙箱后端没有评测侧工作目录")
+
     def close(self) -> None:  # pragma: no cover - 接口
         raise NotImplementedError
 
@@ -186,6 +207,8 @@ report = int(sys.argv[2])
 pid = os.fork()
 if pid == 0:
     os.close(report)
+    import signal
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)  # Python 启动时忽略了 SIGPIPE，exec 前恢复
     try:
         os.execvp(argv[0], argv)
     except OSError:
@@ -195,7 +218,7 @@ os.write(report, json.dumps([status, usage.ru_utime + usage.ru_stime, usage.ru_m
 """
 
 
-def _boot_ticks() -> Optional[int]:
+def boot_ticks() -> Optional[int]:
     """开机以来的时钟滴答数（与 ``/proc/<pid>/stat`` 第 22 列同一口径）；读不到返回 None。"""
     try:
         with open("/proc/uptime") as handle:
@@ -253,6 +276,7 @@ class RlimitSandbox(Sandbox):
     """``fork`` + ``setrlimit``。只给开发与自测（见模块说明）。"""
 
     isolated = False
+    supports_spawn = True
 
     def __init__(self, base: Optional[Path] = None, run_as: Optional[str] = None,
                  kill_strays: bool = False) -> None:
@@ -261,6 +285,8 @@ class RlimitSandbox(Sandbox):
         #: 每次运行后杀掉运行账号在本次运行开始之后起的全部进程（``setsid`` 能逃出进程组清理）。
         #: 只在专用运行账号下打开（worker 用 ``--run-as`` 时）：按账号 + 启动时刻认，不误伤别的服务
         self._kill_strays = kill_strays
+        self._base = base
+        self._run_as = run_as
 
         self._uid = self._gid = None
         if run_as:
@@ -278,8 +304,20 @@ class RlimitSandbox(Sandbox):
     def _owner(self) -> Optional[Tuple[int, int]]:
         return None if self._uid is None else (self._uid, self._gid)
 
+    def peer(self) -> "RlimitSandbox":
+        """再建一个 0700 的工作目录，同一个运行账号（rlimit 只给开发自测，不做账号隔离）。
+        评测侧程序跑完即清空，选手程序运行时那里没有 checker 与答案。"""
+        return RlimitSandbox(base=self._base, run_as=self._run_as, kill_strays=False)
+
     def run(self, argv, limits, *, stdin=None, stdout=None, stderr=None) -> RunResult:
+        return self.spawn(argv, limits, stdin=stdin, stdout=stdout, stderr=stderr,
+                          kill_strays=self._kill_strays).wait()
+
+    def spawn(self, argv, limits, *, stdin=None, stdout=None, stderr=None, stdin_fd=None, stdout_fd=None,
+              kill_strays: Optional[bool] = None) -> "Running":
+        import json
         import resource
+        import sys
 
         uid, gid = self._uid, self._gid
 
@@ -309,78 +347,156 @@ class RlimitSandbox(Sandbox):
                 return os.fdopen(open_existing(self.workdir / name), mode)
             return os.fdopen(create_fresh(self.workdir / name, 0o644, self._owner()), mode)
 
-        files = [open_or_null(stdin, "rb"), open_or_null(stdout, "wb"), open_or_null(stderr, "wb")]
-        import json
-        import sys
-
+        files = [
+            None if stdin_fd is not None else open_or_null(stdin, "rb"),
+            None if stdout_fd is not None else open_or_null(stdout, "wb"),
+            open_or_null(stderr, "wb"),
+        ]
         report_read, report_write = os.pipe()
-
-        since = _boot_ticks()
+        since = boot_ticks()
         started = time.monotonic()
         try:
             proc = subprocess.Popen(
                 [sys.executable, "-I", "-S", "-c", _SHIM, json.dumps(list(argv)), str(report_write)],
-                cwd=str(self.workdir), stdin=files[0], stdout=files[1], stderr=files[2],
+                cwd=str(self.workdir),
+                stdin=stdin_fd if stdin_fd is not None else files[0],
+                stdout=stdout_fd if stdout_fd is not None else files[1],
+                stderr=files[2],
                 env={"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C"},
                 preexec_fn=apply_limits, start_new_session=True, pass_fds=(report_write,),
             )
         except OSError as exc:
             for handle in files:
-                handle.close()
+                if handle is not None:
+                    handle.close()
             os.close(report_read)
             os.close(report_write)
             raise SandboxError("起不来：%s" % exc)
         os.close(report_write)
+        for handle in files:
+            if handle is not None:
+                handle.close()
+        strays = self._kill_strays if kill_strays is None else kill_strays
+        return _RlimitRun(proc, report_read, limits, since, started, uid if strays else None)
 
-        killed = threading.Event()
+    def reap_strays(self, since: Optional[int]) -> int:
+        """清掉运行账号在 ``since`` 之后起的进程（交互题两边都结束后统一清）。"""
+        if not self._kill_strays or self._uid is None or since is None:
+            return 0
+        return kill_processes_since(self._uid, since)
 
-        def kill() -> None:
-            killed.set()
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except OSError:
-                pass
+    def close(self) -> None:
+        shutil.rmtree(str(self.workdir), ignore_errors=True)
 
-        timer = threading.Timer(limits.wall_seconds, kill)
-        timer.start()
+
+def _group_cpu(shim_pid: int) -> Optional[float]:
+    """中间层的子进程（选手程序）已用的 CPU 秒数；读不到（非 Linux、已退出）返回 None。"""
+    try:
+        with open("/proc/%d/task/%d/children" % (shim_pid, shim_pid)) as handle:
+            children = handle.read().split()
+        total = 0.0
+        for pid in children:
+            with open("/proc/%s/stat" % pid) as handle:
+                fields = handle.read().rsplit(")", 1)[1].split()
+            total += (int(fields[11]) + int(fields[12])) / float(os.sysconf("SC_CLK_TCK"))
+        return total if children else None
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+class Running:
+    """:meth:`Sandbox.spawn` 起来、还在跑的程序。``finished_at`` 是它结束的时刻（monotonic）。"""
+
+    finished_at: Optional[float] = None
+
+    def wait(self, timeout: Optional[float] = None) -> Optional[RunResult]:  # pragma: no cover - 接口
+        raise NotImplementedError
+
+    def done(self, timeout: float = 0) -> bool:  # pragma: no cover - 接口
+        raise NotImplementedError
+
+    def kill(self) -> None:  # pragma: no cover - 接口
+        raise NotImplementedError
+
+
+class _RlimitRun(Running):
+    def __init__(self, proc, report_read: int, limits: Limits, since: Optional[int], started: float,
+                 stray_uid: Optional[int]) -> None:
+        self.proc = proc
+        self.limits = limits
+        self.since = since
+        self.started = started
+        self.stray_uid = stray_uid
+        self.killed = threading.Event()
+        #: 被墙钟杀掉那一刻选手程序已用的 CPU 时间（读不到为 None）：区分"算超时"与"空等"
+        self.cpu_at_kill: Optional[float] = None
+        self.report = b""
+        self._report_read = report_read
+        self._timer = threading.Timer(limits.wall_seconds, self.kill)
+        self._timer.daemon = True
+        self._timer.start()
+        self._thread = threading.Thread(target=self._collect, daemon=True)
+        self._thread.start()
+        self._result: Optional[RunResult] = None
+
+    def _collect(self) -> None:
         try:
-            report = b""
             while True:
-                chunk = os.read(report_read, 4096)
+                chunk = os.read(self._report_read, 4096)
                 if not chunk:
                     break
-                report += chunk
-            proc.wait()
+                self.report += chunk
+            self.proc.wait()
         finally:
-            timer.cancel()
-            os.close(report_read)
-            for handle in files:
-                handle.close()
+            self.finished_at = time.monotonic()
+            self._timer.cancel()
+            os.close(self._report_read)
+
+    def kill(self) -> None:
+        if not self.killed.is_set():
+            self.cpu_at_kill = _group_cpu(self.proc.pid)
+        self.killed.set()
         try:
-            os.killpg(proc.pid, signal.SIGKILL)  # 收拾留下的子进程
+            os.killpg(self.proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+    def done(self, timeout: float = 0) -> bool:
+        self._thread.join(timeout)
+        return not self._thread.is_alive()
+
+    def wait(self, timeout: Optional[float] = None) -> RunResult:
+        import json
+
+        if self._result is not None:
+            return self._result
+        self._thread.join()
+        try:
+            os.killpg(self.proc.pid, signal.SIGKILL)  # 收拾留下的子进程
         except OSError:
             pass
         escaped = 0
-        if self._kill_strays and uid is not None and since is not None:
-            escaped = kill_processes_since(uid, since, exclude_pgid=proc.pid)
-        wall = time.monotonic() - started
+        if self.stray_uid is not None and self.since is not None:
+            escaped = kill_processes_since(self.stray_uid, self.since, exclude_pgid=self.proc.pid)
+        wall = (self.finished_at or time.monotonic()) - self.started
+        limits = self.limits
         try:
-            status, cpu, maxrss = json.loads(report.decode("ascii"))
+            status, cpu, maxrss = json.loads(self.report.decode("ascii"))
         except (ValueError, UnicodeDecodeError):
-            if killed.is_set():
-                return RunResult(TLE, None, signal.SIGKILL, limits.cpu_seconds, wall, 0, escaped=escaped)
-            raise SandboxError("沙箱中间层没有报回结果（退出码 %s）" % proc.returncode)
+            if self.killed.is_set():
+                cpu = limits.cpu_seconds if self.cpu_at_kill is None else self.cpu_at_kill
+                self._result = RunResult(TLE, None, signal.SIGKILL, cpu, wall, 0, escaped=escaped)
+                return self._result
+            raise SandboxError("沙箱中间层没有报回结果（退出码 %s）" % self.proc.returncode)
         memory = int(maxrss) * 1024
         sig = os.WTERMSIG(status) if os.WIFSIGNALED(status) else None
         code = os.WEXITSTATUS(status) if os.WIFEXITED(status) else None
         verdict = _classify(
-            killed_by_wall=killed.is_set(), cpu=cpu, limits=limits, memory=memory,
+            killed_by_wall=self.killed.is_set(), cpu=cpu, limits=limits, memory=memory,
             exit_code=code, sig=sig,
         )
-        return RunResult(verdict, code, sig, cpu, wall, memory, escaped=escaped)
-
-    def close(self) -> None:
-        shutil.rmtree(str(self.workdir), ignore_errors=True)
+        self._result = RunResult(verdict, code, sig, cpu, wall, memory, escaped=escaped)
+        return self._result
 
 
 # --------------------------------------------------------------------------- #
@@ -401,11 +517,15 @@ class IsolateSandbox(Sandbox):
     """IOI isolate。``--cg`` 打开时用 cgroup 记内存（更准，需要 isolate 配好 cgroup）。"""
 
     isolated = True
+    supports_spawn = True
 
-    def __init__(self, box_id: int = 0, binary: str = "isolate", cgroups: bool = False) -> None:
+    def __init__(self, box_id: int = 0, binary: str = "isolate", cgroups: bool = False,
+                 trusted_box_id: Optional[int] = None) -> None:
         self.binary = binary
         self.box_id = box_id
         self.cgroups = cgroups
+        #: 评测侧 box 的编号（默认 box_id + 500；同机各 worker 的号段不能重叠）
+        self.trusted_box_id = box_id + TRUSTED_BOX_OFFSET if trusted_box_id is None else trusted_box_id
         self._base = [binary, "--box-id=%d" % box_id] + (["--cg"] if cgroups else [])
         subprocess.run(self._base + ["--cleanup"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         result = subprocess.run(
@@ -417,6 +537,7 @@ class IsolateSandbox(Sandbox):
         self.box = Path(result.stdout.strip().splitlines()[-1])
         self.workdir = self.box / "box"
         self._meta_dir = Path(tempfile.mkdtemp(prefix="syncoj-isolate-meta-"))
+        self._spawned = 0
 
     def _command(self, argv, limits, stdin, stdout, stderr, meta: Path) -> List[str]:
         command = self._base + [
@@ -472,9 +593,93 @@ class IsolateSandbox(Sandbox):
         )
         return RunResult(verdict, exit_code, sig, cpu, wall, memory_kb * 1024, message)
 
+    def peer(self) -> "IsolateSandbox":
+        if self.trusted_box_id == self.box_id:
+            raise SandboxError("评测侧 box 编号不能与选手 box 相同（%d）" % self.box_id)
+        return IsolateSandbox(box_id=self.trusted_box_id, binary=self.binary, cgroups=self.cgroups,
+                              trusted_box_id=self.box_id)
+
     def close(self) -> None:
         subprocess.run(self._base + ["--cleanup"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         shutil.rmtree(str(self._meta_dir), ignore_errors=True)
+
+    def spawn(self, argv, limits, *, stdin=None, stdout=None, stderr=None, stdin_fd=None, stdout_fd=None,
+              kill_strays: Optional[bool] = None) -> "Running":
+        """起一个程序、不等它结束（交互题两边同时跑）。标准输入 / 输出直接继承给 isolate（不写
+        ``--stdin`` / ``--stdout``），程序的 stderr 写进 box 里的文件；isolate 自己的输出写进
+        meta 目录下的日志文件，不用管道（管道写满会把 isolate 卡住）。"""
+        self._spawned += 1
+        meta_path = self._meta_dir / ("meta-%d.txt" % self._spawned)
+        log_path = self._meta_dir / ("isolate-%d.log" % self._spawned)
+        command = self._command(argv, limits, None if stdin_fd is not None else stdin,
+                                None if stdout_fd is not None else stdout, stderr, meta_path)
+        log = open(str(log_path), "wb")
+        try:
+            proc = subprocess.Popen(
+                command,
+                stdin=stdin_fd if stdin_fd is not None else subprocess.DEVNULL,
+                stdout=stdout_fd if stdout_fd is not None else subprocess.DEVNULL,
+                stderr=log, close_fds=True,
+            )
+        except OSError as exc:
+            raise SandboxError("isolate 起不来：%s" % exc)
+        finally:
+            log.close()
+        return _IsolateRun(self, proc, limits, meta_path, log_path)
+
+
+class _IsolateRun(Running):
+    #: isolate 自己的墙钟之外再等这么久，还不结束就由宿主侧杀掉、记 SE
+    HOST_GRACE = 10.0
+
+    def __init__(self, box: "IsolateSandbox", proc, limits: Limits, meta_path: Path, log_path: Path) -> None:
+        self.box = box
+        self.proc = proc
+        self.limits = limits
+        self.meta_path = meta_path
+        self.log_path = log_path
+        self.started = time.monotonic()
+        self.forced = False
+        self._result: Optional[RunResult] = None
+        self._thread = threading.Thread(target=self._watch, daemon=True)
+        self._thread.start()
+
+    def _watch(self) -> None:
+        try:
+            self.proc.wait(timeout=self.limits.wall_seconds + self.HOST_GRACE)
+        except subprocess.TimeoutExpired:
+            self.forced = True
+            self.proc.kill()
+            self.proc.wait()
+        self.finished_at = time.monotonic()
+
+    def kill(self) -> None:
+        # isolate 收到 SIGTERM 会杀掉 box 里的程序再退出；宿主侧兜底见 _watch
+        try:
+            self.proc.terminate()
+        except OSError:
+            pass
+
+    def done(self, timeout: float = 0) -> bool:
+        self._thread.join(timeout)
+        return not self._thread.is_alive()
+
+    def wait(self, timeout: Optional[float] = None) -> RunResult:
+        if self._result is not None:
+            return self._result
+        self._thread.join()
+        if self.forced:
+            raise SandboxError("isolate 超过墙钟 %.0f 秒仍未结束，被评测机杀掉" % self.HOST_GRACE)
+        try:
+            meta = parse_isolate_meta(self.meta_path.read_text(encoding="utf-8"))
+        except OSError:
+            try:
+                detail = self.log_path.read_text(encoding="utf-8", errors="replace").strip()[:500]
+            except OSError:
+                detail = ""
+            raise SandboxError("isolate 没有写 meta（退出码 %s）：%s" % (self.proc.returncode, detail))
+        self._result = self.box._result_from_meta(meta, self.limits)
+        return self._result
 
 
 BACKENDS = ("isolate", "rlimit", "winjob")
@@ -503,9 +708,10 @@ def backend_problem(backend: str, platform: str, run_as: Optional[str] = None) -
 def make_sandbox(
     backend: str, *, base: Optional[Path] = None, run_as: Optional[str] = None,
     box_id: int = 0, isolate_binary: str = "isolate", cgroups: bool = False,
+    trusted_box_id: Optional[int] = None,
 ) -> Sandbox:
     if backend == "isolate":
-        return IsolateSandbox(box_id=box_id, binary=isolate_binary, cgroups=cgroups)
+        return IsolateSandbox(box_id=box_id, binary=isolate_binary, cgroups=cgroups, trusted_box_id=trusted_box_id)
     if backend == "rlimit":
         return RlimitSandbox(base=base, run_as=run_as, kill_strays=bool(run_as))
     if backend == "winjob":

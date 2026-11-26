@@ -54,11 +54,14 @@ export const judgingApi = {
 
   progress: (contestId: number) => request<BuiltinJudgeProgressOut>(paths.contestBuiltinJudge(contestId)),
 
-  /** 自动入队：`on_change` = 收到某题新版本就评，`auto_judge_delay` 秒内的连续改动只评最后一版。 */
+  /**
+   * 自动入队：`on_change` = 收到某题新版本就评，`auto_judge_delay` 秒内的连续改动只评最后一版；
+   * `smart` = 判断"可能已经写完"才评（§12.12），`smart_*` 阈值不传 = 不改。
+   */
   setAuto: (contestId: number, payload: JudgeAutoIn) =>
     request<JudgeAutoOut>(paths.contestJudgeAuto(contestId), { method: 'PUT', body: payload }),
 
-  /** 评测任务，新的在前；可按选手、题目、状态、触发方式、风险标注（`flag`）筛。 */
+  /** 评测任务，新的在前；可按选手、题目、状态、触发方式（智能模式另带 `reason`）、风险标注（`flag`）筛。 */
   tasks: (contestId: number, params: ListParams = {}, signal?: AbortSignal) =>
     listPage<JudgeTaskOut>(paths.contestJudgeTasks(contestId), params, signal),
 

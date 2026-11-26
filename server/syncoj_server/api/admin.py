@@ -168,6 +168,7 @@ from ..services import (
     rosters,
     runtime_settings,
     scan_missing,
+    smart_judge,
     uninstall,
     zipcrypto,
 )
@@ -571,6 +572,7 @@ def _contest_out(
         auto_judge=contest.auto_judge or "off",
         auto_judge_delay=60 if contest.auto_judge_delay is None else contest.auto_judge_delay,
         has_player_password=bool(contest.player_password_hash),
+        **smart_judge.threshold_fields(contest),
     )
 
 

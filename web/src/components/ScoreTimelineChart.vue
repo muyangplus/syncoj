@@ -17,6 +17,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import type { SourceVersionOut } from '@/api/types'
 import { formatTime } from '@/utils/format'
+import { triggerLabel } from '@/utils/judgeTrigger'
 
 const props = withDefaults(
   defineProps<{
@@ -230,7 +231,6 @@ const tooltipStyle = computed(() => {
   return { left, right, top: `${PAD.value.top}px` }
 })
 
-const TRIGGER: Record<string, string> = { auto: '自动', manual: '手动', rejudge: '历史版本重测' }
 
 const ariaLabel = computed(() => {
   const judgedCount = points.value.filter((p) => p.y !== null).length
@@ -334,7 +334,7 @@ const ariaLabel = computed(() => {
       <div class="tip-row">{{ formatTime(hover.version.received_at) }}</div>
       <div class="tip-row mono">{{ hover.version.sha256.slice(0, 8) }} · {{ hover.version.rel_path }}</div>
       <div v-if="hover.version.judge" class="tip-row">
-        {{ TRIGGER[hover.version.judge.trigger] ?? hover.version.judge.trigger
+        {{ triggerLabel(hover.version.judge.trigger, hover.version.judge.reason)
         }}<template v-if="hover.version.judge.reused"> · 复用</template
         ><template v-if="hover.version.in_matrix"> · 计入成绩</template>
       </div>

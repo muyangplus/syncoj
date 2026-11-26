@@ -26,6 +26,7 @@ import { usePolling } from '@/composables/usePolling'
 import { useContestStore } from '@/stores/contest'
 import { formatTime } from '@/utils/format'
 import { FLAG_FILTERS, flagParam, flagRowClass } from '@/utils/judgeFlags'
+import { TRIGGER_FILTERS, triggerLabel, triggerParams } from '@/utils/judgeTrigger'
 
 const contest = useContestStore()
 const router = useRouter()
@@ -174,20 +175,45 @@ function queueSelected(): void {
   void queue(target.value === '*' ? null : target.value, false, targetPlayer.value || null)
 }
 
-// ---- 自动评测（§12.9）----
+// ---- 自动评测（§12.9；智能模式 §12.12）----
 
-const autoOn = ref(false)
+type AutoMode = 'off' | 'on_change' | 'smart'
+type SmartKey =
+  | 'smart_stable_seconds'
+  | 'smart_idle_seconds'
+  | 'smart_near_end_seconds'
+  | 'smart_cooldown_seconds'
+  | 'smart_queue_factor'
+
+/** 智能模式的阈值输入：短标签、范围、单位（范围与服务端 JudgeAutoIn 一致） */
+const SMART_FIELDS: { key: SmartKey; label: string; min: number; max: number; step: number; unit: string }[] = [
+  { key: 'smart_stable_seconds', label: '稳定', min: 30, max: 3600, step: 30, unit: '秒' },
+  { key: 'smart_idle_seconds', label: '空闲', min: 60, max: 7200, step: 60, unit: '秒' },
+  { key: 'smart_near_end_seconds', label: '结束前', min: 0, max: 7200, step: 60, unit: '秒' },
+  { key: 'smart_cooldown_seconds', label: '冷却', min: 0, max: 3600, step: 30, unit: '秒' },
+  { key: 'smart_queue_factor', label: '队列倍数', min: 1, max: 1000, step: 1, unit: '×' },
+]
+
+const autoMode = ref<AutoMode>('off')
 const autoDelay = ref(60)
+const smart = ref<Record<SmartKey, number>>({
+  smart_stable_seconds: 180,
+  smart_idle_seconds: 600,
+  smart_near_end_seconds: 900,
+  smart_cooldown_seconds: 300,
+  smart_queue_factor: 20,
+})
 const autoSaving = ref(false)
 
-watch(
-  () => contest.current,
-  (current) => {
-    autoOn.value = current?.auto_judge === 'on_change'
-    autoDelay.value = current?.auto_judge_delay ?? 60
-  },
-  { immediate: true },
-)
+function loadAuto(): void {
+  const current = contest.current
+  const mode = current?.auto_judge
+  autoMode.value = mode === 'on_change' || mode === 'smart' ? mode : 'off'
+  autoDelay.value = current?.auto_judge_delay ?? 60
+  if (current) for (const field of SMART_FIELDS) smart.value[field.key] = current[field.key] ?? smart.value[field.key]
+}
+
+watch(() => contest.current, loadAuto, { immediate: true })
 
 async function saveAuto(): Promise<void> {
   const contestId = contest.currentId
@@ -195,18 +221,15 @@ async function saveAuto(): Promise<void> {
   autoSaving.value = true
   try {
     const saved = await judgingApi.setAuto(contestId, {
-      auto_judge: autoOn.value ? 'on_change' : 'off',
+      auto_judge: autoMode.value,
       auto_judge_delay: autoDelay.value,
+      ...smart.value,
     })
     const current = contest.current
-    if (current) {
-      current.auto_judge = saved.auto_judge
-      current.auto_judge_delay = saved.auto_judge_delay
-    }
+    if (current) Object.assign(current, saved)
   } catch (err) {
     ElMessage.error((err as Error).message)
-    autoOn.value = contest.current?.auto_judge === 'on_change'
-    autoDelay.value = contest.current?.auto_judge_delay ?? 60
+    loadAuto()
   } finally {
     autoSaving.value = false
   }
@@ -229,7 +252,7 @@ const tasks = useList<JudgeTaskOut>({
       {
         limit,
         offset,
-        trigger: taskTrigger.value === 'all' ? undefined : taskTrigger.value,
+        ...triggerParams(taskTrigger.value),
         flag: flagParam(taskFlag.value),
       },
       signal,
@@ -239,7 +262,6 @@ const tasks = useList<JudgeTaskOut>({
   watches: [() => contest.currentId, () => taskTrigger.value, () => taskFlag.value],
 })
 
-const TRIGGER_LABEL: Record<string, string> = { auto: '自动', manual: '手动', rejudge: '历史版本' }
 const TASK_STATUS: Record<string, string> = { queued: '排队', running: '评测中', done: '完成', failed: '失败' }
 const OUTCOME_TYPE: Record<string, 'success' | 'warning' | 'danger' | 'info'> = {
   AC: 'success',
@@ -404,14 +426,19 @@ function openPlayerTimeline(): void {
       </template>
 
     <div class="auto-row">
-      <el-switch
-        v-model="autoOn"
-        :loading="autoSaving"
-        :disabled="!contest.currentId"
-        active-text="收到新版本自动评测"
+      <span class="auto-label">自动评测</span>
+      <el-radio-group
+        v-model="autoMode"
+        size="small"
+        :disabled="!contest.currentId || autoSaving"
+        aria-label="自动评测"
         @change="saveAuto"
-      />
-      <span class="auto-delay">
+      >
+        <el-radio-button value="off">关闭</el-radio-button>
+        <el-radio-button value="on_change">每次改动</el-radio-button>
+        <el-radio-button value="smart">智能</el-radio-button>
+      </el-radio-group>
+      <span v-if="autoMode === 'on_change'" class="auto-delay">
         合并
         <el-input-number
           v-model="autoDelay"
@@ -425,6 +452,23 @@ function openPlayerTimeline(): void {
         />
         秒内的连续改动
       </span>
+    </div>
+    <div v-if="autoMode === 'smart'" class="auto-row smart-row">
+      <label v-for="field in SMART_FIELDS" :key="field.key" class="auto-delay">
+        {{ field.label }}
+        <el-input-number
+          v-model="smart[field.key]"
+          class="smart-input"
+          :min="field.min"
+          :max="field.max"
+          :step="field.step"
+          size="small"
+          controls-position="right"
+          :disabled="!contest.currentId"
+          @change="saveAuto"
+        />
+        {{ field.unit }}
+      </label>
     </div>
 
     <template v-if="progress && progress.total">
@@ -454,11 +498,8 @@ function openPlayerTimeline(): void {
         <el-select v-model="taskFlag" style="width: 130px" aria-label="风险标注">
           <el-option v-for="f in FLAG_FILTERS" :key="f.value" :label="f.label" :value="f.value" />
         </el-select>
-        <el-select v-model="taskTrigger" style="width: 140px">
-          <el-option label="全部触发方式" value="all" />
-          <el-option label="自动" value="auto" />
-          <el-option label="手动" value="manual" />
-          <el-option label="历史版本" value="rejudge" />
+        <el-select v-model="taskTrigger" style="width: 140px" aria-label="触发方式">
+          <el-option v-for="t in TRIGGER_FILTERS" :key="t.value" :label="t.label" :value="t.value" />
         </el-select>
         <el-button :loading="tasks.loading.value" @click="tasks.reload">
           <el-icon><RefreshRight /></el-icon>刷新
@@ -486,8 +527,8 @@ function openPlayerTimeline(): void {
           </el-table-column>
           <el-table-column label="选手" prop="player_no" width="100" />
           <el-table-column label="题目" prop="problem" width="90" />
-          <el-table-column label="触发" width="90">
-            <template #default="{ row }">{{ TRIGGER_LABEL[row.trigger] ?? row.trigger }}</template>
+          <el-table-column label="触发" width="100">
+            <template #default="{ row }">{{ triggerLabel(row.trigger, row.reason) }}</template>
           </el-table-column>
           <el-table-column label="代码" min-width="150">
             <template #default="{ row }">
@@ -571,6 +612,16 @@ function openPlayerTimeline(): void {
   flex-wrap: wrap;
   gap: 16px;
   margin-bottom: 12px;
+}
+.auto-label {
+  color: var(--el-text-color-regular);
+  font-size: 13px;
+}
+.smart-row {
+  gap: 12px 20px;
+}
+.smart-input {
+  width: 110px;
 }
 .auto-delay {
   display: inline-flex;

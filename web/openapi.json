@@ -1601,6 +1601,31 @@
             "title": "Slug",
             "type": "string"
           },
+          "smart_cooldown_seconds": {
+            "default": 300,
+            "title": "Smart Cooldown Seconds",
+            "type": "integer"
+          },
+          "smart_idle_seconds": {
+            "default": 600,
+            "title": "Smart Idle Seconds",
+            "type": "integer"
+          },
+          "smart_near_end_seconds": {
+            "default": 900,
+            "title": "Smart Near End Seconds",
+            "type": "integer"
+          },
+          "smart_queue_factor": {
+            "default": 20,
+            "title": "Smart Queue Factor",
+            "type": "integer"
+          },
+          "smart_stable_seconds": {
+            "default": 180,
+            "title": "Smart Stable Seconds",
+            "type": "integer"
+          },
           "starts_at": {
             "anyOf": [
               {
@@ -2455,12 +2480,13 @@
       },
       "JudgeAutoIn": {
         "additionalProperties": false,
-        "description": "场次的自动入队设置（§12.9）。",
+        "description": "场次的自动入队设置（§12.9、§12.12）。智能模式的阈值不传 = 不改。",
         "properties": {
           "auto_judge": {
             "enum": [
               "off",
-              "on_change"
+              "on_change",
+              "smart"
             ],
             "title": "Auto Judge",
             "type": "string"
@@ -2471,6 +2497,71 @@
             "minimum": 0.0,
             "title": "Auto Judge Delay",
             "type": "integer"
+          },
+          "smart_cooldown_seconds": {
+            "anyOf": [
+              {
+                "maximum": 3600.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Smart Cooldown Seconds"
+          },
+          "smart_idle_seconds": {
+            "anyOf": [
+              {
+                "maximum": 7200.0,
+                "minimum": 60.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Smart Idle Seconds"
+          },
+          "smart_near_end_seconds": {
+            "anyOf": [
+              {
+                "maximum": 7200.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Smart Near End Seconds"
+          },
+          "smart_queue_factor": {
+            "anyOf": [
+              {
+                "maximum": 1000.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Smart Queue Factor"
+          },
+          "smart_stable_seconds": {
+            "anyOf": [
+              {
+                "maximum": 3600.0,
+                "minimum": 30.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Smart Stable Seconds"
           }
         },
         "required": [
@@ -2489,11 +2580,36 @@
           "auto_judge_delay": {
             "title": "Auto Judge Delay",
             "type": "integer"
+          },
+          "smart_cooldown_seconds": {
+            "title": "Smart Cooldown Seconds",
+            "type": "integer"
+          },
+          "smart_idle_seconds": {
+            "title": "Smart Idle Seconds",
+            "type": "integer"
+          },
+          "smart_near_end_seconds": {
+            "title": "Smart Near End Seconds",
+            "type": "integer"
+          },
+          "smart_queue_factor": {
+            "title": "Smart Queue Factor",
+            "type": "integer"
+          },
+          "smart_stable_seconds": {
+            "title": "Smart Stable Seconds",
+            "type": "integer"
           }
         },
         "required": [
           "auto_judge",
-          "auto_judge_delay"
+          "auto_judge_delay",
+          "smart_stable_seconds",
+          "smart_idle_seconds",
+          "smart_near_end_seconds",
+          "smart_cooldown_seconds",
+          "smart_queue_factor"
         ],
         "title": "JudgeAutoOut",
         "type": "object"
@@ -4038,9 +4154,25 @@
             "title": "Precheck Warnings",
             "type": "array"
           },
+          "priority": {
+            "default": 0,
+            "title": "Priority",
+            "type": "integer"
+          },
           "problem": {
             "title": "Problem",
             "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
           },
           "requested_by": {
             "anyOf": [
@@ -4253,9 +4385,25 @@
             "title": "Player No",
             "type": "string"
           },
+          "priority": {
+            "default": 0,
+            "title": "Priority",
+            "type": "integer"
+          },
           "problem": {
             "title": "Problem",
             "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
           },
           "requested_by": {
             "anyOf": [
@@ -8485,6 +8633,17 @@
             ],
             "title": "Outcome"
           },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
           "reused": {
             "default": false,
             "title": "Reused",
@@ -10765,7 +10924,7 @@
     },
     "/api/v1/admin/contests/{contest_id}/judge/auto": {
       "put": {
-        "description": "自动入队（§12.9）：``on_change`` = 收到某题的新版本就排评测，同一 (选手, 题目)\n在 ``auto_judge_delay`` 秒内连续改动只评最后一版。场次进行中也排。",
+        "description": "自动入队（§12.9）：``on_change`` = 收到某题的新版本就排评测，同一 (选手, 题目)\n在 ``auto_judge_delay`` 秒内连续改动只评最后一版。场次进行中也排。\n\n``smart``（§12.12）= 判断\"可能已经写完\"才排（换题 / 空闲 / 将结束 / 掉线 / 已结束），\n阈值随请求改，不传的不改。",
         "operationId": "set_auto_judge_api_v1_admin_contests__contest_id__judge_auto_put",
         "parameters": [
           {
@@ -11293,7 +11452,7 @@
     },
     "/api/v1/admin/contests/{contest_id}/judge/tasks": {
       "get": {
-        "description": "评测任务（新的在前）。任务即历史：每一次评测（含复用的）都在这里。\n\n``flag``（§12.11）：``risk`` 有风险、``warning`` 有疑似违规（不论有没有风险）、``any`` 两者之一。",
+        "description": "评测任务（新的在前）。任务即历史：每一次评测（含复用的）都在这里。\n\n``flag``（§12.11）：``risk`` 有风险、``warning`` 有疑似违规（不论有没有风险）、``any`` 两者之一。\n``reason``（§12.12）：智能模式的信号，配 ``trigger=smart`` 用。",
         "operationId": "list_judge_tasks_api_v1_admin_contests__contest_id__judge_tasks_get",
         "parameters": [
           {
@@ -11370,6 +11529,25 @@
                 }
               ],
               "title": "Trigger"
+            }
+          },
+          {
+            "description": "智能模式的信号（§12.12）",
+            "in": "query",
+            "name": "reason",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "智能模式的信号（§12.12）",
+              "title": "Reason"
             }
           },
           {

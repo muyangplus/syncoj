@@ -820,6 +820,9 @@ export interface paths {
          * Set Auto Judge
          * @description 自动入队（§12.9）：``on_change`` = 收到某题的新版本就排评测，同一 (选手, 题目)
          *     在 ``auto_judge_delay`` 秒内连续改动只评最后一版。场次进行中也排。
+         *
+         *     ``smart``（§12.12）= 判断"可能已经写完"才排（换题 / 空闲 / 将结束 / 掉线 / 已结束），
+         *     阈值随请求改，不传的不改。
          */
         put: operations["set_auto_judge_api_v1_admin_contests__contest_id__judge_auto_put"];
         post?: never;
@@ -986,6 +989,7 @@ export interface paths {
          * @description 评测任务（新的在前）。任务即历史：每一次评测（含复用的）都在这里。
          *
          *     ``flag``（§12.11）：``risk`` 有风险、``warning`` 有疑似违规（不论有没有风险）、``any`` 两者之一。
+         *     ``reason``（§12.12）：智能模式的信号，配 ``trigger=smart`` 用。
          */
         get: operations["list_judge_tasks_api_v1_admin_contests__contest_id__judge_tasks_get"];
         put?: never;
@@ -3812,6 +3816,31 @@ export interface components {
             player_count: number;
             /** Slug */
             slug: string;
+            /**
+             * Smart Cooldown Seconds
+             * @default 300
+             */
+            smart_cooldown_seconds: number;
+            /**
+             * Smart Idle Seconds
+             * @default 600
+             */
+            smart_idle_seconds: number;
+            /**
+             * Smart Near End Seconds
+             * @default 900
+             */
+            smart_near_end_seconds: number;
+            /**
+             * Smart Queue Factor
+             * @default 20
+             */
+            smart_queue_factor: number;
+            /**
+             * Smart Stable Seconds
+             * @default 180
+             */
+            smart_stable_seconds: number;
             /** Starts At */
             starts_at?: string | null;
             /** Status */
@@ -4241,19 +4270,29 @@ export interface components {
         };
         /**
          * JudgeAutoIn
-         * @description 场次的自动入队设置（§12.9）。
+         * @description 场次的自动入队设置（§12.9、§12.12）。智能模式的阈值不传 = 不改。
          */
         JudgeAutoIn: {
             /**
              * Auto Judge
              * @enum {string}
              */
-            auto_judge: "off" | "on_change";
+            auto_judge: "off" | "on_change" | "smart";
             /**
              * Auto Judge Delay
              * @default 60
              */
             auto_judge_delay: number;
+            /** Smart Cooldown Seconds */
+            smart_cooldown_seconds?: number | null;
+            /** Smart Idle Seconds */
+            smart_idle_seconds?: number | null;
+            /** Smart Near End Seconds */
+            smart_near_end_seconds?: number | null;
+            /** Smart Queue Factor */
+            smart_queue_factor?: number | null;
+            /** Smart Stable Seconds */
+            smart_stable_seconds?: number | null;
         };
         /** JudgeAutoOut */
         JudgeAutoOut: {
@@ -4261,6 +4300,16 @@ export interface components {
             auto_judge: string;
             /** Auto Judge Delay */
             auto_judge_delay: number;
+            /** Smart Cooldown Seconds */
+            smart_cooldown_seconds: number;
+            /** Smart Idle Seconds */
+            smart_idle_seconds: number;
+            /** Smart Near End Seconds */
+            smart_near_end_seconds: number;
+            /** Smart Queue Factor */
+            smart_queue_factor: number;
+            /** Smart Stable Seconds */
+            smart_stable_seconds: number;
         };
         /** JudgeBlobRefOut */
         JudgeBlobRefOut: {
@@ -4903,8 +4952,15 @@ export interface components {
             player_no: string;
             /** Precheck Warnings */
             precheck_warnings?: components["schemas"]["JudgePrecheckFindingOut"][];
+            /**
+             * Priority
+             * @default 0
+             */
+            priority: number;
             /** Problem */
             problem: string;
+            /** Reason */
+            reason?: string | null;
             /** Requested By */
             requested_by?: string | null;
             /**
@@ -4984,8 +5040,15 @@ export interface components {
             player_id: number;
             /** Player No */
             player_no: string;
+            /**
+             * Priority
+             * @default 0
+             */
+            priority: number;
             /** Problem */
             problem: string;
+            /** Reason */
+            reason?: string | null;
             /** Requested By */
             requested_by?: string | null;
             /**
@@ -6890,6 +6953,8 @@ export interface components {
             max_score?: number | null;
             /** Outcome */
             outcome?: string | null;
+            /** Reason */
+            reason?: string | null;
             /**
              * Reused
              * @default false
@@ -8524,6 +8589,8 @@ export interface operations {
                 problem?: string | null;
                 status?: string | null;
                 trigger?: string | null;
+                /** @description 智能模式的信号（§12.12） */
+                reason?: string | null;
                 /** @description any / warning（有疑似违规）/ risk（有风险） */
                 flag?: ("any" | "warning" | "risk") | null;
                 /** @description 每页条数 */

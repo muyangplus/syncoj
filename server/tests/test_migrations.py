@@ -151,7 +151,12 @@ MIGRATION_ADDED_COLUMNS = {
     #: 真的把它删掉 —— 它现在在 ``MIGRATION_DROPPED_COLUMNS`` 里。
     #: 自带评测的自动入队开关与去抖秒数（迁移 020，§12.9）；
     #: ``player_password_hash``：场次级考生页密码（迁移 022），老场次是 NULL = 不开放登录。
-    "contest": {"default_roster_id", "auto_judge", "auto_judge_delay", "player_password_hash"},
+    #: 智能自动评测的阈值与「结束后评一遍」已做的时刻（迁移 025，§12.12），NULL 读作默认值。
+    "contest": {
+        "default_roster_id", "auto_judge", "auto_judge_delay", "player_password_hash",
+        "smart_stable_seconds", "smart_idle_seconds", "smart_near_end_seconds",
+        "smart_cooldown_seconds", "smart_queue_factor", "smart_end_done_at",
+    },
     #: file_patterns；以及自带评测的配置与数据包指纹（迁移 018，§12）
     "problem": {
         "file_patterns",

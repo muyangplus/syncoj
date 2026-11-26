@@ -35,6 +35,9 @@ from ..schemas import (
     BuiltinJudgeQueuedOut,
     JudgeAutoIn,
     JudgeAutoOut,
+    JudgeServiceIn,
+    JudgeServiceOut,
+    JudgeSourceOut,
     JudgeTaskDetailOut,
     JudgeTaskOut,
     JudgeWorkerCreatedOut,
@@ -57,6 +60,8 @@ from ..services import builtin_judge, judge_dist, judge_workers
 from ..services.judge import SCAN_LOCK, scan_contest_results
 from .admin import (
     AdminIdentity,
+    FlagFilter,
+    flag_condition,
     _iso,
     _problem_out,
     _reclaim_blobs,
@@ -338,6 +343,8 @@ def _task_out(task: JudgeTask, player_no: str, matrix: Dict[Tuple[int, str], int
         created_at=_iso(task.created_at) or "",
         finished_at=_iso(task.finished_at),
         not_before=_iso(task.not_before),
+        warning_count=int(task.warning_count or 0),
+        risk_count=int(task.risk_count or 0),
     )
 
 
@@ -348,11 +355,15 @@ def list_judge_tasks(
     problem: Optional[str] = Query(default=None, max_length=64),
     status: Optional[str] = Query(default=None, max_length=16),
     trigger: Optional[str] = Query(default=None, max_length=16),
+    flag: Optional[FlagFilter] = Query(default=None, description="any / warning（有疑似违规）/ risk（有风险）"),
     page: PageParams = Depends(),
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> Page[JudgeTaskOut]:
-    """评测任务（新的在前）。任务即历史：每一次评测（含复用的）都在这里。"""
+    """评测任务（新的在前）。任务即历史：每一次评测（含复用的）都在这里。
+
+    ``flag``（§12.11）：``risk`` 有风险、``warning`` 有疑似违规（不论有没有风险）、``any`` 两者之一。
+    """
     conditions = [JudgeTask.contest_id == contest_id]
     if player_id is not None:
         conditions.append(JudgeTask.player_id == player_id)
@@ -365,6 +376,9 @@ def list_judge_tasks(
             conditions.append(JudgeTask.trigger.is_(None) | (JudgeTask.trigger == trigger))
         else:
             conditions.append(JudgeTask.trigger == trigger)
+    flagged = flag_condition(JudgeTask.warning_count, JudgeTask.risk_count, flag)
+    if flagged is not None:
+        conditions.append(flagged)
     with ctx.db.session() as session:
         total = session.execute(select(func.count(JudgeTask.id)).where(*conditions)).scalar_one()
         rows = session.execute(
@@ -407,6 +421,35 @@ def get_judge_task(
         for key in ("source_sha256", "judged_source", "task_id"):
             details.pop(key, None)
         return JudgeTaskDetailOut(**base, **details)
+
+
+#: 明细里「源码」区最多显示这么大的代码（选手代码远小于它；再大的多半是误收的数据文件）
+MAX_SOURCE_VIEW_BYTES = 1024 * 1024
+
+
+@router.get("/contests/{contest_id}/judge/tasks/{task_id}/source", response_model=JudgeSourceOut)
+def get_judge_task_source(
+    contest_id: int,
+    task_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> JudgeSourceOut:
+    """这个评测任务评的那份代码（按任务记下的 sha256 从内容存储取；只读，≤ 1 MB）。
+
+    明细里按行显示、把预检 / 风险标注的行高亮。还没选定代码（排队中）或内容已被清掉时 404，
+    超过 1 MB 时 413。
+    """
+    with ctx.db.session() as session:
+        task, _ = _load_task(session, contest_id, task_id)
+        sha256, path = task.source_sha256, task.source_path
+    if not sha256 or not ctx.blobs.has(sha256):
+        raise ApiError(404, "not_found", "这次评测的代码不在了（还没领到，或内容已被清掉）")
+    blob = ctx.blobs.path_for(sha256)
+    size = blob.stat().st_size
+    if size > MAX_SOURCE_VIEW_BYTES:
+        raise ApiError(413, "payload_too_large", "代码 %d KB，超过 1 MB 不在页面上显示" % (size // 1024))
+    content = blob.read_bytes().decode("utf-8", "replace")
+    return JudgeSourceOut(task_id=task_id, path=path, sha256=sha256, size=size, content=content)
 
 
 @router.post("/contests/{contest_id}/judge/tasks/{task_id}/adopt", response_model=JudgeTaskOut)
@@ -558,6 +601,35 @@ def _load_worker(session, worker_id: int) -> JudgeWorker:
     return row
 
 
+@router.get("/judge-service", response_model=JudgeServiceOut)
+def judge_service_status(
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> JudgeServiceOut:
+    """「评测服务」开关与全部场次的排队 / 在评数（§12.10）。"""
+    with ctx.db.session() as session:
+        return judge_workers.service_out(session)
+
+
+@router.put("/judge-service", response_model=JudgeServiceOut)
+def set_judge_service(
+    payload: JudgeServiceIn,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> JudgeServiceOut:
+    """开 / 关评测服务。关 = 所有评测机都领不到新任务：手上的照常评完交回，排队的任务留着
+    （自动入队也照常入队），打开后接着发。"""
+    with ctx.db.session() as session:
+        before = judge_workers.service_enabled(session)
+        judge_workers.set_service_enabled(session, payload.enabled)
+        if before != payload.enabled:
+            session.add(EventLog(
+                level="info", category="judge_service",
+                message="评测服务：%s（%s）" % ("开启" if payload.enabled else "关闭", admin.username),
+            ))
+        return judge_workers.service_out(session)
+
+
 @router.get("/judge-workers", response_model=Page[JudgeWorkerOut])
 def list_judge_workers(
     page: PageParams = Depends(),
@@ -598,9 +670,23 @@ def update_judge_worker(
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> JudgeWorkerOut:
-    """改名；暂停（``enabled`` = false：领不到新任务，手上的照常评完）/ 恢复。"""
+    """改名；暂停（``enabled`` = false：领不到新任务，手上的照常评完）/ 恢复；改并发数
+    （``slots``：随下一次 poll 下发，评测机评完手上的任务后以新的 ``--slots`` 重启）。
+
+    改并发数：旧评测机（不认下发的并发数）409 ``judge_worker_unsupported``；后端不是 isolate
+    而 ``slots`` > 1 时 409 ``judge_worker_slots``。
+    """
     with ctx.db.session() as session:
         row = _load_worker(session, worker_id)
+        if payload.slots is not None:
+            problem = judge_workers.slots_problem(row, payload.slots)
+            if problem == "unsupported":
+                raise ApiError(409, "judge_worker_unsupported",
+                               "这台评测机版本太旧，不能远程改并发数；请在那台机器上改 --slots 后重启")
+            if problem == "backend":
+                raise ApiError(409, "judge_worker_slots",
+                               "%s 后端只能单并发：多个任务以同一个账号运行，能互相读写工作目录（仅 isolate 可以大于 1）"
+                               % (row.backend or "未知"))
         if payload.name is not None:
             name = payload.name.strip()
             if not name:
@@ -608,6 +694,8 @@ def update_judge_worker(
             row.name = name
         if payload.enabled is not None:
             row.enabled = payload.enabled
+        if payload.slots is not None:
+            row.desired_slots = payload.slots
         session.flush()
         return _workers_out(session, [row])[0]
 

@@ -42,6 +42,8 @@ const props = defineProps<{
   emptyFilteredText?: string
   /** 当前是否处于筛选状态（决定空状态用哪句话）。 */
   filtered?: boolean
+  /** 按行加 class（例如风险标注的左边框）。 */
+  rowClass?: (row: T) => string
 }>()
 
 const emit = defineEmits<{
@@ -52,6 +54,10 @@ const emit = defineEmits<{
 }>()
 
 const paginated = () => props.total !== undefined && props.pageSize !== undefined
+
+function rowClassName(data: { row: T }): string {
+  return props.rowClass ? props.rowClass(data.row) : ''
+}
 </script>
 
 <template>
@@ -59,6 +65,7 @@ const paginated = () => props.total !== undefined && props.pageSize !== undefine
     <el-table
       :data="rows"
       :row-key="rowKey"
+      :row-class-name="rowClassName"
       v-loading="loading"
       @selection-change="(picked: T[]) => emit('selection-change', picked)"
     >

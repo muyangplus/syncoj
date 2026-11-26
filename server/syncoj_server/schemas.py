@@ -1008,6 +1008,9 @@ class JudgeTaskOut(_Base):
     finished_at: Optional[str] = None
     #: 去抖：这个时刻之前不发给评测机
     not_before: Optional[str] = None
+    #: 结果里疑似违规 / 风险的条数（§12.11；分级见 ``precheck.level_of``）
+    warning_count: int = 0
+    risk_count: int = 0
 
 
 class JudgeTaskDetailOut(JudgeTaskOut):
@@ -1021,7 +1024,34 @@ class JudgeTaskDetailOut(JudgeTaskOut):
     cases: List[JudgeCaseOut] = Field(default_factory=list)
     subtasks: List[JudgeSubtaskOut] = Field(default_factory=list)
     precheck_warnings: List[JudgePrecheckFindingOut] = Field(default_factory=list)
+    risk_events: List[JudgeRiskEventOut] = Field(default_factory=list)
     truncated: bool = False
+
+
+class JudgeSourceOut(_Base):
+    """评测任务评的那份代码（按任务记下的 sha256 从内容存储取，§12.11）。"""
+
+    task_id: int
+    path: Optional[str] = None
+    sha256: str
+    size: int
+    #: UTF-8 解码（坏字节替换）后的全文
+    content: str
+
+
+class JudgeServiceIn(_Base):
+    """「评测服务」开关：关 = 所有评测机都领不到新任务（手上的照常评完，排队的留着）。"""
+
+    enabled: bool
+
+
+class JudgeServiceOut(_Base):
+    enabled: bool = True
+    #: 全部场次排队中的任务数（含还在去抖的）
+    queued: int = 0
+    #: 其中还在去抖、没到点的
+    delayed: int = 0
+    running: int = 0
 
 
 class VersionJudgeOut(_Base):
@@ -1067,6 +1097,9 @@ class JudgeWorkerPatchIn(_Base):
 
     name: Optional[str] = Field(default=None, min_length=1, max_length=64)
     enabled: Optional[bool] = None
+    #: 并发数（§12.10）：随 poll 下发，评测机评完手上的任务后以新的 ``--slots`` 重启。
+    #: 后端不是 isolate 的只能是 1；旧评测机（不认下发的并发数）409
+    slots: Optional[int] = Field(default=None, ge=1, le=64)
 
 
 class JudgeWorkerTaskOut(_Base):
@@ -1099,8 +1132,12 @@ class JudgeWorkerOut(_Base):
     hostname: Optional[str] = None
     platform: Optional[str] = None
     slots: Optional[int] = None
+    #: 管理端设定的并发数；与 ``slots`` 不同 = 等评测机评完手上的任务后重启生效
+    desired_slots: Optional[int] = None
     #: 能收远程停止 / 重启（报过状态的评测机）
     remote_control: bool = False
+    #: 能远程改并发数（评测机报了 ``slots`` 能力）
+    slots_control: bool = False
     running: List[JudgeWorkerTaskOut] = Field(default_factory=list)
 
 
@@ -1127,6 +1164,8 @@ class JudgePollIn(_Base):
     want: int = Field(default=1, ge=0, le=1)
     #: 本进程的随机标识（每次启动换新）；不带 = 旧评测机，命令按一次性送达
     boot_id: Optional[str] = Field(default=None, max_length=32)
+    #: 评测机的能力：``slots`` = 认响应里下发的并发数
+    features: Optional[List[str]] = Field(default=None, max_length=16)
 
 
 class LocalJudgeOut(_Base):
@@ -1178,6 +1217,10 @@ class JudgePollOut(_Base):
     task: Optional[JudgeLeaseOut] = None
     command: Literal["run", "stop", "restart"] = "run"
     enabled: bool = True
+    #: 管理端设定的并发数；与评测机当前的不同时评测机评完手上的任务、以它重启。null = 没设
+    slots: Optional[int] = None
+    #: 「评测服务」开关：关时不发任务
+    service: bool = True
 
 
 class JudgeResultIn(_Base):
@@ -1608,6 +1651,9 @@ class ScoreCellOut(_Base):
     run_id: Optional[int] = None
     #: 结果文件带测试点明细（``GET .../judge/runs/{run_id}``）
     has_cases: bool = False
+    #: 这一格结果里疑似违规 / 风险的条数（§12.11）
+    warning_count: int = 0
+    risk_count: int = 0
 
 
 class ScoreRowOut(_Base):
@@ -1686,6 +1732,9 @@ class JudgeRunOut(_Base):
     source_path: Optional[str] = None
     updated_at: str
     has_cases: bool = False
+    #: 结果里疑似违规 / 风险的条数（§12.11）
+    warning_count: int = 0
+    risk_count: int = 0
 
 
 class JudgeCaseOut(_Base):
@@ -1711,6 +1760,23 @@ class JudgePrecheckFindingOut(_Base):
     line: int = 0
     message: str = ""
     excerpt: str = ""
+    #: ``risk``（拦截类规则）/ ``warning``（疑似违规），服务端按 code 分级
+    level: Literal["risk", "warning"] = "warning"
+
+
+class JudgeRiskEventOut(_Base):
+    """一条风险事件（§12.11）：运行选手程序后发现的逃逸 / 篡改痕迹，或源码预检的拦截项。"""
+
+    code: str
+    #: 哪个测试点；预检拦截为 null
+    case: Optional[str] = None
+    #: 源码行号；只有预检拦截才有
+    line: int = 0
+    message: str = ""
+    #: 预检拦截时被拦下的规则 code
+    rule: str = ""
+    excerpt: str = ""
+    level: Literal["risk", "warning"] = "risk"
 
 
 class JudgeRunDetailOut(JudgeRunOut):
@@ -1728,6 +1794,8 @@ class JudgeRunDetailOut(JudgeRunOut):
     subtasks: List[JudgeSubtaskOut] = Field(default_factory=list)
     #: 自带评测的源码预检预警；旧评测机或外部评测器的结果没有
     precheck_warnings: List[JudgePrecheckFindingOut] = Field(default_factory=list)
+    #: 风险事件（§12.11）；旧评测机或外部评测器的结果没有
+    risk_events: List[JudgeRiskEventOut] = Field(default_factory=list)
     truncated: bool = False
     #: 自带评测写的结果：出自哪个评测任务（§12.9）
     task_id: Optional[int] = None

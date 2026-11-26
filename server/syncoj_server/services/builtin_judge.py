@@ -25,6 +25,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from sqlalchemy import delete, func, select
 
+from ..judging.precheck import count_flags
 from ..judging.runner import LANGUAGES
 from ..models import Contest, ContestStatus, JudgeTask, Player, Problem, SourceFile, SourceVersion, utcnow
 from ..paths import safe_join
@@ -517,6 +518,7 @@ def _store_result(ctx, session, task: JudgeTask, contest: Contest, player: Playe
     task.result_json = _encode(document).decode("utf-8")
     task.score = _int_or_none(document.get("score"))
     task.max_score = _int_or_none(document.get("max_score"))
+    task.warning_count, task.risk_count = count_flags(document)
     _finish(task, DONE, now, outcome=str(document.get("status") or "")[:16])
     if _should_apply(session, task):
         apply_result(ctx, task, contest, player, now)

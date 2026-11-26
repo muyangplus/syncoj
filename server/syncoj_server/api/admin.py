@@ -15,7 +15,7 @@ import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple
 
 from fastapi import (
     APIRouter,
@@ -69,6 +69,7 @@ from ..models import (
     iso_utc,
     utcnow,
 )
+from ..judging.precheck import LEVEL_RISK, level_of
 from ..paths import PathValidationError, safe_join, slugify, validate_relpath
 from ..schemas import (
     ProblemTestdataOut,
@@ -5112,6 +5113,8 @@ def score_matrix(
                         updated_at=_iso(run.updated_at),
                         run_id=run.id,
                         has_cases=_has_cases(run),
+                        warning_count=int(run.warning_count or 0),
+                        risk_count=int(run.risk_count or 0),
                     )
                 )
             rows.append(
@@ -5220,11 +5223,28 @@ def score_progress(
         return page_of(items, total_players, page)
 
 
+def flag_condition(warning_col, risk_col, flag: Optional[str]):
+    """``flag`` 筛选（§12.11）：``risk`` = 有风险；``warning`` = 有疑似违规（不论有没有风险）；
+    ``any`` = 两者之一。None = 不筛。"""
+    if flag == "risk":
+        return risk_col > 0
+    if flag == "warning":
+        return warning_col > 0
+    if flag == "any":
+        return (warning_col > 0) | (risk_col > 0)
+    return None
+
+
+#: 评测记录列表的 ``flag`` 参数
+FlagFilter = Literal["any", "warning", "risk"]
+
+
 @router.get("/contests/{contest_id}/judge/runs", response_model=Page[JudgeRunOut])
 def list_judge_runs(
     contest_id: int,
     page: PageParams = Depends(),
     parse_status: Optional[str] = None,
+    flag: Optional[FlagFilter] = Query(default=None, description="any / warning（有疑似违规）/ risk（有风险）"),
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> Page[JudgeRunOut]:
@@ -5232,6 +5252,9 @@ def list_judge_runs(
         filters = [JudgeRun.contest_id == contest_id]
         if parse_status:
             filters.append(JudgeRun.parse_status == parse_status)
+        flagged = flag_condition(JudgeRun.warning_count, JudgeRun.risk_count, flag)
+        if flagged is not None:
+            filters.append(flagged)
 
         total = session.execute(
             select(func.count(JudgeRun.id)).where(*filters)
@@ -5270,6 +5293,8 @@ def _judge_run_out(run: JudgeRun, player_no: str) -> JudgeRunOut:
         source_path=run.source_path,
         updated_at=_iso(run.updated_at) or "",
         has_cases=_has_cases(run),
+        warning_count=int(run.warning_count or 0),
+        risk_count=int(run.risk_count or 0),
     )
 
 
@@ -5322,12 +5347,29 @@ def _result_details(raw: Optional[str]) -> Dict[str, Any]:
     for item in document.get("precheck_warnings") or []:
         if not isinstance(item, dict) or not item.get("code"):
             continue
+        code = str(item.get("code"))[:32]
         precheck_warnings.append(
             {
-                "code": str(item.get("code"))[:32],
+                "code": code,
                 "line": _int_or_none(item.get("line")) or 0,
                 "message": str(item.get("message") or "")[:500],
                 "excerpt": str(item.get("excerpt") or "")[:200],
+                "level": level_of(code),
+            }
+        )
+    risk_events = []
+    for item in document.get("risk_events") or []:
+        if not isinstance(item, dict) or not item.get("code"):
+            continue
+        risk_events.append(
+            {
+                "code": str(item.get("code"))[:32],
+                "case": str(item["case"])[:128] if item.get("case") is not None else None,
+                "line": _int_or_none(item.get("line")) or 0,
+                "message": str(item.get("message") or "")[:500],
+                "rule": str(item.get("rule") or "")[:32],
+                "excerpt": str(item.get("excerpt") or "")[:200],
+                "level": LEVEL_RISK,
             }
         )
     isolated = document.get("isolated")
@@ -5342,6 +5384,7 @@ def _result_details(raw: Optional[str]) -> Dict[str, Any]:
         "cases": cases,
         "subtasks": subtasks,
         "precheck_warnings": precheck_warnings[:200],
+        "risk_events": risk_events[:200],
         "truncated": bool(document.get("truncated")),
         "task_id": _int_or_none(document.get("task_id")),
     }

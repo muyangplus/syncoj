@@ -113,6 +113,7 @@ class LocalJudge:
             row.desired = "run"
             session.flush()
             worker_id = row.id
+            desired_slots = int(row.desired_slots or 1)
         token_file = root / "token"
         fd = os.open(str(token_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -129,6 +130,9 @@ class LocalJudge:
         ]
         if backend == "rlimit" and hasattr(os, "geteuid") and os.geteuid() == 0:
             argv += ["--run-as", settings.judge_local_run_as]
+        if backend == "isolate" and desired_slots > 1:
+            # 管理端改过并发数：直接以它启动（不然评测机第一次 poll 就会为此重启一次）
+            argv += ["--slots", str(desired_slots)]
         log_path = Path(settings.log_root) / "judge-local.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         env = dict(os.environ)

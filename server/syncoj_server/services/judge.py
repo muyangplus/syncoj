@@ -38,6 +38,7 @@ from sqlalchemy.orm import Session
 
 from ..config import Settings
 from ..models import Contest, JudgeRun, Player, utcnow
+from ..judging.precheck import count_flags_json
 from ..paths import PathValidationError, validate_relpath
 
 __all__ = [
@@ -569,6 +570,7 @@ def scan_contest_results(
                 detail=("%s：%s" % (parser_name, reason or ""))[:512],
                 raw_json=parsed.raw,
             )
+            values["warning_count"], values["risk_count"] = count_flags_json(parsed.raw)
         pending.append((player_id, problem, values, known[0] if known else None))
 
     # ---- 写入阶段：条件语句，手工成绩写不进去 ----

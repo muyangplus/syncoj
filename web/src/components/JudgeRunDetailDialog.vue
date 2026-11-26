@@ -1,15 +1,17 @@
 <script setup lang="ts">
 /**
- * 测试点明细（§12）：逐点状态、用时、内存、信息，子任务，编译信息，源码预检的预警。
+ * 测试点明细（§12）：逐点状态、用时、内存、信息，子任务，编译信息，风险与疑似违规（§12.11，
+ * 风险在上），以及这次评测的源码（标注的行高亮，点条目滚到那一行）。
  *
  * 两种来源：成绩矩阵的一条评测记录（`runId`），或某个评测任务（`taskId`，历史版本的结果，
  * §12.9）。两者明细形状相同，这里归一成同一个视图。
  */
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 
 import { judgingApi } from '@/api'
-import type { JudgeRunDetailOut, JudgeTaskDetailOut } from '@/api/types'
+import { ApiError } from '@/api/client'
+import type { JudgeRunDetailOut, JudgeSourceOut, JudgeTaskDetailOut } from '@/api/types'
 import { formatTime } from '@/utils/format'
 
 const props = withDefaults(
@@ -56,10 +58,12 @@ const detail = computed(() => {
       judged_at: t.judged_at,
       compile_message: t.compile_message,
       precheck_warnings: t.precheck_warnings ?? [],
+      risk_events: t.risk_events ?? [],
       subtasks: t.subtasks,
       cases: t.cases,
       truncated: t.truncated,
       sha: t.source_sha256,
+      task_id: t.id as number | null,
     }
   }
   if (run.value) {
@@ -77,10 +81,12 @@ const detail = computed(() => {
       judged_at: r.judged_at,
       compile_message: r.compile_message,
       precheck_warnings: r.precheck_warnings ?? [],
+      risk_events: r.risk_events ?? [],
       subtasks: r.subtasks,
       cases: r.cases,
       truncated: r.truncated,
       sha: r.source_sha256,
+      task_id: (r.task_id ?? null) as number | null,
     }
   }
   return null
@@ -93,6 +99,10 @@ watch(
     loading.value = true
     run.value = null
     task.value = null
+    source.value = null
+    sourceError.value = null
+    sourceOpen.value = []
+    focusLine.value = null
     try {
       if (taskId) task.value = await judgingApi.task(props.contestId, taskId)
       else if (runId) run.value = await judgingApi.run(props.contestId, runId)
@@ -118,6 +128,105 @@ const STATUS_TYPE: Record<string, 'success' | 'warning' | 'danger' | 'info'> = {
 
 function statusType(status: string | null | undefined): 'success' | 'warning' | 'danger' | 'info' {
   return STATUS_TYPE[status ?? ''] ?? 'info'
+}
+
+// ---- 风险与疑似违规（§12.11；级别由服务端给）----
+
+interface FlagItem {
+  key: string
+  level: 'risk' | 'warning'
+  code: string
+  line: number
+  case: string | null
+  rule: string
+  message: string
+  excerpt: string
+}
+
+const flags = computed<FlagItem[]>(() => {
+  const d = detail.value
+  if (!d) return []
+  const items: FlagItem[] = []
+  d.risk_events.forEach((e, i) =>
+    items.push({
+      key: `e${i}`,
+      level: e.level === 'warning' ? 'warning' : 'risk',
+      code: e.code,
+      line: e.line ?? 0,
+      case: e.case ?? null,
+      rule: e.rule ?? '',
+      message: e.message ?? '',
+      excerpt: e.excerpt ?? '',
+    }),
+  )
+  d.precheck_warnings.forEach((w, i) =>
+    items.push({
+      key: `w${i}`,
+      level: w.level === 'risk' ? 'risk' : 'warning',
+      code: w.code,
+      line: w.line ?? 0,
+      case: null,
+      rule: '',
+      message: w.message ?? '',
+      excerpt: w.excerpt ?? '',
+    }),
+  )
+  return items
+})
+
+const risks = computed(() => flags.value.filter((f) => f.level === 'risk'))
+const warnings = computed(() => flags.value.filter((f) => f.level === 'warning'))
+
+/** 行号 → 级别（同一行风险优先） */
+const marked = computed(() => {
+  const map = new Map<number, 'risk' | 'warning'>()
+  for (const item of flags.value) {
+    if (item.line > 0 && map.get(item.line) !== 'risk') map.set(item.line, item.level)
+  }
+  return map
+})
+
+// ---- 源码 ----
+
+const source = ref<JudgeSourceOut | null>(null)
+const sourceLoading = ref(false)
+const sourceError = ref<string | null>(null)
+const sourceOpen = ref<string[]>([])
+const focusLine = ref<number | null>(null)
+const codeBox = ref<HTMLElement | null>(null)
+
+const sourceLines = computed(() => (source.value ? source.value.content.replace(/\r\n?/g, '\n').split('\n') : []))
+
+async function loadSource(): Promise<void> {
+  const taskId = detail.value?.task_id
+  if (source.value || sourceLoading.value || !props.contestId || !taskId) return
+  sourceLoading.value = true
+  sourceError.value = null
+  try {
+    source.value = await judgingApi.taskSource(props.contestId, taskId)
+  } catch (err) {
+    sourceError.value = err instanceof ApiError && err.status === 404 ? '代码不在' : (err as Error).message
+  } finally {
+    sourceLoading.value = false
+  }
+}
+
+watch(sourceOpen, (open) => {
+  if (open.includes('source')) void loadSource()
+})
+
+async function jumpTo(item: FlagItem): Promise<void> {
+  if (!item.line || !detail.value?.task_id) return
+  if (!sourceOpen.value.includes('source')) sourceOpen.value = [...sourceOpen.value, 'source']
+  await loadSource()
+  focusLine.value = item.line
+  await nextTick()
+  const box = codeBox.value
+  const row = box?.querySelector<HTMLElement>(`[data-line="${item.line}"]`)
+  if (box && row) {
+    box.scrollTop = Math.max(0, row.offsetTop - box.clientHeight / 2)
+    row.scrollIntoView({ block: 'nearest' })
+  }
 }
 
 const caseSubtask = computed(() => {
@@ -176,21 +285,60 @@ const caseSubtask = computed(() => {
           <pre class="compile">{{ detail.compile_message }}</pre>
         </template>
 
-        <template v-if="detail.precheck_warnings.length">
-          <div class="section-label">
-            源码预警 <span class="muted">{{ detail.precheck_warnings.length }} 条</span>
-          </div>
-          <ul class="warnings">
-            <li v-for="(item, index) in detail.precheck_warnings" :key="`${item.code}-${item.line}-${index}`">
-              <div class="warning-head">
-                <el-tag size="small" type="warning" effect="plain" class="mono">{{ item.code }}</el-tag>
-                <span v-if="item.line" class="muted">第 {{ item.line }} 行</span>
-                <span class="warning-message">{{ item.message }}</span>
-              </div>
-              <code v-if="item.excerpt" class="warning-excerpt">{{ item.excerpt }}</code>
-            </li>
-          </ul>
+        <template v-for="group in [
+          { level: 'risk', label: '风险', items: risks },
+          { level: 'warning', label: '疑似违规', items: warnings },
+        ]" :key="group.level">
+          <template v-if="group.items.length">
+            <div class="section-label">
+              {{ group.label }} <span class="muted">{{ group.items.length }} 条</span>
+            </div>
+            <ul class="flags">
+              <li
+                v-for="item in group.items"
+                :key="item.key"
+                class="flag"
+                :class="[`is-${item.level}`, { 'is-jump': item.line > 0 && detail.task_id }]"
+                @click="jumpTo(item)"
+              >
+                <div class="flag-head">
+                  <span class="flag-code mono">{{ item.code }}</span>
+                  <span v-if="item.rule" class="flag-code mono">{{ item.rule }}</span>
+                  <span v-if="item.line" class="muted">第 {{ item.line }} 行</span>
+                  <span v-if="item.case" class="muted">测试点 {{ item.case }}</span>
+                  <span class="flag-message">{{ item.message }}</span>
+                </div>
+                <code v-if="item.excerpt" class="flag-excerpt">{{ item.excerpt }}</code>
+              </li>
+            </ul>
+          </template>
         </template>
+
+        <el-collapse v-if="detail.task_id && detail.sha" v-model="sourceOpen" class="source">
+          <el-collapse-item name="source">
+            <template #title>
+              <span class="source-title">源码</span>
+              <span v-if="source" class="muted mono">&nbsp;{{ source.path }} · {{ sourceLines.length }} 行</span>
+            </template>
+            <div v-loading="sourceLoading" class="source-body">
+              <div v-if="sourceError" class="muted">{{ sourceError }}</div>
+              <div v-else-if="source" ref="codeBox" class="code">
+                <div
+                  v-for="(text, index) in sourceLines"
+                  :key="index"
+                  :data-line="index + 1"
+                  class="code-line"
+                  :class="[
+                    marked.get(index + 1) ? `is-${marked.get(index + 1)}` : '',
+                    { 'is-focus': focusLine === index + 1 },
+                  ]"
+                >
+                  <span class="code-no">{{ index + 1 }}</span><span class="code-text">{{ text || ' ' }}</span>
+                </div>
+              </div>
+            </div>
+          </el-collapse-item>
+        </el-collapse>
 
         <template v-if="detail.subtasks?.length">
           <div class="section-label">子任务</div>
@@ -326,31 +474,57 @@ const caseSubtask = computed(() => {
   font-size: 12px;
   white-space: pre-wrap;
 }
-.warnings {
+.flags {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   margin: 0;
   padding: 0;
   list-style: none;
-  border: 1px solid var(--sj-border);
-  border-radius: var(--sj-radius-sm);
-  background: var(--sj-warning-soft);
 }
-.warnings li {
+.flag {
   padding: 8px 12px;
+  border: 1px solid var(--flag-line);
+  border-left-width: 3px;
+  border-radius: var(--sj-radius-sm);
+  background: var(--flag-soft);
 }
-.warnings li + li {
-  border-top: 1px solid var(--sj-border);
+.flag.is-risk {
+  --flag-line: var(--sj-danger-line);
+  --flag-soft: var(--sj-danger-soft);
+  --flag-fg: var(--sj-danger);
 }
-.warning-head {
+.flag.is-warning {
+  --flag-line: var(--sj-warning-line);
+  --flag-soft: var(--sj-warning-soft);
+  --flag-fg: var(--sj-warning);
+}
+.flag.is-jump {
+  cursor: pointer;
+}
+.flag.is-jump:hover {
+  border-color: var(--flag-fg);
+}
+.flag-head {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
   font-size: 13px;
 }
-.warning-message {
-  color: var(--sj-text);
+.flag-code {
+  padding: 0 6px;
+  border: 1px solid var(--flag-line);
+  border-radius: var(--sj-radius-sm);
+  color: var(--flag-fg);
+  font-size: 12px;
+  line-height: 18px;
 }
-.warning-excerpt {
+.flag-message {
+  color: var(--sj-text);
+  word-break: break-word;
+}
+.flag-excerpt {
   display: block;
   margin-top: 4px;
   font-family: var(--sj-mono);
@@ -358,6 +532,61 @@ const caseSubtask = computed(() => {
   color: var(--sj-text-2);
   white-space: pre-wrap;
   word-break: break-all;
+}
+.source {
+  margin-top: 14px;
+}
+.source-title {
+  font-weight: 600;
+}
+.source-body {
+  min-height: 40px;
+}
+.code {
+  max-height: 360px;
+  overflow: auto;
+  border: 1px solid var(--sj-border);
+  border-radius: var(--sj-radius-sm);
+  background: var(--sj-surface-2);
+  font-family: var(--sj-mono);
+  font-size: 12px;
+  line-height: 18px;
+}
+.code-line {
+  display: flex;
+  min-width: max-content;
+}
+.code-line.is-warning {
+  background: var(--sj-warning-mark);
+}
+.code-line.is-risk {
+  background: var(--sj-danger-mark);
+}
+.code-line.is-focus .code-no {
+  box-shadow: inset 3px 0 0 var(--sj-primary);
+  font-weight: 700;
+}
+.code-no {
+  position: sticky;
+  left: 0;
+  flex: none;
+  width: 44px;
+  padding-right: 8px;
+  text-align: right;
+  color: var(--sj-text-3);
+  background: var(--sj-surface-2);
+  user-select: none;
+}
+.code-line.is-warning .code-no {
+  color: var(--sj-warning);
+}
+.code-line.is-risk .code-no {
+  color: var(--sj-danger);
+}
+.code-text {
+  padding-right: 12px;
+  white-space: pre;
+  color: var(--sj-text);
 }
 .mono {
   font-family: var(--sj-mono);

@@ -174,6 +174,8 @@ export const paths = {
   problemTestdata: (problemId: number) => `${ADMIN}/problems/${problemId}/testdata`,
   contestBuiltinJudge: (contestId: number) => `${ADMIN}/contests/${contestId}/judge/builtin`,
   judgeWorkers: () => `${ADMIN}/judge-workers`,
+  /** 「评测服务」全局开关与排队数（§12.10）。 */
+  judgeService: () => `${ADMIN}/judge-service`,
   /** 自动入队开关与去抖秒数（§12.9）。 */
   contestJudgeAuto: (contestId: number) => `${ADMIN}/contests/${contestId}/judge/auto`,
   /** 评测任务（任务即历史）。 */
@@ -181,6 +183,9 @@ export const paths = {
   contestJudgeTask: (contestId: number, taskId: number) =>
     `${ADMIN}/contests/${contestId}/judge/tasks/${taskId}`,
   /** 采用此版本成绩：把任务结果写成当前 result.json。 */
+  /** 评测任务评的那份代码（≤ 1 MB，明细里按行显示，§12.11）。 */
+  contestJudgeTaskSource: (contestId: number, taskId: number) =>
+    `${ADMIN}/contests/${contestId}/judge/tasks/${taskId}/source`,
   contestJudgeTaskAdopt: (contestId: number, taskId: number) =>
     `${ADMIN}/contests/${contestId}/judge/tasks/${taskId}/adopt`,
   /** 一位选手的代码版本历史与每版评测结果（分数 timeline）。 */

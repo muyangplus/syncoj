@@ -14,6 +14,8 @@
 #
 # 装到：
 #   /opt/syncoj-judge/syncoj-judge.pyz     评测机程序（服务端按需打包的 zipapp，只用标准库）
+#   /opt/syncoj-judge/uninstall.sh         卸载脚本（root 所有，0755）：sudo /opt/syncoj-judge/uninstall.sh
+#   /opt/syncoj-judge/install.json         安装方式（评测机远程卸载时据此清理自己）
 #   /etc/syncoj-judge/token                令牌（0600）
 #   /var/cache/syncoj-judge                数据包缓存
 #   /etc/systemd/system/syncoj-judge.service
@@ -31,6 +33,7 @@ ACCOUNT=syncoj-judge
 INSTALL_DIR=/opt/syncoj-judge
 CONF_DIR=/etc/syncoj-judge
 UNIT=/etc/systemd/system/$SERVICE.service
+CACHE_DIR=/var/cache/$SERVICE
 
 TOKEN=""
 SERVER="$EMBEDDED_SERVER"
@@ -127,6 +130,9 @@ fi
 
 # ---- 程序 ----
 mkdir -p "$INSTALL_DIR" "$CONF_DIR"
+# umask 0 下 mkdir 出来是 0777：这两个目录里放着以 root 执行的卸载脚本与令牌，收紧
+chown root:root "$INSTALL_DIR" "$CONF_DIR"
+chmod 0755 "$INSTALL_DIR" "$CONF_DIR"
 TMP="$(mktemp "$INSTALL_DIR/.syncoj-judge.pyz.XXXXXX")"
 trap 'rm -f "$TMP"' EXIT
 say "下载评测机程序：$SERVER/judge/worker.pyz"
@@ -149,6 +155,37 @@ chmod 0755 "$TMP"
 mv -f "$TMP" "$INSTALL_DIR/syncoj-judge.pyz"
 trap - EXIT
 
+# ---- 卸载脚本与安装清单 ----
+# 卸载脚本由服务端发脚本时嵌进下面的 heredoc；从仓库里直接跑时占位符原样留着，取旁边那份
+write_uninstaller() {
+    cat > "$1" <<'SYNCOJ_UNINSTALL_EOF'
+__SYNCOJ_UNINSTALL_SH__
+SYNCOJ_UNINSTALL_EOF
+}
+UNINSTALL_TMP="$(mktemp "$INSTALL_DIR/.uninstall.sh.XXXXXX")"
+trap 'rm -f "$UNINSTALL_TMP"' EXIT
+write_uninstaller "$UNINSTALL_TMP"
+if grep -qx '__SYNCOJ_UNINSTALL''_SH__' "$UNINSTALL_TMP"; then
+    LOCAL_UNINSTALLER="$(dirname "$0")/uninstall.sh"
+    [ -f "$LOCAL_UNINSTALLER" ] || die "缺少卸载脚本（从服务端下载 install.sh 再跑）"
+    cat "$LOCAL_UNINSTALLER" > "$UNINSTALL_TMP"
+fi
+bash -n "$UNINSTALL_TMP" || die "卸载脚本语法不对"
+chown root:root "$UNINSTALL_TMP"
+chmod 0755 "$UNINSTALL_TMP"
+mv -f "$UNINSTALL_TMP" "$INSTALL_DIR/uninstall.sh"
+trap - EXIT
+MARKER="$CACHE_DIR/.uninstall-requested"
+cat > "$INSTALL_DIR/install.json" <<EOF
+{"kind": "systemd", "service": "$SERVICE", "marker": "$MARKER",
+ "paths": ["$INSTALL_DIR", "$CONF_DIR", "$CACHE_DIR", "$UNIT"],
+ "accounts": ["$ACCOUNT", "syncoj-judge-run"]}
+EOF
+chown root:root "$INSTALL_DIR/install.json"
+chmod 0644 "$INSTALL_DIR/install.json"
+# 重装：上一次远程卸载没做完留下的标记会让新服务一起来就退出，清掉
+rm -f "$MARKER"
+
 # ---- 令牌 ----
 umask 077
 printf '%s\n' "$TOKEN" > "$CONF_DIR/token"
@@ -156,7 +193,8 @@ chown "$SERVICE_USER" "$CONF_DIR/token"
 chmod 0600 "$CONF_DIR/token"
 
 # ---- 服务 ----
-ARGS="--server $SERVER --token-file $CONF_DIR/token --backend $BACKEND --slots $SLOTS --cache-dir /var/cache/$SERVICE"
+ARGS="--server $SERVER --token-file $CONF_DIR/token --backend $BACKEND --slots $SLOTS --cache-dir $CACHE_DIR"
+ARGS="$ARGS --install-manifest $INSTALL_DIR/install.json"
 [ "$BACKEND" = rlimit ] && ARGS="$ARGS --run-as $RUN_AS"
 cat > "$UNIT" <<EOF
 [Unit]
@@ -169,6 +207,9 @@ Type=simple
 User=$SERVICE_USER
 ExecStart=$PYTHON $INSTALL_DIR/syncoj-judge.pyz $ARGS
 CacheDirectory=$SERVICE
+# 远程卸载（§12.10）：评测机告别后写标记、以 0 退出；这里以 root（+）看到标记就脱离本单元卸载。
+# 没有标记时什么都不做（平常的停止 / 重启照常）
+ExecStopPost=+$INSTALL_DIR/uninstall.sh --if-requested
 # 停止（systemctl stop / 管理端「停止」）= 评完手上的任务再退出
 KillMode=mixed
 TimeoutStopSec=300

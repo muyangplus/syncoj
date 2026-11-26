@@ -71,6 +71,8 @@ class RunResult:
     wall_seconds: float = 0.0
     memory_bytes: int = 0
     message: str = ""
+    #: 运行结束后清掉的、逃出进程组的进程数（rlimit 后端 ``kill_strays`` 时；其余后端为 0）
+    escaped: int = 0
 
 
 def create_fresh(path: Path, mode: int, owner: Optional[Tuple[int, int]] = None) -> int:
@@ -203,9 +205,16 @@ def _boot_ticks() -> Optional[int]:
         return None
 
 
-def kill_processes_since(uid: int, since_ticks: int, proc_root: str = "/proc") -> int:
-    """杀掉属于 ``uid``、且在 ``since_ticks`` 之后启动的进程；返回杀掉的个数。"""
+def kill_processes_since(
+    uid: int, since_ticks: int, proc_root: str = "/proc", exclude_pgid: Optional[int] = None,
+) -> int:
+    """杀掉属于 ``uid``、且在 ``since_ticks`` 之后启动的进程；返回杀掉的个数。
+
+    僵尸进程（已退出、等收尸）跳过。``exclude_pgid`` 里的进程照杀但不计数：那是本次运行的
+    进程组，刚被 ``killpg`` 过、还没来得及消失的不算"逃出"。
+    """
     killed = set()
+    counted = 0
     for _ in range(3):  # 杀的同时它可能还在 fork：多扫几遍
         found = 0
         try:
@@ -220,20 +229,24 @@ def kill_processes_since(uid: int, since_ticks: int, proc_root: str = "/proc") -
                     continue
                 with open(os.path.join(proc_root, entry, "stat")) as handle:
                     fields = handle.read().rsplit(")", 1)[1].split()
+                state = fields[0]
+                pgid = int(fields[2])
                 start = int(fields[19])  # 第 22 列（comm 之后从第 3 列算起）
             except (OSError, ValueError, IndexError):
                 continue
-            if start + 1 < since_ticks:
+            if start + 1 < since_ticks or state in ("Z", "X"):
                 continue
             try:
                 os.kill(int(entry), signal.SIGKILL)
                 killed.add(int(entry))
                 found += 1
+                if exclude_pgid is None or pgid != exclude_pgid:
+                    counted += 1
             except OSError:
                 pass
         if not found:
             break
-    return len(killed)
+    return counted
 
 
 class RlimitSandbox(Sandbox):
@@ -347,14 +360,15 @@ class RlimitSandbox(Sandbox):
             os.killpg(proc.pid, signal.SIGKILL)  # 收拾留下的子进程
         except OSError:
             pass
+        escaped = 0
         if self._kill_strays and uid is not None and since is not None:
-            kill_processes_since(uid, since)
+            escaped = kill_processes_since(uid, since, exclude_pgid=proc.pid)
         wall = time.monotonic() - started
         try:
             status, cpu, maxrss = json.loads(report.decode("ascii"))
         except (ValueError, UnicodeDecodeError):
             if killed.is_set():
-                return RunResult(TLE, None, signal.SIGKILL, limits.cpu_seconds, wall, 0)
+                return RunResult(TLE, None, signal.SIGKILL, limits.cpu_seconds, wall, 0, escaped=escaped)
             raise SandboxError("沙箱中间层没有报回结果（退出码 %s）" % proc.returncode)
         memory = int(maxrss) * 1024
         sig = os.WTERMSIG(status) if os.WIFSIGNALED(status) else None
@@ -363,7 +377,7 @@ class RlimitSandbox(Sandbox):
             killed_by_wall=killed.is_set(), cpu=cpu, limits=limits, memory=memory,
             exit_code=code, sig=sig,
         )
-        return RunResult(verdict, code, sig, cpu, wall, memory)
+        return RunResult(verdict, code, sig, cpu, wall, memory, escaped=escaped)
 
     def close(self) -> None:
         shutil.rmtree(str(self.workdir), ignore_errors=True)

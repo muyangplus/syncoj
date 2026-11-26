@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 
 import { ElMessage, ElMessageBox } from 'element-plus'
 
@@ -10,6 +10,7 @@ import JudgeRunDetailDialog from '@/components/JudgeRunDetailDialog.vue'
 import ScoreTimelineDialog from '@/components/ScoreTimelineDialog.vue'
 import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
 import DataTable from '@/components/DataTable.vue'
+import JudgeFlagTags from '@/components/JudgeFlagTags.vue'
 import FormDialog from '@/components/FormDialog.vue'
 import PageShell from '@/components/PageShell.vue'
 import SectionCard from '@/components/SectionCard.vue'
@@ -20,6 +21,7 @@ import { useRoute, useRouter } from 'vue-router'
 
 import { useContestStore } from '@/stores/contest'
 import { formatTime } from '@/utils/format'
+import { FLAG_FILTERS, flagParam, flagRowClass } from '@/utils/judgeFlags'
 
 const contest = useContestStore()
 const router = useRouter()
@@ -65,8 +67,10 @@ const view = computed(() => {
 // 都列出来"。
 // --------------------------------------------------------------------------- //
 
-/** 空串 = 全部。服务端只认 `parse_status` 这个参数名。 */
-const parseFilter = ref('')
+/** `all` = 全部（el-select 把空串当成"没选"，只显示占位符）。服务端只认 `parse_status` 这个参数名。 */
+const parseFilter = ref('all')
+/** 风险标注筛选（§12.11） */
+const flagFilter = ref('all')
 
 const runs = useList<JudgeRunOut>({
   rowKey: (row) => row.id,
@@ -76,17 +80,16 @@ const runs = useList<JudgeRunOut>({
     if (!contestId) return Promise.resolve(null)
     return scoreApi.runs(
       contestId,
-      { limit, offset, parse_status: parseFilter.value || undefined },
+      { limit, offset, parse_status: parseFilter.value === 'all' ? undefined : parseFilter.value, flag: flagParam(flagFilter.value) },
       signal,
     )
   },
   // 与矩阵同一个节奏：两边看到的是同一批数据
   interval: 10000,
   // 筛选变化要回到第一页 —— `watches` 负责这件事，页面不再自己 watch
-  watches: [() => contest.currentId, () => parseFilter.value],
+  watches: [() => contest.currentId, () => parseFilter.value, () => flagFilter.value],
 })
 
-const runsSection = ref<HTMLElement | null>(null)
 const scanReport = ref<JudgeScanOut | null>(null)
 const scanErrors = computed(() => scanReport.value?.errors ?? [])
 
@@ -121,12 +124,6 @@ const rescan = useMutation(
     },
   },
 )
-
-/** 把"未解析"作为筛选条件带到记录区，并滚过去 —— 不滚的话长页面上等于点了没反应。 */
-function showUnparsedRuns(): void {
-  parseFilter.value = 'unparsed'
-  void nextTick(() => runsSection.value?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
-}
 
 // --------------------------------------------------------------------------- //
 // 清空成绩记录（范围删除）
@@ -214,6 +211,8 @@ function cellView(cell: ScoreCellOut | undefined): {
   const parts = [`${cell.score}${hasMax ? ` / ${cell.max_score}` : ''} 分`]
   if (cell.status) parts.push(cell.status)
   if (cell.parse_status === 'manual') parts.push('手工录入')
+  if (cell.risk_count) parts.push(`风险 ${cell.risk_count}`)
+  if (cell.warning_count) parts.push(`疑似违规 ${cell.warning_count}`)
   if (detail) parts.push(detail)
 
   return {
@@ -226,55 +225,16 @@ function cellView(cell: ScoreCellOut | undefined): {
   }
 }
 
+/** 格子的风险细边框（不改分数颜色）：风险红、疑似违规黄 */
+function cellFlagClass(cell: ScoreCellOut | undefined): string {
+  if (cell?.risk_count) return 'flag-risk'
+  if (cell?.warning_count) return 'flag-warning'
+  return ''
+}
+
 function cellOf(row: ScoreRowOut, ident: string): ScoreCellOut | undefined {
   return row.cells?.find((cell) => cell.problem === ident)
 }
-
-interface CellRef {
-  row: ScoreRowOut
-  cell: ScoreCellOut
-}
-
-/** 按题目筛出符合条件的所有格子。 */
-function pickCells(predicate: (cell: ScoreCellOut) => boolean): CellRef[] {
-  const result: CellRef[] = []
-  for (const row of view.value?.rows ?? []) {
-    for (const cell of row.cells) {
-      if (predicate(cell)) result.push({ row, cell })
-    }
-  }
-  return result
-}
-
-const unparsedCells = computed(() => pickCells((cell) => cell.parse_status === 'unparsed'))
-
-/**
- * 「交了，但评测还没出结果」。
- *
- * 这一栏是给教师吃定心丸用的：机器在跑、文件收到了，等着就行 ——
- * 以前这种格子显示成「—」，和"根本没交"长得一模一样，只能逐个点开看。
- */
-const pendingCells = computed(() =>
-  pickCells((cell) => cell.parse_status === 'missing' && cell.submitted === true),
-)
-
-/**
- * 「一题都没交」。真正需要人去催的那一栏。
- *
- * 只统计**清单里登记过的题目** —— 未登记的题目可能只是历史遗留，
- * 拿它去质问选手是错的。
- */
-const missingCells = computed(() => {
-  const declared = new Set(
-    (view.value?.columns ?? []).filter((column) => column.declared).map((c) => c.ident),
-  )
-  return pickCells(
-    (cell) =>
-      cell.parse_status === 'missing' &&
-      cell.submitted !== true &&
-      declared.has(cell.problem),
-  )
-})
 
 // --------------------------------------------------------------------------- //
 // 手工录分（矩阵与记录共用同一个弹窗）
@@ -440,10 +400,6 @@ function runStatusLabel(parseStatus: string): string {
   return map[parseStatus] ?? parseStatus
 }
 
-const pendingTotal = computed(
-  () => unparsedCells.value.length + pendingCells.value.length + missingCells.value.length,
-)
-
 // --------------------------------------------------------------------------- //
 // 测试点明细（§12）
 // --------------------------------------------------------------------------- //
@@ -559,70 +515,6 @@ async function rejudge(run: JudgeRunDetailOut, force = false): Promise<void> {
       </template>
     </el-alert>
 
-    <SectionCard v-if="pendingTotal" title="待处理" :meta="`${pendingTotal} 格`">
-      <div class="todo-list">
-        <div v-if="unparsedCells.length" class="todo-row">
-          <div class="todo-label">
-            <span class="todo-dot unparsed" />未解析
-            <span class="todo-count">{{ unparsedCells.length }} 格</span>
-          </div>
-          <div class="todo-chips">
-            <el-tag
-              v-for="item in unparsedCells.slice(0, 20)"
-              :key="`${item.row.player_id}-${item.cell.problem}`"
-              size="small"
-              type="danger"
-              effect="plain"
-              class="clickable"
-              @click="openManual(item.row, item.cell.problem, item.cell)"
-            >
-              {{ item.row.player_no }} / {{ item.cell.problem }}
-            </el-tag>
-            <span v-if="unparsedCells.length > 20" class="muted">等 {{ unparsedCells.length }} 格</span>
-            <el-button link type="primary" @click="showUnparsedRuns">筛选评测记录</el-button>
-          </div>
-        </div>
-
-        <div v-if="pendingCells.length" class="todo-row">
-          <div class="todo-label">
-            <span class="todo-dot pending" />待评测
-            <span class="todo-count">{{ pendingCells.length }} 格</span>
-          </div>
-          <div class="todo-chips">
-            <el-tag
-              v-for="item in pendingCells.slice(0, 20)"
-              :key="`${item.row.player_id}-${item.cell.problem}`"
-              size="small"
-              type="primary"
-              effect="plain"
-            >
-              {{ item.row.player_no }} / {{ item.cell.problem }}
-            </el-tag>
-            <span v-if="pendingCells.length > 20" class="muted">等 {{ pendingCells.length }} 格</span>
-          </div>
-        </div>
-
-        <div v-if="missingCells.length" class="todo-row">
-          <div class="todo-label">
-            <span class="todo-dot missing" />未交
-            <span class="todo-count">{{ missingCells.length }} 格</span>
-          </div>
-          <div class="todo-chips">
-            <el-tag
-              v-for="item in missingCells.slice(0, 20)"
-              :key="`${item.row.player_id}-${item.cell.problem}`"
-              size="small"
-              type="warning"
-              effect="plain"
-            >
-              {{ item.row.player_no }} / {{ item.cell.problem }}
-            </el-tag>
-            <span v-if="missingCells.length > 20" class="muted">等 {{ missingCells.length }} 格</span>
-          </div>
-        </div>
-      </div>
-    </SectionCard>
-
     <SectionCard
       title="成绩矩阵"
       :meta="view && view.columns.length ? `${view.rows.length} 名选手 · ${view.columns.length} 道题` : ''"
@@ -679,7 +571,7 @@ async function rejudge(run: JudgeRunDetailOut, force = false): Promise<void> {
               <button
                 type="button"
                 class="score-block"
-                :class="`is-${cellView(cellOf(row, column.ident)).kind}`"
+                :class="[`is-${cellView(cellOf(row, column.ident)).kind}`, cellFlagClass(cellOf(row, column.ident))]"
                 @click="openCell(row, column.ident)"
               >
                 <span class="score-main">{{ cellView(cellOf(row, column.ident)).text }}</span>
@@ -710,11 +602,14 @@ async function rejudge(run: JudgeRunDetailOut, force = false): Promise<void> {
       </div>
     </SectionCard>
 
-    <div ref="runsSection" class="runs-anchor">
+    <div class="runs-anchor">
       <SectionCard title="评测记录" :meta="`共 ${runs.total.value} 条`" flush>
         <template #extra>
+          <el-select v-model="flagFilter" style="width: 130px" aria-label="风险标注">
+            <el-option v-for="f in FLAG_FILTERS" :key="f.value" :label="f.label" :value="f.value" />
+          </el-select>
           <el-select v-model="parseFilter" style="width: 140px">
-            <el-option label="全部记录" value="" />
+            <el-option label="全部记录" value="all" />
             <el-option label="未解析" value="unparsed" />
             <el-option label="已解析" value="ok" />
             <el-option label="手工录入" value="manual" />
@@ -731,7 +626,8 @@ async function rejudge(run: JudgeRunDetailOut, force = false): Promise<void> {
           :total="runs.total.value"
           :page="runs.page.value"
           :page-size="runs.pageSize.value"
-          :filtered="!!parseFilter"
+          :filtered="parseFilter !== 'all' || flagFilter !== 'all'"
+          :row-class="flagRowClass"
           empty-text="无评测记录"
           empty-filtered-text="无匹配的评测记录"
           @update:page="runs.setPage"
@@ -747,10 +643,13 @@ async function rejudge(run: JudgeRunDetailOut, force = false): Promise<void> {
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="得分" width="100" align="right">
+            <el-table-column label="得分" width="130" align="right">
               <template #default="{ row }">
                 <span v-if="row.score === null || row.score === undefined" class="muted">—</span>
                 <span v-else>{{ row.score }} / {{ row.max_score ?? '?' }}</span>
+                <div v-if="row.risk_count || row.warning_count" class="run-flags">
+                  <JudgeFlagTags :warning="row.warning_count" :risk="row.risk_count" />
+                </div>
               </template>
             </el-table-column>
             <el-table-column label="来源文件" min-width="220">
@@ -905,62 +804,6 @@ async function rejudge(run: JudgeRunDetailOut, force = false): Promise<void> {
   display: inline-flex;
   align-items: center;
   color: var(--sj-danger);
-}
-
-/* ---- 待处理 ---- */
-
-.todo-list {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.todo-row {
-  display: flex;
-  gap: 16px;
-  align-items: flex-start;
-}
-
-.todo-label {
-  flex: none;
-  width: 120px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-weight: 600;
-  line-height: 24px;
-}
-
-.todo-count {
-  font-weight: 400;
-  font-size: 12.5px;
-  color: var(--sj-text-3);
-}
-
-.todo-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-}
-
-.todo-dot.unparsed {
-  background: var(--sj-danger);
-}
-
-.todo-dot.pending {
-  background: var(--sj-primary);
-}
-
-.todo-dot.missing {
-  background: var(--sj-warning);
-}
-
-.todo-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
-  min-width: 0;
 }
 
 /* ---- 图例 ---- */
@@ -1155,7 +998,28 @@ async function rejudge(run: JudgeRunDetailOut, force = false): Promise<void> {
   --block-border: var(--sj-border-strong);
 }
 
+/* 风险标注（§12.11）：细边框，不改分数颜色 */
+.score-block.flag-warning {
+  box-shadow: 0 0 0 2px var(--sj-warning-line);
+}
+
+.score-block.flag-risk {
+  box-shadow: 0 0 0 2px var(--sj-danger-line);
+}
+
+.score-block.flag-warning:hover {
+  box-shadow: 0 0 0 2px var(--sj-warning-line), var(--sj-shadow-lg);
+}
+
+.score-block.flag-risk:hover {
+  box-shadow: 0 0 0 2px var(--sj-danger-line), var(--sj-shadow-lg);
+}
+
 /* ---- 评测记录 ---- */
+
+.run-flags {
+  margin-top: 4px;
+}
 
 .runs-anchor {
   margin-top: 16px;

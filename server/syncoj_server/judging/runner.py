@@ -12,11 +12,15 @@ NOI 惯例：
   （testlib 风格：``checker <in> <out> <ans>``，退出码 0 为通过）。
 * 每个测试点前清空工作目录：程序不能跨测试点留东西。
 * 编译前先做源码预检（:mod:`.precheck`）：有拦截项就不编译、记 CE；预警写进 ``precheck_warnings``。
+* 每次运行选手程序后检查工作目录与沙箱的报告，记风险事件 ``risk_events``（符号链接 / FIFO /
+  设备 / 硬链接、checker 同名文件或程序自身被改写、逃出进程组的进程）；源码预检的拦截项也记一条。
+  风险事件只是标注，不改变判分。
 * Windows（``winjob`` 后端，MinGW-w64）：产物带 ``.exe``、静态链接、主线程栈调大、``-pipe``（:func:`platform_compile_argv`）。
 """
 
 from __future__ import annotations
 
+import hashlib
 import sys
 import os
 import stat
@@ -102,6 +106,8 @@ class JudgeOutcome:
     isolated: bool = False
     #: 源码预检的预警（``Finding.to_dict()``）；没有就不写进结果
     precheck_warnings: List[Dict[str, object]] = field(default_factory=list)
+    #: 风险事件（:class:`RiskEvent` 的 ``to_dict()``）；没有就不写进结果
+    risk_events: List[Dict[str, object]] = field(default_factory=list)
 
     def to_result_json(self) -> Dict[str, object]:
         document: Dict[str, object] = {
@@ -117,7 +123,99 @@ class JudgeOutcome:
         }
         if self.precheck_warnings:
             document["precheck_warnings"] = self.precheck_warnings
+        if self.risk_events:
+            document["risk_events"] = self.risk_events
         return document
+
+
+#: 风险事件最多记几条（每个测试点每种至多一条，再多就没有信息量了）
+MAX_RISK_EVENTS = 50
+#: 选手程序不该造出来的文件名：评测机放 checker 时用的名字
+CHECKER_NAMES = frozenset(["chk", "chk.exe", "checker", "checker.exe"])
+#: 检查工作目录时最多看多少个条目（选手程序可以造很多文件，检查本身不能卡住评测机）
+MAX_WORKDIR_ENTRIES = 10000
+
+
+@dataclass
+class RiskEvent:
+    """一条风险事件：``code`` 稳定（见 ``precheck.RISK_EVENT_CODES``），``case`` 是测试点名
+    （源码预检拦截为 None），``line`` 只有预检拦截才有，``rule`` 是被拦下的预检规则。"""
+
+    code: str
+    message: str
+    case: Optional[str] = None
+    line: int = 0
+    rule: str = ""
+    excerpt: str = ""
+
+    def to_dict(self) -> Dict[str, object]:
+        document: Dict[str, object] = {"code": self.code, "case": self.case, "message": self.message}
+        if self.line:
+            document["line"] = self.line
+        if self.rule:
+            document["rule"] = self.rule
+        if self.excerpt:
+            document["excerpt"] = self.excerpt
+        return document
+
+
+def _sha256_fd_path(path: Path) -> Optional[str]:
+    """工作目录里一个普通文件的 sha256（不跟随链接）；不是普通文件或打不开为 None。"""
+    try:
+        fd = sb.open_existing(path)
+    except OSError:
+        return None
+    with os.fdopen(fd, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            return None
+        digest = hashlib.sha256()
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+        return digest.hexdigest()
+
+
+def inspect_workdir(workdir: Path, case: str, prog: str, prog_sha: str) -> List[RiskEvent]:
+    """选手程序运行之后看一眼工作目录：逃逸、篡改的痕迹各记一条。"""
+    events: List[RiskEvent] = []
+    odd: List[str] = []
+    checkers: List[str] = []
+    seen = 0
+    for root, dirs, files in os.walk(str(workdir), followlinks=False):
+        for name in list(dirs) + files:
+            seen += 1
+            if seen > MAX_WORKDIR_ENTRIES:
+                break
+            path = os.path.join(root, name)
+            rel = os.path.relpath(path, str(workdir)).replace(os.sep, "/")
+            try:
+                info = os.lstat(path)
+            except OSError:
+                continue
+            mode = info.st_mode
+            if stat.S_ISLNK(mode):
+                odd.append("%s（符号链接）" % rel)
+            elif stat.S_ISFIFO(mode):
+                odd.append("%s（FIFO）" % rel)
+            elif stat.S_ISCHR(mode) or stat.S_ISBLK(mode):
+                odd.append("%s（设备文件）" % rel)
+            elif stat.S_ISSOCK(mode):
+                odd.append("%s（套接字）" % rel)
+            elif stat.S_ISREG(mode) and info.st_nlink > 1:
+                odd.append("%s（硬链接 %d）" % (rel, info.st_nlink))
+            if name.lower() in CHECKER_NAMES:
+                checkers.append(rel)
+        if seen > MAX_WORKDIR_ENTRIES:
+            break
+    if odd:
+        events.append(RiskEvent("workdir_symlink", "工作目录里出现 " + "、".join(odd[:5])
+                                + ("等 %d 项" % len(odd) if len(odd) > 5 else ""), case))
+    problems = ["写出了 " + "、".join(checkers[:5])] if checkers else []
+    current = _sha256_fd_path(workdir / prog)
+    if current != prog_sha:
+        problems.append("%s 被%s" % (prog, "删除或替换" if current is None else "改写"))
+    if problems:
+        events.append(RiskEvent("tamper_checker", "；".join(problems), case))
+    return events
 
 
 def exe_name(stem: str, windows: bool = WINDOWS) -> str:
@@ -203,8 +301,12 @@ def judge(
         )
         warnings = [item.to_dict() for item in report.warnings]
         if report.blocked:
+            risks = [
+                RiskEvent("precheck_blocked", item.message, None, item.line, item.code, item.excerpt).to_dict()
+                for item in report.blocked[:MAX_RISK_EVENTS]
+            ]
             return JudgeOutcome(0, data.total_score, CE, language, _truncate(report.blocked_message().encode("utf-8")),
-                                precheck_warnings=warnings)
+                                precheck_warnings=warnings, risk_events=risks)
         box = sandbox_factory()
         try:
             outcome = _judge_in(box, archive, data, source, main_name, compile_argv, language, config)
@@ -235,6 +337,8 @@ def _judge_in(box, archive, data: Testdata, source, main_name, compile_argv, lan
     # 编译产物读进评测机内存：选手程序能改写工作目录（换掉 checker 就能"永远 AC"），
     # 所以每次运行前清空工作目录、从这里重新放一份干净的，不在测试点之间留任何文件
     binaries = {prog: (box.workdir / prog).read_bytes()}
+    prog_sha = hashlib.sha256(binaries[prog]).hexdigest()
+    risks: List[RiskEvent] = []
     if data.checker:
         for member in [data.checker] + data.checker_support:
             box.put(Path(member).name, archive.read(member))
@@ -271,6 +375,9 @@ def _judge_in(box, archive, data: Testdata, source, main_name, compile_argv, lan
         )
         if run.status == sb.SE:
             raise sb.SandboxError("沙箱出错：%s" % run.message)
+        if run.escaped:
+            risks.append(RiskEvent("escaped_process", "清掉 %d 个逃出进程组的进程" % run.escaped, case.name))
+        risks.extend(inspect_workdir(box.workdir, case.name, prog, prog_sha))
         if run.status == sb.OK:
             output = _read(box, out_name)
             if output is None:
@@ -303,6 +410,7 @@ def _judge_in(box, archive, data: Testdata, source, main_name, compile_argv, lan
     return JudgeOutcome(
         score, max_score, worst([item.status for item in cases]), language, compile_message,
         cases, subtask_results, isolated=box.isolated,
+        risk_events=[event.to_dict() for event in risks[:MAX_RISK_EVENTS]],
     )
 
 

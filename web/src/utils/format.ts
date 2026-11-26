@@ -129,6 +129,9 @@ const EVENT_CATEGORY_LABELS: Record<string, string> = {
   judge_queue: '排评测任务',
   judge_auto: '自动评测设置',
   judge_adopt: '采用版本成绩',
+  judge_worker_uninstall: '评测机卸载',
+  judge_service: '评测服务开关',
+  judge_import: '导入题目配置',
   scores_clear: '清空成绩',
   // 审计
   events_clear: '清空日志',

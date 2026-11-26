@@ -10,10 +10,14 @@
   （它本来就没有 root 能丢）。
 * 停止 = SIGTERM：评测机评完手上的任务再退出。服务端退出时一并停掉（等 10 秒，
   不退就 SIGKILL —— 没交的任务租约到期自动回队列）。
+* 卸载 = 停掉子进程 + 删行 + 删 ``<数据目录>/judge-local``。在跑时走和远程评测机同一条
+  路（下 ``uninstall`` 命令，评完手上的、告别时服务端删行删目录）；没在跑时直接删。
+  子进程以 ``--install-manifest``（``{"kind": "local"}``）启动：告别后它自己什么都不删。
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -97,7 +101,7 @@ class LocalJudge:
 
     def _spawn(self, ctx) -> None:
         settings = ctx.settings
-        root = Path(settings.data_root) / "judge-local"
+        root = self.root(settings)
         root.mkdir(parents=True, exist_ok=True)
         token = new_token()
         with ctx.db.session() as session:
@@ -113,6 +117,9 @@ class LocalJudge:
             row.desired = "run"
             session.flush()
             worker_id = row.id
+            desired_slots = int(row.desired_slots or 1)
+        manifest = root / "install.json"
+        manifest.write_text(json.dumps({"kind": "local"}) + "\n", encoding="utf-8")
         token_file = root / "token"
         fd = os.open(str(token_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -126,9 +133,13 @@ class LocalJudge:
             "--token-file", str(token_file),
             "--backend", backend,
             "--cache-dir", str(root / "cache"),
+            "--install-manifest", str(manifest),
         ]
         if backend == "rlimit" and hasattr(os, "geteuid") and os.geteuid() == 0:
             argv += ["--run-as", settings.judge_local_run_as]
+        if backend == "isolate" and desired_slots > 1:
+            # 管理端改过并发数：直接以它启动（不然评测机第一次 poll 就会为此重启一次）
+            argv += ["--slots", str(desired_slots)]
         log_path = Path(settings.log_root) / "judge-local.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         env = dict(os.environ)
@@ -152,6 +163,18 @@ class LocalJudge:
             if self._proc is not None and self._proc.poll() is None:
                 self._proc.terminate()
         return self.status()
+
+    @staticmethod
+    def root(settings) -> Path:
+        return Path(settings.data_root) / "judge-local"
+
+    def remove_files(self, settings) -> None:
+        """卸载：删 ``<数据目录>/judge-local``（令牌、缓存、install.json）。子进程若还没退出，
+        它手上已经没有任务（告别之后才调这里），文件没了也无妨。"""
+        with self._lock:
+            self._backend = None
+            self._worker_id = None
+        shutil.rmtree(str(self.root(settings)), ignore_errors=True)
 
     def shutdown(self, timeout: float = 10.0) -> None:
         """服务端退出时调用：停掉子进程，等不到就杀掉。"""

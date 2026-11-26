@@ -200,6 +200,17 @@ class Contest(Base, TimestampMixin):
     auto_judge = Column(String(16), nullable=True, default="off")
     #: 自动入队的去抖秒数：同一 (选手, 题目) 在这段时间内连续改动只评最后一版。NULL 读作 60。
     auto_judge_delay = Column(Integer, nullable=True, default=60)
+    #: 智能模式（``auto_judge = smart``，§12.12）的阈值，迁移 025。全部可空，NULL 读作默认值
+    #: （见 ``services/smart_judge.py`` 的 ``DEFAULTS``）：稳定秒数、空闲秒数、结束前秒数、
+    #: 冷却秒数、队列倍数
+    smart_stable_seconds = Column(Integer, nullable=True)
+    smart_idle_seconds = Column(Integer, nullable=True)
+    smart_near_end_seconds = Column(Integer, nullable=True)
+    smart_cooldown_seconds = Column(Integer, nullable=True)
+    smart_queue_factor = Column(Integer, nullable=True)
+    #: 智能模式在场次结束后「全员最新版本评一遍」已做过的时刻；场次重新开放（时间改回未来、
+    #: 状态改回进行中）时清空，下次结束再做一次
+    smart_end_done_at = Column(DateTime, nullable=True)
 
     players = relationship("Player", back_populates="contest", cascade="all, delete-orphan")
     default_roster = relationship("Roster")
@@ -564,6 +575,11 @@ class JudgeWorker(Base):
     desired_boot = Column(String(32), nullable=True)
     #: 服务端以子进程拉起的「本机评测机」（§12.10）。同时最多一行
     is_local = Column(Boolean, nullable=False, default=False)
+    #: 管理端设定的并发数（迁移 024）：随 poll 响应下发，与评测机自报的 ``slots`` 不同时它评完
+    #: 手上的任务、换成这个 ``--slots`` 重启自己。NULL = 没设过，按评测机自己的启动参数
+    desired_slots = Column(Integer, nullable=True)
+    #: 评测机报的能力（逗号分隔，迁移 024）：``slots`` = 认下发的并发数。旧评测机为 NULL
+    features = Column(String(128), nullable=True)
 
 
 class JudgeTask(Base):
@@ -573,8 +589,9 @@ class JudgeTask(Base):
     状态：``queued`` → ``running``（带租约，worker 崩了租约过期自动回到队列）→ ``done`` / ``failed``。
     ``done`` 不等于有成绩：没交代码的选手直接 ``done``、不写 ``result.json``（矩阵照旧显示未交）。
 
-    ``trigger``：``auto``（收到新版本自动排）/ ``manual``（教师排，评最新版）/ ``rejudge``
-    （教师指定某个历史版本重测）。前两种领任务时才选代码，结果写进 ``result.json``；
+    ``trigger``：``auto``（收到新版本自动排）/ ``smart``（智能模式判断"可能写完了"才排，§12.12）/
+    ``manual``（教师排，评最新版）/ ``rejudge``（教师指定某个历史版本重测）。前三种领任务时才选代码，
+    结果写进 ``result.json``；
     ``rejudge`` 钉死 ``source_version_id``，结果只进历史，教师「采用」后才写 ``result.json``。
     """
 
@@ -619,6 +636,19 @@ class JudgeTask(Base):
     result_json = Column(Text, nullable=True)
     #: 这份结果写进 result.json 的时刻（自动写入或教师「采用」）
     applied_at = Column(DateTime, nullable=True)
+    #: 结果里疑似违规 / 风险的条数（迁移 024，§12.11）：入库时按 ``precheck.count_flags`` 算好，
+    #: 列表按它筛选，不必每次解析 ``result_json``
+    warning_count = Column(Integer, nullable=True, default=0)
+    risk_count = Column(Integer, nullable=True, default=0)
+    #: 领任务的先后（迁移 025，§12.12）：大的先领，同级按 id。手动 / 重测 100，智能模式按
+    #: 信号 20–60，收到新版本即评 10。老任务迁移时按触发方式回填
+    priority = Column(Integer, nullable=True, default=0)
+    #: 智能模式排的任务（``trigger = smart``）是哪个信号触发的：``moved_on`` / ``long_stable`` /
+    #: ``near_end`` / ``offline`` / ``contest_end``；其余触发方式为 NULL
+    reason = Column(String(16), nullable=True)
+    #: 智能模式排任务时看到的那个最新版本（不钉死代码，领任务时照常选最新版）。"同一版本不重复排"
+    #: 按它与 ``source_version_id`` 判 —— 领任务失败、没选上这一版时也不会反复排
+    target_version_id = Column(Integer, ForeignKey("source_version.id", ondelete="SET NULL"), nullable=True)
 
     __table_args__ = (
         Index("ix_judge_task_status", "status", "id"),
@@ -841,6 +871,9 @@ class JudgeRun(Base):
     #: 解析器名称 / 未解析原因
     detail = Column(String(512), nullable=True)
     raw_json = Column(Text, nullable=True)
+    #: ``raw_json`` 里疑似违规 / 风险的条数（迁移 024，§12.11）：扫描入库时算好，列表按它筛选
+    warning_count = Column(Integer, nullable=True, default=0)
+    risk_count = Column(Integer, nullable=True, default=0)
     scanned_at = Column(DateTime, default=utcnow, nullable=False)
     updated_at = Column(DateTime, default=utcnow, nullable=False)
 

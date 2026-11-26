@@ -9,7 +9,9 @@
 
 和服务端的往来只有一个循环（§12.10）：每个轮询间隔 ``POST /judge/poll`` 一次 —— 自报状态
 （版本、后端、主机、并发数），有空位就顺带领一个任务，响应里带管理端下的命令
-（``stop``：评完手上的退出；``restart``：评完手上的、以同样的参数重启自己）。评测中也照常
+（``stop``：评完手上的退出；``restart``：评完手上的、以同样的参数重启自己；``uninstall``：评完
+手上的、告别服务端、按安装方式清理自己，见 ``uninstall.py``），以及管理端设定的
+并发数（与当前 ``--slots`` 不同时评完手上的、换成新的 ``--slots`` 重启自己）。评测中也照常
 poll（``want`` = 0），服务端据此判断在线。``--slots N`` 时 N 个任务并发评（各用一个线程，
 isolate 的 box 编号依次 +1）。
 
@@ -38,6 +40,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import runner
 from . import sandbox as sb
+from . import uninstall
 
 log = logging.getLogger("syncoj.judge")
 
@@ -47,6 +50,11 @@ MAX_BLOB_BYTES = 1024 * 1024 * 1024
 #: 各后端是否隔离（报给服务端，界面据此标"不隔离"）。不在表里的后端先报未知，
 #: 评完第一个任务后按结果里的 ``isolated`` 更正。
 BACKEND_ISOLATED = {"isolate": True, "rlimit": False, "winjob": False}
+
+#: 报给服务端的能力：``slots`` = 认 poll 响应里的并发数（服务端据此决定能不能远程改并发）；
+#: ``uninstall`` = 认卸载命令（告别并清理自己）
+FEATURES = ["slots", "uninstall"]
+MAX_SLOTS = 64
 
 
 def _version() -> str:
@@ -105,10 +113,15 @@ class Worker:
             "platform": sys.platform[:32],
             # 每个进程一个：服务端据此知道命令是否已经生效（换了进程才复位）
             "boot_id": uuid.uuid4().hex,
+            "features": list(FEATURES),
         }
+        self.backend = backend
         self._stop = False
-        #: 服务端下的命令（``stop`` / ``restart``）；``main`` 据此决定退出后是否重启自己
+        #: 服务端下的命令（``stop`` / ``restart`` / ``uninstall``）；``main`` 据此决定退出后重启自己
+        #: 还是告别并清理自己
         self.command = "run"
+        #: 服务端要求的新并发数；与 ``slots`` 不同时 ``main`` 以它重启
+        self.restart_slots: Optional[int] = None
         self._wake = threading.Event()
         self._fetch_lock = threading.Lock()
 
@@ -141,6 +154,12 @@ class Worker:
         """
         body = dict(self.status, slots=self.slots, poll_seconds=self.poll_seconds, want=1 if want else 0)
         status, raw = self.transport.request("POST", "/api/v1/judge/poll", body)
+        if status == 422 and "features" in self.status and b"features" in raw:
+            # 服务端比评测机旧，不认 ``features``（请求体多一个键就 422，错误里点名这个字段）：
+            # 不报能力，照常 poll。别的 422 不是这个原因，不能因此丢掉能力
+            self.status.pop("features")
+            body.pop("features")
+            status, raw = self.transport.request("POST", "/api/v1/judge/poll", body)
         if status == 404:
             if not want:
                 return None
@@ -154,12 +173,32 @@ class Worker:
             raise RuntimeError("和服务端通信失败：HTTP %d %s" % (status, raw[:200].decode("utf-8", "replace")))
         reply = json.loads(raw.decode("utf-8"))
         command = reply.get("command") or "run"
-        if command in ("stop", "restart") and self.command == "run":
+        if command == "uninstall" and self.command != "uninstall":
+            # 比停止 / 重启优先：手上有重启在等也改成卸载
+            log.info("服务端要求卸载：不再领新任务，评完手上的任务后告别并清理")
+            self.command = command
+            self.restart_slots = None
+            self.stop()
+        elif command in ("stop", "restart") and self.command == "run":
             log.info("服务端要求%s：评完手上的任务后%s", "停止" if command == "stop" else "重启",
                      "退出" if command == "stop" else "重启")
             self.command = command
             self.stop()
+        self._apply_slots(reply.get("slots"))
         return reply.get("task")
+
+    def _apply_slots(self, wanted: Any) -> None:
+        """管理端改了并发数：评完手上的任务后以新的 ``--slots`` 重启（只 isolate 能大于 1）。"""
+        if isinstance(wanted, bool) or not isinstance(wanted, int) or self.command != "run":
+            return
+        if wanted == self.slots or not 1 <= wanted <= MAX_SLOTS:
+            return
+        if wanted > 1 and self.backend != "isolate":
+            return
+        log.info("服务端把并发数改为 %d：评完手上的任务后重启", wanted)
+        self.restart_slots = wanted
+        self.command = "restart"
+        self.stop()
 
     def run_once(self) -> bool:
         """领一个任务并评完。没有任务返回 False。"""
@@ -263,16 +302,37 @@ class Worker:
         return 0
 
 
-def restart_argv() -> List[str]:
-    """以同样的参数重启自己的命令行。
+def with_slots(args: List[str], slots: Optional[int]) -> List[str]:
+    """命令行参数里的 ``--slots`` 换成 ``slots``（``--slots N`` 与 ``--slots=N`` 两种写法都认；
+    没有就追加）。``slots`` 为 None 时原样返回。"""
+    if slots is None:
+        return list(args)
+    out: List[str] = []
+    skip = False
+    for item in args:
+        if skip:
+            skip = False
+            continue
+        if item == "--slots":
+            skip = True
+            continue
+        if item.startswith("--slots="):
+            continue
+        out.append(item)
+    return out + ["--slots", str(int(slots))]
+
+
+def restart_argv(slots: Optional[int] = None) -> List[str]:
+    """以同样的参数（``slots`` 给了就换掉 ``--slots``）重启自己的命令行。
 
     从 zipapp（``python syncoj-judge.pyz …``）启动时原样重跑那个 pyz；``-m`` / 安装后的
     ``syncoj-judge`` 入口（Windows 上是 .exe，不能交给 python）一律换成 ``-m``。
     """
     argv0 = sys.argv[0] if sys.argv else ""
+    args = with_slots(sys.argv[1:], slots)
     if argv0 and os.path.isfile(argv0) and _is_zip(argv0):
-        return [sys.executable, argv0] + sys.argv[1:]
-    return [sys.executable, "-m", "syncoj_server.judging.worker"] + sys.argv[1:]
+        return [sys.executable, argv0] + args
+    return [sys.executable, "-m", "syncoj_server.judging.worker"] + args
 
 
 def _is_zip(path: str) -> bool:
@@ -284,10 +344,10 @@ def _is_zip(path: str) -> bool:
         return False
 
 
-def restart_self() -> None:
+def restart_self(slots: Optional[int] = None) -> None:
     """Linux 上原地 exec（同一个进程号，systemd 看来服务没断）；Windows 上 exec 会换进程号、
     父进程（计划任务）以为它已退出，所以改为起一个新进程再退出。"""
-    argv = restart_argv()
+    argv = restart_argv(slots)
     log.info("重启：%s", " ".join(argv))
     logging.shutdown()
     if os.name == "nt":
@@ -334,8 +394,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--box-dir", default=None,
                         help="rlimit / winjob 的工作目录放在这里（默认系统临时目录；winjob 遇到非 ASCII 路径自动换）")
     parser.add_argument("--poll", type=float, default=DEFAULT_POLL_SECONDS, help="没有任务时多久问一次（秒）")
-    parser.add_argument("--slots", type=int, default=1, help="同时评几个任务（isolate 的 box 编号从 --box-id 起依次占用）")
+    parser.add_argument("--slots", type=int, default=1,
+                        help="同时评几个任务（isolate 的 box 编号从 --box-id 起依次占用；管理端改了会以新值重启）")
     parser.add_argument("--log-file", default=None, help="日志写到这个文件（默认 stderr）")
+    parser.add_argument("--install-manifest", default=None,
+                        help="安装脚本写的 install.json（记安装方式，远程卸载时据此清理；默认在 pyz 同目录找）")
     parser.add_argument("--once", action="store_true", help="只评一个任务就退出（调试）")
     parser.add_argument("--verbose", "-v", action="store_true")
     return parser
@@ -348,8 +411,8 @@ def main(argv=None) -> int:
     if problem:
         print("错误：" + problem, file=sys.stderr)
         return 2
-    if args.slots < 1:
-        print("--slots 要是正整数", file=sys.stderr)
+    if not 1 <= args.slots <= MAX_SLOTS:
+        print("--slots 要是 1 到 %d 的整数" % MAX_SLOTS, file=sys.stderr)
         return 2
     if args.slots > 1 and backend != "isolate":
         # rlimit / winjob 的并发任务以同一个账号运行，能互相读写工作目录（看到别人的答案、改别人的输出）
@@ -360,8 +423,15 @@ def main(argv=None) -> int:
         format="%(asctime)s %(levelname)-7s %(message)s",
         filename=args.log_file,
     )
-    token = Path(args.token_file).read_text(encoding="utf-8").strip()
     cache = Path(args.cache_dir) if args.cache_dir else Path.home() / ".cache" / "syncoj-judge"
+    manifest = uninstall.load_manifest(
+        Path(args.install_manifest) if args.install_manifest else uninstall.default_manifest_path()
+    )
+    if uninstall.already_requested(manifest, cache):
+        # 告别过、等 root / SYSTEM 来清理（令牌可能已经删了）：别起来，更别反复重启
+        log.info("已告别服务端、等待清理（%s）：不再启动", manifest.marker_path(cache))
+        return 0
+    token = Path(args.token_file).read_text(encoding="utf-8").strip()
 
     def factory(slot: int = 0) -> sb.Sandbox:
         return sb.make_sandbox(
@@ -386,8 +456,11 @@ def main(argv=None) -> int:
     if args.once:
         return 0 if worker.run_once() else 1
     code = worker.run_forever()
+    if worker.command == "uninstall":
+        return uninstall.finish(worker.transport, manifest, Path(args.token_file), cache,
+                                program=sys.argv[0] if sys.argv else None)
     if worker.restart_requested:
-        restart_self()
+        restart_self(worker.restart_slots)
     return code
 
 

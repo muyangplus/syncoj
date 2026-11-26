@@ -760,6 +760,89 @@ def _migration_023_judge_worker_status(engine: Engine) -> None:
         conn.execute(text("UPDATE judge_worker SET is_local = 0 WHERE is_local IS NULL"))
 
 
+def _migration_024_judge_flags(engine: Engine) -> None:
+    """评测机可远程改并发数；评测结果记疑似违规 / 风险条数（§12.10、§12.11）。
+
+    1. ``judge_worker`` 加 ``desired_slots``（NULL = 没设过）与 ``features``（旧评测机 NULL）；
+    2. ``judge_task`` / ``judge_run`` 加 ``warning_count`` / ``risk_count``，回填：把已有的
+       ``result_json`` / ``raw_json`` 解析一次按 :func:`precheck.count_flags_json` 计数，其余为 0。
+       只改仍为 NULL 的行，可重跑；
+    3. 「评测服务」开关存在已有的 ``runtime_setting`` 表里（键 ``judge_service``），不用加表。
+    """
+    from .judging.precheck import count_flags_json
+
+    tables = _tables(engine)
+    if "judge_worker" in tables:
+        _add_column(engine, "judge_worker", "desired_slots", "INTEGER")
+        _add_column(engine, "judge_worker", "features", "VARCHAR(128)")
+    for table, column in (("judge_task", "result_json"), ("judge_run", "raw_json")):
+        if table not in tables:
+            continue
+        _add_column(engine, table, "warning_count", "INTEGER")
+        _add_column(engine, table, "risk_count", "INTEGER")
+        # 结果文档可能很大（单份上限 2 MB）：不一次全读进内存。只有含这两个键的才可能非零，
+        # 先用 LIKE 挑出来按 id 分批解析，其余一条 UPDATE 置 0
+        candidates = (
+            "(warning_count IS NULL OR risk_count IS NULL) AND "
+            "(%s LIKE '%%\"precheck_warnings\"%%' OR %s LIKE '%%\"risk_events\"%%')" % (column, column)
+        )
+        last_id = 0
+        while True:
+            with engine.begin() as conn:
+                rows = conn.execute(text(
+                    "SELECT id, %s FROM %s WHERE %s AND id > :last ORDER BY id LIMIT 200" % (column, table, candidates)
+                ), {"last": last_id}).all()
+                for row_id, raw in rows:
+                    warnings, risks = count_flags_json(raw)
+                    conn.execute(
+                        text("UPDATE %s SET warning_count = :w, risk_count = :r WHERE id = :id" % table),
+                        {"w": warnings, "r": risks, "id": row_id},
+                    )
+            if not rows:
+                break
+            last_id = rows[-1][0]
+        with engine.begin() as conn:
+            conn.execute(text(
+                "UPDATE %s SET warning_count = COALESCE(warning_count, 0), risk_count = COALESCE(risk_count, 0) "
+                "WHERE warning_count IS NULL OR risk_count IS NULL" % table
+            ))
+
+
+def _migration_025_smart_judge(engine: Engine) -> None:
+    """自动评测的智能模式与任务优先级（§12.12）。
+
+    1. ``contest`` 加智能模式的五个阈值与 ``smart_end_done_at``，全部可空、不回填
+       （NULL 读作默认值，老场次 ``auto_judge`` 不变，行为不变）；
+    2. ``judge_task`` 加 ``priority`` / ``reason`` / ``target_version_id``。``priority`` 按触发方式
+       回填：手动、历史版本重测与迁移前的空触发方式 100，收到新版本即评 10；只改仍为 NULL 的行，可重跑。
+    """
+    tables = _tables(engine)
+    if "contest" in tables:
+        for name, ddl in (
+            ("smart_stable_seconds", "INTEGER"),
+            ("smart_idle_seconds", "INTEGER"),
+            ("smart_near_end_seconds", "INTEGER"),
+            ("smart_cooldown_seconds", "INTEGER"),
+            ("smart_queue_factor", "INTEGER"),
+            ("smart_end_done_at", "DATETIME"),
+        ):
+            _add_column(engine, "contest", name, ddl)
+    if "judge_task" in tables:
+        _add_column(engine, "judge_task", "priority", "INTEGER")
+        _add_column(engine, "judge_task", "reason", "VARCHAR(16)")
+        _add_column(
+            engine, "judge_task", "target_version_id",
+            "INTEGER REFERENCES source_version (id) ON DELETE SET NULL",
+        )
+        # 没有 trigger 列的极老结构（迁移 020 之前的形状只在测试里出现）一律按手动算
+        rule = (
+            "CASE WHEN trigger = 'auto' THEN 10 ELSE 100 END"
+            if "trigger" in _columns(engine, "judge_task") else "100"
+        )
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE judge_task SET priority = %s WHERE priority IS NULL" % rule))
+
+
 MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
     (1, "统一密钥注册 + 名单库所需的结构", _migration_001_enrollment),
     (2, "机器永久绑定名单条目；去掉注册码链路", _migration_002_roster_binding),
@@ -859,6 +942,16 @@ MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
         23,
         "评测机记自报状态，可暂停、远程停止与重启",
         _migration_023_judge_worker_status,
+    ),
+    (
+        24,
+        "评测机可远程改并发数；评测结果记疑似违规与风险条数",
+        _migration_024_judge_flags,
+    ),
+    (
+        25,
+        "自动评测加智能模式；评测任务按优先级领取",
+        _migration_025_smart_judge,
     ),
 ]
 

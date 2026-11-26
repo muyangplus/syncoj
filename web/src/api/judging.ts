@@ -5,7 +5,7 @@
  * 结果写进 `judge_result/`，由成绩扫描收进矩阵 —— 所以成绩照旧从 `scoreApi` 读。
  */
 
-import { request } from './client'
+import { query, request } from './client'
 import { listPage, removeItem } from './crud'
 import type { ListParams } from './crud'
 import { paths } from './endpoints'
@@ -16,6 +16,9 @@ import type {
   JudgeAutoIn,
   JudgeAutoOut,
   JudgeRunDetailOut,
+  JudgeServiceIn,
+  JudgeServiceOut,
+  JudgeSourceOut,
   JudgeTaskDetailOut,
   JudgeTaskOut,
   JudgeWorkerCreatedOut,
@@ -24,6 +27,7 @@ import type {
   LocalJudgeOut,
   ProblemJudgeIn,
   ProblemOut,
+  SimpleAck,
   SourceVersionOut,
 } from './types'
 
@@ -51,17 +55,24 @@ export const judgingApi = {
 
   progress: (contestId: number) => request<BuiltinJudgeProgressOut>(paths.contestBuiltinJudge(contestId)),
 
-  /** 自动入队：`on_change` = 收到某题新版本就评，`auto_judge_delay` 秒内的连续改动只评最后一版。 */
+  /**
+   * 自动入队：`on_change` = 收到某题新版本就评，`auto_judge_delay` 秒内的连续改动只评最后一版；
+   * `smart` = 判断"可能已经写完"才评（§12.12），`smart_*` 阈值不传 = 不改。
+   */
   setAuto: (contestId: number, payload: JudgeAutoIn) =>
     request<JudgeAutoOut>(paths.contestJudgeAuto(contestId), { method: 'PUT', body: payload }),
 
-  /** 评测任务，新的在前；可按选手、题目、状态、触发方式筛。 */
+  /** 评测任务，新的在前；可按选手、题目、状态、触发方式（智能模式另带 `reason`）、风险标注（`flag`）筛。 */
   tasks: (contestId: number, params: ListParams = {}, signal?: AbortSignal) =>
     listPage<JudgeTaskOut>(paths.contestJudgeTasks(contestId), params, signal),
 
   /** 一个任务及其测试点明细（历史版本的结果从这里看）。 */
   task: (contestId: number, taskId: number) =>
     request<JudgeTaskDetailOut>(paths.contestJudgeTask(contestId, taskId)),
+
+  /** 这次评测的代码（明细里按行显示、标注行高亮）。超过 1 MB 413，没领到代码 404。 */
+  taskSource: (contestId: number, taskId: number) =>
+    request<JudgeSourceOut>(paths.contestJudgeTaskSource(contestId, taskId)),
 
   /** 采用此版本成绩：成绩矩阵这一格换成该任务的结果。手工录入的格子 409 `manual_score`。 */
   adopt: (contestId: number, taskId: number) =>
@@ -82,7 +93,10 @@ export const judgingApi = {
   createWorker: (name: string) =>
     request<JudgeWorkerCreatedOut>(paths.judgeWorkers(), { method: 'POST', body: { name } }),
 
-  /** 改名；暂停（`enabled: false`，领不到新任务、照常心跳）/ 恢复。 */
+  /**
+   * 改名；暂停（`enabled: false`，领不到新任务、照常心跳）/ 恢复；改并发数（`slots`，评完手上的
+   * 任务后以新值重启）。非 isolate 改成大于 1 时 409 `judge_worker_slots`，旧评测机 409。
+   */
   updateWorker: (workerId: number, payload: JudgeWorkerPatchIn) =>
     request<JudgeWorkerOut>(paths.judgeWorker(workerId), { method: 'PATCH', body: payload }),
 
@@ -93,6 +107,23 @@ export const judgingApi = {
   /** 重启：评完手上的任务后以同样的参数重启。 */
   restartWorker: (workerId: number) =>
     request<JudgeWorkerOut>(paths.judgeWorkerRestart(workerId), { method: 'POST' }),
+
+  /**
+   * 卸载：评测机评完手上的任务后告别（服务端删行、令牌失效），再删掉自己的服务 / 计划任务、程序、
+   * 令牌与缓存。`confirm` 必须逐字等于评测机名称。离线 / 不支持卸载的旧评测机 409；
+   * 本机评测机没在跑时直接删。
+   */
+  uninstallWorker: (workerId: number, name: string) =>
+    request<SimpleAck>(`${paths.judgeWorkerUninstall(workerId)}${query({ confirm: name })}`, {
+      method: 'POST',
+    }),
+
+  /** 「评测服务」开关与全部场次的排队 / 在评数。 */
+  service: () => request<JudgeServiceOut>(paths.judgeService()),
+
+  /** 关 = 所有评测机领不到新任务（手上的照常评完，排队的留着）。 */
+  setService: (payload: JudgeServiceIn) =>
+    request<JudgeServiceOut>(paths.judgeService(), { method: 'PUT', body: payload }),
 
   /** 本机评测机状态；非 Linux 服务端 `supported: false`。 */
   localJudge: () => request<LocalJudgeOut>(paths.judgeLocal()),

@@ -64,7 +64,7 @@ syncoj-server（服务端账号）         syncoj-judge worker（专用账号，
 
 * 「评测」页「题目」卡片：每题「设置」——上传数据包、设时空限制与 IO 方式、选择「自带评测 / 外部评测器」。
 * 「评测」页「任务」卡片：题目（全部 / 单题）× 选手（全部 / 单人）「评测 / 重测」，可勾「不复用已有结果」；自动评测开关与去抖秒数；失败行「重测本题」；进度沿用已有聚合进度接口形状。顶栏「快捷操作」→「评测全部题目」等价。「评测记录」卡片列出每次评测（含复用的）。
-* 「评测」页「评测机」卡片：签发令牌（附一行安装命令）、状态与正在评的任务、暂停 / 停止 / 重启 / 改名 / 吊销、本机评测机启停（§12.10）。
+* 「评测」页「评测机」卡片：签发令牌（附一行安装命令）、状态与正在评的任务、暂停 / 停止 / 重启 / 改名 / 卸载 / 吊销、本机评测机启停（§12.10）。
 * 「成绩」：格子点开看每个测试点明细，可重测、看版本；选手列「版本与分数」看这位选手全部题目的 timeline。
 * 评测用**领任务时 `source/` 里按题目模式选定的那份代码**（记下路径与 sha256）。场次仍在进行（`is_active` 或未到结束时间）时排任务回 409 `contest_in_progress`（评的是考到一半的代码）；教师确认后带 `force` 再排。
 
@@ -98,7 +98,7 @@ syncoj-server（服务端账号）         syncoj-judge worker（专用账号，
   * `auto` / `manual` 评最新版：领任务时才选代码（规则同上一节）。结果写 `result.json`；乱序（旧版本的任务比新版本晚交回）时只进历史。
   * `rejudge` 评指定的历史版本：排任务时钉死版本，结果只进历史与 timeline，教师「采用此版本成绩」才写 `result.json`（手工录入的格子拒绝采用）。不受"场次还在进行"的限制。
 * **复用**：`judge_key` = (数据包 sha, 评测配置, 代码 sha) 的指纹；已有同 key 的完成结果（`SE` 除外）时领任务就地抄结果、不占评测机，任务标 `reused_from`。教师勾「不复用已有结果」（`rerun`）时真跑。
-* **自动入队**：场次 `auto_judge = off | on_change`（默认 `off`）、`auto_judge_delay`（默认 60 秒）。开启后上传某题新版本 → 对 (选手, 题目) 排 `auto` 任务，带 `not_before = 收到时刻 + 去抖`；同一对已有排队中的自动任务时只把它往后推（领任务时才选代码，评的总是最后一版）。只对自带评测且有数据包、语言后缀认得的题；场次进行中也排（这是它的意义）。
+* **自动入队**：场次 `auto_judge = off | on_change | smart`（默认 `off`；`smart` 见 §12.12）、`auto_judge_delay`（默认 60 秒）。开启后上传某题新版本 → 对 (选手, 题目) 排 `auto` 任务，带 `not_before = 收到时刻 + 去抖`；同一对已有排队中的自动任务时只把它往后推（领任务时才选代码，评的总是最后一版）。只对自带评测且有数据包、语言后缀认得的题；场次进行中也排（这是它的意义）。
 * **timeline**：`GET …/judge/versions?player_id=&problem=` 每版带最近一次评测；界面画「版本 × 分数」阶梯线（内联 SVG），点的颜色是状态、状态变化处标状态字，矩阵采用的那一版加外环，未评的版本画在基线下方。
 * **进度**：排队 / 在评全数；完成 / 失败只数每 (选手, 题目) 最新的那条。
 
@@ -106,8 +106,43 @@ syncoj-server（服务端账号）         syncoj-judge worker（专用账号，
 
 * **一个循环**：评测机每个轮询间隔 `POST /api/v1/judge/poll` 一次，自报 `version` / `backend` / `isolated` / `hostname` / `platform` / `slots` / `poll_seconds`，有空位时 `want = 1` 顺带领一个任务；评测中照样 poll（`want = 0`）。服务端记进 `judge_worker` 的新列（迁移 023），在线 = 最近联系不超过 3 × 轮询间隔（下限 15 秒）。正在评什么不靠自报，直接看任务表里租约在它名下的 `running` 任务。旧评测机只调 `/lease`：照常领任务、算心跳，自报列为空，收不到命令。
 * **管理动作**：暂停（`enabled = false`：领不到新任务、照常心跳、手上的评完照常交）；停止 / 重启记进 `desired`，在下一次 poll 的响应 `command` 里带走并复位成 `run`（一次性，评测机日后被重新拉起不会再停一次）。评测机收到后不再领任务，评完手上的：停止 = 退出码 0（systemd 的 `Restart=on-failure` 不再拉起）；重启 = 以同样的参数重启自己（Linux 原地 exec，进程号不变；Windows 起新进程后退出）。只对在线、报过状态的评测机下命令（否则 409），免得命令在库里放到下次开机才生效。吊销 = 删行，它名下在评的任务**立刻**退回队列（令牌已失效，交不回结果，不必等 15 分钟租约）。
+* **远程卸载**：`POST /admin/judge-workers/{id}/uninstall`（输名称确认）把 `desired` 记成 `uninstall`。与停止 / 重启不同，它**不复位**：一直下发到评测机告别、这一行被删为止，中途崩溃被拉起的新进程照样收到；也不能被停止 / 重启盖掉（409）。只对在线且报了 `features: ["uninstall"]` 的评测机下。评测机不再领任务，评完手上的、交完结果，`POST /judge/goodbye` → 服务端删行（令牌失效、名下任务回队列、记审计），然后按安装脚本写在 pyz 旁的 `install.json`（`--install-manifest`）清理自己：
+  * systemd：服务可能以非 root 账号运行，删不了单元。评测机只在缓存目录写标记、以 0 退出；单元的 `ExecStopPost=+/opt/syncoj-judge/uninstall.sh --if-requested`（`+` = root，systemd ≥ 231）看到标记，用 `systemd-run --on-active=2` 起临时单元去停服务、删单元、目录与账号（本单元此刻正在停止，不能在 ExecStopPost 里停它自己）。uninstall.sh 由 install.sh 写出、root 所有 0755，也供手动运行。
+  * Windows：计划任务以 LOCAL SERVICE 运行，删不了任务。评测机在它可写的 `cache\` 写标记后退出；install.ps1 另注册以 SYSTEM 运行的「SyncOJ Judge Cleanup」，开机与每 2 分钟用 `cmd /c if exist` 看标记（平常不起 PowerShell），在才执行 `uninstall.ps1`（只有 SYSTEM / Administrators 可改，安装目录 = 脚本所在目录，不收参数）。标记只看在不在，内容不被执行；删目录用 `rmdir /s`（不跟随 LOCAL SERVICE 可能放的目录联接）。
+  * 本机评测机：服务端告别时删 `<数据目录>/judge-local`；没在跑时管理端直接删。没有 `install.json`（手动运行）：删自己的令牌与缓存里自己写的文件，程序文件留给人删。
+  * 告别失败（连不上）不清理、以 1 退出，等被拉起重来；告别得到 401（已吊销）照样清理，不陷入循环。评测机一直不回来时仍可直接吊销。
 * **并发**：`--slots N` 起 N 个评测线程，各领各的任务；isolate 的 box 编号从 `--box-id` 起依次占用。只有 isolate 可以大于 1（每个 box 一个账号）；rlimit / winjob 共用一个运行账号，并发任务能互相读写工作目录，启动即拒绝。
+  * **管理端改并发数**：`PATCH /admin/judge-workers/{id}` 带 `slots`（1–64），存进 `judge_worker.desired_slots`（迁移 024），随每次 poll 响应的 `slots` 下发。评测机发现与自己的 `--slots` 不同时不再领新任务，评完手上的、把命令行里的 `--slots` 换成新值重启（复用上面的重启路径；pyz 与 `-m` 两种启动方式都改 argv）。只有报了 `features: ["slots"]` 的评测机能改（旧评测机 409 `judge_worker_unsupported`）；后端不是 isolate 的只能是 1（409 `judge_worker_slots`），服务端也不给它下发大于 1 的值。本机评测机直接以设定的并发数启动。
+* **「评测服务」开关**：全局一个（`runtime_setting` 里的 `judge_service`，没有这一行 = 开），`GET / PUT /admin/judge-service`。关 = 所有评测机都领不到新任务（`/poll` 与 `/lease` 都遵守，poll 响应 `service = false`），手上的照常评完交回，排队的任务留着；自动入队照常入队、只是不发出去，打开后按原顺序接着发。
 * **一键接入**：服务端（只在管理端口）发 `GET /judge/worker.pyz`、`/judge/install.sh`、`/judge/install.ps1`。pyz 把 `syncoj_server/judging/`（只用标准库，测试用 AST 守着）连同只有版本号的包根打成 zipapp，按「版本号 + 源码指纹」缓存在 `<数据目录>/cache/judge-worker/`；另一台机器只要有 Python 3.8+ 与编译器，不必装服务端包。安装脚本嵌入请求的 Host 头（形状不安全就不嵌）与 pyz 的 sha256，令牌由教师在命令行给。签发令牌的响应直接带 Linux / Windows 两条一行命令。
   * Linux：`/opt/syncoj-judge/syncoj-judge.pyz`、`/etc/syncoj-judge/token`（0600）、systemd 单元 `syncoj-judge`。有 isolate 用 isolate、服务以专用账号 `syncoj-judge` 运行；没有 isolate 先询问（`--yes` 跳过），用 rlimit、服务以 root 运行、选手程序换成 `syncoj-judge-run` 跑。幂等，重跑 = 换令牌 / 升级。
   * Windows：`%ProgramData%\SyncOJ\judge\`（不继承上级权限），令牌只给 SYSTEM、Administrators 读写与 LOCAL SERVICE 读（按 SID 授权）并标 `NO_READ_UP`，`cache\` / `boxes\` / 日志给 LOCAL SERVICE 修改；计划任务「SyncOJ Judge」开机启动、以 LOCAL SERVICE 运行（不是 SYSTEM）、失败每分钟重启，`--backend winjob`。检查 Python ≥ 3.8 与 g++ 是否在**系统** PATH、LOCAL SERVICE 能否读到（Python 装在用户目录下时提示改为「为所有用户安装」）。脚本是 UTF-8 BOM（PowerShell 5.1 无 BOM 按 ANSI 读），所以一行命令先下载到文件再执行，而不是 `iwr | iex`。
 * **本机评测机**：Linux 服务端可在界面一键启停一个子进程评测机（`python -m syncoj_server.judging.worker`，连 `127.0.0.1:<管理端口>`）。它是 `judge_worker` 里 `is_local = 1` 的那一行，每次启动换一枚令牌（写 `<数据目录>/judge-local/token`，0600）；有 isolate 用 isolate，否则 rlimit（服务端是 root 时选手程序以 `SYNCOJ_JUDGE_LOCAL_RUN_AS`，默认 `nobody` 运行）。日志 `<数据目录>/logs/judge-local.log`。服务端退出时一并停掉（SIGTERM，10 秒后 SIGKILL）；不随服务端启动自动拉起。非 Linux 服务端不提供。
+
+### 12.11 风险标注与筛选
+
+* **风险事件**：runner 每次运行选手程序后检查工作目录与沙箱的报告，记进结果的 `risk_events`（`{code, case, message}`，预检拦截还带 `line` / `rule` / `excerpt`）：`workdir_symlink`（符号链接、FIFO、设备、套接字、硬链接计数 > 1 的文件）、`tamper_checker`（出现 `chk` / `chk.exe` / `checker` 同名文件，或 `prog` 运行前后 sha256 不同）、`escaped_process`（rlimit 下运行结束后按账号 + 启动时刻清掉的、不在本次进程组里的进程；winjob 的 Job 拒绝建子进程不发通知、要另开完成端口才拿得到，不做；isolate 自己收拾）、`precheck_blocked`（源码预检的每个拦截项）。**只标注，不改变判分**（拦截照旧 CE）。
+* **分级放服务端一处**（`judging/precheck.py` 的 `level_of`）：风险 = `risk_events` 全部 + 拦截类规则 code（题目配成 `warn` 时它们出现在预警里，级别不降）；疑似违规 = 预警类规则。明细接口给每条带 `level`，前端不维护 code 表。
+* **计数入库**：`judge_task` / `judge_run` 加 `warning_count` / `risk_count`（迁移 024，老数据解析一次 `result_json` / `raw_json` 回填），交结果、扫描入库时算好；列表据此筛选（`flag = any | warning | risk`），不在每次请求里解析结果文档。
+* **界面**：评测记录（成绩页、评测页）可筛「有疑似违规 / 有风险」，行上黄 / 红左边框与计数（风险优先）；成绩矩阵格子最新结果有风险加红细边框、有疑似违规加黄细边框，分数颜色不变；明细对话框风险条目在上（红框）、疑似违规在下（黄框），「源码」折叠区按行显示该次评测的代码（`GET …/judge/tasks/{id}/source`，≤ 1 MB），标注的行高亮，点条目滚到对应行。
+
+### 12.12 智能自动评测
+
+`auto_judge = smart`：判断某人某题「可能已经写完」才排评测，考试中评测机不必为每次保存跑一遍。代码：`services/smart_judge.py`（判定是纯函数 `decide`）、`tasks/smart_judge.py`。
+
+* **触发信号**（满足任一即对该 (选手, 题目) 排一次；阈值按场次配，括号内为默认值）：
+
+  | 信号 `reason` | 界面 | 条件 |
+  |---|---|---|
+  | `moved_on` | 换题 | 该题最新版本已稳定 ≥ `smart_stable_seconds`（180），且此后该选手别的题（含不评测的题）收到过新版本 |
+  | `long_stable` | 空闲 | 该题最新版本已稳定 ≥ `smart_idle_seconds`（600） |
+  | `near_end` | 将结束 | 距 `ends_at` ≤ `smart_near_end_seconds`（900；0 = 不用）：每对未评的最新版本各排一次，之后再改按冷却 |
+  | `offline` | 掉线 | 选手有这一场的机器、且全都离线（内存注册表；服务端刚重启、注册表里没有的不算），最新版本未评 |
+  | `contest_end` | 已结束 | 场次已结束（状态 `closed` 或到了 `ends_at`）：全员每题未评的最新版本各排一次。做完记 `contest.smart_end_done_at`，不再重复；场次重新开放时清空 |
+
+* **未评**：该 (选手, 题目) 最新版本（按当前题目模式归题、语言后缀认得、题目自带评测且有数据包）没有任何任务评过它或为它排过（`judge_task.source_version_id` / `target_version_id`，任意状态，失败的也算，免得反复排），且没有还在排队的「评最新版」任务。
+* **减压**：相同 `judge_key` 照旧复用结果；同一对两次换题 / 空闲至少隔 `smart_cooldown_seconds`（300）；全局排队任务数 > 在线且没暂停的评测机 `slots` 之和（至少 1）× `smart_queue_factor`（20）时只接受将结束 / 掉线 / 已结束，其余下一轮再判。
+* **优先级**：`judge_task.priority`（迁移 025，老任务回填手动 / 重测 100、自动 10），领任务按它降序、同级按 id：手动 100 > 已结束 60 > 掉线 50 > 将结束 40 > 换题 30 > 空闲 20 > 收到新版本即评 10。智能任务 `trigger = smart`，信号记在 `reason`。
+* **考后结果进矩阵**：后台成绩扫描平时跳过 `closed` 场次；评测机交回结果时把场次记进 `ctx.judge_dirty_contests`，下一轮扫描照扫它一次（已归档仍不扫）。
+* **节奏**：后台每 `smart_tick_seconds`（服务端配置，默认 30 秒）评估一轮，每场一个短事务；归档场次不评；评测服务关着照常入队、只是不发。
+* **界面**：「任务」卡片的自动评测三态（关闭 / 每次改动 / 智能），选智能时展开阈值（稳定 / 空闲 / 结束前 / 冷却 / 队列倍数）；评测记录的触发方式显示与筛选带上各信号。

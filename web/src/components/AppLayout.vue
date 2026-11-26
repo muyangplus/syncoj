@@ -29,7 +29,11 @@ const collapsed = ref(false)
 const aboutOpen = ref(false)
 
 function covers(item: NavItem, name: unknown): boolean {
-  return item.name === name || !!item.children?.some((child) => child.name === name)
+  return (
+    item.name === name ||
+    !!item.children?.some((child) => child.name === name) ||
+    !!item.match?.includes(String(name))
+  )
 }
 
 const currentGroup = computed(() => {
@@ -159,7 +163,7 @@ onMounted(async () => {
               v-else
               :to="{ name: item.name }"
               class="nav-item"
-              :class="{ active: route.name === item.name }"
+              :class="{ active: covers(item, route.name) }"
               :title="collapsed ? item.label : undefined"
             >
               <el-icon class="nav-icon"><component :is="item.icon" /></el-icon>
@@ -251,7 +255,7 @@ onMounted(async () => {
           <el-dropdown trigger="click" @command="runAction">
             <el-button type="primary">
               <el-icon><Lightning /></el-icon>
-              <span>快捷操作</span>
+              <span class="quick-label">快捷操作</span>
             </el-button>
             <template #dropdown>
               <el-dropdown-menu class="quick-menu">
@@ -639,6 +643,29 @@ onMounted(async () => {
   }
   .content {
     padding: 16px;
+  }
+}
+/* 手机宽度：面包屑让位，场次框收窄，快捷操作只留图标 */
+@media (max-width: 520px) {
+  .crumbs,
+  .quick-label {
+    display: none;
+  }
+  .contest-select {
+    width: 104px;
+  }
+  .topbar {
+    padding: 0 10px;
+  }
+  .topbar-right {
+    gap: 6px;
+  }
+  .pill {
+    padding: 0 8px;
+    white-space: nowrap;
+  }
+  .content {
+    padding: 12px;
   }
 }
 </style>

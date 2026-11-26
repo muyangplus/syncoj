@@ -9,6 +9,7 @@ import ConfirmByNameDialog from '@/components/ConfirmByNameDialog.vue'
 import ContestCreateDialog from '@/components/ContestCreateDialog.vue'
 import ContestSettingsDialog from '@/components/ContestSettingsDialog.vue'
 import DataTable from '@/components/DataTable.vue'
+import ContestTabs from '@/components/ContestTabs.vue'
 import PageShell from '@/components/PageShell.vue'
 import SectionCard from '@/components/SectionCard.vue'
 import ProblemManageDialog from '@/components/ProblemManageDialog.vue'
@@ -209,12 +210,10 @@ function clearDetail(count: number): string {
 
 <template>
   <PageShell title="场次管理" :error="list.error.value" retryable @retry="refreshAll">
+    <template #sub><ContestTabs :archived-count="contest.archived.length" /></template>
     <template #toolbar>
       <el-button :loading="list.loading.value" @click="refreshAll">
         <el-icon><Refresh /></el-icon>刷新
-      </el-button>
-      <el-button @click="router.push({ name: 'contests-archived' })">
-        <el-icon><Box /></el-icon>已归档（{{ contest.archived.length }}）
       </el-button>
       <el-button type="primary" @click="createVisible = true">
         <el-icon><Plus /></el-icon>新建场次

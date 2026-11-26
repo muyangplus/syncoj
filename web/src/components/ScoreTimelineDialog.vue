@@ -15,6 +15,7 @@ import JudgeRunDetailDialog from '@/components/JudgeRunDetailDialog.vue'
 import ScoreTimelineChart from '@/components/ScoreTimelineChart.vue'
 import { usePolling } from '@/composables/usePolling'
 import { formatBytes, formatTime } from '@/utils/format'
+import { triggerLabel } from '@/utils/judgeTrigger'
 
 const props = defineProps<{
   modelValue: boolean
@@ -134,7 +135,6 @@ const STATUS_TYPE: Record<string, 'success' | 'warning' | 'danger' | 'info'> = {
   OLE: 'warning',
 }
 
-const TRIGGER: Record<string, string> = { auto: '自动', manual: '手动', rejudge: '历史版本' }
 
 // ---- 动作 ----
 
@@ -283,7 +283,7 @@ const selected = computed(() => focused.value.find((v) => v.id === selectedId.va
           <el-table-column label="评测" min-width="110">
             <template #default="{ row }">
               <template v-if="row.judge">
-                {{ TRIGGER[row.judge.trigger] ?? row.judge.trigger }}<span v-if="row.judge.reused" class="cell-sub"> · 复用</span>
+                {{ triggerLabel(row.judge.trigger, row.judge.reason) }}<span v-if="row.judge.reused" class="cell-sub"> · 复用</span>
                 <span v-if="row.tasks > 1" class="cell-sub"> · {{ row.tasks }} 次</span>
               </template>
               <span v-else class="muted">—</span>

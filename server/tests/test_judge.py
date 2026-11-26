@@ -580,3 +580,29 @@ def test_扫描途中教师录入的手工成绩不会被覆盖(client, admin_he
     ).json()
     cell = matrix["rows"][0]["cells"][0]
     assert (cell["score"], cell["parse_status"]) == (99, "manual")
+
+
+def test_已结束场次_自带评测交回结果后照扫一次(app, client, admin_headers, contest, player) -> None:
+    """后台扫描跳过 closed 场次；考后评测（智能模式「已结束」、手动重测）交回的结果仍要进矩阵。"""
+    import json as json_module
+
+    from syncoj_server.models import Contest, ContestStatus
+    from syncoj_server.tasks.judge import scan_all_contests
+
+    ctx = app.state.ctx
+    with ctx.db.session() as session:
+        session.get(Contest, contest["id"]).status = ContestStatus.CLOSED
+    folder = Path(ctx.settings.judge_result_root) / contest["slug"] / player["player_no"] / "p1"
+    folder.mkdir(parents=True)
+    (folder / "result.json").write_text(json_module.dumps({"score": 42}), encoding="utf-8")
+
+    def cell():
+        matrix = client.get("/api/v1/admin/contests/%d/scores" % contest["id"], headers=admin_headers).json()
+        return matrix["rows"][0]["cells"][0] if matrix["rows"][0]["cells"] else {}
+
+    scan_all_contests(ctx)
+    assert cell().get("score") != 42  # 平时不扫已结束的场次
+    ctx.judge_dirty_contests.add(contest["id"])  # builtin_judge.complete 交结果时会这样标记
+    scan_all_contests(ctx)
+    assert cell().get("score") == 42
+    assert not ctx.judge_dirty_contests

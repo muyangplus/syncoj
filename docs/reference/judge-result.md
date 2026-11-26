@@ -303,10 +303,19 @@ $p = Join-Path $env:TEMP syncoj-judge-install.ps1; iwr -UseBasicParsing http://1
 
 | 安装脚本 | 装到 | 后端 | 可选参数 |
 |---|---|---|---|
-| `install.sh` | `/opt/syncoj-judge/syncoj-judge.pyz`、`/etc/syncoj-judge/token`（0600）、systemd 单元 `syncoj-judge` | 有 isolate 用 isolate（服务以账号 `syncoj-judge` 运行）；没有则询问后用 rlimit（服务以 root 运行，选手程序用账号 `syncoj-judge-run`） | `--server` / `--backend` / `--run-as` / `--slots` / `--yes`（没有 isolate 不询问） |
-| `install.ps1` | `%ProgramData%\SyncOJ\judge\`（`syncoj-judge.pyz`、`token`、`cache\`、`boxes\`、`judge.log`；目录不继承上级权限，令牌与 `cache\` 标 `NO_READ_UP`）、计划任务「SyncOJ Judge」（开机启动、以 LOCAL SERVICE 运行、失败每分钟重启） | `winjob` | `-Server` / `-Backend` / `-Slots` / `-Python` / `-InstallDir` |
+| `install.sh` | `/opt/syncoj-judge/syncoj-judge.pyz`、`/opt/syncoj-judge/uninstall.sh`（root 所有，0755）、`/opt/syncoj-judge/install.json`、`/etc/syncoj-judge/token`（0600）、systemd 单元 `syncoj-judge`（`ExecStopPost=+/opt/syncoj-judge/uninstall.sh --if-requested`） | 有 isolate 用 isolate（服务以账号 `syncoj-judge` 运行）；没有则询问后用 rlimit（服务以 root 运行，选手程序用账号 `syncoj-judge-run`） | `--server` / `--backend` / `--run-as` / `--slots` / `--yes`（没有 isolate 不询问） |
+| `install.ps1` | `%ProgramData%\SyncOJ\judge\`（`syncoj-judge.pyz`、`token`、`cache\`、`boxes\`、`judge.log`、`install.json`、`uninstall.ps1`（只有 SYSTEM / Administrators 可改）；目录不继承上级权限，令牌与 `cache\` 标 `NO_READ_UP`）、计划任务「SyncOJ Judge」（开机启动、以 LOCAL SERVICE 运行、失败每分钟重启）、计划任务「SyncOJ Judge Cleanup」（以 SYSTEM 运行，开机与每 2 分钟：`cache\.uninstall-requested` 在才执行 `uninstall.ps1 -IfRequested`） | `winjob` | `-Server` / `-Backend` / `-Slots` / `-Python` / `-InstallDir` |
 
-- 两个脚本都幂等：重跑 = 换令牌 / 换参数 / 升级评测机程序并重启。
+- 两个脚本都幂等：重跑 = 换令牌 / 换参数 / 升级评测机程序并重启（并清掉上次没卸完留下的卸载标记）。
+- 手动卸载（幂等）：Linux `sudo /opt/syncoj-judge/uninstall.sh`；Windows 以管理员运行 `%ProgramData%\SyncOJ\judge\uninstall.ps1`。
+
+| 卸载脚本 | 删除 | 不动 |
+|---|---|---|
+| `uninstall.sh` | 停止并禁用 `syncoj-judge`、单元文件（`daemon-reload`）、`/opt/syncoj-judge`、`/etc/syncoj-judge`、`/var/cache/syncoj-judge`、账号 `syncoj-judge` / `syncoj-judge-run` | isolate、Python、g++ |
+| `uninstall.ps1` | 计划任务「SyncOJ Judge」（连同进程）与「SyncOJ Judge Cleanup」、整个安装目录（`rmdir /s`，不跟随目录联接） | Python、MinGW |
+
+- `uninstall.sh --if-requested`（单元的 `ExecStopPost=+`，root）：`/var/cache/syncoj-judge/.uninstall-requested` 不在时直接退出；在时 `systemd-run --unit=syncoj-judge-uninstall --on-active=2 … uninstall.sh --now` 脱离本单元再卸。
+- 标记文件只判断在不在，内容不被读取或执行。
 - 前提：Python ≥ 3.8、g++（Windows 上是 MinGW-w64，且在**系统** PATH 里）；脚本检查并提示。
 - `GET /judge/worker.pyz`：评测机程序（zipapp，只用标准库），`python3 syncoj-judge.pyz --server … --token-file …` 直接运行；装了 `server/` 包的机器上等价命令是 `syncoj-judge`。
 
@@ -330,6 +339,7 @@ syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
 | `--box-dir` | `rlimit` / `winjob` 工作目录所在（默认系统临时目录；`winjob` 遇非 ASCII 路径自动换） |
 | `--poll` | 轮询间隔（默认 5 秒）；评测中也按它报状态 |
 | `--log-file` | 日志写到文件（默认 stderr） |
+| `--install-manifest` | 安装脚本写的 `install.json`（`{kind, service, marker, paths, accounts}`，`kind` = `systemd` / `schtask` / `local`），远程卸载时据此清理；默认找 pyz 同目录的 `install.json`，没有 = 手动运行 |
 | `--once` | 评一个任务后退出 |
 | `--verbose` / `-v` | 调试日志 |
 
@@ -339,21 +349,47 @@ syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
 
 | 列 | 来自 |
 |---|---|
-| 状态 | `online`（最近联系 ≤ 3 × 自报的轮询间隔，下限 15 秒）/ `enabled = false` 为「暂停」/ `running[]` 非空为忙碌并列出任务（考号 · 题目） |
+| 状态 | `online`（最近联系 ≤ 3 × 自报的轮询间隔，下限 15 秒）/ `enabled = false` 为「暂停」/ `running[]` 非空为忙碌并列出任务（考号 · 题目）；`desired` 为 `stop` / `restart` / `uninstall` 时另标「停止中」/「重启中」/「卸载中」 |
 | 后端 | `backend`；`isolated = false` 标警告色 |
-| 主机 / 平台 | `hostname` / `platform`（`sys.platform`）/ `slots` |
-| 版本 | `version`；为空 = 旧评测机，收不到停止 / 重启（`remote_control = false`） |
+| 领任务 | `enabled`；开关即暂停 / 恢复 |
+| 主机 / 平台 | `hostname` / `platform`（`sys.platform`） |
+| 并发 | `slots`（评测机当前的 `--slots`）；`desired_slots` 与它不同 = 等评测机评完手上的任务后重启生效。只有 `slots_control = true` 且后端是 isolate 时可改，其余后端显示「仅 isolate」 |
+| 版本 | `version`；为空 = 旧评测机，收不到停止 / 重启（`remote_control = false`）；`uninstall_control = false` = 不支持远程卸载 |
 | IP、最近心跳 | `last_seen_ip`、`last_seen_at` |
 
 | 管理动作 | 接口 | 效果 |
 |---|---|---|
 | 暂停 / 恢复 | `PATCH /api/v1/admin/judge-workers/{id}` `{enabled}` | 暂停后领不到新任务，照常心跳，手上的评完照常交 |
 | 改名 | 同上 `{name}` | — |
+| 改并发数 | 同上 `{slots}`（1–64） | 记进 `desired_slots`，随下一次 poll 下发；评测机评完手上的任务后把 `--slots` 换成新值重启（pyz 与 `-m` 两种启动方式都改命令行）。旧评测机（没报 `features: ["slots"]`）`409 judge_worker_unsupported`；后端不是 isolate 而 `slots` > 1 时 `409 judge_worker_slots` |
 | 停止 | `POST /api/v1/admin/judge-workers/{id}/stop` | 下一次 poll 时送达；评完手上的任务后退出，不会被 systemd / 计划任务再拉起。不在线或旧评测机 `409 judge_worker_offline` / `judge_worker_unsupported` |
 | 重启 | `POST /api/v1/admin/judge-workers/{id}/restart` | 同上；评完手上的任务后以同样的参数重启（换上磁盘上的新程序） |
+| 卸载 | `POST /api/v1/admin/judge-workers/{id}/uninstall?confirm=<名称>` | `desired = uninstall`（状态列「卸载中」），一直下发到评测机告别为止（换了进程也照发）；评测机不再领任务，评完手上的、交完结果后 `POST /api/v1/judge/goodbye`，服务端删行（令牌失效、名下在评的任务退回队列、审计 `judge_worker_uninstall`），评测机再按 `install.json` 清理自己（见下表）。不在线 `409 judge_worker_offline`；没报 `features: ["uninstall"]` `409 judge_worker_unsupported`；卸载中再停止 / 重启 `409 judge_worker_uninstalling`。本机评测机没在跑时直接删行并删 `<数据目录>/judge-local`。评测机一直不回来时可直接吊销 |
 | 吊销 | `DELETE /api/v1/admin/judge-workers/{id}?confirm=<名称>` | 令牌立即失效，它名下在评的任务立即退回队列；本机评测机一并停止 |
 
-本机评测机（只在 Linux 服务端上）：卡片头「本机评测机」启动 / 停止。
+评测机告别后的清理（`install.json` 的 `kind`）：
+
+| `kind` | 评测机做的 | 之后谁来删 |
+|---|---|---|
+| `systemd` | 写 `/var/cache/syncoj-judge/.uninstall-requested`，退出码 0 | 单元的 `ExecStopPost=+uninstall.sh --if-requested`（root）→ `systemd-run` 临时单元 `syncoj-judge-uninstall` 2 秒后执行 `uninstall.sh --now` |
+| `schtask` | 写 `cache\.uninstall-requested`，退出码 0 | 计划任务「SyncOJ Judge Cleanup」（SYSTEM）2 分钟内执行 `uninstall.ps1` |
+| `local` | 不删 | 服务端告别时删 `<数据目录>/judge-local` |
+| 无 `install.json` | 删令牌文件（删得掉时）与缓存目录里自己写的文件，日志提示程序文件需手动删 | — |
+
+- 告别返回 `200` 或 `401`（已吊销 / 已告别）都继续清理；连不上重试 4 次仍失败则**不清理**、退出码 1（systemd / 计划任务拉起后新进程照样收到卸载命令）；`409 judge_worker_not_uninstalling` 不清理。
+- 标记已在时评测机启动即以 0 退出（不读令牌、不 poll）。
+
+
+「评测服务」总开关（卡片头，旁边是全部场次的排队数）：
+
+| 接口 | 说明 |
+|---|---|
+| `GET /api/v1/admin/judge-service` | `{enabled, queued, delayed, running}`；`queued` 含还在去抖的（`delayed`），跨全部场次 |
+| `PUT /api/v1/admin/judge-service` | `{enabled}`。关 = 所有评测机领不到新任务（`/poll` 与 `/lease` 都遵守，poll 响应 `service: false`）；手上的照常评完交回；排队的任务留着，打开后接着发。存在 `runtime_setting` 的 `judge_service` 键（没有 = 开） |
+
+- 自动入队（`auto_judge = on_change` / `smart`）在评测服务关闭时**照常入队**，只是不发给评测机。
+
+本机评测机（只在 Linux 服务端上）：卡片头「本机评测机」启动 / 停止。已设过并发数（`desired_slots` > 1）且用 isolate 时直接带 `--slots` 启动。
 
 | 接口 | 说明 |
 |---|---|
@@ -399,6 +435,7 @@ syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
 ```
 
 - 有源码预检预警时多一个 `precheck_warnings`：`[{"code", "line", "message", "excerpt"}]`（第 7 节）；没有预警或旧评测机时不带。
+- 有风险事件时多一个 `risk_events`（第 8 节）；没有或旧评测机时不带。
 - 扫描器只读 `score` / `max_score` / `status`，其余进 `raw_json`。
 - 评测机自身故障（沙箱起不来、checker 编不过，记 `SE`）：不写成绩，任务退回队列；第 3 次仍失败记失败，进度里显示原因。
 - 代码选择：只看仍在机器上、内容已存下的文件，按题目代码路径归题；多份候选时取文件名与题目同名者；仍无法区分 → 记失败。
@@ -414,10 +451,11 @@ syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
 
 | 接口 | 说明 |
 |---|---|
-| `PUT /api/v1/admin/contests/{id}/judge/auto` | `{auto_judge: "off"\|"on_change", auto_judge_delay: 0–3600}`；场次列表回显这两项 |
-| `GET /api/v1/admin/contests/{id}/judge/versions?player_id=&problem=` | 选手的代码版本（旧的在前，列表信封）：`id` / `rel_path` / `sha256` / `size` / `received_at` / `problem`（按当前题目模式）/ `current` / `tasks` / `judge{task_id, status, trigger, score, max_score, outcome, reused, applied, finished_at}` / `in_matrix` |
-| `GET /api/v1/admin/contests/{id}/judge/tasks?player_id=&problem=&status=&trigger=` | 评测任务（新的在前，列表信封），含复用的 |
-| `GET /api/v1/admin/contests/{id}/judge/tasks/{task_id}` | 任务与测试点明细 |
+| `PUT /api/v1/admin/contests/{id}/judge/auto` | `{auto_judge: "off"\|"on_change"\|"smart", auto_judge_delay: 0–3600, smart_stable_seconds?: 30–3600, smart_idle_seconds?: 60–7200, smart_near_end_seconds?: 0–7200, smart_cooldown_seconds?: 0–3600, smart_queue_factor?: 1–1000}`；`smart_*` 不传 = 不改；响应与场次列表回显全部七项（没设过的阈值回显默认值 180 / 600 / 900 / 300 / 20）。智能模式见 §12.12 |
+| `GET /api/v1/admin/contests/{id}/judge/versions?player_id=&problem=` | 选手的代码版本（旧的在前，列表信封）：`id` / `rel_path` / `sha256` / `size` / `received_at` / `problem`（按当前题目模式）/ `current` / `tasks` / `judge{task_id, status, trigger, reason, score, max_score, outcome, reused, applied, finished_at}` / `in_matrix` |
+| `GET /api/v1/admin/contests/{id}/judge/tasks?player_id=&problem=&status=&trigger=&reason=&flag=` | 评测任务（新的在前，列表信封），含复用的；每行带 `trigger`（`auto` / `smart` / `manual` / `rejudge`）、`reason`（智能模式的信号 `moved_on` / `long_stable` / `near_end` / `offline` / `contest_end`，其余为 `null`）、`priority`（大的先领）、`warning_count` / `risk_count`，`flag` 见第 8 节 |
+| `GET /api/v1/admin/contests/{id}/judge/tasks/{task_id}` | 任务与测试点明细（含 `precheck_warnings[].level`、`risk_events`） |
+| `GET /api/v1/admin/contests/{id}/judge/tasks/{task_id}/source` | 这次评测的代码 `{task_id, path, sha256, size, content}`（按任务记下的 sha256 取，UTF-8 解码）；还没选定代码或内容已清掉 `404`，超过 1 MB `413 payload_too_large` |
 | `POST /api/v1/admin/contests/{id}/judge/tasks/{task_id}/adopt` | 采用此版本成绩：写成当前 `result.json` 并立即重扫；无结果 `409 judge_task_no_result`，手工录入的格子 `409 manual_score` |
 
 ### 评测机接口
@@ -426,10 +464,11 @@ syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
 
 | 接口 | 说明 |
 |---|---|
-| `POST /api/v1/judge/poll` | 体 `{version, backend, isolated, hostname, platform, slots, poll_seconds, want}`（自报状态；`want` 1 = 顺带领一个任务）。返回 `{task, command, enabled}`：`task` 形状同 `/lease` 的响应，没领到为 `null`（无任务、已暂停、`want` 0 或有命令）；`command` 为 `run` / `stop` / `restart`（一次性） |
-| `POST /api/v1/judge/lease` | 旧评测机用：领任务（租约 15 分钟，过期回队列）；无任务或已暂停 `204`。返回 `id`、`contest_slug`、`player_no`、`problem`（`ident` / `time_limit_ms` / `memory_limit_mb` / `io_mode` / `input_file` / `output_file` / `compile_flags`；文件名为 `null` = 用 `<ident>.in` / `<ident>.out`）、`source`（`path` / `sha256`）、`testdata`（`sha256` / `name`）、`attempt` |
+| `POST /api/v1/judge/poll` | 体 `{version, backend, isolated, hostname, platform, slots, poll_seconds, want, boot_id, features}`（自报状态；`want` 1 = 顺带领一个任务；`features` 是能力列表，`slots` = 认下发的并发数）。返回 `{task, command, enabled, slots, service}`：`task` 形状同 `/lease` 的响应，没领到为 `null`（无任务、已暂停、评测服务关着、`want` 0 或有命令）；`command` 为 `run` / `stop` / `restart` / `uninstall`；`slots` 是管理端设定的并发数（没设、评测机没报 `slots` 能力、或后端不是 isolate 而设定 > 1 时为 `null`），与评测机当前的不同时评测机评完手上的、以它重启；`service` 是「评测服务」开关。评测机遇到旧服务端（多了 `features` 回 `422`）时去掉 `features` 重发 |
+| `POST /api/v1/judge/goodbye` | `{kind}`（`systemd` / `schtask` / `local` / `manual`，只进审计）。只在管理端下过卸载时认：删掉这台评测机（令牌失效、名下在评的任务退回队列）并返回 `200`；否则 `409 judge_worker_not_uninstalling` |
+| `POST /api/v1/judge/lease` | 旧评测机用：领任务（租约 15 分钟，过期回队列）；无任务、已暂停或评测服务关着 `204`。返回 `id`、`contest_slug`、`player_no`、`problem`（`ident` / `time_limit_ms` / `memory_limit_mb` / `io_mode` / `input_file` / `output_file` / `compile_flags`；文件名为 `null` = 用 `<ident>.in` / `<ident>.out`）、`source`（`path` / `sha256`）、`testdata`（`sha256` / `name`）、`attempt` |
 | `GET /api/v1/judge/tasks/{id}/blobs/{sha256}` | 取本任务的代码或数据包；其他内容 `404` |
-| `POST /api/v1/judge/tasks/{id}/result` | `{score, max_score, status, detail}`（`score` / `max_score` 0–1000000，`status` 1–16 字符），写 `result.json`；`detail` 里认 `judge` / `isolated` / `language` / `compile_message` / `cases` / `subtasks` / `precheck_warnings`，其余丢弃 |
+| `POST /api/v1/judge/tasks/{id}/result` | `{score, max_score, status, detail}`（`score` / `max_score` 0–1000000，`status` 1–16 字符），写 `result.json`；`detail` 里认 `judge` / `isolated` / `language` / `compile_message` / `cases` / `subtasks` / `precheck_warnings` / `risk_events`，其余丢弃 |
 | `POST /api/v1/judge/tasks/{id}/fail` | `{message}`（≤2000），退回队列 |
 
 评测机与服务端出自同一个包，需一起升级：旧评测机不认 `input_file` / `output_file`，仍按 `<ident>.in` / `<ident>.out` 读写，设了自定义文件名的题会被评错。
@@ -492,3 +531,39 @@ syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
 | `disabled` | 关闭的规则 code 数组 | `[]` |
 
 不认识的字段、模式或 code：上传时报错。
+
+## 8. 风险标注与筛选（§12.11）
+
+评测机每次运行选手程序后检查工作目录与沙箱的报告，把发现记进 `result.json` 的 `risk_events`；源码预检的拦截项也各记一条。**只标注，不改变判分**（拦截照旧 `CE`）。
+
+```json
+"risk_events": [
+  {"code": "workdir_symlink", "case": "3", "message": "工作目录里出现 y（符号链接）"},
+  {"code": "precheck_blocked", "case": null, "line": 2, "rule": "pragma", "message": "禁止使用 #pragma", "excerpt": "#pragma GCC optimize(2)"}
+]
+```
+
+| code | 条件 |
+|---|---|
+| `workdir_symlink` | 运行后工作目录（含子目录）里有符号链接、FIFO、设备文件、套接字，或硬链接计数 > 1 的普通文件 |
+| `tamper_checker` | 运行后出现名为 `chk` / `chk.exe` / `checker` / `checker.exe` 的文件，或 `prog` 被删除、替换、改写（运行前后 sha256 不同） |
+| `escaped_process` | rlimit 后端（以 `--run-as` 运行）在运行结束后按账号 + 启动时刻清掉的、不在本次进程组里的进程数 > 0。isolate 自己收拾进程；winjob 的 Job 拒绝建子进程不发通知（要另开完成端口），不记 |
+| `precheck_blocked` | 源码预检的每个拦截项，`line` / `rule`（被拦的规则 code）/ `excerpt` 同第 7 节 |
+
+每个测试点每种至多一条，全部至多 50 条。
+
+**分级**（服务端 `judging/precheck.py` 的 `level_of`；明细接口给每条带 `level`，界面只按它上色）：
+
+| `level` | 包括 |
+|---|---|
+| `risk`（红） | `risk_events` 全部；`precheck_warnings` 里的拦截类 code：`pragma` `attribute_optimize` `inline_asm` `syscall` `forbidden_header` `file_access` `bidi`（题目 `precheck.mode = warn` 时它们出现在预警里，级别不降） |
+| `warning`（黄，疑似违规） | 预警类 code：`macro_heavy` `token_paste` `trigraph_digraph` `line_splice` `long_line` `big_table` `encoded_blob` `non_ascii_ident` `huge_source` `file_dynamic`；不认识的 code 也按它 |
+
+**计数与筛选**：`judge_task` / `judge_run` 存 `warning_count`（`warning` 级条数）与 `risk_count`（`risk` 级条数），交结果、扫描入库时算好（迁移 024 对老数据解析一次回填）。列表行、成绩矩阵格子带这两个数。
+
+| 接口 | `flag` |
+|---|---|
+| `GET /api/v1/admin/contests/{id}/judge/runs?flag=` | `any` = 两者之一；`warning` = 有疑似违规（`warning_count` > 0，不论有没有风险）；`risk` = 有风险（`risk_count` > 0）；不给 = 不筛；其他值 `422` |
+| `GET /api/v1/admin/contests/{id}/judge/tasks?flag=` | 同上 |
+
+明细（`GET …/judge/runs/{run_id}`、`GET …/judge/tasks/{task_id}`）：`precheck_warnings[]` 多 `level`；`risk_events[]` 为 `{code, case, line, message, rule, excerpt, level}`。

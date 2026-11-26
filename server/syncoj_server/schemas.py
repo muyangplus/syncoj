@@ -496,9 +496,15 @@ class ContestOut(_Base):
     #: ``null`` = 这一端不限制。
     starts_at: Optional[str] = None
     ends_at: Optional[str] = None
-    #: 自带评测的自动入队（§12.9）：``off`` / ``on_change``；去抖秒数
+    #: 自带评测的自动入队（§12.9）：``off`` / ``on_change`` / ``smart``（§12.12）；去抖秒数
     auto_judge: str = "off"
     auto_judge_delay: int = 60
+    #: 智能模式的阈值（§12.12；没设过的回显默认值）
+    smart_stable_seconds: int = 180
+    smart_idle_seconds: int = 600
+    smart_near_end_seconds: int = 900
+    smart_cooldown_seconds: int = 300
+    smart_queue_factor: int = 20
     #: 是否设了考生页密码。密码本身**只写不读**（库里也只有哈希）。
     has_player_password: bool = False
 
@@ -964,16 +970,31 @@ class BuiltinJudgeProgressOut(_Base):
 
 
 class JudgeAutoIn(_Base):
-    """场次的自动入队设置（§12.9）。"""
+    """场次的自动入队设置（§12.9、§12.12）。智能模式的阈值不传 = 不改。"""
 
-    auto_judge: Literal["off", "on_change"]
-    #: 去抖秒数：同一 (选手, 题目) 在这段时间内连续改动只评最后一版
+    auto_judge: Literal["off", "on_change", "smart"]
+    #: 去抖秒数：同一 (选手, 题目) 在这段时间内连续改动只评最后一版（``on_change`` 用）
     auto_judge_delay: int = Field(default=60, ge=0, le=3600)
+    #: 智能：最新版本稳定这么久、且之后改了别的题 → 排（「换题」）
+    smart_stable_seconds: Optional[int] = Field(default=None, ge=30, le=3600)
+    #: 智能：最新版本稳定这么久 → 排（「空闲」）
+    smart_idle_seconds: Optional[int] = Field(default=None, ge=60, le=7200)
+    #: 智能：距结束时间不超过这么久时，未评的最新版本各排一次（「将结束」）；0 = 不用
+    smart_near_end_seconds: Optional[int] = Field(default=None, ge=0, le=7200)
+    #: 智能：同一 (选手, 题目) 两次「换题」/「空闲」排任务的最短间隔
+    smart_cooldown_seconds: Optional[int] = Field(default=None, ge=0, le=3600)
+    #: 智能：排队任务数超过「在线评测机并发总数 × 它」时只接受将结束 / 掉线 / 已结束
+    smart_queue_factor: Optional[int] = Field(default=None, ge=1, le=1000)
 
 
 class JudgeAutoOut(_Base):
     auto_judge: str
     auto_judge_delay: int
+    smart_stable_seconds: int
+    smart_idle_seconds: int
+    smart_near_end_seconds: int
+    smart_cooldown_seconds: int
+    smart_queue_factor: int
 
 
 class JudgeTaskOut(_Base):
@@ -985,8 +1006,12 @@ class JudgeTaskOut(_Base):
     problem: str
     #: queued / running / done / failed
     status: str
-    #: auto / manual / rejudge
+    #: auto / smart / manual / rejudge
     trigger: str
+    #: 智能模式的信号（§12.12）：moved_on / long_stable / near_end / offline / contest_end；其余为 null
+    reason: Optional[str] = None
+    #: 领任务的优先级，大的先领
+    priority: int = 0
     requested_by: Optional[str] = None
     source_version_id: Optional[int] = None
     source_path: Optional[str] = None
@@ -1008,6 +1033,9 @@ class JudgeTaskOut(_Base):
     finished_at: Optional[str] = None
     #: 去抖：这个时刻之前不发给评测机
     not_before: Optional[str] = None
+    #: 结果里疑似违规 / 风险的条数（§12.11；分级见 ``precheck.level_of``）
+    warning_count: int = 0
+    risk_count: int = 0
 
 
 class JudgeTaskDetailOut(JudgeTaskOut):
@@ -1021,7 +1049,34 @@ class JudgeTaskDetailOut(JudgeTaskOut):
     cases: List[JudgeCaseOut] = Field(default_factory=list)
     subtasks: List[JudgeSubtaskOut] = Field(default_factory=list)
     precheck_warnings: List[JudgePrecheckFindingOut] = Field(default_factory=list)
+    risk_events: List[JudgeRiskEventOut] = Field(default_factory=list)
     truncated: bool = False
+
+
+class JudgeSourceOut(_Base):
+    """评测任务评的那份代码（按任务记下的 sha256 从内容存储取，§12.11）。"""
+
+    task_id: int
+    path: Optional[str] = None
+    sha256: str
+    size: int
+    #: UTF-8 解码（坏字节替换）后的全文
+    content: str
+
+
+class JudgeServiceIn(_Base):
+    """「评测服务」开关：关 = 所有评测机都领不到新任务（手上的照常评完，排队的留着）。"""
+
+    enabled: bool
+
+
+class JudgeServiceOut(_Base):
+    enabled: bool = True
+    #: 全部场次排队中的任务数（含还在去抖的）
+    queued: int = 0
+    #: 其中还在去抖、没到点的
+    delayed: int = 0
+    running: int = 0
 
 
 class VersionJudgeOut(_Base):
@@ -1030,6 +1085,8 @@ class VersionJudgeOut(_Base):
     task_id: int
     status: str
     trigger: str
+    #: 智能模式的信号（§12.12），其余触发方式为 null
+    reason: Optional[str] = None
     score: Optional[int] = None
     max_score: Optional[int] = None
     outcome: Optional[str] = None
@@ -1067,6 +1124,9 @@ class JudgeWorkerPatchIn(_Base):
 
     name: Optional[str] = Field(default=None, min_length=1, max_length=64)
     enabled: Optional[bool] = None
+    #: 并发数（§12.10）：随 poll 下发，评测机评完手上的任务后以新的 ``--slots`` 重启。
+    #: 后端不是 isolate 的只能是 1；旧评测机（不认下发的并发数）409
+    slots: Optional[int] = Field(default=None, ge=1, le=64)
 
 
 class JudgeWorkerTaskOut(_Base):
@@ -1088,8 +1148,9 @@ class JudgeWorkerOut(_Base):
     online: bool = False
     #: 暂停 = False：领不到新任务，照常心跳
     enabled: bool = True
-    #: ``run`` / ``stop`` / ``restart``：后两者 = 已下令、等评测机下一次 poll 取走
-    desired: Literal["run", "stop", "restart"] = "run"
+    #: ``run`` / ``stop`` / ``restart`` / ``uninstall``：后三者 = 已下令、等评测机取走；
+    #: ``uninstall`` 一直保持到评测机告别（这一行随之删除）
+    desired: Literal["run", "stop", "restart", "uninstall"] = "run"
     #: 服务端拉起的本机评测机
     local: bool = False
     #: 以下为评测机自报；旧评测机不报，全为空
@@ -1099,8 +1160,14 @@ class JudgeWorkerOut(_Base):
     hostname: Optional[str] = None
     platform: Optional[str] = None
     slots: Optional[int] = None
+    #: 管理端设定的并发数；与 ``slots`` 不同 = 等评测机评完手上的任务后重启生效
+    desired_slots: Optional[int] = None
     #: 能收远程停止 / 重启（报过状态的评测机）
     remote_control: bool = False
+    #: 能远程改并发数（评测机报了 ``slots`` 能力）
+    slots_control: bool = False
+    #: 能远程卸载（评测机报了 ``uninstall`` 能力；本机评测机恒为 true）
+    uninstall_control: bool = False
     running: List[JudgeWorkerTaskOut] = Field(default_factory=list)
 
 
@@ -1127,6 +1194,16 @@ class JudgePollIn(_Base):
     want: int = Field(default=1, ge=0, le=1)
     #: 本进程的随机标识（每次启动换新）；不带 = 旧评测机，命令按一次性送达
     boot_id: Optional[str] = Field(default=None, max_length=32)
+    #: 评测机的能力：``slots`` = 认响应里下发的并发数
+    features: Optional[List[str]] = Field(default=None, max_length=16)
+
+
+class JudgeGoodbyeIn(_Base):
+    """评测机收到 ``uninstall``、评完手上的任务后的告别（§12.10）：服务端删掉这一行。"""
+
+    #: 它接下来怎么清理自己：``systemd`` / ``schtask``（安装脚本装的）、``local``（本机评测机）、
+    #: ``manual``（手动运行：只删令牌与缓存，程序文件要到那台机器上手动删）
+    kind: Literal["systemd", "schtask", "local", "manual"] = "manual"
 
 
 class LocalJudgeOut(_Base):
@@ -1176,8 +1253,12 @@ class JudgePollOut(_Base):
     """``task`` 为空 = 没领到（没有任务、已暂停或 ``want`` = 0）。``command`` 见 §12.10。"""
 
     task: Optional[JudgeLeaseOut] = None
-    command: Literal["run", "stop", "restart"] = "run"
+    command: Literal["run", "stop", "restart", "uninstall"] = "run"
     enabled: bool = True
+    #: 管理端设定的并发数；与评测机当前的不同时评测机评完手上的任务、以它重启。null = 没设
+    slots: Optional[int] = None
+    #: 「评测服务」开关：关时不发任务
+    service: bool = True
 
 
 class JudgeResultIn(_Base):
@@ -1608,6 +1689,9 @@ class ScoreCellOut(_Base):
     run_id: Optional[int] = None
     #: 结果文件带测试点明细（``GET .../judge/runs/{run_id}``）
     has_cases: bool = False
+    #: 这一格结果里疑似违规 / 风险的条数（§12.11）
+    warning_count: int = 0
+    risk_count: int = 0
 
 
 class ScoreRowOut(_Base):
@@ -1686,6 +1770,9 @@ class JudgeRunOut(_Base):
     source_path: Optional[str] = None
     updated_at: str
     has_cases: bool = False
+    #: 结果里疑似违规 / 风险的条数（§12.11）
+    warning_count: int = 0
+    risk_count: int = 0
 
 
 class JudgeCaseOut(_Base):
@@ -1711,6 +1798,23 @@ class JudgePrecheckFindingOut(_Base):
     line: int = 0
     message: str = ""
     excerpt: str = ""
+    #: ``risk``（拦截类规则）/ ``warning``（疑似违规），服务端按 code 分级
+    level: Literal["risk", "warning"] = "warning"
+
+
+class JudgeRiskEventOut(_Base):
+    """一条风险事件（§12.11）：运行选手程序后发现的逃逸 / 篡改痕迹，或源码预检的拦截项。"""
+
+    code: str
+    #: 哪个测试点；预检拦截为 null
+    case: Optional[str] = None
+    #: 源码行号；只有预检拦截才有
+    line: int = 0
+    message: str = ""
+    #: 预检拦截时被拦下的规则 code
+    rule: str = ""
+    excerpt: str = ""
+    level: Literal["risk", "warning"] = "risk"
 
 
 class JudgeRunDetailOut(JudgeRunOut):
@@ -1728,6 +1832,8 @@ class JudgeRunDetailOut(JudgeRunOut):
     subtasks: List[JudgeSubtaskOut] = Field(default_factory=list)
     #: 自带评测的源码预检预警；旧评测机或外部评测器的结果没有
     precheck_warnings: List[JudgePrecheckFindingOut] = Field(default_factory=list)
+    #: 风险事件（§12.11）；旧评测机或外部评测器的结果没有
+    risk_events: List[JudgeRiskEventOut] = Field(default_factory=list)
     truncated: bool = False
     #: 自带评测写的结果：出自哪个评测任务（§12.9）
     task_id: Optional[int] = None

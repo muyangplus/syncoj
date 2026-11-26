@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { contestApi } from '@/api'
 import type { ContestOut } from '@/api/types'
 import DataTable from '@/components/DataTable.vue'
+import ContestTabs from '@/components/ContestTabs.vue'
 import PageShell from '@/components/PageShell.vue'
 import SectionCard from '@/components/SectionCard.vue'
 import { useList } from '@/composables/useList'
@@ -41,7 +42,8 @@ const unarchive = useMutation((row: ContestOut) => contestApi.unarchive(row.id),
 </script>
 
 <template>
-  <PageShell title="已归档场次" :error="list.error.value" retryable @retry="refreshAll">
+  <PageShell title="场次管理" :error="list.error.value" retryable @retry="refreshAll">
+    <template #sub><ContestTabs :archived-count="list.total.value" /></template>
     <template #toolbar>
       <el-button :loading="list.loading.value" @click="refreshAll">
         <el-icon><Refresh /></el-icon>刷新

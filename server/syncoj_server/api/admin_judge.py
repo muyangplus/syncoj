@@ -35,6 +35,9 @@ from ..schemas import (
     BuiltinJudgeQueuedOut,
     JudgeAutoIn,
     JudgeAutoOut,
+    JudgeServiceIn,
+    JudgeServiceOut,
+    JudgeSourceOut,
     JudgeTaskDetailOut,
     JudgeTaskOut,
     JudgeWorkerCreatedOut,
@@ -53,10 +56,12 @@ from ..schemas import (
 )
 from ..security import hash_token, new_token
 from ..storage import BlobTooLarge
-from ..services import builtin_judge, judge_dist, judge_workers
+from ..services import builtin_judge, judge_dist, judge_workers, smart_judge
 from ..services.judge import SCAN_LOCK, scan_contest_results
 from .admin import (
     AdminIdentity,
+    FlagFilter,
+    flag_condition,
     _iso,
     _problem_out,
     _reclaim_blobs,
@@ -282,19 +287,35 @@ def set_auto_judge(
     admin: AdminIdentity = Depends(require_admin),
 ) -> JudgeAutoOut:
     """自动入队（§12.9）：``on_change`` = 收到某题的新版本就排评测，同一 (选手, 题目)
-    在 ``auto_judge_delay`` 秒内连续改动只评最后一版。场次进行中也排。"""
+    在 ``auto_judge_delay`` 秒内连续改动只评最后一版。场次进行中也排。
+
+    ``smart``（§12.12）= 判断"可能已经写完"才排（换题 / 空闲 / 将结束 / 掉线 / 已结束），
+    阈值随请求改，不传的不改。"""
     with ctx.db.session() as session:
         contest = session.get(Contest, contest_id)
         if contest is None:
             raise ApiError(404, "not_found", "场次不存在")
         contest.auto_judge = payload.auto_judge
         contest.auto_judge_delay = payload.auto_judge_delay
+        for column in smart_judge.FIELDS:
+            value = getattr(payload, column)
+            if value is not None:
+                setattr(contest, column, value)
+        if payload.auto_judge == builtin_judge.AUTO_SMART:
+            current = smart_judge.thresholds_of(contest)
+            detail = "智能（稳定 %d 秒、空闲 %d 秒、结束前 %d 秒、冷却 %d 秒、队列倍数 %d）" % (
+                current.stable, current.idle, current.near_end, current.cooldown, current.queue_factor)
+        elif payload.auto_judge == builtin_judge.AUTO_ON_CHANGE:
+            detail = "收到新版本即评（去抖 %d 秒）" % payload.auto_judge_delay
+        else:
+            detail = "关闭"
         session.add(EventLog(
-            level="info", category="judge_auto", contest_id=contest_id,
-            message="自动评测：%s（去抖 %d 秒）" % (
-                "收到新版本即评" if payload.auto_judge == "on_change" else "关闭", payload.auto_judge_delay),
+            level="info", category="judge_auto", contest_id=contest_id, message="自动评测：%s" % detail,
         ))
-        return JudgeAutoOut(auto_judge=contest.auto_judge, auto_judge_delay=contest.auto_judge_delay)
+        return JudgeAutoOut(
+            auto_judge=contest.auto_judge, auto_judge_delay=contest.auto_judge_delay,
+            **smart_judge.threshold_fields(contest),
+        )
 
 
 def _matrix_task_ids(session, contest_id: int, player_ids=None) -> Dict[Tuple[int, str], int]:
@@ -322,6 +343,8 @@ def _task_out(task: JudgeTask, player_no: str, matrix: Dict[Tuple[int, str], int
         problem=task.problem,
         status=task.status,
         trigger=builtin_judge.trigger_of(task),
+        reason=task.reason,
+        priority=int(task.priority or 0),
         requested_by=task.requested_by,
         source_version_id=task.source_version_id,
         source_path=task.source_path,
@@ -338,6 +361,8 @@ def _task_out(task: JudgeTask, player_no: str, matrix: Dict[Tuple[int, str], int
         created_at=_iso(task.created_at) or "",
         finished_at=_iso(task.finished_at),
         not_before=_iso(task.not_before),
+        warning_count=int(task.warning_count or 0),
+        risk_count=int(task.risk_count or 0),
     )
 
 
@@ -348,11 +373,17 @@ def list_judge_tasks(
     problem: Optional[str] = Query(default=None, max_length=64),
     status: Optional[str] = Query(default=None, max_length=16),
     trigger: Optional[str] = Query(default=None, max_length=16),
+    reason: Optional[str] = Query(default=None, max_length=16, description="智能模式的信号（§12.12）"),
+    flag: Optional[FlagFilter] = Query(default=None, description="any / warning（有疑似违规）/ risk（有风险）"),
     page: PageParams = Depends(),
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> Page[JudgeTaskOut]:
-    """评测任务（新的在前）。任务即历史：每一次评测（含复用的）都在这里。"""
+    """评测任务（新的在前）。任务即历史：每一次评测（含复用的）都在这里。
+
+    ``flag``（§12.11）：``risk`` 有风险、``warning`` 有疑似违规（不论有没有风险）、``any`` 两者之一。
+    ``reason``（§12.12）：智能模式的信号，配 ``trigger=smart`` 用。
+    """
     conditions = [JudgeTask.contest_id == contest_id]
     if player_id is not None:
         conditions.append(JudgeTask.player_id == player_id)
@@ -365,6 +396,11 @@ def list_judge_tasks(
             conditions.append(JudgeTask.trigger.is_(None) | (JudgeTask.trigger == trigger))
         else:
             conditions.append(JudgeTask.trigger == trigger)
+    if reason:
+        conditions.append(JudgeTask.reason == reason)
+    flagged = flag_condition(JudgeTask.warning_count, JudgeTask.risk_count, flag)
+    if flagged is not None:
+        conditions.append(flagged)
     with ctx.db.session() as session:
         total = session.execute(select(func.count(JudgeTask.id)).where(*conditions)).scalar_one()
         rows = session.execute(
@@ -407,6 +443,35 @@ def get_judge_task(
         for key in ("source_sha256", "judged_source", "task_id"):
             details.pop(key, None)
         return JudgeTaskDetailOut(**base, **details)
+
+
+#: 明细里「源码」区最多显示这么大的代码（选手代码远小于它；再大的多半是误收的数据文件）
+MAX_SOURCE_VIEW_BYTES = 1024 * 1024
+
+
+@router.get("/contests/{contest_id}/judge/tasks/{task_id}/source", response_model=JudgeSourceOut)
+def get_judge_task_source(
+    contest_id: int,
+    task_id: int,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> JudgeSourceOut:
+    """这个评测任务评的那份代码（按任务记下的 sha256 从内容存储取；只读，≤ 1 MB）。
+
+    明细里按行显示、把预检 / 风险标注的行高亮。还没选定代码（排队中）或内容已被清掉时 404，
+    超过 1 MB 时 413。
+    """
+    with ctx.db.session() as session:
+        task, _ = _load_task(session, contest_id, task_id)
+        sha256, path = task.source_sha256, task.source_path
+    if not sha256 or not ctx.blobs.has(sha256):
+        raise ApiError(404, "not_found", "这次评测的代码不在了（还没领到，或内容已被清掉）")
+    blob = ctx.blobs.path_for(sha256)
+    size = blob.stat().st_size
+    if size > MAX_SOURCE_VIEW_BYTES:
+        raise ApiError(413, "payload_too_large", "代码 %d KB，超过 1 MB 不在页面上显示" % (size // 1024))
+    content = blob.read_bytes().decode("utf-8", "replace")
+    return JudgeSourceOut(task_id=task_id, path=path, sha256=sha256, size=size, content=content)
 
 
 @router.post("/contests/{contest_id}/judge/tasks/{task_id}/adopt", response_model=JudgeTaskOut)
@@ -522,6 +587,7 @@ def list_source_versions(
                     task_id=chosen.id,
                     status=chosen.status,
                     trigger=builtin_judge.trigger_of(chosen),
+                    reason=chosen.reason,
                     score=chosen.score,
                     max_score=chosen.max_score,
                     outcome=chosen.outcome,
@@ -556,6 +622,35 @@ def _load_worker(session, worker_id: int) -> JudgeWorker:
     if row is None:
         raise ApiError(404, "not_found", "评测机不存在")
     return row
+
+
+@router.get("/judge-service", response_model=JudgeServiceOut)
+def judge_service_status(
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> JudgeServiceOut:
+    """「评测服务」开关与全部场次的排队 / 在评数（§12.10）。"""
+    with ctx.db.session() as session:
+        return judge_workers.service_out(session)
+
+
+@router.put("/judge-service", response_model=JudgeServiceOut)
+def set_judge_service(
+    payload: JudgeServiceIn,
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> JudgeServiceOut:
+    """开 / 关评测服务。关 = 所有评测机都领不到新任务：手上的照常评完交回，排队的任务留着
+    （自动入队也照常入队），打开后接着发。"""
+    with ctx.db.session() as session:
+        before = judge_workers.service_enabled(session)
+        judge_workers.set_service_enabled(session, payload.enabled)
+        if before != payload.enabled:
+            session.add(EventLog(
+                level="info", category="judge_service",
+                message="评测服务：%s（%s）" % ("开启" if payload.enabled else "关闭", admin.username),
+            ))
+        return judge_workers.service_out(session)
 
 
 @router.get("/judge-workers", response_model=Page[JudgeWorkerOut])
@@ -598,9 +693,23 @@ def update_judge_worker(
     ctx: AppContext = Depends(get_ctx),
     admin: AdminIdentity = Depends(require_admin),
 ) -> JudgeWorkerOut:
-    """改名；暂停（``enabled`` = false：领不到新任务，手上的照常评完）/ 恢复。"""
+    """改名；暂停（``enabled`` = false：领不到新任务，手上的照常评完）/ 恢复；改并发数
+    （``slots``：随下一次 poll 下发，评测机评完手上的任务后以新的 ``--slots`` 重启）。
+
+    改并发数：旧评测机（不认下发的并发数）409 ``judge_worker_unsupported``；后端不是 isolate
+    而 ``slots`` > 1 时 409 ``judge_worker_slots``。
+    """
     with ctx.db.session() as session:
         row = _load_worker(session, worker_id)
+        if payload.slots is not None:
+            problem = judge_workers.slots_problem(row, payload.slots)
+            if problem == "unsupported":
+                raise ApiError(409, "judge_worker_unsupported",
+                               "这台评测机版本太旧，不能远程改并发数；请在那台机器上改 --slots 后重启")
+            if problem == "backend":
+                raise ApiError(409, "judge_worker_slots",
+                               "%s 后端只能单并发：多个任务以同一个账号运行，能互相读写工作目录（仅 isolate 可以大于 1）"
+                               % (row.backend or "未知"))
         if payload.name is not None:
             name = payload.name.strip()
             if not name:
@@ -608,6 +717,8 @@ def update_judge_worker(
             row.name = name
         if payload.enabled is not None:
             row.enabled = payload.enabled
+        if payload.slots is not None:
+            row.desired_slots = payload.slots
         session.flush()
         return _workers_out(session, [row])[0]
 
@@ -619,6 +730,9 @@ def _command(ctx: AppContext, worker_id: int, command: str) -> JudgeWorkerOut:
             raise ApiError(409, "judge_worker_unsupported", "这台评测机版本太旧，收不到远程命令；请在那台机器上操作")
         if not judge_workers.is_online(row, utcnow()):
             raise ApiError(409, "judge_worker_offline", "评测机不在线")
+        if row.desired == "uninstall":
+            # 卸载命令不复位，不能被停止 / 重启盖掉；不想等了就直接吊销
+            raise ApiError(409, "judge_worker_uninstalling", "评测机正在卸载")
         judge_workers.issue_command(row, command)
         session.flush()
         return _workers_out(session, [row])[0]
@@ -642,6 +756,43 @@ def restart_judge_worker(
 ) -> JudgeWorkerOut:
     """重启：评完手上的任务后以同样的参数重新启动自己（换上磁盘上的新程序）。"""
     return _command(ctx, worker_id, "restart")
+
+
+@router.post("/judge-workers/{worker_id}/uninstall", response_model=SimpleAck)
+def uninstall_judge_worker(
+    worker_id: int,
+    confirm: str = Query(..., min_length=1, max_length=200, description="原样输入评测机名称"),
+    ctx: AppContext = Depends(get_ctx),
+    admin: AdminIdentity = Depends(require_admin),
+) -> SimpleAck:
+    """卸载：评测机下一次 poll 时取走命令，评完手上的任务、告别（服务端删行，令牌失效），
+    再按安装方式删掉自己的服务 / 计划任务、程序、令牌与缓存（§12.10）。
+
+    不在线 409 ``judge_worker_offline``；没报 ``uninstall`` 能力（旧评测机）409
+    ``judge_worker_unsupported``。本机评测机没在跑时直接卸：删行、删 ``<数据目录>/judge-local``。
+    评测机一直不回来时，照样可以直接吊销。
+    """
+    with ctx.db.session() as session:
+        row = _load_worker(session, worker_id)
+        require_confirm(row.name, confirm, "评测机名称")
+        if row.is_local and not ctx.local_judge.running():
+            released = judge_workers.forget_uninstalled(session, row, "local", admin.username)
+            session.flush()
+            local_now = True
+        else:
+            local_now = False
+            if not row.is_local:
+                if not judge_workers.remote_control(row) or not judge_workers.uninstall_control(row):
+                    raise ApiError(409, "judge_worker_unsupported",
+                                   "这台评测机版本太旧，不能远程卸载；请先升级，或到那台机器上手动卸载")
+                if not judge_workers.is_online(row, utcnow()):
+                    raise ApiError(409, "judge_worker_offline", "评测机不在线")
+            judge_workers.issue_command(row, "uninstall")
+            session.flush()
+    if local_now:
+        ctx.local_judge.remove_files(ctx.settings)
+        return SimpleAck(ok=True, detail="已卸载" + ("，%d 个任务已退回队列" % released if released else ""))
+    return SimpleAck(ok=True, detail="已下令卸载")
 
 
 @router.delete("/judge-workers/{worker_id}", response_model=SimpleAck)

@@ -1601,6 +1601,31 @@
             "title": "Slug",
             "type": "string"
           },
+          "smart_cooldown_seconds": {
+            "default": 300,
+            "title": "Smart Cooldown Seconds",
+            "type": "integer"
+          },
+          "smart_idle_seconds": {
+            "default": 600,
+            "title": "Smart Idle Seconds",
+            "type": "integer"
+          },
+          "smart_near_end_seconds": {
+            "default": 900,
+            "title": "Smart Near End Seconds",
+            "type": "integer"
+          },
+          "smart_queue_factor": {
+            "default": 20,
+            "title": "Smart Queue Factor",
+            "type": "integer"
+          },
+          "smart_stable_seconds": {
+            "default": 180,
+            "title": "Smart Stable Seconds",
+            "type": "integer"
+          },
           "starts_at": {
             "anyOf": [
               {
@@ -2455,12 +2480,13 @@
       },
       "JudgeAutoIn": {
         "additionalProperties": false,
-        "description": "场次的自动入队设置（§12.9）。",
+        "description": "场次的自动入队设置（§12.9、§12.12）。智能模式的阈值不传 = 不改。",
         "properties": {
           "auto_judge": {
             "enum": [
               "off",
-              "on_change"
+              "on_change",
+              "smart"
             ],
             "title": "Auto Judge",
             "type": "string"
@@ -2471,6 +2497,71 @@
             "minimum": 0.0,
             "title": "Auto Judge Delay",
             "type": "integer"
+          },
+          "smart_cooldown_seconds": {
+            "anyOf": [
+              {
+                "maximum": 3600.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Smart Cooldown Seconds"
+          },
+          "smart_idle_seconds": {
+            "anyOf": [
+              {
+                "maximum": 7200.0,
+                "minimum": 60.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Smart Idle Seconds"
+          },
+          "smart_near_end_seconds": {
+            "anyOf": [
+              {
+                "maximum": 7200.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Smart Near End Seconds"
+          },
+          "smart_queue_factor": {
+            "anyOf": [
+              {
+                "maximum": 1000.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Smart Queue Factor"
+          },
+          "smart_stable_seconds": {
+            "anyOf": [
+              {
+                "maximum": 3600.0,
+                "minimum": 30.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Smart Stable Seconds"
           }
         },
         "required": [
@@ -2489,11 +2580,36 @@
           "auto_judge_delay": {
             "title": "Auto Judge Delay",
             "type": "integer"
+          },
+          "smart_cooldown_seconds": {
+            "title": "Smart Cooldown Seconds",
+            "type": "integer"
+          },
+          "smart_idle_seconds": {
+            "title": "Smart Idle Seconds",
+            "type": "integer"
+          },
+          "smart_near_end_seconds": {
+            "title": "Smart Near End Seconds",
+            "type": "integer"
+          },
+          "smart_queue_factor": {
+            "title": "Smart Queue Factor",
+            "type": "integer"
+          },
+          "smart_stable_seconds": {
+            "title": "Smart Stable Seconds",
+            "type": "integer"
           }
         },
         "required": [
           "auto_judge",
-          "auto_judge_delay"
+          "auto_judge_delay",
+          "smart_stable_seconds",
+          "smart_idle_seconds",
+          "smart_near_end_seconds",
+          "smart_cooldown_seconds",
+          "smart_queue_factor"
         ],
         "title": "JudgeAutoOut",
         "type": "object"
@@ -2648,6 +2764,25 @@
           }
         },
         "title": "JudgeFailIn",
+        "type": "object"
+      },
+      "JudgeGoodbyeIn": {
+        "additionalProperties": false,
+        "description": "评测机收到 ``uninstall``、评完手上的任务后的告别（§12.10）：服务端删掉这一行。",
+        "properties": {
+          "kind": {
+            "default": "manual",
+            "enum": [
+              "systemd",
+              "schtask",
+              "local",
+              "manual"
+            ],
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "title": "JudgeGoodbyeIn",
         "type": "object"
       },
       "JudgeImportApplyIn": {
@@ -3037,6 +3172,21 @@
             ],
             "title": "Boot Id"
           },
+          "features": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 16,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Features"
+          },
           "hostname": {
             "anyOf": [
               {
@@ -3118,7 +3268,8 @@
             "enum": [
               "run",
               "stop",
-              "restart"
+              "restart",
+              "uninstall"
             ],
             "title": "Command",
             "type": "string"
@@ -3127,6 +3278,22 @@
             "default": true,
             "title": "Enabled",
             "type": "boolean"
+          },
+          "service": {
+            "default": true,
+            "title": "Service",
+            "type": "boolean"
+          },
+          "slots": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slots"
           },
           "task": {
             "anyOf": [
@@ -3153,6 +3320,15 @@
           "excerpt": {
             "default": "",
             "title": "Excerpt",
+            "type": "string"
+          },
+          "level": {
+            "default": "warning",
+            "enum": [
+              "risk",
+              "warning"
+            ],
+            "title": "Level",
             "type": "string"
           },
           "line": {
@@ -3268,6 +3444,61 @@
           "status"
         ],
         "title": "JudgeResultIn",
+        "type": "object"
+      },
+      "JudgeRiskEventOut": {
+        "additionalProperties": false,
+        "description": "一条风险事件（§12.11）：运行选手程序后发现的逃逸 / 篡改痕迹，或源码预检的拦截项。",
+        "properties": {
+          "case": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Case"
+          },
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "excerpt": {
+            "default": "",
+            "title": "Excerpt",
+            "type": "string"
+          },
+          "level": {
+            "default": "risk",
+            "enum": [
+              "risk",
+              "warning"
+            ],
+            "title": "Level",
+            "type": "string"
+          },
+          "line": {
+            "default": 0,
+            "title": "Line",
+            "type": "integer"
+          },
+          "message": {
+            "default": "",
+            "title": "Message",
+            "type": "string"
+          },
+          "rule": {
+            "default": "",
+            "title": "Rule",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "title": "JudgeRiskEventOut",
         "type": "object"
       },
       "JudgeRunClearIn": {
@@ -3428,6 +3659,18 @@
             "title": "Problem",
             "type": "string"
           },
+          "risk_count": {
+            "default": 0,
+            "title": "Risk Count",
+            "type": "integer"
+          },
+          "risk_events": {
+            "items": {
+              "$ref": "#/components/schemas/JudgeRiskEventOut"
+            },
+            "title": "Risk Events",
+            "type": "array"
+          },
           "score": {
             "anyOf": [
               {
@@ -3498,6 +3741,11 @@
           "updated_at": {
             "title": "Updated At",
             "type": "string"
+          },
+          "warning_count": {
+            "default": 0,
+            "title": "Warning Count",
+            "type": "integer"
           }
         },
         "required": [
@@ -3561,6 +3809,11 @@
             "title": "Problem",
             "type": "string"
           },
+          "risk_count": {
+            "default": 0,
+            "title": "Risk Count",
+            "type": "integer"
+          },
           "score": {
             "anyOf": [
               {
@@ -3597,6 +3850,11 @@
           "updated_at": {
             "title": "Updated At",
             "type": "string"
+          },
+          "warning_count": {
+            "default": 0,
+            "title": "Warning Count",
+            "type": "integer"
           }
         },
         "required": [
@@ -3647,6 +3905,89 @@
           }
         },
         "title": "JudgeScanOut",
+        "type": "object"
+      },
+      "JudgeServiceIn": {
+        "additionalProperties": false,
+        "description": "「评测服务」开关：关 = 所有评测机都领不到新任务（手上的照常评完，排队的留着）。",
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "title": "JudgeServiceIn",
+        "type": "object"
+      },
+      "JudgeServiceOut": {
+        "additionalProperties": false,
+        "properties": {
+          "delayed": {
+            "default": 0,
+            "title": "Delayed",
+            "type": "integer"
+          },
+          "enabled": {
+            "default": true,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "queued": {
+            "default": 0,
+            "title": "Queued",
+            "type": "integer"
+          },
+          "running": {
+            "default": 0,
+            "title": "Running",
+            "type": "integer"
+          }
+        },
+        "title": "JudgeServiceOut",
+        "type": "object"
+      },
+      "JudgeSourceOut": {
+        "additionalProperties": false,
+        "description": "评测任务评的那份代码（按任务记下的 sha256 从内容存储取，§12.11）。",
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          },
+          "task_id": {
+            "title": "Task Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "task_id",
+          "sha256",
+          "size",
+          "content"
+        ],
+        "title": "JudgeSourceOut",
         "type": "object"
       },
       "JudgeSubtaskOut": {
@@ -3833,9 +4174,25 @@
             "title": "Precheck Warnings",
             "type": "array"
           },
+          "priority": {
+            "default": 0,
+            "title": "Priority",
+            "type": "integer"
+          },
           "problem": {
             "title": "Problem",
             "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
           },
           "requested_by": {
             "anyOf": [
@@ -3863,6 +4220,18 @@
               }
             ],
             "title": "Reused From"
+          },
+          "risk_count": {
+            "default": 0,
+            "title": "Risk Count",
+            "type": "integer"
+          },
+          "risk_events": {
+            "items": {
+              "$ref": "#/components/schemas/JudgeRiskEventOut"
+            },
+            "title": "Risk Events",
+            "type": "array"
           },
           "score": {
             "anyOf": [
@@ -3927,6 +4296,11 @@
             "default": false,
             "title": "Truncated",
             "type": "boolean"
+          },
+          "warning_count": {
+            "default": 0,
+            "title": "Warning Count",
+            "type": "integer"
           }
         },
         "required": [
@@ -4031,9 +4405,25 @@
             "title": "Player No",
             "type": "string"
           },
+          "priority": {
+            "default": 0,
+            "title": "Priority",
+            "type": "integer"
+          },
           "problem": {
             "title": "Problem",
             "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
           },
           "requested_by": {
             "anyOf": [
@@ -4061,6 +4451,11 @@
               }
             ],
             "title": "Reused From"
+          },
+          "risk_count": {
+            "default": 0,
+            "title": "Risk Count",
+            "type": "integer"
           },
           "score": {
             "anyOf": [
@@ -4113,6 +4508,11 @@
           "trigger": {
             "title": "Trigger",
             "type": "string"
+          },
+          "warning_count": {
+            "default": 0,
+            "title": "Warning Count",
+            "type": "integer"
           }
         },
         "required": [
@@ -4150,10 +4550,22 @@
             "enum": [
               "run",
               "stop",
-              "restart"
+              "restart",
+              "uninstall"
             ],
             "title": "Desired",
             "type": "string"
+          },
+          "desired_slots": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Desired Slots"
           },
           "enabled": {
             "default": true,
@@ -4264,9 +4676,19 @@
             ],
             "title": "Slots"
           },
+          "slots_control": {
+            "default": false,
+            "title": "Slots Control",
+            "type": "boolean"
+          },
           "token": {
             "title": "Token",
             "type": "string"
+          },
+          "uninstall_control": {
+            "default": false,
+            "title": "Uninstall Control",
+            "type": "boolean"
           },
           "version": {
             "anyOf": [
@@ -4335,10 +4757,22 @@
             "enum": [
               "run",
               "stop",
-              "restart"
+              "restart",
+              "uninstall"
             ],
             "title": "Desired",
             "type": "string"
+          },
+          "desired_slots": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Desired Slots"
           },
           "enabled": {
             "default": true,
@@ -4441,6 +4875,16 @@
             ],
             "title": "Slots"
           },
+          "slots_control": {
+            "default": false,
+            "title": "Slots Control",
+            "type": "boolean"
+          },
+          "uninstall_control": {
+            "default": false,
+            "title": "Uninstall Control",
+            "type": "boolean"
+          },
           "version": {
             "anyOf": [
               {
@@ -4488,6 +4932,19 @@
               }
             ],
             "title": "Name"
+          },
+          "slots": {
+            "anyOf": [
+              {
+                "maximum": 64.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slots"
           }
         },
         "title": "JudgeWorkerPatchIn",
@@ -7359,6 +7816,11 @@
             "title": "Problem",
             "type": "string"
           },
+          "risk_count": {
+            "default": 0,
+            "title": "Risk Count",
+            "type": "integer"
+          },
           "run_id": {
             "anyOf": [
               {
@@ -7407,6 +7869,11 @@
               }
             ],
             "title": "Updated At"
+          },
+          "warning_count": {
+            "default": 0,
+            "title": "Warning Count",
+            "type": "integer"
           }
         },
         "required": [
@@ -8198,6 +8665,17 @@
             ],
             "title": "Outcome"
           },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
           "reused": {
             "default": false,
             "title": "Reused",
@@ -8281,7 +8759,7 @@
   "info": {
     "description": "通用编程考试与竞赛模拟的在线同步评测系统",
     "title": "SyncOJ",
-    "version": "0.3.0"
+    "version": "0.4.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -10478,7 +10956,7 @@
     },
     "/api/v1/admin/contests/{contest_id}/judge/auto": {
       "put": {
-        "description": "自动入队（§12.9）：``on_change`` = 收到某题的新版本就排评测，同一 (选手, 题目)\n在 ``auto_judge_delay`` 秒内连续改动只评最后一版。场次进行中也排。",
+        "description": "自动入队（§12.9）：``on_change`` = 收到某题的新版本就排评测，同一 (选手, 题目)\n在 ``auto_judge_delay`` 秒内连续改动只评最后一版。场次进行中也排。\n\n``smart``（§12.12）= 判断\"可能已经写完\"才排（换题 / 空闲 / 将结束 / 掉线 / 已结束），\n阈值随请求改，不传的不改。",
         "operationId": "set_auto_judge_api_v1_admin_contests__contest_id__judge_auto_put",
         "parameters": [
           {
@@ -10693,6 +11171,29 @@
                 }
               ],
               "title": "Parse Status"
+            }
+          },
+          {
+            "description": "any / warning（有疑似违规）/ risk（有风险）",
+            "in": "query",
+            "name": "flag",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "any",
+                    "warning",
+                    "risk"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "any / warning（有疑似违规）/ risk（有风险）",
+              "title": "Flag"
             }
           },
           {
@@ -10983,7 +11484,7 @@
     },
     "/api/v1/admin/contests/{contest_id}/judge/tasks": {
       "get": {
-        "description": "评测任务（新的在前）。任务即历史：每一次评测（含复用的）都在这里。",
+        "description": "评测任务（新的在前）。任务即历史：每一次评测（含复用的）都在这里。\n\n``flag``（§12.11）：``risk`` 有风险、``warning`` 有疑似违规（不论有没有风险）、``any`` 两者之一。\n``reason``（§12.12）：智能模式的信号，配 ``trigger=smart`` 用。",
         "operationId": "list_judge_tasks_api_v1_admin_contests__contest_id__judge_tasks_get",
         "parameters": [
           {
@@ -11060,6 +11561,48 @@
                 }
               ],
               "title": "Trigger"
+            }
+          },
+          {
+            "description": "智能模式的信号（§12.12）",
+            "in": "query",
+            "name": "reason",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "智能模式的信号（§12.12）",
+              "title": "Reason"
+            }
+          },
+          {
+            "description": "any / warning（有疑似违规）/ risk（有风险）",
+            "in": "query",
+            "name": "flag",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "any",
+                    "warning",
+                    "risk"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "any / warning（有疑似违规）/ risk（有风险）",
+              "title": "Flag"
             }
           },
           {
@@ -11217,6 +11760,58 @@
           }
         },
         "summary": "Adopt Judge Task",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/contests/{contest_id}/judge/tasks/{task_id}/source": {
+      "get": {
+        "description": "这个评测任务评的那份代码（按任务记下的 sha256 从内容存储取；只读，≤ 1 MB）。\n\n明细里按行显示、把预检 / 风险标注的行高亮。还没选定代码（排队中）或内容已被清掉时 404，\n超过 1 MB 时 413。",
+        "operationId": "get_judge_task_source_api_v1_admin_contests__contest_id__judge_tasks__task_id__source_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contest_id",
+            "required": true,
+            "schema": {
+              "title": "Contest Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JudgeSourceOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Judge Task Source",
         "tags": [
           "admin"
         ]
@@ -12480,6 +13075,68 @@
         ]
       }
     },
+    "/api/v1/admin/judge-service": {
+      "get": {
+        "description": "「评测服务」开关与全部场次的排队 / 在评数（§12.10）。",
+        "operationId": "judge_service_status_api_v1_admin_judge_service_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JudgeServiceOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Judge Service Status",
+        "tags": [
+          "admin"
+        ]
+      },
+      "put": {
+        "description": "开 / 关评测服务。关 = 所有评测机都领不到新任务：手上的照常评完交回，排队的任务留着\n（自动入队也照常入队），打开后接着发。",
+        "operationId": "set_judge_service_api_v1_admin_judge_service_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JudgeServiceIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JudgeServiceOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Judge Service",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/api/v1/admin/judge-workers": {
       "get": {
         "description": "评测机与它们自报的状态、在线与否、手上正在评的任务（§12.10）。",
@@ -12637,7 +13294,7 @@
         ]
       },
       "patch": {
-        "description": "改名；暂停（``enabled`` = false：领不到新任务，手上的照常评完）/ 恢复。",
+        "description": "改名；暂停（``enabled`` = false：领不到新任务，手上的照常评完）/ 恢复；改并发数\n（``slots``：随下一次 poll 下发，评测机评完手上的任务后以新的 ``--slots`` 重启）。\n\n改并发数：旧评测机（不认下发的并发数）409 ``judge_worker_unsupported``；后端不是 isolate\n而 ``slots`` > 1 时 409 ``judge_worker_slots``。",
         "operationId": "update_judge_worker_api_v1_admin_judge_workers__worker_id__patch",
         "parameters": [
           {
@@ -12769,6 +13426,62 @@
           }
         },
         "summary": "Stop Judge Worker",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/judge-workers/{worker_id}/uninstall": {
+      "post": {
+        "description": "卸载：评测机下一次 poll 时取走命令，评完手上的任务、告别（服务端删行，令牌失效），\n再按安装方式删掉自己的服务 / 计划任务、程序、令牌与缓存（§12.10）。\n\n不在线 409 ``judge_worker_offline``；没报 ``uninstall`` 能力（旧评测机）409\n``judge_worker_unsupported``。本机评测机没在跑时直接卸：删行、删 ``<数据目录>/judge-local``。\n评测机一直不回来时，照样可以直接吊销。",
+        "operationId": "uninstall_judge_worker_api_v1_admin_judge_workers__worker_id__uninstall_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "原样输入评测机名称",
+            "in": "query",
+            "name": "confirm",
+            "required": true,
+            "schema": {
+              "description": "原样输入评测机名称",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Confirm",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Uninstall Judge Worker",
         "tags": [
           "admin"
         ]
@@ -15092,9 +15805,51 @@
         ]
       }
     },
+    "/api/v1/judge/goodbye": {
+      "post": {
+        "description": "卸载前的告别：只在管理端下过 ``uninstall`` 时认（否则 409 ``judge_worker_not_uninstalling``）。\n删行（令牌随之失效）、名下还在评的任务退回队列、记审计；本机评测机一并删 ``judge-local`` 目录。\n``kind`` 是评测机接下来的清理方式，只进审计日志。",
+        "operationId": "goodbye_api_v1_judge_goodbye_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JudgeGoodbyeIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Goodbye",
+        "tags": [
+          "judge"
+        ]
+      }
+    },
     "/api/v1/judge/lease": {
       "post": {
-        "description": "领下一个任务；没有（或这台评测机被暂停）就 204。租约 15 分钟，过期没交结果的任务自动回到队列。",
+        "description": "领下一个任务；没有（或这台评测机被暂停、评测服务关着）就 204。租约 15 分钟，过期没交结果的任务自动回到队列。",
         "operationId": "lease_api_v1_judge_lease_post",
         "responses": {
           "200": {
@@ -15119,7 +15874,7 @@
     },
     "/api/v1/judge/poll": {
       "post": {
-        "description": "自报状态；``want`` = 1 时顺带领一个任务；响应带管理端下的命令（§12.10）。\n\n有命令（``stop`` / ``restart``）时不发任务：评测机要做的是评完手上的然后退出。\n暂停时也不发任务，但命令照样送达。",
+        "description": "自报状态；``want`` = 1 时顺带领一个任务；响应带管理端下的命令（§12.10）。\n\n有命令（``stop`` / ``restart``）时不发任务：评测机要做的是评完手上的然后退出。\n暂停或评测服务关着时也不发任务，但命令照样送达。``slots`` 是管理端设定的并发数。",
         "operationId": "poll_api_v1_judge_poll_post",
         "requestBody": {
           "content": {

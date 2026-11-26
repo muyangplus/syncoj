@@ -16,7 +16,10 @@
 5. 再铺开一个**一启动就崩**的版本 → 单元的 ``ExecStartPre=-+`` 启动守卫（root）数够次数后
    切回上一版，服务恢复；
 6. 服务端换端口重启并关掉局域网发现 → 机器只能靠主动通告（§11）+ 挑战应答转过去；
-7. 服务端授权卸载（机器未配对）→ root 管理单元验令牌后卸干净，运行账号与家目录不动。
+7. 服务端授权卸载（机器未配对）→ root 管理单元验令牌后卸干净，运行账号与家目录不动；
+8. 评测机（§12.10）：一键安装（rlimit，服务以 root 跑）→ 在线 → 管理端「卸载」→ 评测机告别、
+   写标记退出 → 单元的 ``ExecStopPost=+uninstall.sh --if-requested`` 经 ``systemd-run`` 卸干净
+   （单元、程序、令牌、缓存、两个账号）。
 
 本脚本只用标准库，跑在宿主上。
 """
@@ -134,6 +137,17 @@ class Admin:
         from urllib.parse import quote
 
         self._call("POST", "/agents/%d/uninstall?confirm=%s" % (agent_id, quote(hostname)))
+
+    def judge_workers(self) -> dict:
+        return {item["name"]: item for item in self._call("GET", "/judge-workers?limit=100")["items"]}
+
+    def create_judge_worker(self, name: str) -> dict:
+        return self._call("POST", "/judge-workers", {"name": name})
+
+    def uninstall_judge_worker(self, worker_id: int, name: str) -> None:
+        from urllib.parse import quote
+
+        self._call("POST", "/judge-workers/%d/uninstall?confirm=%s" % (worker_id, quote(name)))
 
 
 def build_bundles(work: Path, server_url: str, key_dir: Path):
@@ -302,6 +316,8 @@ def smoke(work: Path) -> None:
         expect(leftovers == "", "配置、状态、管理单元代码都清掉了（剩下：%r）" % leftovers)
         expect(sh("id -u %s" % RUN_USER, check=False).strip().isdigit(), "运行账号还在")
         expect(sh("test -d /home/%s && echo y" % RUN_USER).strip() == "y", "家目录还在")
+
+        _judge_uninstall(admin, server_url)
         log("冒烟全部通过")
     finally:
         server.terminate()
@@ -309,6 +325,40 @@ def smoke(work: Path) -> None:
             server.wait(timeout=10)
         except subprocess.TimeoutExpired:
             server.kill()
+
+
+JUDGE_NAME = "冒烟评测机"
+
+
+def _judge_uninstall(admin: "Admin", server_url: str) -> None:
+    log("评测机：一键安装（rlimit）→ 管理端卸载 → 单元的 ExecStopPost=+ 卸干净")
+    issued = admin.create_judge_worker(JUDGE_NAME)
+    # 命令里的地址取自请求的 Host 头，就是 server_url；容器用宿主网络连得上
+    sh("curl -fsSL %s/judge/install.sh | bash -s -- %s --backend rlimit --yes" % (server_url, issued["token"]))
+    wait_for("评测机上线", lambda: admin.judge_workers().get(JUDGE_NAME, {}).get("online") is True, timeout=60)
+    row = admin.judge_workers()[JUDGE_NAME]
+    expect(row["uninstall_control"] is True, "评测机报了卸载能力")
+    unit = sh("systemctl cat syncoj-judge")
+    expect("ExecStopPost=+/opt/syncoj-judge/uninstall.sh --if-requested" in unit, "单元带 ExecStopPost=+ 卸载钩子")
+    expect("--install-manifest /opt/syncoj-judge/install.json" in unit, "服务命令行带安装清单")
+    expect(sh("stat -c '%U %a' /opt/syncoj-judge/uninstall.sh").strip() == "root 755",
+           "uninstall.sh 属 root、0755")
+
+    admin.uninstall_judge_worker(int(row["id"]), JUDGE_NAME)
+    wait_for("评测机告别、从管理端消失", lambda: JUDGE_NAME not in admin.judge_workers(), timeout=60)
+    wait_for("程序目录被删", lambda: sh("test -e /opt/syncoj-judge && echo y || echo n").strip() == "n", timeout=90)
+    wait_for("单元被删", lambda: sh("test -e /etc/systemd/system/syncoj-judge.service && echo y || echo n",
+                                    check=False).strip() == "n", timeout=60)
+    leftovers = sh("ls -d /etc/syncoj-judge /var/cache/syncoj-judge 2>/dev/null || true", check=False).strip()
+    expect(leftovers == "", "令牌与缓存目录都删了（剩下：%r）" % leftovers)
+    expect("could not be found" in sh("systemctl status syncoj-judge 2>&1 || true", check=False)
+           or "not-found" in sh("systemctl show -p LoadState syncoj-judge", check=False),
+           "systemd 里没有 syncoj-judge 了")
+    for account in ("syncoj-judge", "syncoj-judge-run"):
+        expect(sh("id -u %s >/dev/null 2>&1 && echo y || echo n" % account, check=False).strip() == "n",
+               "账号 %s 删了" % account)
+    journal = sh("journalctl -u syncoj-judge-uninstall --no-pager", check=False)
+    expect("评测机已卸载" in journal, "卸载是 systemd-run 起的临时单元做的（journal 里有记录）")
 
 
 def _http_ok(url: str) -> bool:
@@ -375,7 +425,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
     except SmokeFailed as exc:
         print("\n✗ 冒烟失败：%s" % exc, file=sys.stderr, flush=True)
-        for unit in ("syncoj-agent", "syncoj-agent-admin.service", "syncoj-agent-enroll.service"):
+        for unit in ("syncoj-agent", "syncoj-agent-admin.service", "syncoj-agent-enroll.service",
+                     "syncoj-judge", "syncoj-judge-uninstall"):
             print("\n--- journalctl -u %s ---" % unit)
             print(sh("journalctl -u %s --no-pager -n 40 || true" % unit, check=False))
         print("\n--- agent.log ---\n" + sh("tail -40 /var/lib/syncoj/agent.log 2>/dev/null || true", check=False))

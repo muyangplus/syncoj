@@ -231,6 +231,7 @@ def test_旧评测机不报能力也能评传统题(client, admin_headers, conte
 
 
 def test_评测机报题型能力(tmp_path) -> None:
-    assert "type:interactive" in worker.features_for("rlimit")
+    assert "type:interactive" in worker.features_for("isolate")
+    assert "type:interactive" not in worker.features_for("rlimit")  # 评测侧目录与选手同账号
     assert "type:interactive" not in worker.features_for("winjob")
     assert {"type:grader", "type:answer_only"} <= set(worker.features_for("winjob"))

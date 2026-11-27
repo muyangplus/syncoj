@@ -55,9 +55,11 @@ BACKEND_ISOLATED = {"isolate": True, "rlimit": False, "winjob": False}
 #: ``uninstall`` = 认卸载命令（告别并清理自己）
 FEATURES = ["slots", "uninstall"]
 #: 能评的题型（§12.13），以 ``type:<题型>`` 报给服务端；服务端只派报了的题型，传统题人人能评。
-#: 交互题要两个程序同时跑、用管道连起来，只有 isolate / rlimit 后端做得到
+#: 交互题要两个程序同时跑、用管道连起来，而且运行期间评测侧目录（interactor、输入、答案）就在旁边：
+#: 只有 isolate（评测侧另一个 box、另一个账号）报这项。rlimit 的评测侧目录与选手同一账号，交互时
+#: 选手能读到答案；winjob 没有双进程管道。安装脚本在没有 isolate 时会退到 rlimit，所以不能只靠文档
 TYPE_FEATURES = ["type:grader", "type:answer_only"]
-PIPE_BACKENDS = ("isolate", "rlimit")
+PIPE_BACKENDS = ("isolate",)
 MAX_SLOTS = 64
 
 

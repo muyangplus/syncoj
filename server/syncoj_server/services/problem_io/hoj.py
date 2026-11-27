@@ -147,7 +147,14 @@ def _checker(bundle: ProblemBundle, problem: Dict[str, Any], folder: str) -> Non
         bundle.fail(notice("checker_language", language=str(language)))
         return
     source = code.encode("utf-8")
+    if bundle.problem_type == "interactive":
+        # HOJ 的交互题：spjCode 是 testlib interactor
+        bundle.interactor = FileRef(data=source)
+        bundle.checker_points = "percent"
+        return
     bundle.checker = FileRef(data=source)
+    # HOJ 的 testlib checker 用 quitp 给 0..100 的分
+    bundle.checker_points = "percent"
     if not uses_testlib(source):
         bundle.warn(notice("checker_not_testlib"))
 
@@ -305,10 +312,7 @@ def _judge_mode(bundle: ProblemBundle, problem: Dict[str, Any], doc: Dict[str, A
     mode = inner or outer or "default"
     if inner and outer and inner != outer:
         bundle.warn(notice("judge_mode_mismatch", mode=mode))
-    if mode == "interactive":
-        bundle.fail(notice("interactive_unsupported"))
-        return None
-    if mode not in ("default", "spj"):
+    if mode not in ("default", "spj", "interactive"):
         bundle.fail(notice("problem_type_unsupported", type=mode))
         return None
     return mode
@@ -349,10 +353,15 @@ def _parse_one(view: ArchiveView, folder: str, doc: Any) -> ProblemBundle:
     bundle.ident = ident_from_io(bundle.input_file) or problem_id.lower() or folder
 
     mode = _judge_mode(bundle, problem, doc)
-    if mode == "spj":
+    if mode == "interactive":
+        bundle.problem_type = "interactive"
+        bundle.io_mode = "stdio"
+        bundle.input_file = bundle.output_file = None
+        _checker(bundle, problem, folder)
+    elif mode == "spj":
         _checker(bundle, problem, folder)
     elif mode == "default" and problem.get("isRemoveEndBlank") is False:
-        bundle.warn(notice("strict_compare_relaxed"))
+        bundle.compare_mode = "strict"
     _extra(bundle, problem, doc)
     _languages(bundle, doc)
 
@@ -460,11 +469,18 @@ def _export_one(problem: ExportProblem, k: int, open_blob: OpenBlob, zf: Any) ->
                 sample["score"] = case.score
             samples.append(sample)
             _copy(zf_in, case.input, zf, "%s/%d.in" % (folder, i), dry_run)
-            _copy(zf_in, case.answer, zf, "%s/%d.out" % (folder, i), dry_run)
+            if case.answer:
+                _copy(zf_in, case.answer, zf, "%s/%d.out" % (folder, i), dry_run)
+            else:
+                zf.writestr("%s/%d.out" % (folder, i), b"")
 
         checker_code: Optional[str] = None
         headers: Dict[str, str] = {}
-        if testdata.checker is not None:
+        if testdata.interactor is not None:
+            checker_code = zf_in.read(testdata.interactor).decode("utf-8", errors="replace")
+            if testdata.checker is not None:
+                warnings.append(notice("extra_files_dropped", files=testdata.checker.rsplit("/", 1)[-1]))
+        elif testdata.checker is not None:
             source = zf_in.read(testdata.checker)
             checker_code = source.decode("utf-8", errors="replace")
             if not uses_testlib(source):
@@ -478,7 +494,14 @@ def _export_one(problem: ExportProblem, k: int, open_blob: OpenBlob, zf: Any) ->
                 warnings.append(notice("hoj_extra_headers", files="、".join(sorted(headers))))
         total = testdata.total_score
 
-    mode = "spj" if checker_code is not None else "default"
+    mode = "interactive" if problem.problem_type == "interactive" else (
+        "spj" if checker_code is not None else "default")
+    if testdata.checker is not None and testdata.checker_protocol != "testlib":
+        warnings.append(notice("checker_protocol_approx", protocol=testdata.checker_protocol))
+    if checker_code is None and problem.compare_mode in ("trailing_spaces", "trailing_newlines"):
+        warnings.append(notice("compare_mode_approx", mode=problem.compare_mode))
+    if problem.io_mode == "auto":
+        warnings.append(notice("io_auto_as_file"))
     languages, dropped = _languages_for(problem.compile_flags)
     if dropped:
         warnings.append(notice("flags_dropped", flags=" ".join(dropped)))
@@ -492,8 +515,8 @@ def _export_one(problem: ExportProblem, k: int, open_blob: OpenBlob, zf: Any) ->
         "timeLimit": problem.effective_time_limit_ms,
         "memoryLimit": memory,
         "stackLimit": memory,
-        "isFileIO": problem.io_mode == "file",
-        "isRemoveEndBlank": True,
+        "isFileIO": problem.io_mode in ("file", "auto"),
+        "isRemoveEndBlank": problem.compare_mode != "strict",
         "ioScore": total,
         "description": "",
         "input": "",
@@ -509,7 +532,7 @@ def _export_one(problem: ExportProblem, k: int, open_blob: OpenBlob, zf: Any) ->
         "isUploadCase": True,
         "openCaseResult": True,
     }
-    if problem.io_mode == "file":
+    if problem.io_mode in ("file", "auto"):
         body["ioReadFileName"] = problem.effective_input_file
         body["ioWriteFileName"] = problem.effective_output_file
     if checker_code is not None:
@@ -535,6 +558,10 @@ def export(problems: List[ExportProblem], open_blob: OpenBlob, zf: Any) -> Dict[
     """把 ``problems``（都有数据包）写进 ``zf``，返回每题的警告。"""
     out: Dict[int, List[Notice]] = {}
     for k, problem in enumerate(problems, 1):
+        if problem.problem_type in ("grader", "answer_only"):
+            label = "函数交互题" if problem.problem_type == "grader" else "提交答案题"
+            out[problem.id] = [notice("type_not_exportable", type=label, format=LABEL)]
+            continue
         try:
             out[problem.id] = _export_one(problem, k, open_blob, zf)
         except FileNotFoundError:

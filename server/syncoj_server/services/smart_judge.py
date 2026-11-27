@@ -16,12 +16,10 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from pathlib import PurePosixPath
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from sqlalchemy import func, select
 
-from ..judging.runner import LANGUAGES
 from ..models import Contest, ContestStatus, EventLog, JudgeTask, JudgeWorker, Player, Problem, SourceVersion, utcnow
 from . import builtin_judge, judge_workers
 
@@ -246,7 +244,7 @@ def offline_players(registry, contest_id: int) -> Set[int]:
 def contest_inputs(session, contest: Contest, settings) -> Tuple[List[PairState], Dict[int, Dict[str, datetime]]]:
     """从库里取出一场的 (选手, 题目) 状态与各人各题的最新活动时刻。"""
     judgeable = {
-        row.ident
+        row.ident: row
         for row in session.execute(select(Problem).where(Problem.contest_id == contest.id)).scalars()
         if builtin_judge.is_builtin(row) and row.testdata_sha256
     }
@@ -266,7 +264,7 @@ def contest_inputs(session, contest: Contest, settings) -> Tuple[List[PairState]
         if not ident:
             continue
         activity.setdefault(row.player_id, {})[ident] = row.received_at
-        if ident in judgeable and PurePosixPath(row.rel_path).suffix.lower() in LANGUAGES:
+        if ident in judgeable and builtin_judge.judgeable_path(judgeable[ident], row.rel_path):
             latest[(row.player_id, ident)] = (row.id, row.received_at)
     if not latest:
         return [], activity
@@ -278,7 +276,8 @@ def contest_inputs(session, contest: Contest, settings) -> Tuple[List[PairState]
     for task in session.execute(
         select(JudgeTask.player_id, JudgeTask.problem, JudgeTask.status, JudgeTask.trigger, JudgeTask.reason,
                JudgeTask.source_version_id, JudgeTask.target_version_id, JudgeTask.created_at)
-        .where(JudgeTask.contest_id == contest.id)
+        # 被取消的任务不算"评过"：取消之后同一版本照样可以再排
+        .where(JudgeTask.contest_id == contest.id, JudgeTask.status != builtin_judge.CANCELLED)
     ):
         key = (task.player_id, task.problem)
         for version_id in (task.source_version_id, task.target_version_id):

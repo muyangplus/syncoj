@@ -596,24 +596,37 @@ class WinJobSandbox(Sandbox):
 
     isolated = False
 
-    def __init__(self, base: Optional[Path] = None, run_as: Optional[str] = None) -> None:
+    def __init__(self, base: Optional[Path] = None, run_as: Optional[str] = None, trusted: bool = False) -> None:
         if sys.platform != "win32":
             raise SandboxError("winjob 后端只能在 Windows 上用")
         if run_as:
             raise SandboxError("winjob 后端不支持 --run-as：请直接以低权限专用账号运行评测机")
         api = _win32()
         api.k32.SetErrorMode(_ERROR_MODE)
+        self._base = base
         self.workdir = self._make_workdir(base)
         #: 选手程序与 checker 是否以低完整性级别运行；降级时 :attr:`degraded` 写原因
         self.low_integrity = False
         self.degraded = ""
         self._token = None
+        #: 评测侧工作目录（§12.15）：checker / interactor / grader 以评测机自己的令牌运行；目录标
+        #: Medium + 禁止读上 / 写上，低完整性的选手程序打不开里面的 checker 与答案
+        self.trusted = trusted
+        if trusted:
+            try:
+                _set_label(api, self.workdir, NO_READ_UP_DIR_LABEL)
+            except SandboxError as exc:
+                log.warning("winjob：评测侧工作目录没能设禁止读上标签：%s", exc)
+            return
         try:
             _set_label(api, self.workdir, LOW_DIR_LABEL)
             self._token = _low_integrity_token(api)
             self.low_integrity = True
         except SandboxError as exc:
             self._degrade(str(exc))
+
+    def peer(self) -> "WinJobSandbox":
+        return WinJobSandbox(base=self._base, trusted=True)
 
     @staticmethod
     def _make_workdir(base: Optional[Path]) -> Path:

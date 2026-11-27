@@ -4,6 +4,7 @@
  * 状态与正在评的任务、停止 / 重启 / 改名 / 卸载 / 吊销，添加评测机（一行安装命令）与本机评测机启停。
  */
 import { computed, reactive, ref } from 'vue'
+import { problemTypeLabel } from '@/utils/judgeStatus'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 import { judgingApi } from '@/api'
@@ -378,6 +379,9 @@ async function confirmRemove(): Promise<void> {
             {{ row.backend }}<template v-if="row.isolated === false"> · 不隔离</template>
           </el-tag>
           <span v-else class="muted">—</span>
+          <div v-if="row.types?.length > 1" class="cell-sub">
+            {{ row.types.filter((t: string) => t !== 'traditional').map(problemTypeLabel).join(' · ') }}
+          </div>
         </template>
       </el-table-column>
       <el-table-column label="主机 / 平台" min-width="150">

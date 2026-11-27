@@ -218,6 +218,12 @@ ERROR_CODES = {
     "judge_worker_slots": "这台评测机的沙箱后端只能单并发",
     #: 本机评测机（§12.10）只在 Linux 服务端上提供
     "local_judge_unsupported": "本机评测机只能在 Linux 服务端上运行",
+    #: 上传数据包（§12.13）：config.json 写的题型与题目的题型不一致（``details``：problem_type / declared）
+    "testdata_type_mismatch": "数据包的题型与题目不一致",
+    #: 改题型（§12.13）：已有的数据包按新题型校验不过
+    "testdata_invalid_for_type": "已有的数据包不符合新题型",
+    #: 题型与输入输出方式冲突（交互题只能用标准输入输出）
+    "io_mode_conflict": "这个题型不能用这种输入输出方式",
 }
 
 

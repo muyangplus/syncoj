@@ -881,6 +881,11 @@ class ProblemUpsert(_Base):
     file_patterns: List[str] = Field(default_factory=list)
 
 
+class TestdataWarningOut(_Base):
+    code: str
+    message: str = ""
+
+
 class ProblemTestdataOut(_Base):
     """题目的数据包（§12）：上传时校验出的摘要。"""
 
@@ -891,6 +896,21 @@ class ProblemTestdataOut(_Base):
     subtasks: int = 0
     has_checker: bool = False
     total_score: int = 0
+    #: config.json 写的题型；没写为空（§12.13）
+    declared_type: Optional[str] = None
+    #: 按文件名猜的题型（有 interactor.cpp → interactive，有 grader.cpp → grader），只作提示
+    detected_type: Optional[str] = None
+    #: 有 checker 时：testlib / lemon / exitcode，与 points 口径 ratio / percent / auto
+    checker_protocol: Optional[str] = None
+    checker_points: Optional[str] = None
+    has_interactor: bool = False
+    #: 函数交互题：grader 的附带文件名
+    grader_files: List[str] = Field(default_factory=list)
+    #: 提交答案题：答案文件个数与扩展名
+    answer_count: int = 0
+    answer_exts: List[str] = Field(default_factory=list)
+    #: 上传时的提醒（``unknown_config_key`` / ``testlib_overridden`` / ``detected_type``）
+    warnings: List[TestdataWarningOut] = Field(default_factory=list)
 
 
 class ProblemOut(_Base):
@@ -913,6 +933,10 @@ class ProblemOut(_Base):
     output_file: Optional[str] = None
     compile_flags: Optional[str] = None
     testdata: Optional[ProblemTestdataOut] = None
+    #: 题型（§12.13）
+    problem_type: Literal["traditional", "grader", "answer_only", "interactive"] = "traditional"
+    #: 默认比较器的空白处理（§12.5）
+    compare_mode: Literal["strict", "trailing_spaces", "trailing_newlines", "both"] = "both"
 
 
 class ProblemJudgeIn(_Base):
@@ -921,11 +945,16 @@ class ProblemJudgeIn(_Base):
     judge_mode: Literal["external", "builtin"] = "external"
     time_limit_ms: Optional[int] = Field(default=None, ge=100, le=60000)
     memory_limit_mb: Optional[int] = Field(default=None, ge=16, le=4096)
-    io_mode: Literal["stdio", "file"] = "stdio"
+    #: stdio / file（freopen）/ auto（两者都能评，输出文件优先）
+    io_mode: Literal["stdio", "file", "auto"] = "stdio"
     #: 文件 IO 的输入/输出文件名；不传或留空 = <ident>.in / <ident>.out
     input_file: Optional[str] = Field(default=None, max_length=64)
     output_file: Optional[str] = Field(default=None, max_length=64)
     compile_flags: Optional[str] = Field(default=None, max_length=200)
+    #: 题型；不传 = 不改（§12.13）。已有数据包时按新题型重新校验，不合格 422 ``testdata_invalid_for_type``
+    problem_type: Optional[Literal["traditional", "grader", "answer_only", "interactive"]] = None
+    #: 默认比较器的空白处理；不传 = 不改
+    compare_mode: Optional[Literal["strict", "trailing_spaces", "trailing_newlines", "both"]] = None
 
 
 class BuiltinJudgeIn(_Base):
@@ -954,6 +983,8 @@ class BuiltinJudgeFailureOut(_Base):
     player_no: str
     problem: str
     error: str
+    #: SF（选代码 / 题目配置失败，重新评测即可）/ SE（评测机连续出错）
+    code: Literal["SF", "SE"] = "SF"
 
 
 class BuiltinJudgeProgressOut(_Base):
@@ -966,7 +997,29 @@ class BuiltinJudgeProgressOut(_Base):
     failed: int = 0
     #: 排队中、还在去抖（没到 ``not_before``）的自动任务数
     delayed: int = 0
+    #: 被取消的（CA，只数每对最新的那条）
+    cancelled: int = 0
+    #: 在评里按阶段：编译中（CP）/ 评测中（JG）；旧评测机不报阶段，两者都不计
+    compiling: int = 0
+    judging: int = 0
+    #: 失败里：选代码 / 题目配置失败（SF）与评测机连续出错（SE）
+    submit_failed: int = 0
+    system_error: int = 0
+    #: 排队中、但没有在线评测机能评这个题型的任务数（题型 → 条数）
+    unservable: Dict[str, int] = Field(default_factory=dict)
     failures: List[BuiltinJudgeFailureOut] = Field(default_factory=list)
+
+
+class BuiltinJudgeCancelIn(_Base):
+    """取消排队中 / 在评的任务（CA）。都不填 = 全场。"""
+
+    problem: Optional[str] = Field(default=None, max_length=64)
+    player_id: Optional[int] = None
+    task_id: Optional[int] = None
+
+
+class BuiltinJudgeCancelOut(_Base):
+    cancelled: int = 0
 
 
 class JudgeAutoIn(_Base):
@@ -1004,10 +1057,12 @@ class JudgeTaskOut(_Base):
     player_id: int
     player_no: str
     problem: str
-    #: queued / running / done / failed
+    #: queued / running / done / failed / cancelled
     status: str
     #: auto / smart / manual / rejudge
     trigger: str
+    #: 在评时的阶段：compiling / judging（旧评测机不报）
+    phase: Optional[str] = None
     #: 智能模式的信号（§12.12）：moved_on / long_stable / near_end / offline / contest_end；其余为 null
     reason: Optional[str] = None
     #: 领任务的优先级，大的先领
@@ -1051,6 +1106,7 @@ class JudgeTaskDetailOut(JudgeTaskOut):
     precheck_warnings: List[JudgePrecheckFindingOut] = Field(default_factory=list)
     risk_events: List[JudgeRiskEventOut] = Field(default_factory=list)
     truncated: bool = False
+    problem_type: Optional[str] = None
 
 
 class JudgeSourceOut(_Base):
@@ -1168,6 +1224,8 @@ class JudgeWorkerOut(_Base):
     slots_control: bool = False
     #: 能远程卸载（评测机报了 ``uninstall`` 能力；本机评测机恒为 true）
     uninstall_control: bool = False
+    #: 能评的题型（评测机报的 ``type:*`` 能力；旧评测机只有 traditional）
+    types: List[str] = Field(default_factory=lambda: ["traditional"])
     running: List[JudgeWorkerTaskOut] = Field(default_factory=list)
 
 
@@ -1229,6 +1287,17 @@ class JudgeProblemConfigOut(_Base):
     input_file: Optional[str] = None
     output_file: Optional[str] = None
     compile_flags: Optional[str] = None
+    problem_type: str = "traditional"
+    compare_mode: str = "both"
+
+
+class JudgeAnswerRefOut(_Base):
+    """提交答案题的一个答案文件（``path`` / ``sha256`` 为空 = 这个点没交）。"""
+
+    case: str
+    name: str
+    path: Optional[str] = None
+    sha256: Optional[str] = None
 
 
 class JudgeBlobRefOut(_Base):
@@ -1247,6 +1316,8 @@ class JudgeLeaseOut(_Base):
     source: JudgeBlobRefOut
     testdata: JudgeBlobRefOut
     attempt: int
+    #: 提交答案题的答案文件清单（各用 sha256 去取）；其余题型为空
+    sources: List[JudgeAnswerRefOut] = Field(default_factory=list)
 
 
 class JudgePollOut(_Base):
@@ -1272,6 +1343,12 @@ class JudgeResultIn(_Base):
 
 class JudgeFailIn(_Base):
     message: str = Field(default="", max_length=2000)
+
+
+class JudgePhaseIn(_Base):
+    """评测机报告在评任务的阶段（编译中 / 评测中）。"""
+
+    phase: Literal["compiling", "judging"]
 
 
 class ProblemImportOut(_Base):
@@ -1318,6 +1395,9 @@ class JudgeImportItemOut(_Base):
     subtasks: int = 0
     total_score: int = 0
     has_checker: bool = False
+    #: 题型与比较方式（§12.13、§12.16）
+    problem_type: str = "traditional"
+    compare_mode: str = "both"
     warnings: List[NoticeOut] = Field(default_factory=list)
     errors: List[NoticeOut] = Field(default_factory=list)
 
@@ -1782,6 +1862,13 @@ class JudgeCaseOut(_Base):
     time_ms: Optional[int] = None
     memory_kb: Optional[int] = None
     message: str = ""
+    #: 部分正确（PA）时的得分比例与本点分值
+    ratio: Optional[float] = None
+    max_score: Optional[int] = None
+    #: 提交答案题：这个点的答案文件名
+    file: Optional[str] = None
+    #: 交互题：interactor 用的 CPU 时间
+    interactor_time_ms: Optional[int] = None
 
 
 class JudgeSubtaskOut(_Base):
@@ -1837,6 +1924,8 @@ class JudgeRunDetailOut(JudgeRunOut):
     truncated: bool = False
     #: 自带评测写的结果：出自哪个评测任务（§12.9）
     task_id: Optional[int] = None
+    #: 题型（§12.13）；传统题与外部评测器的结果为空
+    problem_type: Optional[str] = None
 
 
 class JudgeScanOut(_Base):

@@ -843,6 +843,21 @@ def _migration_025_smart_judge(engine: Engine) -> None:
             conn.execute(text("UPDATE judge_task SET priority = %s WHERE priority IS NULL" % rule))
 
 
+def _migration_026_problem_types(engine: Engine) -> None:
+    """题型与评测状态（§12.13、§12.5）。
+
+    ``problem`` 加 ``problem_type`` / ``compare_mode``；``judge_task`` 加 ``sources_json`` / ``phase``。
+    全部可空、不回填：NULL 读作传统题、两种空白都忽略、没有答案文件清单、没报阶段 —— 老数据行为不变。
+    """
+    tables = _tables(engine)
+    if "problem" in tables:
+        _add_column(engine, "problem", "problem_type", "VARCHAR(16)")
+        _add_column(engine, "problem", "compare_mode", "VARCHAR(16)")
+    if "judge_task" in tables:
+        _add_column(engine, "judge_task", "sources_json", "TEXT")
+        _add_column(engine, "judge_task", "phase", "VARCHAR(16)")
+
+
 MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
     (1, "统一密钥注册 + 名单库所需的结构", _migration_001_enrollment),
     (2, "机器永久绑定名单条目；去掉注册码链路", _migration_002_roster_binding),
@@ -952,6 +967,11 @@ MIGRATIONS: List[Tuple[int, str, Callable[[Engine], None]]] = [
         25,
         "自动评测加智能模式；评测任务按优先级领取",
         _migration_025_smart_judge,
+    ),
+    (
+        26,
+        "题目加题型与比较方式；评测任务记答案文件清单与评测阶段",
+        _migration_026_problem_types,
     ),
 ]
 

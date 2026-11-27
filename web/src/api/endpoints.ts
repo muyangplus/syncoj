@@ -173,6 +173,7 @@ export const paths = {
   problemJudge: (problemId: number) => `${ADMIN}/problems/${problemId}/judge`,
   problemTestdata: (problemId: number) => `${ADMIN}/problems/${problemId}/testdata`,
   contestBuiltinJudge: (contestId: number) => `${ADMIN}/contests/${contestId}/judge/builtin`,
+  contestBuiltinJudgeCancel: (contestId: number) => `${ADMIN}/contests/${contestId}/judge/builtin/cancel`,
   judgeWorkers: () => `${ADMIN}/judge-workers`,
   /** 「评测服务」全局开关与排队数（§12.10）。 */
   judgeService: () => `${ADMIN}/judge-service`,

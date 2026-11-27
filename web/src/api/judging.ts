@@ -10,6 +10,8 @@ import { listPage, removeItem } from './crud'
 import type { ListParams } from './crud'
 import { paths } from './endpoints'
 import type {
+  BuiltinJudgeCancelIn,
+  BuiltinJudgeCancelOut,
   BuiltinJudgeIn,
   BuiltinJudgeProgressOut,
   BuiltinJudgeQueuedOut,
@@ -36,11 +38,17 @@ export const judgingApi = {
   setProblemJudge: (problemId: number, payload: ProblemJudgeIn) =>
     request<ProblemOut>(paths.problemJudge(problemId), { method: 'PUT', body: payload }),
 
-  /** 上传数据包（zip）。结构不对（缺答案、路径不安全、配置写错）当场 400。 */
-  uploadTestdata: (problemId: number, file: File) => {
+  /**
+   * 上传数据包（zip）。结构不对（缺答案、路径不安全、配置写错）当场 400；config.json 写的题型与题目
+   * 不一致 422 `testdata_type_mismatch`（`details.declared`）。给了 `problemType` = 同时把题目改成这个题型。
+   */
+  uploadTestdata: (problemId: number, file: File, problemType?: string) => {
     const form = new FormData()
     form.append('file', file)
-    return request<ProblemOut>(paths.problemTestdata(problemId), { method: 'POST', form })
+    const url = problemType
+      ? `${paths.problemTestdata(problemId)}${query({ problem_type: problemType })}`
+      : paths.problemTestdata(problemId)
+    return request<ProblemOut>(url, { method: 'POST', form })
   },
 
   removeTestdata: (problemId: number) =>
@@ -54,6 +62,10 @@ export const judgingApi = {
     request<BuiltinJudgeQueuedOut>(paths.contestBuiltinJudge(contestId), { method: 'POST', body: payload }),
 
   progress: (contestId: number) => request<BuiltinJudgeProgressOut>(paths.contestBuiltinJudge(contestId)),
+
+  /** 取消排队中 / 在评的任务（CA）：不写成绩；都不填 = 全场。 */
+  cancel: (contestId: number, payload: BuiltinJudgeCancelIn) =>
+    request<BuiltinJudgeCancelOut>(paths.contestBuiltinJudgeCancel(contestId), { method: 'POST', body: payload }),
 
   /**
    * 自动入队：`on_change` = 收到某题新版本就评，`auto_judge_delay` 秒内的连续改动只评最后一版；

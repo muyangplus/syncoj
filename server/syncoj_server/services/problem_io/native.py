@@ -1,4 +1,4 @@
-"""SyncOJ 原生格式 ``syncoj-judge/1``：无损导出与导入。
+"""SyncOJ 原生格式 ``syncoj-judge/1``（有非传统题、比较方式或自动 IO 时写 ``/2``）：无损导出与导入。
 
 ::
 
@@ -8,6 +8,9 @@
 清单里每道题的列按原值写出（``file_patterns`` 是库里的原值，None = 默认模式）；
 导入时原样写回，内层 zip 的 sha256 必须与清单一致。多道题指向同一个内层包时按 path 只校验一遍；
 构建时直接流式读归档成员写 blob（``build.try_build``），不整包读进内存。
+
+版本 2 多了 ``problem_type`` / ``compare_mode`` 两列与 ``io_mode: auto``（§12.13、§12.16）；只有
+用到它们时才写 2，旧服务端读到 2 会 ``version_unsupported`` 拒收，而不是悄悄当传统题导入。
 """
 
 from __future__ import annotations
@@ -31,7 +34,11 @@ __all__ = ["MANIFEST", "FORMAT_NAME", "VERSION", "parse", "export"]
 
 MANIFEST = "syncoj-problems.json"
 FORMAT_NAME = "syncoj-judge"
-VERSION = 1
+VERSION = 2
+#: 只有传统题、默认比较方式时仍写 1（旧服务端能读）
+BASE_VERSION = 1
+PROBLEM_TYPES = ("traditional", "grader", "answer_only", "interactive")
+COMPARE_MODES = ("strict", "trailing_spaces", "trailing_newlines", "both")
 
 
 # --------------------------------------------------------------------------- #
@@ -53,8 +60,14 @@ def _entry(problem: ExportProblem) -> Dict[str, Any]:
         "input_file": problem.input_file,
         "output_file": problem.output_file,
         "compile_flags": problem.compile_flags,
+        "problem_type": problem.problem_type,
+        "compare_mode": problem.compare_mode,
         "testdata": None,
     }
+
+
+def _needs_v2(problem: ExportProblem) -> bool:
+    return problem.problem_type != "traditional" or problem.compare_mode != "both" or problem.io_mode == "auto"
 
 
 def export(problems: List[ExportProblem], open_blob: OpenBlob, zf: Any) -> Dict[int, List[Notice]]:
@@ -82,7 +95,8 @@ def export(problems: List[ExportProblem], open_blob: OpenBlob, zf: Any) -> Dict[
                     "size": int(problem.testdata_size or 0),
                 }
         entries.append(entry)
-    manifest = {"format": FORMAT_NAME, "version": VERSION, "problems": entries}
+    version = VERSION if any(_needs_v2(problem) for problem in problems) else BASE_VERSION
+    manifest = {"format": FORMAT_NAME, "version": version, "problems": entries}
     zf.writestr(MANIFEST, json.dumps(manifest, ensure_ascii=False, indent=2))
     return notices
 
@@ -133,7 +147,7 @@ class _Inner:
         self.error: Optional[Notice] = None
 
 
-def _verify_inner(view: ArchiveView, path: str, spool: IO[bytes]) -> _Inner:
+def _verify_inner(view: ArchiveView, path: str, spool: IO[bytes], problem_type: str = "traditional") -> _Inner:
     """把内层 zip 流式读进 ``spool``、算 sha256、过 ``parse_testdata``。"""
     inner = _Inner()
     digest = hashlib.sha256()
@@ -153,7 +167,7 @@ def _verify_inner(view: ArchiveView, path: str, spool: IO[bytes]) -> _Inner:
     spool.seek(0)
     try:
         with zipfile.ZipFile(spool) as archive:
-            inner.summary = parse_testdata(archive).summary()
+            inner.summary = parse_testdata(archive, problem_type).summary()
     except zipfile.BadZipFile:
         inner.error = notice("testdata_invalid", reason="不是合法的 zip")
     except TestdataError as exc:
@@ -161,11 +175,11 @@ def _verify_inner(view: ArchiveView, path: str, spool: IO[bytes]) -> _Inner:
     return inner
 
 
-def _inspect(view: ArchiveView, path: str) -> _Inner:
+def _inspect(view: ArchiveView, path: str, problem_type: str = "traditional") -> _Inner:
     # 用真正的临时文件：SpooledTemporaryFile 在 3.11 之前没有 seekable，zipfile 读它会 AttributeError
     spool = tempfile.TemporaryFile(mode="w+b")
     try:
-        return _verify_inner(view, path, spool)
+        return _verify_inner(view, path, spool, problem_type)
     except CORRUPT_ERRORS:
         inner = _Inner()
         inner.error = notice("testdata_invalid", reason="压缩数据已损坏")
@@ -182,9 +196,10 @@ def _check_testdata(view: ArchiveView, bundle: ProblemBundle, meta: Any, cache: 
     if not view.exists(path):
         bundle.fail(notice("missing_file", path=path))
         return
-    inner = cache.get(path)
+    key = "%s\0%s" % (path, bundle.problem_type)
+    inner = cache.get(key)
     if inner is None:
-        inner = cache[path] = _inspect(view, path)
+        inner = cache[key] = _inspect(view, path, bundle.problem_type)
     if inner.sha256 is not None and inner.sha256 != str(meta.get("sha256") or "").lower():
         bundle.fail(notice("sha_mismatch", path=path))
         return
@@ -228,7 +243,7 @@ def parse(view: ArchiveView) -> ImportResult:
             title=_opt_str(item.get("title")),
             time_limit_ms=_opt_int(item.get("time_limit_ms")),
             memory_limit_mb=_opt_int(item.get("memory_limit_mb")),
-            io_mode="file" if item.get("io_mode") == "file" else "stdio",
+            io_mode=item.get("io_mode") if item.get("io_mode") in ("file", "auto") else "stdio",
             input_file=_opt_str(item.get("input_file")),
             output_file=_opt_str(item.get("output_file")),
             compile_flags=_opt_str(item.get("compile_flags")),
@@ -238,6 +253,8 @@ def parse(view: ArchiveView) -> ImportResult:
                 [p for p in patterns if isinstance(p, str)] if isinstance(patterns, list) else None
             ),
             judge_mode="builtin" if item.get("judge_mode") == "builtin" else "external",
+            problem_type=item.get("problem_type") if item.get("problem_type") in PROBLEM_TYPES else "traditional",
+            compare_mode=item.get("compare_mode") if item.get("compare_mode") in COMPARE_MODES else None,
         )
         if item.get("testdata") is not None:
             _check_testdata(view, bundle, item["testdata"], checked)

@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Sequence
 
 __all__ = [
     "DEFAULT_EXTENSIONS",
@@ -71,10 +71,15 @@ DEFAULT_EXCLUDE_SUFFIXES: List[str] = [
 ]
 
 
-def build_policy(max_file_size: int, scan_interval: int, max_files: int) -> Dict[str, Any]:
-    """构造下发给 Agent 的策略片段。"""
+def build_policy(
+    max_file_size: int, scan_interval: int, max_files: int, extra_extensions: Sequence[str] = (),
+) -> Dict[str, Any]:
+    """构造下发给 Agent 的策略片段。``extra_extensions``：场次里提交答案题的答案扩展名（§12.13），
+    追加在默认后缀之后；回收时仍按题目模式过滤，别的题不会因此多收文件。"""
+    extensions = list(DEFAULT_EXTENSIONS)
+    extensions += [ext for ext in extra_extensions if ext not in extensions]
     return {
-        "extensions": list(DEFAULT_EXTENSIONS),
+        "extensions": extensions,
         "exclude_dirs": list(DEFAULT_EXCLUDE_DIRS),
         "exclude_suffixes": list(DEFAULT_EXCLUDE_SUFFIXES),
         "max_file_size": int(max_file_size),

@@ -531,7 +531,7 @@ def test_native_inner_zip_shared_by_problems_is_checked_once(tmp_path: Path, mon
     })
     calls = []
     real = native_mod._inspect
-    monkeypatch.setattr(native_mod, "_inspect", lambda view, p: calls.append(p) or real(view, p))
+    monkeypatch.setattr(native_mod, "_inspect", lambda view, p, *rest: calls.append(p) or real(view, p, *rest))
     with problem_io.parse_archive(stage(tmp_path, data)) as parsed:
         bundles = parsed.result.problems
         assert calls == ["shared/testdata.zip"]

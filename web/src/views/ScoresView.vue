@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
+import { statusCode, statusTooltip } from '@/utils/judgeStatus'
 
 import { ElMessage, ElMessageBox } from 'element-plus'
 
@@ -209,7 +210,7 @@ function cellView(cell: ScoreCellOut | undefined): {
   else kind = 'low'
 
   const parts = [`${cell.score}${hasMax ? ` / ${cell.max_score}` : ''} 分`]
-  if (cell.status) parts.push(cell.status)
+  if (cell.status) parts.push(statusTooltip(cell.status))
   if (cell.parse_status === 'manual') parts.push('手工录入')
   if (cell.risk_count) parts.push(`风险 ${cell.risk_count}`)
   if (cell.warning_count) parts.push(`疑似违规 ${cell.warning_count}`)
@@ -217,7 +218,7 @@ function cellView(cell: ScoreCellOut | undefined): {
 
   return {
     text: String(cell.score),
-    sub: cell.status || (hasMax ? `/ ${cell.max_score}` : ''),
+    sub: (cell.status && statusCode(cell.status)) || (hasMax ? `/ ${cell.max_score}` : ''),
     kind,
     ratio,
     manual: cell.parse_status === 'manual',

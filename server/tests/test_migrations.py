@@ -164,6 +164,8 @@ MIGRATION_ADDED_COLUMNS = {
         "testdata_sha256", "testdata_name", "testdata_size", "testdata_info",
         #: 文件 IO 的自定义输入/输出文件名（迁移 019）
         "input_file", "output_file",
+        #: 题型与比较方式（迁移 026）
+        "problem_type", "compare_mode",
     },
     "player": set(),
     #: ``agent_status`` 不在这里：它是迁移 017 删掉的整张表（见 test_017_…）。
@@ -838,3 +840,31 @@ def test_021_单值绑定搬进_agent_binding_并删掉老列(workdir: Path) -> 
     assert rows(engine, "SELECT COUNT(*) FROM agent")[0][0] == 3, "重建不能丢机器"
     assert migrations.migrate(engine) == [], "重跑是空操作"
     engine.dispose()
+
+
+def test_026_题目加题型与比较方式_任务加清单与阶段(workdir: Path) -> None:
+    """025 的库升上来多出四列，老行全是 NULL（= 传统题、两种空白都忽略）。"""
+    engine = make_engine(workdir / "v25.db")
+    migrations.migrate(engine)
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO contest (id, slug, name, status, created_at) "
+                          "VALUES (1, 'c', 'c', 'draft', '2026-01-01')"))
+        conn.execute(text("INSERT INTO problem (id, contest_id, ident, order_index, created_at) "
+                          "VALUES (1, 1, 'sum', 0, '2026-01-01')"))
+    for table, names in (("problem", ("problem_type", "compare_mode")), ("judge_task", ("sources_json", "phase"))):
+        with engine.begin() as conn:
+            for name in names:
+                conn.execute(text("ALTER TABLE %s DROP COLUMN %s" % (table, name)))
+    with engine.begin() as conn:
+        conn.execute(text("PRAGMA user_version = 25"))
+
+    applied = migrations.migrate(engine)
+
+    problem = {c["name"] for c in inspect(engine).get_columns("problem")}
+    task = {c["name"] for c in inspect(engine).get_columns("judge_task")}
+    values = rows(engine, "SELECT problem_type, compare_mode FROM problem WHERE id = 1")
+    assert migrations.current_version(engine) == migrations.LATEST_VERSION
+    engine.dispose()
+    assert any(step.startswith("026 ") for step in applied)
+    assert {"problem_type", "compare_mode"} <= problem and {"sources_json", "phase"} <= task
+    assert [tuple(row) for row in values] == [(None, None)]

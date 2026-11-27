@@ -363,9 +363,7 @@ def test_langs_map_to_std_flag(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("kind, code", [
-    ("interactive", "interactive_unsupported"),
     ("communication", "communication_unsupported"),
-    ("submit_answer", "answers_only_unsupported"),
     ("objective", "problem_type_unsupported"),
     ("remote_judge", "problem_type_unsupported"),
 ])
@@ -374,9 +372,36 @@ def test_problem_types_are_rejected(tmp_path: Path, kind: str, code: str) -> Non
     assert codes(bundle.errors) == [code]
 
 
-def test_user_extra_files_mean_a_grader(tmp_path: Path) -> None:
+def test_user_extra_files_without_main_are_rejected(tmp_path: Path) -> None:
     bundle, _ = one(tmp_path, hydro_pkg("user_extra_files: [grader.h]\n", extra={"1001/testdata/grader.h": "x"}))
     assert codes(bundle.errors) == ["grader_unsupported"]
+
+
+def test_user_extra_files_with_main_map_to_grader(tmp_path: Path) -> None:
+    extra = {"1001/testdata/grader.cpp": "#include \"add.h\"\nint main(){}", "1001/testdata/add.h": "int add();"}
+    bundle, built = one(tmp_path, hydro_pkg("user_extra_files: [grader.cpp, add.h]\n", extra=extra))
+    assert not bundle.errors and bundle.problem_type == "grader" and list(bundle.grader_files) == ["add.h"]
+    with zipfile.ZipFile(io.BytesIO(built)) as zf:
+        data = parse_testdata(zf)
+    assert data.problem_type == "grader" and data.grader_files == ["add.h"]
+
+
+def test_interactive_maps_to_interactor(tmp_path: Path) -> None:
+    extra = {"1001/testdata/interactor.cc": "int main(){}"}
+    bundle, built = one(tmp_path, hydro_pkg("type: interactive\ninteractor: interactor.cc\n", extra=extra))
+    assert not bundle.errors and bundle.problem_type == "interactive" and bundle.interactor is not None
+    with zipfile.ZipFile(io.BytesIO(built)) as zf:
+        data = parse_testdata(zf)
+    assert data.problem_type == "interactive" and data.interactor == "interactor.cpp"
+
+
+def test_submit_answer_maps_to_answer_only(tmp_path: Path) -> None:
+    bundle, built = one(tmp_path, hydro_pkg("type: submit_answer\n"))
+    assert not bundle.errors and bundle.problem_type == "answer_only" and bundle.answer_files
+    with zipfile.ZipFile(io.BytesIO(built)) as zf:
+        data = parse_testdata(zf)
+    assert data.problem_type == "answer_only"
+    assert sorted(data.answer_names.values()) == sorted(bundle.answer_files.values())
 
 
 # --------------------------------------------------------------------------- #
@@ -411,12 +436,20 @@ def test_unknown_builtin_checker(tmp_path: Path) -> None:
     assert codes(bundle.errors) == ["checker_unknown"]
 
 
-def test_strict_compare_is_relaxed(tmp_path: Path) -> None:
+def test_strict_compare_maps_to_strict(tmp_path: Path) -> None:
     bundle, _ = one(tmp_path, hydro_pkg("checker_type: strict\n"))
-    assert bundle.checker is None and codes(bundle.warnings) == ["strict_compare_relaxed"]
+    assert bundle.checker is None and bundle.warnings == [] and bundle.compare_mode == "strict"
 
 
-@pytest.mark.parametrize("kind", ["hustoj", "lemon", "qduoj", "syzoj", "kattis"])
+def test_lemon_checker_uses_lemon_protocol(tmp_path: Path) -> None:
+    bundle, built = one(tmp_path, hydro_pkg("checker_type: lemon\nchecker: chk.cpp\n",
+                                            extra={"1001/testdata/chk.cpp": "int main(){}"}))
+    assert not bundle.errors and bundle.checker_protocol == "lemon"
+    with zipfile.ZipFile(io.BytesIO(built)) as zf:
+        assert parse_testdata(zf).checker_protocol == "lemon"
+
+
+@pytest.mark.parametrize("kind", ["hustoj", "qduoj", "syzoj", "kattis"])
 def test_foreign_checker_protocols_are_rejected(tmp_path: Path, kind: str) -> None:
     bundle, _ = one(tmp_path, hydro_pkg("checker_type: %s\nchecker: chk.cpp\n" % kind,
                                         extra={"1001/testdata/chk.cpp": "int main(){}"}))

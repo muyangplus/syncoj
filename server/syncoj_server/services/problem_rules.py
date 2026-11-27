@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import List
 
 from sqlalchemy import select
@@ -23,7 +24,7 @@ from ..config import Settings
 from ..models import Problem
 from . import matching
 
-__all__ = ["patterns_for", "rules_for"]
+__all__ = ["patterns_for", "rules_for", "answer_patterns", "answer_extensions"]
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +36,8 @@ def patterns_for(row: Problem, settings: Settings) -> List[str]:
     默认模式而不是抛异常：一道题的模式读不出来不该让整个题目列表 500。
     """
     if not row.file_patterns:
+        if (row.problem_type or "") == "answer_only":
+            return answer_patterns(row)
         return [settings.default_file_pattern]
 
     try:
@@ -46,6 +49,44 @@ def patterns_for(row: Problem, settings: Settings) -> List[str]:
     if not isinstance(stored, list):
         return [settings.default_file_pattern]
     return [str(p) for p in stored if isinstance(p, str) and p.strip()]
+
+
+def answer_patterns(row: Problem) -> List[str]:
+    """提交答案题没配模式时的默认模式（§12.13）：``{ident}/<答案名公共前缀>*<扩展名>``，每种扩展名
+    一条。用公共前缀而不是 ``*.out``：选手目录里编译出来的 ``a.out`` 之类不该被当成答案收上来。
+    还没有数据包时用 ``{ident}/{ident}*.out``。"""
+    try:
+        info = json.loads(row.testdata_info or "{}")
+    except ValueError:
+        info = {}
+    names = info.get("answer_names") if isinstance(info, dict) else None
+    if not isinstance(names, dict) or not names:
+        return ["{ident}/{ident}*.out"]
+    resolved = [str(n).replace("{ident}", row.ident) for n in names.values()]
+    patterns = []
+    for ext in sorted({n[n.rfind("."):] for n in resolved if "." in n}):
+        group = [n[: -len(ext)] for n in resolved if n.endswith(ext)]
+        prefix = os.path.commonprefix(group)
+        if prefix.startswith(row.ident):
+            prefix = "{ident}" + prefix[len(row.ident):]
+        patterns.append("{ident}/%s*%s" % (prefix, ext))
+    return patterns
+
+
+def answer_extensions(rows) -> List[str]:
+    """一批题目里提交答案题的答案扩展名（Agent 要多收这些扩展名的文件）。"""
+    exts = set()
+    for row in rows:
+        if (row.problem_type or "") != "answer_only":
+            continue
+        try:
+            info = json.loads(row.testdata_info or "{}")
+        except ValueError:
+            continue
+        exts.update(str(e).lower() for e in (info.get("answer_exts") or []) if str(e).startswith("."))
+        if not info.get("answer_exts"):
+            exts.add(".out")
+    return sorted(exts)
 
 
 def rules_for(session, contest_id: int, settings: Settings) -> List[matching.ProblemRule]:

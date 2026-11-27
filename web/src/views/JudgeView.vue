@@ -27,6 +27,8 @@ import { useContestStore } from '@/stores/contest'
 import { formatTime } from '@/utils/format'
 import { FLAG_FILTERS, flagParam, flagRowClass } from '@/utils/judgeFlags'
 import { TRIGGER_FILTERS, triggerLabel, triggerParams } from '@/utils/judgeTrigger'
+import { compareModeShort, judgeStatus, problemTypeLabel, taskStatusCode } from '@/utils/judgeStatus'
+import JudgeStatusTag from '@/components/JudgeStatusTag.vue'
 
 const contest = useContestStore()
 const router = useRouter()
@@ -115,9 +117,42 @@ function openSetting(row: ProblemOut): void {
 }
 
 function ioLabel(row: ProblemOut): string {
+  if (row.problem_type === 'answer_only') return '—'
+  const files = `${row.input_file || `${row.ident}.in`} / ${row.output_file || `${row.ident}.out`}`
+  if (row.io_mode === 'auto') return `自动 · ${files}`
   if (row.io_mode !== 'file') return '标准输入输出'
-  return `${row.input_file || `${row.ident}.in`} / ${row.output_file || `${row.ident}.out`}`
+  return files
 }
+
+// ---- 取消（CA）与重新评测 ----
+
+const cancelling = ref(false)
+
+async function cancelTasks(payload: { problem?: string; player_id?: number; task_id?: number }, label: string): Promise<void> {
+  const contestId = contest.currentId
+  if (!contestId) return
+  try {
+    await ElMessageBox.confirm(`${label}：排队与评测中的任务将被取消，不写成绩。`, '取消评测？', {
+      type: 'warning',
+      confirmButtonText: '取消评测',
+      cancelButtonText: '返回',
+    })
+  } catch {
+    return
+  }
+  cancelling.value = true
+  try {
+    const result = await judgingApi.cancel(contestId, payload)
+    ElMessage.success(`已取消 ${result.cancelled} 个任务`)
+    await Promise.all([loadProgress(), tasks.reload()])
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  } finally {
+    cancelling.value = false
+  }
+}
+
+const UNSERVABLE_LABEL: Record<string, string> = { grader: '函数交互', answer_only: '提交答案', interactive: '交互' }
 
 // ---- 导入 / 导出题目配置 ----
 
@@ -262,15 +297,6 @@ const tasks = useList<JudgeTaskOut>({
   watches: [() => contest.currentId, () => taskTrigger.value, () => taskFlag.value],
 })
 
-const TASK_STATUS: Record<string, string> = { queued: '排队', running: '评测中', done: '完成', failed: '失败' }
-const OUTCOME_TYPE: Record<string, 'success' | 'warning' | 'danger' | 'info'> = {
-  AC: 'success',
-  WA: 'danger',
-  RE: 'danger',
-  TLE: 'warning',
-  MLE: 'warning',
-  OLE: 'warning',
-}
 
 const taskDetailOpen = ref(false)
 const taskDetailId = ref<number | null>(null)
@@ -350,9 +376,17 @@ function openPlayerTimeline(): void {
           <el-tag v-else size="small" type="info" effect="plain">外部评测器</el-tag>
         </template>
       </el-table-column>
+      <el-table-column label="题型" width="120">
+        <template #default="{ row }">
+          <span>{{ problemTypeLabel(row.problem_type) }}</span>
+          <span v-if="row.judge_mode === 'builtin' && row.compare_mode && row.compare_mode !== 'both' && !row.testdata?.has_checker" class="cell-sub">
+            · {{ compareModeShort(row.compare_mode) }}
+          </span>
+        </template>
+      </el-table-column>
       <el-table-column label="时限 / 内存" width="130">
         <template #default="{ row }">
-          <template v-if="row.judge_mode === 'builtin'">
+          <template v-if="row.judge_mode === 'builtin' && row.problem_type !== 'answer_only'">
             {{ row.time_limit_ms ?? 1000 }} ms / {{ row.memory_limit_mb ?? 256 }} MB
           </template>
           <span v-else class="muted">—</span>
@@ -371,6 +405,7 @@ function openPlayerTimeline(): void {
             {{ row.testdata.cases }} 个测试点
             <template v-if="row.testdata.subtasks"> · {{ row.testdata.subtasks }} 个子任务</template>
             <template v-if="row.testdata.has_checker"> · checker</template>
+            <template v-if="row.testdata.has_interactor"> · interactor</template>
             · 满分 {{ row.testdata.total_score }}
           </template>
           <el-tag v-else size="small" type="danger" effect="plain">缺数据包</el-tag>
@@ -474,16 +509,53 @@ function openPlayerTimeline(): void {
     <template v-if="progress && progress.total">
       <el-progress :percentage="percent" :status="progress.failed ? 'warning' : undefined" />
       <div class="counts">
-        排队 {{ progress.queued }}<template v-if="progress.delayed">（等待改动停止 {{ progress.delayed }}）</template>
-        · 评测中 {{ progress.running }} · 完成 {{ progress.done }} · 失败 {{ progress.failed }}
+        <el-tooltip :content="`${judgeStatus('PD')?.name}：${judgeStatus('PD')?.description}`" placement="top">
+          <span>PD {{ progress.queued }}</span>
+        </el-tooltip><template v-if="progress.delayed">（等待改动停止 {{ progress.delayed }}）</template>
+        · <el-tooltip :content="`${judgeStatus('CP')?.name}：${judgeStatus('CP')?.description}`" placement="top">
+          <span>CP {{ progress.compiling ?? 0 }}</span>
+        </el-tooltip>
+        · <el-tooltip :content="`${judgeStatus('JG')?.name}：${judgeStatus('JG')?.description}`" placement="top">
+          <span>JG {{ progress.running - (progress.compiling ?? 0) }}</span>
+        </el-tooltip>
+        · 完成 {{ progress.done }}
+        · <el-tooltip :content="`${judgeStatus('SF')?.name}：${judgeStatus('SF')?.description}`" placement="top">
+          <span>SF {{ progress.submit_failed ?? 0 }}</span>
+        </el-tooltip>
+        · <el-tooltip :content="`${judgeStatus('SE')?.name}：${judgeStatus('SE')?.description}`" placement="top">
+          <span>SE {{ progress.system_error ?? 0 }}</span>
+        </el-tooltip>
+        <template v-if="progress.cancelled">
+          · <el-tooltip :content="`${judgeStatus('CA')?.name}：${judgeStatus('CA')?.description}`" placement="top">
+            <span>CA {{ progress.cancelled }}</span>
+          </el-tooltip>
+        </template>
+        <template v-for="(count, kind) in progress.unservable ?? {}" :key="kind">
+          · <span class="error-text">{{ UNSERVABLE_LABEL[kind] ?? kind }} {{ count }} 待评·无评测机</span>
+        </template>
+        <el-button
+          v-if="progress.queued || progress.running"
+          link
+          type="danger"
+          size="small"
+          :loading="cancelling"
+          @click="cancelTasks({}, '全场')"
+        >
+          取消评测
+        </el-button>
       </div>
       <el-table v-if="progress.failures?.length" :data="progress.failures" max-height="280">
+        <el-table-column label="状态" width="70">
+          <template #default="{ row }"><JudgeStatusTag :code="row.code" /></template>
+        </el-table-column>
         <el-table-column prop="player_no" label="考号" width="120" />
         <el-table-column prop="problem" label="题目" width="120" />
         <el-table-column prop="error" label="失败原因" />
         <el-table-column label="操作" width="90" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" size="small" @click="queue(row.problem)">重测本题</el-button>
+            <el-button link type="primary" size="small" @click="queue(row.problem)">
+              {{ row.code === 'SF' ? '重新评测' : '重测本题' }}
+            </el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -543,23 +615,47 @@ function openPlayerTimeline(): void {
             <template #default="{ row }">
               <template v-if="row.status === 'done' && row.score !== null && row.score !== undefined">
                 {{ row.score }} / {{ row.max_score }}
-                <el-tag :type="OUTCOME_TYPE[row.outcome ?? ''] ?? 'info'" size="small" effect="light" class="tag">
-                  {{ row.outcome }}
-                </el-tag>
+                <JudgeStatusTag
+                  :code="row.outcome"
+                  class="tag"
+                  :clickable="row.outcome === 'CE' && row.has_result"
+                  @click="openTask(row)"
+                />
                 <el-tag v-if="row.reused_from" size="small" type="info" effect="plain" class="tag">复用</el-tag>
                 <el-tag v-if="row.in_matrix" size="small" type="primary" effect="plain" class="tag">计入成绩</el-tag>
                 <JudgeFlagTags :warning="row.warning_count" :risk="row.risk_count" class="tag" />
               </template>
               <span v-else-if="row.status === 'done' && row.outcome === 'missing'" class="muted">未交</span>
-              <span v-else-if="row.status === 'failed'" class="error-text">{{ row.error || '失败' }}</span>
+              <template v-else-if="row.status === 'failed'">
+                <JudgeStatusTag :code="taskStatusCode(row)" class="tag" />
+                <span class="error-text">{{ row.error || '' }}</span>
+              </template>
               <span v-else class="muted">
-                {{ TASK_STATUS[row.status] ?? row.status
-                }}<template v-if="row.not_before && row.status === 'queued'">（{{ formatTime(row.not_before).slice(11) }} 后）</template>
+                <JudgeStatusTag :code="taskStatusCode(row)" class="tag" />
+                <template v-if="row.not_before && row.status === 'queued'">（{{ formatTime(row.not_before).slice(11) }} 后）</template>
               </span>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="130" fixed="right">
+          <el-table-column label="操作" width="170" fixed="right">
             <template #default="{ row }">
+              <el-button
+                v-if="row.status === 'queued' || row.status === 'running'"
+                link
+                type="danger"
+                size="small"
+                @click="cancelTasks({ task_id: row.id }, `${row.player_no} · ${row.problem}`)"
+              >
+                取消
+              </el-button>
+              <el-button
+                v-else-if="row.status === 'failed' && row.outcome !== 'SE'"
+                link
+                type="primary"
+                size="small"
+                @click="queue(row.problem)"
+              >
+                重新评测
+              </el-button>
               <el-button link type="primary" size="small" :disabled="!row.has_result" @click="openTask(row)">
                 明细
               </el-button>

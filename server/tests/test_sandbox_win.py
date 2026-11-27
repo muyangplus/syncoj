@@ -420,3 +420,13 @@ def test_win_提交答案(tmp_path: Path) -> None:
                                    runner.ProblemConfig(ident="ab", problem_type="answer_only"), _boxes(tmp_path))
     assert [case.status for case in outcome.cases] == ["AC", "WA"], outcome
     assert outcome.score == 50
+
+
+@windows
+@needs_windows_gxx
+def test_win_自动IO与严格比较(tmp_path: Path) -> None:
+    assert _judge(tmp_path, AB, io_mode="auto").status == "AC"
+    freopen = AB.replace("int main(){", "int main(){freopen(\"ab.out\",\"w\",stdout);")
+    assert _judge(tmp_path, freopen, io_mode="auto").status == "AC"
+    spaced = AB.replace("%lld\\n", "%lld \\n")
+    assert _judge(tmp_path, spaced, compare_mode="strict").status == "PE"

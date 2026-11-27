@@ -177,6 +177,19 @@ def _parse_stored(ctx: AppContext, row: Problem, kind: str) -> Dict[str, object]
     return data.summary()
 
 
+def _warn_answer_size(archive: zipfile.ZipFile, data, summary: Dict[str, object], limit: int) -> None:
+    """提交答案题：标准答案比 Agent 的单文件上限还大时，选手的答案多半也传不上来 —— 上传时提醒。"""
+    sizes = [archive.getinfo(case.answer).file_size for case in data.cases if case.answer]
+    largest = max(sizes) if sizes else 0
+    summary["max_answer_bytes"] = largest
+    if largest > limit:
+        warnings = list(summary.get("warnings") or [])
+        warnings.append({"code": "answer_too_large",
+                         "message": "最大的答案 %d 字节，超过选手机单文件上限 %d 字节，超出的答案文件收不上来"
+                                    % (largest, limit)})
+        summary["warnings"] = warnings
+
+
 def _check_grader_names(row: Problem, kind: str) -> None:
     """grader 的文件不能与选手代码同名（``<ident>.cpp`` / ``<ident>.c``）。"""
     if kind != "grader" or not row.testdata_info:
@@ -218,6 +231,8 @@ def upload_testdata(
         with zipfile.ZipFile(str(ctx.blobs.path_for(sha256))) as archive:
             data = parse_testdata(archive, kind)
             summary = data.summary()
+            if kind == "answer_only":
+                _warn_answer_size(archive, data, summary, ctx.settings.max_file_size)
     except (zipfile.BadZipFile, TestdataError) as exc:
         _reclaim_blobs(ctx, [sha256])
         message = "不是合法的 zip" if isinstance(exc, zipfile.BadZipFile) else str(exc)

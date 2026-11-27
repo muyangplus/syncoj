@@ -120,6 +120,24 @@ def test_提交答案题_回收答案文件_领到清单(client, admin_headers, 
     assert blob.status_code == 200 and blob.content == b"1\n"
 
 
+def test_提交答案题_答案超过单文件上限时提醒(client, admin_headers, problem) -> None:
+    set_builtin(client, admin_headers, problem, problem_type="answer_only")
+    limit = client.app.state.ctx.settings.max_file_size
+    data = zip_bytes({"1.in": "", "1.ans": "x" * (limit + 1)})
+    body = client.post("/api/v1/admin/problems/%d/testdata" % problem["id"],
+                       files={"file": ("a.zip", data, "application/zip")}, headers=admin_headers).json()
+    assert [w["code"] for w in body["testdata"]["warnings"]] == ["answer_too_large"]
+
+
+def test_评测侧box号段校验(tmp_path) -> None:
+    token = tmp_path / "token"
+    token.write_text("t", encoding="utf-8")
+    base = ["--server", "http://127.0.0.1:9", "--token-file", str(token), "--backend", "isolate",
+            "--cache-dir", str(tmp_path / "c")]
+    assert worker.main(base + ["--box-id", "0", "--slots", "2", "--trusted-box-id", "1"]) == 2
+    assert worker.main(base + ["--box-id", "600", "--trusted-box-id", "1000"]) == 2
+
+
 def test_没有提交答案题的场次不多收扩展名(client, admin_headers, problem, enrolled) -> None:
     reply = tick(client, enrolled["token"], [], machine_id=enrolled["machine_id"])
     assert ".out" not in reply["config"]["extensions"]

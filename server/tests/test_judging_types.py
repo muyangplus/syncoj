@@ -298,3 +298,29 @@ def test_提交答案_checker给部分分(tmp_path) -> None:
     outcome = runner.judge_answers({"1": tmp_path / "a1"}, {"1": "ab1.out"}, data,
                                    runner.ProblemConfig(ident="ab", problem_type="answer_only"), factory(tmp_path))
     assert outcome.status == "PA" and outcome.score == 50
+
+
+# ------------------------------------------------------------ IO auto ------- #
+
+
+@needs_gcc
+def test_自动IO_标准输入输出与freopen都能评(tmp_path) -> None:
+    config = {"precheck": {"disabled": ["file_access"]}}
+    files = dict(AB_CASES, **{"config.json": json.dumps(config)})
+    assert judge(tmp_path, AB, files, io_mode="auto").status == "AC"
+    with_freopen = AB.replace("int main(){", "int main(){freopen(\"ab.in\",\"r\",stdin);freopen(\"ab.out\",\"w\",stdout);")
+    assert judge(tmp_path, with_freopen, files, io_mode="auto").status == "AC"
+    # 读标准输入、写输出文件的混合写法
+    mixed = AB.replace("int main(){", "int main(){freopen(\"ab.out\",\"w\",stdout);")
+    assert judge(tmp_path, mixed, files, io_mode="auto").status == "AC"
+    silent = "int main(){return 0;}"
+    outcome = judge(tmp_path, silent, files, io_mode="auto")
+    assert outcome.status == "WA"
+
+
+@needs_gcc
+def test_比较方式与格式错误_端到端(tmp_path) -> None:
+    spaced = AB.replace("%lld\\n", "%lld \\n")
+    assert judge(tmp_path, spaced, AB_CASES).status == "AC"
+    strict = judge(tmp_path, spaced, AB_CASES, compare_mode="strict")
+    assert strict.status == "PE" and strict.score == 0

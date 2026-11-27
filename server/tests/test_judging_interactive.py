@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -143,6 +144,15 @@ def test_交互_交互结束后选手仍在输出判RE(tmp_path) -> None:
     chatty = GUESS.replace("if(r[0]=='=')return 0;", "if(r[0]=='='){for(;;){printf(\"x\\n\");fflush(stdout);}}")
     outcome = judge(tmp_path, chatty, {"1.in": "500\n", "interactor.cpp": INTERACTOR}, problem_type="interactive")
     assert outcome.status == "RE"
+
+
+@needs_gcc
+def test_交互_选手看不到interactor与答案(tmp_path) -> None:
+    spy = GUESS.replace("int main(){", "int main(){const char*n[]={\"interactor\",\"in.txt\",\"ans.txt\","
+                        "\"tout.txt\",\"interactor.cpp\"};for(int i=0;i<5;i++)if(fopen(n[i],\"r\"))return 3;")
+    files = guess_files(**{"1.ans": "secret\n", "config.json": json.dumps({"precheck": {"mode": "off"}})})
+    outcome = judge(tmp_path, spy, files, problem_type="interactive")
+    assert outcome.status == "AC", outcome
 
 
 @needs_gcc

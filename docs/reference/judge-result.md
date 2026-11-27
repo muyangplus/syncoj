@@ -301,6 +301,7 @@ grader.cpp  sum.h    # 函数交互题必有 grader；同目录头文件是 grad
 | `answer_pattern` / `answer_files` | 提交答案题：答案文件名模板（占位符 `{ident}` `{input_stem}` `{case}` `{index}`，默认输入名全是数字时 `{ident}{input_stem}.out`，否则 `{input_stem}.out`）；`answer_files` 逐点指定，优先 |
 
 - 不认识的键只提醒（`unknown_config_key`），不报错。
+- 提交答案题：最大的答案超过服务端 `max_file_size`（选手机单文件上限）时提醒 `answer_too_large`，摘要带 `max_answer_bytes`。
 - 未写分值：总分 100 按测试点平均，余数给最后几个点。
 - `precheck`：源码预检配置（第 7 节）；不合法时上传报 `400 validation_error`。
 - 子任务：得分 = floor(子任务分 × 子任务内各点的最小得分比例)；有点不是 AC / PA 即 0；子任务内的点不单独计分。

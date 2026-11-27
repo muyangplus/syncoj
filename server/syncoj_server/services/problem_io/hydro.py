@@ -23,6 +23,11 @@
 * SYZOJ ``data.yml``：``inputFile`` / ``outputFile`` 模板只替换第一个 ``#``；``min`` / ``mul`` 捆绑
   （``mul`` 给 ``mul_as_bundle``），``sum`` 拆成独立点；时限内存不在文件里（``limits_defaulted``）。
 
+题型（§12.13）：``type: interactive``（``interactor``）→ 交互题；``type: submit_answer`` → 提交答案
+（答案文件名 = 各测试点输出文件名）；``user_extra_files`` 里带 main 的源码当 grader、头文件当附带文件
+→ 函数交互；``objective`` / ``communication`` 报错。``checker_type``：``strict`` → 严格比较，``lemon`` →
+Lemon 协议，``testlib`` 的 points 口径按 ``auto``。
+
 导出：``<ident>/problem.yaml``（pid 不满足 Hydro 规则时省略）+ ``<ident>/testdata/config.yaml`` 与
 扁平化的数据文件。子任务写成 ``type: min``，散点各自写成单点 min 子任务；testlib.h 不写
 （Hydro 评测机总是用自带的那份）。
@@ -76,12 +81,12 @@ _APPROX_CHECKERS = frozenset({"wcmp", "ncmp", "lcmp", "fcmp", "hcmp"})
 #: 名字 → (eps, 是否也认相对误差)。testlib 的 rcmp 是 1.5e-6、只比绝对误差；rcmpN 绝对或相对
 _REAL_CHECKERS = {"rcmp": (1.5e-6, False), "rcmp4": (1e-4, True), "rcmp6": (1e-6, True), "rcmp9": (1e-9, True)}
 
-_PROTOCOL_CHECKERS = frozenset({"hustoj", "lemon", "qduoj", "syzoj", "kattis"})
+_PROTOCOL_CHECKERS = frozenset({"hustoj", "qduoj", "syzoj", "kattis"})
 _TYPE_ERRORS = {
-    "interactive": "interactive_unsupported",
     "communication": "communication_unsupported",
-    "submit_answer": "answers_only_unsupported",
 }
+#: Hydro 的 type → 题型
+_TYPES = {"default": "traditional", "interactive": "interactive", "submit_answer": "answer_only"}
 
 _PID_RE = re.compile(r"^[a-z][0-9a-z]*$", re.I)
 _TIME_RE = re.compile(r"^([0-9]+(?:\.[0-9]*)?)([mu]?)s?$", re.I)
@@ -572,10 +577,12 @@ def _checker(bundle: ProblemBundle, problem: _Problem, config: Dict[str, Any], p
     if kind == "default":
         return
     if kind == "strict":
-        bundle.warn(notice("strict_compare_relaxed"))
+        bundle.compare_mode = "strict"
         return
-    if kind != "testlib":
+    if kind not in ("testlib", "lemon"):
         raise _ConfigError(notice("checker_protocol_unsupported", checker=kind))
+    bundle.checker_protocol = "lemon" if kind == "lemon" else None
+    bundle.checker_points = "auto" if kind == "testlib" else None
     spec = config.get("checker")
     name = spec.get("file") if isinstance(spec, dict) else spec
     if not isinstance(name, str) or not name.strip():
@@ -628,13 +635,19 @@ def _langs(bundle: ProblemBundle, config: Dict[str, Any]) -> None:
 def _hydro_config(bundle: ProblemBundle, problem: _Problem, config: Dict[str, Any], path: str,
                   time: Any, memory: Any) -> None:
     kind = config.get("type") or "default"
-    if kind != "default":
+    if kind not in _TYPES:
         code = _TYPE_ERRORS.get(str(kind))
         raise _ConfigError(notice(code) if code else notice("problem_type_unsupported", type=kind))
+    bundle.problem_type = _TYPES[str(kind)]
     if config.get("multi_pass"):
         raise _ConfigError(notice("problem_type_unsupported", type="multi_pass"))
-    if _as_list(config.get("user_extra_files")):
-        raise _ConfigError(notice("grader_unsupported"))
+    extra_files = _as_list(config.get("user_extra_files"))
+    if extra_files:
+        if bundle.problem_type != "traditional":
+            raise _ConfigError(notice("grader_unsupported"))
+        _grader(bundle, problem, extra_files)
+    if bundle.problem_type == "interactive":
+        _interactor(bundle, problem, config)
     filename = config.get("filename")
     if isinstance(filename, str) and filename.strip():
         filename = filename.strip()
@@ -650,6 +663,48 @@ def _hydro_config(bundle: ProblemBundle, problem: _Problem, config: Dict[str, An
     normalized = _normalize(bundle, problem, subtasks, time, memory, {"min": None, "max": "max_as_bundle"})
     _apply_limits(bundle, normalized, time, memory, path)
     bundle.cases, bundle.subtasks = normalized.cases, normalized.subtasks
+    if bundle.problem_type == "answer_only":
+        bundle.io_mode = "stdio"
+        bundle.answer_files = {
+            case.name: (case.answer.member or "").rsplit("/", 1)[-1]
+            for case in bundle.cases if case.answer is not None and case.answer.member
+        }
+
+
+def _grader(bundle: ProblemBundle, problem: _Problem, files: List[Any]) -> None:
+    """``user_extra_files``：和选手代码一起编译的文件。带 ``main`` 的 C / C++ 源码当 grader，头文件当附带文件。"""
+    for item in files:
+        text = str(item)
+        base = text.replace("\\", "/").rsplit("/", 1)[-1]
+        found = problem.resolve(text)
+        if found is None:
+            raise _ConfigError(notice("missing_file", path=problem.view.full(problem.path(text))))
+        ref = FileRef(member=problem.view.full(found))
+        if base.lower().endswith((".cpp", ".cc", ".c")) and bundle.grader is None \
+                and re.search(rb"\bmain\s*\(", problem.view.read(found)):
+            bundle.grader = ref
+            bundle.grader_name = "grader.c" if base.lower().endswith(".c") else "grader.cpp"
+        elif base.lower().endswith((".h", ".hpp", ".cpp", ".cc", ".c")):
+            bundle.grader_files[base] = ref
+        else:
+            raise _ConfigError(notice("grader_unsupported"))
+    if bundle.grader is None:
+        raise _ConfigError(notice("grader_unsupported"))
+    bundle.problem_type = "grader"
+
+
+def _interactor(bundle: ProblemBundle, problem: _Problem, config: Dict[str, Any]) -> None:
+    spec = config.get("interactor")
+    name = spec.get("file") if isinstance(spec, dict) else spec
+    if not isinstance(name, str) or not name.strip():
+        raise _ConfigError(notice("checker_missing_source", path="interactor"))
+    if not checker_language_ok(name.strip()):
+        raise _ConfigError(notice("checker_language", language=name.rsplit(".", 1)[-1]))
+    found = problem.resolve(name.strip())
+    if found is None:
+        raise _ConfigError(notice("checker_missing_source", path=problem.view.full(problem.path(name.strip()))))
+    bundle.interactor = FileRef(member=problem.view.full(found))
+    bundle.io_mode = "stdio"
 
 
 def _syzoj_config(bundle: ProblemBundle, problem: _Problem, config: Dict[str, Any], path: str) -> None:
@@ -774,8 +829,14 @@ def parse(view: ArchiveView) -> ImportResult:
 # --------------------------------------------------------------------------- #
 
 
+#: 题型 → Hydro 的 type（grader 是 default + user_extra_files）
+_EXPORT_TYPES = {"interactive": "interactive", "answer_only": "submit_answer"}
+
+
 def _filename(problem: ExportProblem, warnings: List[Notice]) -> Optional[str]:
-    if problem.io_mode != "file":
+    if problem.io_mode == "auto":
+        warnings.append(notice("io_auto_as_file"))
+    elif problem.io_mode != "file":
         return None
     inp, out = problem.effective_input_file, problem.effective_output_file
     if inp.endswith(".in") and out.endswith(".out") and inp[:-3] == out[:-4] and inp[:-3]:
@@ -822,7 +883,7 @@ def _export_one(problem: ExportProblem, open_blob: OpenBlob, zf: Any) -> List[No
     zf.writestr(folder + "/" + PROBLEM_YAML, yaml_lite.dump(meta))
 
     config: Dict[str, Any] = {
-        "type": "default",
+        "type": _EXPORT_TYPES.get(problem.problem_type, "default"),
         "time": "%dms" % problem.effective_time_limit_ms,
         "memory": "%dm" % problem.effective_memory_limit_mb,
     }
@@ -836,10 +897,32 @@ def _export_one(problem: ExportProblem, open_blob: OpenBlob, zf: Any) -> List[No
         flat = flat_case_names([case.name for case in testdata.cases])
         for case in testdata.cases:
             _copy(zf_in, case.input, zf, prefix + flat[case.name] + ".in")
-            _copy(zf_in, case.answer, zf, prefix + flat[case.name] + ".out")
+            if case.answer:
+                _copy(zf_in, case.answer, zf, prefix + flat[case.name] + ".out")
+            else:
+                zf.writestr(prefix + flat[case.name] + ".out", b"")
+        if testdata.checker is None and problem.compare_mode == "strict" and problem.problem_type != "interactive":
+            config["checker_type"] = "strict"
+        elif testdata.checker is None and problem.compare_mode in ("trailing_spaces", "trailing_newlines"):
+            warnings.append(notice("compare_mode_approx", mode=problem.compare_mode))
+        if testdata.interactor is not None:
+            config["interactor"] = "interactor.cpp"
+            _copy(zf_in, testdata.interactor, zf, prefix + "interactor.cpp")
+        if testdata.grader:
+            member = testdata.grader.get("cpp") or next(iter(testdata.grader.values()))
+            base = member.rsplit("/", 1)[-1]
+            _copy(zf_in, member, zf, prefix + base)
+            names = [base]
+            for item in testdata.grader_files:
+                item_base = item.rsplit("/", 1)[-1]
+                _copy(zf_in, item, zf, prefix + item_base)
+                names.append(item_base)
+            config["user_extra_files"] = names
         if testdata.checker is not None:
-            config["checker_type"] = "testlib"
+            config["checker_type"] = "lemon" if testdata.checker_protocol == "lemon" else "testlib"
             config["checker"] = "checker.cpp"
+            if testdata.checker_protocol == "exitcode":
+                warnings.append(notice("checker_protocol_approx", protocol="exitcode"))
             _copy(zf_in, testdata.checker, zf, prefix + "checker.cpp")
             extra = []
             for member in sorted(testdata.checker_support):

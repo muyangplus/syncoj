@@ -325,10 +325,18 @@ def test_spj_language_and_source_checks(tmp_path: Path) -> None:
     assert _errors(bundle) == ["checker_missing_source"]
 
 
-def test_interactive_is_rejected(tmp_path: Path) -> None:
+def test_interactive_maps_to_interactor(tmp_path: Path) -> None:
+    """judgeMode=interactive：spjCode 是 testlib interactor，points 按百分数。"""
     doc = hoj_problem_json(judgeMode="interactive", spjCode=TESTLIB_CHECKER, spjLanguage="C++")
     bundle, _, _ = _one(tmp_path, doc)
-    assert _errors(bundle) == ["interactive_unsupported"]
+    assert _errors(bundle) == [] and bundle.problem_type == "interactive"
+    assert bundle.interactor is not None and bundle.checker is None and bundle.io_mode == "stdio"
+
+
+def test_spj_points_are_percent(tmp_path: Path) -> None:
+    doc = hoj_problem_json(judgeMode="spj", spjCode=TESTLIB_CHECKER, spjLanguage="C++")
+    bundle, _, _ = _one(tmp_path, doc)
+    assert bundle.checker_points == "percent"
 
 
 def test_judge_mode_mismatch_follows_problem(tmp_path: Path) -> None:
@@ -347,9 +355,9 @@ def test_judge_mode_mismatch_follows_problem(tmp_path: Path) -> None:
     assert built["checker"] is not None and "judge_mode_mismatch" not in _codes(bundle)
 
 
-def test_remove_end_blank_off_warns(tmp_path: Path) -> None:
+def test_remove_end_blank_off_is_strict(tmp_path: Path) -> None:
     bundle, _, _ = _one(tmp_path, hoj_problem_json(isRemoveEndBlank=False))
-    assert "strict_compare_relaxed" in _codes(bundle)
+    assert "strict_compare_relaxed" not in _codes(bundle) and bundle.compare_mode == "strict"
 
 
 def test_extra_files(tmp_path: Path) -> None:

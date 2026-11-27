@@ -300,7 +300,10 @@ def parse_testdata(archive: zipfile.ZipFile, problem_type: Optional[str] = None)
                 answers[stem] = name
 
     names = sorted(inputs, key=_natural_key)
-    answers_optional = kind == "interactive" or (kind == "answer_only" and checker is not None)
+    # 交互题的答案给 interactor 用、可以没有；有 checker 的提交答案题与 exitcode 协议（QDUOJ 的两参数 spj
+    # 不读答案）也可以没有，按空文件
+    answers_optional = kind == "interactive" or (checker is not None and (
+        kind == "answer_only" or config.get("checker_protocol") == "exitcode"))
     missing = [name for name in names if name not in answers]
     if missing and not answers_optional:
         raise TestdataError("这些输入没有对应的答案（.ans / .out）：%s" % ", ".join(missing[:10]))

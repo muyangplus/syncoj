@@ -4593,6 +4593,11 @@ export interface components {
              * @default 0
              */
             cases: number;
+            /**
+             * Compare Mode
+             * @default both
+             */
+            compare_mode: string;
             /** Compile Flags */
             compile_flags?: string | null;
             /** Errors */
@@ -4629,6 +4634,11 @@ export interface components {
             memory_limit_mb?: number | null;
             /** Output File */
             output_file?: string | null;
+            /**
+             * Problem Type
+             * @default traditional
+             */
+            problem_type: string;
             /** Source Name */
             source_name: string;
             /**

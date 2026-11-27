@@ -10,8 +10,9 @@
 * ``display_id`` → ident 建议；``title`` → 标题
 * ``time_limit``（ms）/ ``memory_limit``（MB）→ 直接对应；缺失或不是数字时按默认值并提示
 * ``rule_type=OI`` → 每个测试点用自己的分值；``ACM`` → 全部测试点一个捆绑子任务，100 分
-* ``spj`` 不为 null → 错误 ``qduoj_spj_unsupported``（两参数 spj，没有标准答案）
-* ``io_mode`` 不在导出包里，一律 stdio；比较方式用默认比较（比 QDUOJ 的整文件 rstrip 宽松）
+* ``spj`` 不为 null → checker，``checker_protocol: exitcode``（QDUOJ 的 spj 以 ``spj <输入> <选手输出>``
+  调用、退出码 0 通过 1 答案错；本系统多传的第三个参数它不读）；只收 C / C++
+* ``io_mode`` 不在导出包里，一律 stdio；比较方式 ``trailing_newlines``（QDUOJ 只对整个文件去尾部空白）
 * ``template`` 非空 → ``template_dropped``；题面、样例、标签、标程 → 整包一次 ``statement_dropped``
 """
 
@@ -138,8 +139,19 @@ def _parse_problem(view: ArchiveView, folder: str, result: ImportResult) -> Prob
     rule_type = str(doc.get("rule_type") or "OI").strip().upper()
     if rule_type not in ("OI", "ACM"):
         bundle.fail(notice("problem_type_unsupported", type=rule_type))
-    if doc.get("spj") is not None:
-        bundle.fail(notice("qduoj_spj_unsupported"))
+    spj = doc.get("spj")
+    if spj is not None:
+        code = spj.get("code") if isinstance(spj, dict) else None
+        language = str(spj.get("language") or "") if isinstance(spj, dict) else ""
+        if not isinstance(code, str) or not code.strip():
+            bundle.fail(notice("checker_missing_source", path=view.full(path) + ": spj"))
+        elif language.strip().upper() not in ("C", "C++", ""):
+            bundle.fail(notice("checker_language", language=language))
+        else:
+            bundle.checker = FileRef(data=code.encode("utf-8"))
+            bundle.checker_protocol = "exitcode"
+    else:
+        bundle.compare_mode = "trailing_newlines"
     if bundle.errors:
         return bundle
 
@@ -165,14 +177,16 @@ def _parse_problem(view: ArchiveView, folder: str, result: ImportResult) -> Prob
             bundle.fail(notice("missing_file", path=view.full("%s/testcase/%d.in" % (folder, k))))
             return bundle
         answer_rel = "%s/testcase/%d.out" % (folder, k)
-        if not view.exists(answer_rel):
+        has_answer = view.exists(answer_rel)
+        if not has_answer and bundle.checker is None:
             bundle.fail(notice("missing_answer", name=str(k)))
             return bundle
         bundle.cases.append(
             BundleCase(
                 name=str(k),
                 input=FileRef(member=view.full(input_rel)),
-                answer=FileRef(member=view.full(answer_rel)),
+                # spj 题没有标准答案：按空文件
+                answer=FileRef(member=view.full(answer_rel)) if has_answer else None,
                 score=scores[k - 1],
             )
         )

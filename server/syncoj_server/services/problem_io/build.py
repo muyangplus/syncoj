@@ -139,7 +139,7 @@ def _check_volume(bundle: ProblemBundle, archive: Archive) -> int:
     写出的数据包里每次引用都是一份真实的副本，评测时也要逐份解出，所以这里**不**去重。"""
     total = 0
     for case in bundle.cases:
-        total += _ref_size(case.input, archive) + _ref_size(case.answer, archive)
+        total += _ref_size(case.input, archive) + (_ref_size(case.answer, archive) if case.answer else 0)
         if total > MAX_BUILD_BYTES:
             raise TestdataError("解压后超过 %s" % human_size(MAX_BUILD_BYTES))
     return total
@@ -178,6 +178,17 @@ def _plan(
     config: Dict[str, object] = {
         "cases": [{"name": flat[case.name], "score": int(case.score)} for case in bundle.cases],
     }
+    if bundle.problem_type != "traditional":
+        config["type"] = bundle.problem_type
+    if bundle.checker is not None and bundle.checker_protocol:
+        config["checker_protocol"] = bundle.checker_protocol
+    if bundle.checker is not None and bundle.checker_points:
+        config["checker_points"] = bundle.checker_points
+    if bundle.problem_type == "answer_only" and bundle.answer_files:
+        config["answer_files"] = {flat[name]: file for name, file in bundle.answer_files.items() if name in flat}
+    if bundle.problem_type == "grader" and bundle.grader is not None:
+        config["grader"] = bundle.grader_name
+        config["grader_files"] = sorted(_base(name) for name in bundle.grader_files)
     if bundle.subtasks:
         subtasks = []
         for sub in bundle.subtasks:
@@ -205,10 +216,12 @@ def _write_zip(
             name = flat[case.name]
             if skeleton:
                 zf.writestr(name + ".in", b"")
-                zf.writestr(name + ".ans", b"")
+                if case.answer is not None:
+                    zf.writestr(name + ".ans", b"")
             else:
                 _copy_ref(case.input, archive, zf, name + ".in")
-                _copy_ref(case.answer, archive, zf, name + ".ans")
+                if case.answer is not None:
+                    _copy_ref(case.answer, archive, zf, name + ".ans")
         zf.writestr("config.json", json.dumps(config, ensure_ascii=False, indent=1))
         if bundle.checker is not None:
             source = read_ref(bundle.checker, archive)
@@ -222,6 +235,16 @@ def _write_zip(
                 if not base.lower().endswith((".h", ".hpp")) or base.lower() == "checker.cpp":
                     continue
                 zf.writestr(base, read_ref(ref, archive))
+        if bundle.interactor is not None:
+            zf.writestr("interactor.cpp", read_ref(bundle.interactor, archive))
+        if bundle.grader is not None:
+            zf.writestr(bundle.grader_name, read_ref(bundle.grader, archive))
+            for name, ref in sorted(bundle.grader_files.items()):
+                zf.writestr(_base(name), read_ref(ref, archive))
+
+
+def _base(name: str) -> str:
+    return name.replace("\\", "/").rsplit("/", 1)[-1]
 
 
 def _copy_raw(ref: FileRef, archive: Archive, out: IO[bytes]) -> None:
@@ -251,7 +274,7 @@ def write_testdata(
             budget.charge(_ref_size(bundle.raw_testdata, archive))
         _copy_raw(bundle.raw_testdata, archive, out)
         out.seek(0)
-        return summarize(out)
+        return summarize(out, bundle.problem_type)
     flat, config = _plan(bundle, archive, budget)
     _write_zip(bundle, archive, flat, config, out)
     out.seek(0)
@@ -265,12 +288,12 @@ def build_testdata_zip(bundle: ProblemBundle, archive: Archive) -> bytes:
     return buffer.getvalue()
 
 
-def summarize(data: Union[bytes, IO[bytes]]) -> Dict[str, object]:
+def summarize(data: Union[bytes, IO[bytes]], problem_type: Optional[str] = None) -> Dict[str, object]:
     """数据包摘要（与上传时写进 ``testdata_info`` 的一样）。不合法抛 ``TestdataError``。"""
     source = io.BytesIO(data) if isinstance(data, bytes) else data
     try:
         with zipfile.ZipFile(source) as zf:
-            return parse_testdata(zf).summary()
+            return parse_testdata(zf, problem_type).summary()
     except zipfile.BadZipFile:
         raise TestdataError("不是合法的 zip")
 
@@ -278,7 +301,7 @@ def summarize(data: Union[bytes, IO[bytes]]) -> Dict[str, object]:
 def _self_check(bundle: ProblemBundle, flat: Dict[str, str], source: IO[bytes]) -> Dict[str, object]:
     """回读写出的数据包与 bundle 对账；一致时返回摘要。"""
     with zipfile.ZipFile(source) as zf:
-        parsed = parse_testdata(zf)
+        parsed = parse_testdata(zf, bundle.problem_type)
     want_scores = {flat[case.name]: int(case.score) for case in bundle.cases}
     got_scores = {case.name: case.score for case in parsed.cases}
     want_subs = sorted((int(s.score), sorted(flat[n] for n in s.cases)) for s in bundle.subtasks)
@@ -298,7 +321,7 @@ def _verify_members(bundle: ProblemBundle, archive: Archive, budget: BuildBudget
     同一成员每次请求只读一遍（记在 ``budget.verified``）。"""
     for case in bundle.cases:
         for ref in (case.input, case.answer):
-            if ref.member is None or ref.member in budget.verified:
+            if ref is None or ref.member is None or ref.member in budget.verified:
                 continue
             with _open_ref(ref, archive) as source:
                 while source.read(_CHUNK):

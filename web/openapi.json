@@ -3065,6 +3065,11 @@
             "title": "Cases",
             "type": "integer"
           },
+          "compare_mode": {
+            "default": "both",
+            "title": "Compare Mode",
+            "type": "string"
+          },
           "compile_flags": {
             "anyOf": [
               {
@@ -3154,6 +3159,11 @@
               }
             ],
             "title": "Output File"
+          },
+          "problem_type": {
+            "default": "traditional",
+            "title": "Problem Type",
+            "type": "string"
           },
           "source_name": {
             "title": "Source Name",

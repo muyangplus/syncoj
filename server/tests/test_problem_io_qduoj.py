@@ -79,12 +79,24 @@ def test_acm_with_one_case_is_a_plain_case(tmp_path: Path) -> None:
     assert "acm_as_bundle" not in _codes(bundle.warnings)
 
 
-def test_spj_is_rejected(tmp_path: Path) -> None:
+def test_spj_maps_to_exitcode_checker(tmp_path: Path) -> None:
+    """QDUOJ 的两参数 spj（spj <输入> <选手输出>，退出码判定）→ exitcode 协议的 checker。"""
     doc = qduoj_problem_json(spj={"code": "int main(){return 0;}", "language": "C++"})
     result, (data,) = _parse(tmp_path, make_qduoj_zip([doc]))
     (bundle,) = result.problems
-    assert _codes(bundle.errors) == ["qduoj_spj_unsupported"] and data is None
-    assert bundle.errors[0].message == "两参数 spj（无标准答案）无法导入"
+    assert _codes(bundle.errors) == [] and data is not None
+    assert bundle.checker is not None and bundle.checker_protocol == "exitcode"
+
+
+def test_spj_in_other_language_is_rejected(tmp_path: Path) -> None:
+    doc = qduoj_problem_json(spj={"code": "print(1)", "language": "Python3"})
+    result, _ = _parse(tmp_path, make_qduoj_zip([doc]))
+    assert _codes(result.problems[0].errors) == ["checker_language"]
+
+
+def test_default_compare_ignores_trailing_newlines_only(tmp_path: Path) -> None:
+    result, _ = _parse(tmp_path, make_qduoj_zip([qduoj_problem_json()]))
+    assert result.problems[0].compare_mode == "trailing_newlines"
 
 
 def test_missing_case_number_is_an_error(tmp_path: Path) -> None:

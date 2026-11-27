@@ -69,7 +69,8 @@
 | `timeLimit`(ms) / `memoryLimit`(MB) | 时限 / 内存；缺失或 ≤ 0 的那一项取 1000 ms / 256 MB | `limits_defaulted` |
 | `stackLimit` ≠ `memoryLimit` | 丢弃 | `stack_limit_dropped` |
 | `isFileIO` + `ioReadFileName` / `ioWriteFileName` | 文件 IO + 文件名；ident 取输入主名 | |
-| `problem.judgeMode`（顶层 `judgeMode` 只校验） | `default` 默认比较；`spj` → `spjCode` 写成 checker.cpp；`interactive` → 错误 | `judge_mode_mismatch`、`interactive_unsupported` |
+| `problem.judgeMode`（顶层 `judgeMode` 只校验） | `default` 默认比较；`spj` → `spjCode` 写成 checker.cpp（`checker_points: percent`）；`interactive` → 交互题，`spjCode` 写成 interactor.cpp，一律标准 IO | `judge_mode_mismatch` |
+| `isRemoveEndBlank=false` | `compare_mode: strict` | |
 | `spjLanguage` | 只收 C / C++ | `checker_language` |
 | `spjCode` 没用 testlib | 照样导入 | `checker_not_testlib` |
 | `judgeExtraFile` / `userExtraFile` | testlib.h 丢弃；checker 用到的 `.h` 作支持文件；其余丢弃 | `extra_files_dropped` |
@@ -88,16 +89,17 @@
 |---|---|---|
 | `version` ≠ `"1.0"` | 整包错误 | `version_unsupported` |
 | `sourceFileName` / `problemTitle` | ident / 标题 | |
-| `taskType` 1 / 2 / 3、4 | 错误 | `answers_only_unsupported` / `interactive_unsupported` / `communication_unsupported` |
+| `taskType` 0 / 1 / 2 | 传统 / 提交答案（答案文件名 = 各测试点输出文件名）/ 函数交互（`grader` 写成 grader.cpp，`interactor` 头文件按 `interactorName` 改名作附带文件） | `checker_missing_source`（没有 grader） |
+| `taskType` 3、4 | 错误 | `communication_unsupported` |
 | `standardInputCheck`、`standardOutputCheck` 都为 true | 标准 IO | |
 | 都为 false | 文件 IO，`inputFileName` / `outputFileName` | |
-| 两者不同 | 文件 IO | `mixed_io` |
+| 两者不同 | `io_mode: auto`（输入同时是 stdin 与文件，输出优先取文件） | |
 | `testCases[k]` 1 对文件 / 多对文件 | 普通测试点 / 捆绑子任务，分值 `fullScore` | |
 | `inputFiles` 里的 `*_lemon_SUbtaskDEPENDENCE_fLAg` | 剔除后按下标配对 | `dependency_dropped` |
 | `timeLimit`(ms) / `memoryLimit`(MB) | 取各组最大值 | `limits_collapsed` |
-| `comparisonMode` 1 / 0 / 2 | 默认比较 | — / `strict_compare_relaxed` / `diff_compare_relaxed` |
+| `comparisonMode` 1 / 0 / 2 | 默认比较 / `compare_mode: strict` / 默认比较 | — / — / `diff_compare_relaxed` |
 | `comparisonMode` 3 | 生成实数 checker，eps = 10^-`realPrecision`，绝对或相对误差 | `real_checker_generated` |
-| `comparisonMode` 4 | 错误 | `lemon_spj_unsupported` |
+| `comparisonMode` 4 | Lemon 协议 spj（`checker_protocol: lemon`），找源码的规则同 5 | `checker_missing_source` |
 | `comparisonMode` 5 | `specialJudge` 同目录依次找 `<spj>`(源码)、`<spj>.cpp/.cc`、`<主名>.cpp/.cc`、`checker.cpp`、`chk.cpp`、`spj.cpp`；同目录 `.h` 作支持文件 | `checker_missing_source` |
 | 测试点总数 > 500 | 错误（解析时就报） | `too_many_cases` |
 | `compilerConfiguration`、`diffArguments`、`contestants`、`subFolderCheck` | 忽略 | |
@@ -111,18 +113,21 @@
 | 目录 | 根目录有 `problem.yaml` / `testdata/` / `data.yml` 时整包一题，否则根下每个目录一题；`testdata/` 子目录展开一层 | |
 | `problem.yaml: pid` / `title` | ident / 标题；解析失败只提示 | `problem_yaml_ignored` |
 | `problem.yaml: limits.time_limit`(s) / `memory`(MB) | 覆盖 config | |
-| `type` ≠ `default`、`multi_pass` | 错误 | `interactive_unsupported` 等、`problem_type_unsupported` |
-| `user_extra_files` | 错误 | `grader_unsupported` |
+| `type: interactive` + `interactor` | 交互题，interactor 写成 interactor.cpp；一律标准 IO | `checker_missing_source` |
+| `type: submit_answer` | 提交答案题，答案文件名 = 各测试点输出文件名 | |
+| `type` 其他、`multi_pass` | 错误 | `communication_unsupported`、`problem_type_unsupported` |
+| `user_extra_files` | 带 `main` 的 C / C++ 源码 → grader，其余 `.h` / 源码 → 附带文件，题型 grader；没有带 main 的源码、或与交互 / 提交答案同时出现 → 错误 | `grader_unsupported` |
 | `time` | 数字按 ms；`s`/`ms`/`us` 换算后向下取整；非有限数 → 错误 | `bad_manifest` |
 | `memory` | 数字按 MB；`k`/`m`/`g` 换算后向上取整 | |
 | `filename` | 文件 IO，`<filename>.in/.out`；ident 取 `filename`（覆盖 pid） | |
-| `checker_type` default / strict | 默认比较 | — / `strict_compare_relaxed` |
-| `checker_type: testlib` + `checker: x.cpp` | checker.cpp；`judge_extra_files` 里的 `.h` 作支持文件 | `extra_files_dropped` |
+| `checker_type` default / strict | 默认比较 / `compare_mode: strict` | |
+| `checker_type: testlib` + `checker: x.cpp` | checker.cpp（`checker_points: auto`）；`judge_extra_files` 里的 `.h` 作支持文件 | `extra_files_dropped` |
+| `checker_type: lemon` + `checker: x.cpp` | checker.cpp，`checker_protocol: lemon` | |
 | `checker: rcmp4` / `rcmp6` / `rcmp9` | 实数 checker，1e-4 / 1e-6 / 1e-9，绝对或相对误差 | `real_checker_generated` |
 | `checker: rcmp` | 实数 checker，1.5e-6，只比绝对误差 | `real_checker_generated` |
 | `checker: wcmp` / `ncmp` / `lcmp` / `fcmp` / `hcmp` | 默认比较 | `builtin_checker_approx` |
 | 其他内置 checker | 错误 | `checker_unknown` |
-| `checker_type` hustoj / lemon / qduoj / syzoj / kattis | 错误 | `checker_protocol_unsupported` |
+| `checker_type` hustoj / qduoj / syzoj / kattis | 错误 | `checker_protocol_unsupported` |
 | 子任务没写 `score`（含 0） | 平分 `100 − 已写分之和`，余数给后面几个 | |
 | `subtasks[].type` min（缺省） | 捆绑；单点当普通点 | `subtask_scores_uneven` |
 | `sum` / 平铺 `cases` | 拆成独立点，没写分的点平分子任务分 | |
@@ -142,8 +147,8 @@
 | `time_limit`(ms) / `memory_limit`(MB) | 直接对应；缺失的那一项取默认 | `limits_defaulted` |
 | `test_case_score[k]` | 第 k 个 `testcase/k.in` / `k.out`；缺号报错，多出未列的点报错 | `missing_file`、`cases_unlisted` |
 | `rule_type=OI` / `ACM` | 各点自己的分 / 一个捆绑子任务 100 分 | `acm_as_bundle` |
-| `spj` 非 null | 错误 | `qduoj_spj_unsupported` |
-| IO | 一律标准 IO；默认比较 | |
+| `spj` 非 null | `spj.code` 写成 checker.cpp，`checker_protocol: exitcode`（QDUOJ 以 `spj <输入> <选手输出>` 调用，多传的答案参数它不读；没有 `k.out` 时按空答案）；只收 C / C++ | `checker_language` |
+| IO | 一律标准 IO；没有 spj 时 `compare_mode: trailing_newlines`（QDUOJ 只对整个文件去尾部空白） | |
 | `template` | 丢弃 | `template_dropped` |
 
 ### FPS
@@ -164,23 +169,24 @@
 
 XML：拒绝 DOCTYPE / ENTITY（`xml_unsafe`）；按 1 MB 一块流式解析，只建 `fps` → `item` → 上表元素。
 
-## 5. 原生格式 `syncoj-judge/1`
+## 5. 原生格式 `syncoj-judge/1`、`/2`
 
 ```
 syncoj-problems.json
 <ident>/testdata.zip          # 原样的 blob 字节
 ```
 
-`syncoj-problems.json`：`{"format": "syncoj-judge", "version": 1, "problems": [...]}`，每题字段：
+`syncoj-problems.json`：`{"format": "syncoj-judge", "version": 1, "problems": [...]}`；有非传统题、比较方式不是 `both` 或 `io_mode: auto` 的题时写 `version: 2`（旧服务端读到 2 会 `version_unsupported` 拒收，不会当传统题导入）。每题字段：
 
 | 字段 | 说明 |
 |---|---|
 | `ident`、`title`、`order_index`、`note` | 题目列原值 |
 | `file_patterns` | 库里原值；`null` = 服务端默认模式 |
 | `judge_mode`、`time_limit_ms`、`memory_limit_mb`、`io_mode`、`input_file`、`output_file`、`compile_flags` | 题目列原值 |
+| `problem_type`、`compare_mode` | 题型与比较方式（版本 2 起；缺省 `traditional` / `both`）；内层 zip 按题型过 `parse_testdata` |
 | `testdata` | `{path, name, sha256, size}`；没有数据包时省略。导入时 `name` 只取基本名、去掉控制字符、截到 255 字符，为空用 `<ident>.zip` |
 
-导入：`format` 必须是 `syncoj-judge`，`version > 1` → `version_unsupported`；内层 zip sha256 不符 → `sha_mismatch`；内层 zip 过 `parse_testdata`；各列按原值写回，只校验（ident、IO 文件名、编译参数白名单、代码路径模式）。导出再导入：各列（id 除外）与 `testdata_sha256` 相同。
+导入：`format` 必须是 `syncoj-judge`，`version > 2` → `version_unsupported`；内层 zip sha256 不符 → `sha_mismatch`；内层 zip 过 `parse_testdata`；各列按原值写回，只校验（ident、IO 文件名、编译参数白名单、代码路径模式）。导出再导入：各列（id 除外）与 `testdata_sha256` 相同。
 
 ## 6. 各格式导出映射
 
@@ -192,6 +198,7 @@ syncoj-problems.json
 * 有子任务：`judgeCaseMode=subtask_lowest`，组内每点 score = 子任务分，`groupNum` = 子任务序号；散点各自成组。
 * `languages`：`C`、`C With O2`、`C++`、`C++ With O2`；编译参数带 `-std=c++17`、`-std=c++2a` 或 `-std=c++20` 时加 `C++ 17` 两项，`-std=c++2a` / `-std=c++20` 再加 `C++ 20` 两项。其余参数（含 `-O2`、`-std=c++14`）→ `flags_dropped`。
 * checker 没用 testlib → `checker_not_testlib`。
+* 题型：交互题 `judgeMode=interactive`，interactor 写进 `spjCode`；函数交互、提交答案题 HOJ 没有对应 → 跳过（`type_not_exportable`）。`compare_mode: strict` → `isRemoveEndBlank=false`；`io_mode: auto` 按文件 IO 写出（`io_auto_as_file`）；checker 协议不是 testlib → `checker_protocol_approx`。
 
 ### LemonLime
 
@@ -200,6 +207,7 @@ syncoj-problems.json
 * `subFolderCheck`：按收代码时生效的代码路径模式（没配时是服务端的 `default_file_pattern`）判断：展开后全是 `<ident>.<扩展名>` → false；全是 `<ident>/<ident>.<扩展名>` → true；其他写法按有无子目录取值并给 `lemon_layout_mismatch`。
 * 有 checker：`comparisonMode=5`、`specialJudge="<ident>/checker"`，源码写成 `data/<ident>/checker.cpp`（`checker_needs_build`）；没用 testlib → `checker_not_testlib`。
 * 编译参数 → `flags_dropped`。
+* 题型：提交答案 `taskType=1`（输出文件名取答案文件名）；函数交互 `taskType=2`，grader 写成 `data/<ident>/grader.cpp`，第一个头文件作 `interactor` / `interactorName`（其余 `extra_files_dropped`）；交互题 LemonLime 没有对应 → 跳过（`type_not_exportable`）。Lemon 协议 checker → `comparisonMode=4`；`compare_mode: strict` → `comparisonMode=0`，只忽略其中一种空白 → `compare_mode_approx`；`io_mode: auto` 按文件 IO 写出（`io_auto_as_file`）。
 
 ### Hydro
 
@@ -208,6 +216,7 @@ syncoj-problems.json
 * `time: <n>ms`、`memory: <n>m`；文件 IO 且输入输出主名相同、扩展名为 `.in/.out` 时写 `filename`，否则写 ident（`io_names_lost`）。
 * checker → `checker_type: testlib`、`checker: checker.cpp`，`.h` 写进 `judge_extra_files`（testlib.h 不写）。
 * 子任务与散点都写成 `{id, score, type: min, cases}`。
+* 题型：交互 `type: interactive` + `interactor: interactor.cpp`；提交答案 `type: submit_answer`；函数交互 `user_extra_files: [grader.cpp, 附带文件…]`。`compare_mode: strict` → `checker_type: strict`；Lemon 协议 checker → `checker_type: lemon`。
 * 提示：`hydro_zero_score_filled`（满分 < 100 且有 0 分单元）、`hydro_total_not_100`（其余满分 ≠ 100）、`hydro_case_limit`（> 100 点）、`hydro_total_time`（点数 × 时限 > 60 s）、`flags_dropped`。
 
 往返：HOJ 文件 IO 题导回后 ident 取输入文件主名；Hydro 文件 IO 题导回后 ident 取 `filename`。文件名不变，ident 与原题不同时默认动作是新建。
@@ -314,6 +323,10 @@ syncoj-problems.json
 | `mul_as_bundle` | mul 子任务按捆绑计分，得分可能偏低 |
 | `mixed_io` | {source}已按文件 IO 导入，{affected}的程序全部判错 |
 | `strict_compare_relaxed` | 原为严格逐行比较，现忽略行末空白 |
+| `compare_mode_approx` | 比较方式 {mode} 在目标格式里没有对应，按忽略行末空白写出 |
+| `checker_protocol_approx` | {protocol} 协议的 checker 在目标格式里没有对应，按 testlib 写出，退出码以外的判定可能不同 |
+| `io_auto_as_file` | 自动输入输出在目标格式里没有对应，按文件 IO 写出，读标准输入的程序全部判错 |
+| `type_not_exportable` | {type}无法导出为 {format}，已跳过 |
 | `diff_compare_relaxed` | 原为 diff 比较，现忽略行末空白 |
 | `real_checker_generated` | 已生成实数比较 checker（误差 {eps}） |
 | `builtin_checker_approx` | 内置 checker {name} 改用默认比较 |

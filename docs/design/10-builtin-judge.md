@@ -85,6 +85,7 @@ syncoj-server（服务端账号）         syncoj-judge worker（专用账号，
 * **数据包不变**：外来题目规整成 §12.5 的数据包（`<名字>.in/.ans` + `config.json` + `checker.cpp`），走与上传数据包相同的校验与 blob 存储；评测机与计分不改。
 * **模型只加两列**：`input_file`、`output_file`（文件 IO 文件名，NULL = `<题目>.in/.out`）。逐点限制、子任务依赖、非捆绑子任务、小数分、栈限制折算成现有语义并逐题给警告。
 * **原生格式无损**：`syncoj-problems.json` + 原样的 `testdata.zip`，导出再导入各列与 `testdata_sha256` 不变。
+* **题型**（§12.13）：LemonLime 提交答案 / 交互（= 函数交互）、Hydro `interactive` / `submit_answer` / `user_extra_files`、HOJ `interactive` 映射成对应题型，QDUOJ 的两参数 spj 走 exitcode 协议，严格比较映射成 `compare_mode: strict`；通信题仍报错。导出反向映射，目标格式没有的题型跳过并提示。原生格式有新列时写 `version: 2`。
 * **checker**：随仓库带 testlib.h，checker 用了而包里没有时补上；实数比较与 HUSTOJ spj 由服务端生成不依赖 testlib 的 checker。
 * **YAML** 用自带的受限子集解析器，不引入 PyYAML；XML 流式解析并拒绝 DOCTYPE / ENTITY。
 * **只信服务端解析**：应用导入时重新解析暂存包，只采用客户端回传的标识与动作。

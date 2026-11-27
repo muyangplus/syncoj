@@ -241,11 +241,13 @@ def test_input_without_output(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize("mode, code", [(1, None), (0, "strict_compare_relaxed"), (2, "diff_compare_relaxed")])
-def test_text_compare_modes(tmp_path: Path, mode: int, code: str) -> None:
+@pytest.mark.parametrize("mode, code, compare", [(1, None, None), (0, None, "strict"),
+                                                (2, "diff_compare_relaxed", None)])
+def test_text_compare_modes(tmp_path: Path, mode: int, code: str, compare: str) -> None:
     bundle = parse_one(tmp_path, lemon_task("sum", comparisonMode=mode))
     assert not bundle.errors and bundle.checker is None
     assert codes(bundle.warnings) == ([code] if code else [])
+    assert bundle.compare_mode == compare
 
 
 def test_real_number_mode_generates_checker(tmp_path: Path) -> None:
@@ -257,9 +259,10 @@ def test_real_number_mode_generates_checker(tmp_path: Path) -> None:
     assert b"0.01" in bundle.checker.data and b"testlib.h" not in bundle.checker.data
 
 
-def test_lemon_spj_mode_is_rejected(tmp_path: Path) -> None:
-    bundle = parse_one(tmp_path, lemon_task("sum", comparisonMode=4, specialJudge="sum/spj"))
-    assert codes(bundle.errors) == ["lemon_spj_unsupported"]
+def test_lemon_spj_mode_uses_lemon_protocol(tmp_path: Path) -> None:
+    bundle = parse_one(tmp_path, lemon_task("sum", comparisonMode=4, specialJudge="sum/spj"),
+                       extra={"data/sum/spj.cpp": "int main(){}"})
+    assert not bundle.errors and bundle.checker is not None and bundle.checker_protocol == "lemon"
 
 
 @pytest.mark.parametrize("spj, source", [
@@ -325,21 +328,16 @@ def test_custom_io_names(tmp_path: Path) -> None:
     assert (bundle.ident, bundle.io_mode, bundle.input_file, bundle.output_file) == ("sum", "file", "data.txt", "ans.txt")
 
 
-@pytest.mark.parametrize("stdin, stdout, message", [
-    (True, False, "标准输入 + 文件输出已按文件 IO 导入，读标准输入的程序全部判错"),
-    (False, True, "文件输入 + 标准输出已按文件 IO 导入，写标准输出的程序全部判错"),
-])
-def test_mixed_io_becomes_file(tmp_path: Path, stdin: bool, stdout: bool, message: str) -> None:
-    """混合 IO 仍按文件 IO 导入，提示写清哪种程序会全错。"""
+@pytest.mark.parametrize("stdin, stdout", [(True, False), (False, True)])
+def test_mixed_io_becomes_auto(tmp_path: Path, stdin: bool, stdout: bool) -> None:
+    """混合 IO 按 auto 导入（标准 IO 与文件都能评），不再提示。"""
     bundle = parse_one(tmp_path, lemon_task("sum", standardInputCheck=stdin, standardOutputCheck=stdout,
                                             inputFileName="in.txt"))
-    assert bundle.io_mode == "file" and bundle.input_file == "in.txt"
-    assert [(n.code, n.message) for n in bundle.warnings] == [("mixed_io", message)]
+    assert bundle.io_mode == "auto" and bundle.input_file == "in.txt"
+    assert bundle.warnings == []
 
 
 @pytest.mark.parametrize("task_type, code", [
-    (1, "answers_only_unsupported"),
-    (2, "interactive_unsupported"),
     (3, "communication_unsupported"),
     (4, "communication_unsupported"),
     (9, "problem_type_unsupported"),
@@ -350,8 +348,43 @@ def test_task_types_are_rejected(tmp_path: Path, task_type: int, code: str) -> N
 
 
 def test_other_tasks_survive_a_rejected_one(tmp_path: Path) -> None:
-    problems = parse(tmp_path, make_lemon_zip([lemon_task("a", taskType=2), lemon_task("b")]))
-    assert [(p.ident, codes(p.errors)) for p in problems] == [("a", ["interactive_unsupported"]), ("b", [])]
+    problems = parse(tmp_path, make_lemon_zip([lemon_task("a", taskType=3), lemon_task("b")]))
+    assert [(p.ident, codes(p.errors)) for p in problems] == [("a", ["communication_unsupported"]), ("b", [])]
+
+
+def test_answers_only_maps_to_answer_only(tmp_path: Path) -> None:
+    """taskType 1：答案文件名就是各测试点的输出文件名。"""
+    bundle = parse_one(tmp_path, lemon_task("tsp", 2, taskType=1))
+    assert not bundle.errors and bundle.problem_type == "answer_only"
+    assert sorted(bundle.answer_files.values()) == ["tsp1.out", "tsp2.out"]
+    with problem_io.parse_archive(stage(tmp_path, make_lemon_zip([lemon_task("tsp", 2, taskType=1)]), "a.zip"),
+                                  "auto") as parsed:
+        (one,) = parsed.result.problems
+        blob = build_testdata_zip(one, parsed.archive)
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        data = parse_testdata(zf)
+    assert data.problem_type == "answer_only"
+    assert sorted(data.answer_names.values()) == ["tsp1.out", "tsp2.out"]
+
+
+def test_interaction_maps_to_grader(tmp_path: Path) -> None:
+    """taskType 2（LemonLime 的交互 = 函数交互）：grader 源码 + interactor 头文件（按 interactorName 改名）。"""
+    task = lemon_task("add", 1, taskType=2, grader="add/grader.cpp", interactor="add/lib.h", interactorName="add.h")
+    extra = {"data/add/grader.cpp": "int main(){}", "data/add/lib.h": "int add(int,int);"}
+    with problem_io.parse_archive(stage(tmp_path, make_lemon_zip([task], extra=extra), "g.zip"), "auto") as parsed:
+        (bundle,) = parsed.result.problems
+        assert not bundle.errors and bundle.problem_type == "grader"
+        assert list(bundle.grader_files) == ["add.h"]
+        blob = build_testdata_zip(bundle, parsed.archive)
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        data = parse_testdata(zf)
+        assert data.problem_type == "grader" and data.grader == {"cpp": "grader.cpp"}
+        assert data.grader_files == ["add.h"]
+
+
+def test_interaction_without_grader_is_rejected(tmp_path: Path) -> None:
+    bundle = parse_one(tmp_path, lemon_task("add", 1, taskType=2))
+    assert codes(bundle.errors) == ["checker_missing_source"]
 
 
 # --------------------------------------------------------------------------- #

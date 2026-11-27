@@ -1395,6 +1395,9 @@ class JudgeImportItemOut(_Base):
     subtasks: int = 0
     total_score: int = 0
     has_checker: bool = False
+    #: 题型与比较方式（§12.13、§12.16）
+    problem_type: str = "traditional"
+    compare_mode: str = "both"
     warnings: List[NoticeOut] = Field(default_factory=list)
     errors: List[NoticeOut] = Field(default_factory=list)
 

@@ -7,6 +7,7 @@ import { ElMessage } from 'element-plus'
 import { JUDGE_IMPORT_FORMATS, judgeIoApi } from '@/api'
 import type { JudgeImportFormat } from '@/api'
 import { ApiError } from '@/api/client'
+import { problemTypeLabel } from '@/utils/judgeStatus'
 import type { JudgeImportItemOut, JudgeImportPreviewOut, ProblemOut } from '@/api/types'
 
 const props = defineProps<{ modelValue: boolean; contestId: number | null }>()
@@ -117,8 +118,9 @@ async function submit(): Promise<void> {
 }
 
 function ioText(item: JudgeImportItemOut): string {
-  if (item.io_mode !== 'file') return '标准输入输出'
-  return `${item.input_file || `${item.ident}.in`} / ${item.output_file || `${item.ident}.out`}`
+  if (item.io_mode !== 'file' && item.io_mode !== 'auto') return '标准输入输出'
+  const files = `${item.input_file || `${item.ident}.in`} / ${item.output_file || `${item.ident}.out`}`
+  return item.io_mode === 'auto' ? `自动 · ${files}` : files
 }
 
 function rowClass({ row }: { row: Row }): string {
@@ -193,6 +195,9 @@ function rowClass({ row }: { row: Row }): string {
           <template #default="{ row }">
             <span class="nowrap">{{ row.item.time_limit_ms ?? 1000 }} ms / {{ row.item.memory_limit_mb ?? 256 }} MB</span>
           </template>
+        </el-table-column>
+        <el-table-column label="题型" width="90">
+          <template #default="{ row }">{{ problemTypeLabel(row.item.problem_type) }}</template>
         </el-table-column>
         <el-table-column label="输入输出" min-width="130">
           <template #default="{ row }">

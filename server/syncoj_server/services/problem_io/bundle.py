@@ -47,7 +47,8 @@ class BundleCase:
     #: 来源里的测试点名（规整前）；子任务用它引用测试点
     name: str
     input: FileRef
-    answer: FileRef
+    #: 答案；交互题、有 checker 的提交答案题可以没有（None）
+    answer: Optional[FileRef]
     score: int = 0
 
 
@@ -79,7 +80,7 @@ class ProblemBundle:
     #: None = 评测时按 1000 ms / 256 MB（与题目列的 NULL 同义；外来格式一律填具体值）
     time_limit_ms: Optional[int] = None
     memory_limit_mb: Optional[int] = None
-    #: "stdio" | "file"
+    #: "stdio" | "file" | "auto"
     io_mode: str = "stdio"
     #: 文件 IO 的文件名；None = <ident>.in / <ident>.out。框架会把等于默认名的值规整成 None
     input_file: Optional[str] = None
@@ -91,6 +92,22 @@ class ProblemBundle:
     checker: Optional[FileRef] = None
     #: checker 的支持文件：写出时的文件名（只取 basename，须是 .h/.hpp）→ 来源
     checker_support: Dict[str, FileRef] = field(default_factory=dict)
+    # ---- 题型（§12.13）与判定（§12.14）----
+    #: traditional | grader | answer_only | interactive
+    problem_type: str = "traditional"
+    #: 默认比较器的空白处理；None = both
+    compare_mode: Optional[str] = None
+    #: checker 协议与 points 口径；None = 默认（testlib / ratio）
+    checker_protocol: Optional[str] = None
+    checker_points: Optional[str] = None
+    #: 交互题的 interactor 源码（写成 interactor.cpp）
+    interactor: Optional[FileRef] = None
+    #: 函数交互题的 grader 源码（写成 grader.cpp / grader.c）与附带文件（文件名 → 来源）
+    grader: Optional[FileRef] = None
+    grader_name: str = "grader.cpp"
+    grader_files: Dict[str, FileRef] = field(default_factory=dict)
+    #: 提交答案题：测试点名（:attr:`BundleCase.name`）→ 答案文件名
+    answer_files: Dict[str, str] = field(default_factory=dict)
     # ---- native 专用：原样带回的列 ----
     order_index: Optional[int] = None
     note: Optional[str] = None
@@ -155,6 +172,8 @@ class ExportProblem:
     input_file: Optional[str] = None
     output_file: Optional[str] = None
     compile_flags: Optional[str] = None
+    problem_type: str = "traditional"
+    compare_mode: str = "both"
     testdata_sha256: Optional[str] = None
     testdata_name: Optional[str] = None
     testdata_size: Optional[int] = None

@@ -142,14 +142,14 @@ def _flags(bundle: ProblemBundle) -> None:
 
 def _native_io_names(bundle: ProblemBundle) -> None:
     """原生格式：各列按原值写回（PUT /judge 也是原样存），只校验文件名。"""
-    if bundle.io_mode not in ("stdio", "file"):
+    if bundle.io_mode not in ("stdio", "file", "auto"):
         bundle.io_mode = "stdio"
     for attr in ("input_file", "output_file"):
         value = getattr(bundle, attr) or None
         setattr(bundle, attr, value)
         if value is not None and (not isinstance(value, str) or io_name_error(value)):
             bundle.fail(notice("io_name_invalid", name=str(value)))
-    if bundle.io_mode == "file":
+    if bundle.io_mode in ("file", "auto"):
         effective_in = bundle.input_file or "%s.in" % bundle.ident
         effective_out = bundle.output_file or "%s.out" % bundle.ident
         if effective_in == effective_out:
@@ -157,7 +157,9 @@ def _native_io_names(bundle: ProblemBundle) -> None:
 
 
 def _io_names(bundle: ProblemBundle) -> None:
-    if bundle.io_mode != "file":
+    if bundle.problem_type == "interactive":
+        bundle.io_mode = "stdio"
+    if bundle.io_mode not in ("file", "auto"):
         bundle.io_mode = "stdio"
         bundle.input_file = bundle.output_file = None
         return
@@ -303,6 +305,7 @@ def export_problems(
         notices.setdefault(problem_id, []).extend(items)
     # 非原生格式读不到数据包 blob 的题，格式模块记 missing_file 并没写进包里
     lost = set() if fmt == "syncoj" else {
-        problem_id for problem_id, items in extra.items() if any(item.code == "missing_file" for item in items)
+        problem_id for problem_id, items in extra.items()
+        if any(item.code in ("missing_file", "type_not_exportable") for item in items)
     }
     return ExportOutcome(spool=spool, notices=notices, included=[p.id for p in included if p.id not in lost])

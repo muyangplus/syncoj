@@ -389,6 +389,11 @@ class Problem(Base, TimestampMixin):
     testdata_size = Column(BigInteger, nullable=True)
     #: 上传时校验出的摘要（测试点数、子任务数、有没有 checker、总分），JSON
     testdata_info = Column(Text, nullable=True)
+    #: 题型（迁移 026，§12.13）：traditional | grader | answer_only | interactive；NULL = traditional。
+    #: 题型决定 Agent 收哪些文件（提交答案题收答案文件），所以以这一列为准，数据包只能与它一致
+    problem_type = Column(String(16), nullable=True)
+    #: 默认比较器的空白处理（迁移 026，§12.5）：strict | trailing_spaces | trailing_newlines | both；NULL = both
+    compare_mode = Column(String(16), nullable=True)
 
     __table_args__ = (
         UniqueConstraint("contest_id", "ident", name="uq_problem_contest_ident"),
@@ -628,6 +633,11 @@ class JudgeTask(Base):
     rerun = Column(Boolean, nullable=True, default=False)
     #: (数据包 sha, 评测配置, 代码 sha) 的指纹，复用结果按它找
     judge_key = Column(String(64), nullable=True)
+    #: 提交答案题这次评的答案文件清单（迁移 026）：JSON ``[{case, name, path, sha256}]``；
+    #: ``source_sha256`` 存这份清单（规范化后）的 sha256
+    sources_json = Column(Text, nullable=True)
+    #: 在评任务的阶段（迁移 026）：compiling / judging；评测机上报，旧评测机不报（NULL）
+    phase = Column(String(16), nullable=True)
     #: 结果直接抄自哪个任务（没有占评测机）
     reused_from = Column(Integer, nullable=True)
     #: 交回的结果：三项成绩与完整文档（测试点明细，超长时截断）

@@ -361,3 +361,72 @@ def test_win_低完整性_读不了NR文件_写不了工作目录以外() -> Non
     finally:
         box.close()
         shutil.rmtree(str(outside), ignore_errors=True)
+
+
+# ------------------------------------------------------- 题型（§12.13–§12.14）--- #
+
+
+def _data(tmp_path: Path, files: dict) -> Path:
+    data = tmp_path / "typed.zip"
+    with zipfile.ZipFile(str(data), "w") as archive:
+        for name, content in files.items():
+            archive.writestr(name, content)
+    return data
+
+
+def _boxes(tmp_path: Path):
+    boxes = tmp_path / "boxes"
+    boxes.mkdir(exist_ok=True)
+    return lambda: sw.WinJobSandbox(base=boxes)
+
+
+@windows
+@needs_windows_gxx
+def test_win_testlib_checker给部分分(tmp_path: Path) -> None:
+    checker = ('#include "testlib.h"\nint main(int argc,char**argv){registerTestlibCmd(argc,argv);'
+               'long long x=ouf.readLong(),y=ans.readLong();if(x==y)quitf(_ok,"ok");'
+               'if(x==y+1)quitp(0.5,"half");quitf(_wa,"no");}\n')
+    data = _data(tmp_path, {"1.in": "1 2\n", "1.ans": "3\n", "checker.cpp": checker})
+    source = tmp_path / "ab.cpp"
+    source.write_text(AB.replace("a+b", "a+b+1"), encoding="utf-8")
+    outcome = runner.judge(source, "ab.cpp", data, runner.ProblemConfig(ident="ab"), _boxes(tmp_path))
+    assert outcome.status == "PA" and outcome.score == 50, outcome
+
+
+@windows
+@needs_windows_gxx
+def test_win_grader_选手只写函数(tmp_path: Path) -> None:
+    grader = ('#include <cstdio>\n#include "add.h"\nint main(){long long a,b;scanf("%lld%lld",&a,&b);'
+              'printf("%lld\\n",add(a,b));}\n')
+    data = _data(tmp_path, {"1.in": "1 2\n", "1.ans": "3\n", "grader.cpp": grader,
+                            "add.h": "long long add(long long a, long long b);\n"})
+    source = tmp_path / "ab.cpp"
+    source.write_text('#include "add.h"\nlong long add(long long a,long long b){return a+b;}\n', encoding="utf-8")
+    config = runner.ProblemConfig(ident="ab", problem_type="grader")
+    outcome = runner.judge(source, "ab.cpp", data, config, _boxes(tmp_path))
+    assert outcome.status == "AC", outcome
+    source.write_text(AB + "long long add(long long a,long long b){return a+b;}\n", encoding="utf-8")
+    outcome = runner.judge(source, "ab.cpp", data, config, _boxes(tmp_path))
+    assert outcome.status == "CE", outcome
+
+
+@windows
+@needs_windows_gxx
+def test_win_提交答案(tmp_path: Path) -> None:
+    data = _data(tmp_path, {"1.in": "", "1.ans": "1\n", "2.in": "", "2.ans": "2\n"})
+    answer = tmp_path / "a1"
+    answer.write_bytes(b"1\r\n")
+    outcome = runner.judge_answers({"1": answer, "2": None}, {"1": "ab1.out", "2": "ab2.out"}, data,
+                                   runner.ProblemConfig(ident="ab", problem_type="answer_only"), _boxes(tmp_path))
+    assert [case.status for case in outcome.cases] == ["AC", "WA"], outcome
+    assert outcome.score == 50
+
+
+@windows
+@needs_windows_gxx
+def test_win_自动IO与严格比较(tmp_path: Path) -> None:
+    assert _judge(tmp_path, AB, io_mode="auto").status == "AC"
+    freopen = AB.replace("int main(){", "int main(){freopen(\"ab.out\",\"w\",stdout);")
+    assert _judge(tmp_path, freopen, io_mode="auto").status == "AC"
+    spaced = AB.replace("%lld\\n", "%lld \\n")
+    assert _judge(tmp_path, spaced, compare_mode="strict").status == "PE"

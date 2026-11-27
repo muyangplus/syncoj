@@ -54,7 +54,20 @@ BACKEND_ISOLATED = {"isolate": True, "rlimit": False, "winjob": False}
 #: 报给服务端的能力：``slots`` = 认 poll 响应里的并发数（服务端据此决定能不能远程改并发）；
 #: ``uninstall`` = 认卸载命令（告别并清理自己）
 FEATURES = ["slots", "uninstall"]
+#: 能评的题型（§12.13），以 ``type:<题型>`` 报给服务端；服务端只派报了的题型，传统题人人能评。
+#: 交互题要两个程序同时跑、用管道连起来，而且运行期间评测侧目录（interactor、输入、答案）就在旁边：
+#: 只有 isolate（评测侧另一个 box、另一个账号）报这项。rlimit 的评测侧目录与选手同一账号，交互时
+#: 选手能读到答案；winjob 没有双进程管道。安装脚本在没有 isolate 时会退到 rlimit，所以不能只靠文档
+TYPE_FEATURES = ["type:grader", "type:answer_only"]
+PIPE_BACKENDS = ("isolate",)
 MAX_SLOTS = 64
+
+
+def features_for(backend: Optional[str]) -> List[str]:
+    types = list(TYPE_FEATURES)
+    if backend in PIPE_BACKENDS:
+        types.append("type:interactive")
+    return list(FEATURES) + types
 
 
 def _version() -> str:
@@ -113,7 +126,7 @@ class Worker:
             "platform": sys.platform[:32],
             # 每个进程一个：服务端据此知道命令是否已经生效（换了进程才复位）
             "boot_id": uuid.uuid4().hex,
-            "features": list(FEATURES),
+            "features": features_for(backend),
         }
         self.backend = backend
         self._stop = False
@@ -232,15 +245,21 @@ class Worker:
             return self.sandbox_factory
         return lambda: self.sandbox_factory(slot)
 
+    def _phase(self, task_id: int, phase: str) -> None:
+        """报告阶段（编译中 / 评测中）；服务端太旧（404）或网络抖动都不影响评测。"""
+        try:
+            self.transport.request("POST", "/api/v1/judge/tasks/%d/phase" % task_id, {"phase": phase})
+        except Exception:  # noqa: BLE001
+            log.debug("报告阶段失败", exc_info=True)
+
     def _judge(self, task: Dict[str, Any], slot: int = 0) -> runner.JudgeOutcome:
         task_id = int(task["id"])
         testdata_sha = task["testdata"]["sha256"]
         testdata = self._fetch(task_id, testdata_sha, self.cache_dir / ("%s.zip" % testdata_sha))
         # 放在缓存目录下：Windows 上缓存目录禁止低完整性进程读，别的选手程序读不到这份代码
         work = Path(tempfile.mkdtemp(prefix="syncoj-judge-src-", dir=str(self.cache_dir)))
+        on_phase = lambda phase: self._phase(task_id, phase)  # noqa: E731
         try:
-            source_name = Path(task["source"]["path"] or "main.cpp").name
-            source = self._fetch(task_id, task["source"]["sha256"], work / source_name)
             problem = task["problem"]
             config = runner.ProblemConfig(
                 ident=problem["ident"],
@@ -250,8 +269,23 @@ class Worker:
                 input_file=problem.get("input_file") or None,
                 output_file=problem.get("output_file") or None,
                 compile_flags=problem.get("compile_flags"),
+                problem_type=problem.get("problem_type") or "traditional",
+                compare_mode=problem.get("compare_mode") or "both",
             )
-            return runner.judge(source, source_name, testdata, config, self._factory_for(slot))
+            if config.problem_type == "answer_only":
+                answers: Dict[str, Optional[Path]] = {}
+                names: Dict[str, str] = {}
+                for index, item in enumerate(task.get("sources") or []):
+                    case = str(item["case"])
+                    names[case] = str(item.get("name") or "")
+                    answers[case] = None
+                    if item.get("sha256"):
+                        answers[case] = self._fetch(task_id, item["sha256"], work / ("answer-%d" % index))
+                return runner.judge_answers(answers, names, testdata, config, self._factory_for(slot),
+                                            on_phase=on_phase)
+            source_name = Path(task["source"]["path"] or "main.cpp").name
+            source = self._fetch(task_id, task["source"]["sha256"], work / source_name)
+            return runner.judge(source, source_name, testdata, config, self._factory_for(slot), on_phase=on_phase)
         finally:
             import shutil
 
@@ -388,6 +422,9 @@ def build_parser() -> argparse.ArgumentParser:
                              " / winjob（Windows 默认，Job Object 限资源 + 低完整性级别，不隔离网络）")
     parser.add_argument("--run-as", default=None, help="rlimit 后端以 root 运行时，选手程序换成这个账号跑")
     parser.add_argument("--box-id", type=int, default=0, help="isolate 的 box 编号（同机多个 worker 要各不相同）")
+    parser.add_argument("--trusted-box-id", type=int, default=None,
+                        help="isolate 评测侧 box（checker / interactor / grader）的起始编号；默认 --box-id + 500，"
+                             "并发位依次 +1。同机各 worker 的号段不能重叠")
     parser.add_argument("--isolate", default="isolate", help="isolate 可执行文件路径")
     parser.add_argument("--cgroups", action="store_true", help="isolate 用 cgroup 记内存（需要 isolate 配好 cgroup）")
     parser.add_argument("--cache-dir", default=None, help="数据包缓存目录（默认 ~/.cache/syncoj-judge）")
@@ -433,11 +470,21 @@ def main(argv=None) -> int:
         return 0
     token = Path(args.token_file).read_text(encoding="utf-8").strip()
 
+    trusted_base = args.box_id + sb.TRUSTED_BOX_OFFSET if args.trusted_box_id is None else args.trusted_box_id
+    if backend == "isolate":
+        users = set(range(args.box_id, args.box_id + args.slots))
+        trusted = set(range(trusted_base, trusted_base + args.slots))
+        if users & trusted or not 0 <= min(trusted) or max(trusted) >= 1000:
+            print("--trusted-box-id 的号段（%d 起 %d 个）要在 0..999 内、且不能与 --box-id 的号段重叠"
+                  % (trusted_base, args.slots), file=sys.stderr)
+            return 2
+
     def factory(slot: int = 0) -> sb.Sandbox:
         return sb.make_sandbox(
             backend, run_as=args.run_as, box_id=args.box_id + slot,
             isolate_binary=args.isolate, cgroups=args.cgroups,
             base=Path(args.box_dir) if args.box_dir else None,
+            trusted_box_id=trusted_base + slot,
         )
 
     if backend == "winjob":

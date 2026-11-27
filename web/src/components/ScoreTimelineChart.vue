@@ -180,6 +180,8 @@ function statusClass(status: string | null): string {
     case 'TLE':
     case 'MLE':
     case 'OLE':
+    case 'PA':
+    case 'PE':
       return 'is-limit'
     default:
       return 'is-other'

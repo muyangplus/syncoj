@@ -255,6 +255,7 @@ python scripts/smoke_systemd245.py --keep   # 失败后保留容器与临时目�
 | `--backend` | `isolate` | `isolate`（需先装 isolate）/ `rlimit`（不隔离网络与文件系统，仅开发自测） |
 | `--run-as` | — | `rlimit` 以 root 运行时必需：选手程序用此账号跑 |
 | `--box-id` | `0` | isolate box 编号，同机多个 worker 各不相同 |
+| `--trusted-box-id` | `--box-id` + 500 | isolate 评测侧 box（checker / interactor / grader）的起始编号，并发位依次 +1；要在 0..999、与选手 box 号段不重叠，同机各 worker 的号段也不能重叠 |
 | `--isolate` | `isolate` | isolate 可执行文件路径 |
 | `--cgroups` | 关 | isolate 用 cgroup 统计内存 |
 | `--cache-dir` | `~/.cache/syncoj-judge` | 数据包缓存目录 |
@@ -283,6 +284,20 @@ python scripts/smoke_systemd245.py --keep   # 失败后保留容器与临时目�
 2. 该行「明细」。预期：红框是风险（逃出进程组、篡改 checker、工作目录里的符号链接、预检拦截），黄框是疑似违规，风险在上。
 3. 展开「源码」，或点带行号的条目。预期：代码按行显示，标注的行黄 / 红底色，点条目滚到那一行。代码超过 1 MB 不显示。
 4. 风险只是标注，不改分；要处理就「手工录分」或在版本里改用别的结果。分级与条件 → [`reference/judge-result.md`](reference/judge-result.md) 第 8 节。
+
+题型与数据包（§12.13）：「设置」→「题型」选传统 / 函数交互 / 提交答案 / 交互，再上传对应的数据包。包里 `config.json` 写的 `type` 与所选题型不一致时弹「题型不一致」→「改为 X 并上传」。
+
+| 题型 | 数据包最小示例 | 选手交什么 |
+|---|---|---|
+| 传统 + 部分分 SPJ | `1.in 1.ans checker.cpp`（testlib：`quitp(0.5, …)` 或 `quitf(_pc(50), …)` 给一半分；testlib.h 不用放） | `<题目>/<题目>.cpp` |
+| 传统 + Lemon 老 spj | `1.in 1.ans spj.cpp config.json`，`config.json` 写 `{"checker_protocol": "lemon"}`（spj 把 0..满分写进第 5 个参数的文件） | 同上 |
+| 函数交互 | `1.in 1.ans grader.cpp sum.h`（grader 有 `main`，`#include "sum.h"` 后调用选手的函数） | `<题目>/<题目>.cpp`：只写函数，`#include "sum.h"`，不写 `main` |
+| 提交答案 | `1.in 1.ans 2.in 2.ans`（输入发给选手；答案文件名默认 `<题目>1.out`、`<题目>2.out`，`config.json` 的 `answer_pattern` / `answer_files` 可改） | `<题目>/<题目>1.out` 等 |
+| 交互 | `1.in interactor.cpp`（testlib `registerInteraction`；`.ans` 可缺；要再判一次时放 `checker.cpp`，它读 interactor 写的 `tout`） | `<题目>/<题目>.cpp`，标准输入输出、每次输出后 `fflush` |
+
+提交答案题：Agent 自动多收答案扩展名的文件（只收题目目录下、名字前缀对得上的，编译出的 `a.out` 不收）；缺文件的点判 WA 并写明文件名。交互题只能用标准输入输出；只有 isolate / rlimit 评测机能评（「评测机」卡片后端下方列出能评的题型），没有能评的评测机时「任务」卡片显示「交互 N 待评·无评测机」。isolate 评测机多占一段 box 编号放 checker / interactor（`--trusted-box-id`，默认 +500）。
+
+评测状态（§12.16）：标签显示代号，悬停看名称与说明。「任务」卡片计数 PD（排队）· CP（编译中）· JG（评测中）· 完成 · SF（提交失败，行尾「重新评测」）· SE（系统错误）· CA（已取消）。取消：「任务」卡片「取消评测」（全场），或「评测记录」行「取消」。CE 标签点开看编译信息。
 
 ⚠️ 考试进行中评测的是未完成的代码。数据包格式、结果格式、接口 → 见 [`reference/judge-result.md`](reference/judge-result.md) 第 6 节、[`design/10-builtin-judge.md`](design/10-builtin-judge.md)。
 

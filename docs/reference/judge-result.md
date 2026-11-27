@@ -247,11 +247,13 @@ curl -H "Authorization: Bearer <管理员令牌>" \
 | `judge_mode` | `external` / `builtin` | `external` |
 | `time_limit_ms` | 100–60000 | 1000 |
 | `memory_limit_mb` | 16–4096 | 256 |
-| `io_mode` | `stdio` / `file`（读输入文件、写输出文件） | `stdio` |
+| `problem_type` | `traditional` / `grader`（函数交互）/ `answer_only`（提交答案）/ `interactive`（交互）；不传 = 不改。已有数据包按新题型重新校验，不合格 `422 testdata_invalid_for_type`；交互题配 `file` / `auto` `422 io_mode_conflict`；提交答案题不存时限、内存与编译参数（§12.13） | `traditional` |
+| `io_mode` | `stdio` / `file`（读输入文件、写输出文件）/ `auto`（输入同时是 stdin 与输入文件，输出优先取输出文件、否则取标准输出） | `stdio` |
+| `compare_mode` | 默认比较器的空白处理：`strict` / `trailing_spaces` / `trailing_newlines` / `both`；不传 = 不改；有 checker、交互题时不适用（§12.16） | `both` |
 | `input_file` / `output_file` | 文件 IO 的文件名，≤64 字符：字母或数字开头，只含字母、数字、`.` `_` `-`；不能用评测机自己的文件名（`prog`、`main.cpp`、`chk`、`in.txt` 等）；两者生效名不能相同；空 = `<题目>.in` / `<题目>.out`。`PUT` 整体覆盖，不传即回到默认名 | 空 |
 | `compile_flags` | ≤200 字符；只收 `-std=` / `-O` / `-D` / `-W` / `-f…`（不含 `-fplugin`）/ `-g` / `-static` / `-m…` | 空 |
 
-数据包：`POST /api/v1/admin/problems/{id}/testdata` 上传，`DELETE` 同路径删除。
+数据包：`POST /api/v1/admin/problems/{id}/testdata` 上传，`DELETE` 同路径删除。上传按题目的题型校验；`config.json` 的 `type` 与题型不一致 `422 testdata_type_mismatch`（`details`：`problem_type` / `declared`）；带 `?problem_type=X` = 按 X 校验、通过后把题目改成 X（界面「改为 X 并上传」）。题目返回的 `testdata` 多带 `declared_type` / `detected_type` / `checker_protocol` / `checker_points` / `has_interactor` / `grader_files` / `answer_count` / `answer_exts` / `warnings[{code, message}]`。
 
 ### 数据包
 
@@ -261,7 +263,9 @@ zip，结构同 LemonLime 数据目录，上传时校验：
 1.in  1.ans          # 答案也可以叫 .out；可放在子目录里
 2.in  2.ans
 config.json          # 可选
-checker.cpp          # 可选：special judge（testlib 风格），testlib.h 放同一目录
+checker.cpp          # 可选：special judge；testlib.h 评测时注入，不用放
+interactor.cpp       # 交互题必有（testlib registerInteraction）；交互题的 .ans 可缺
+grader.cpp  sum.h    # 函数交互题必有 grader；同目录头文件是 grader_files
 ```
 
 | 规则 | 值 |
@@ -270,20 +274,37 @@ checker.cpp          # 可选：special judge（testlib 风格），testlib.h �
 | 测试点数上限 | 500 |
 | 测试点名 | 去掉扩展名的相对路径，唯一；按自然序排列 |
 | 答案后缀 | `.ans` 优先于 `.out` |
-| checker 文件名 | `checker.cpp` / `spj.cpp` / `chk.cpp`；调用 `checker <in> <out> <ans>`，退出码 0 为通过 |
+| checker 文件名 | `checker.cpp` / `spj.cpp` / `chk.cpp`（或 `config.json` 的 `checker`）；调用 `checker <in> <out> <ans>`，按 stderr 首行前缀判定（§12.14） |
+| 出题人文件名 | 字母或数字开头，只含字母、数字、`.` `_` `-`，≤64 字符；不能用评测机自己的名字（`prog`、`chk`、`interactor`、`main.cpp`、`user.o`、`grader.o`、`in.txt` 等） |
 | 结构错误 | `400 validation_error` |
 | 超大 | `413 payload_too_large` |
 
 `config.json`（全部可选）：
 
 ```json
-{"cases": [{"name": "1", "score": 10}], "subtasks": [{"score": 40, "cases": ["1", "2"]}],
- "precheck": {"mode": "block", "disabled": ["file_access"]}}
+{"cases": [{"name": "1", "score": 10, "full_score": 10}], "subtasks": [{"score": 40, "cases": ["1", "2"]}],
+ "precheck": {"mode": "block", "disabled": ["file_access"]},
+ "type": "traditional", "checker": "checker.cpp", "checker_protocol": "testlib", "checker_points": "ratio",
+ "testlib": "builtin", "interactor": "interactor.cpp", "interactor_time_factor": 2, "interactor_memory_mb": 512,
+ "grader": "grader.cpp", "grader_files": ["sum.h"], "answer_pattern": "{ident}{input_stem}.out",
+ "answer_files": {"1": "sum1.out"}}
 ```
 
+| 键 | 说明 |
+|---|---|
+| `type` | 必须等于题目的题型；不写时按文件名猜，只作提示 |
+| `checker_protocol` | `testlib`（默认）/ `lemon`（`spj in out ans <满分> score.txt msg.txt`，满分取 `full_score`，缺省本点分值，再缺省 100）/ `exitcode`（0 AC、1 WA、其余 SE） |
+| `checker_points` | `points X` 的口径：`ratio`（默认，0..1）/ `percent`（0..100）/ `auto`（≤1 当比例）；越界记 SE |
+| `testlib` | `builtin`（默认，评测时注入随服务端带的 testlib.h，包里的版本不同给 `testlib_overridden` 提醒）/ `bundled`（用包里的） |
+| `interactor` / `interactor_time_factor` / `interactor_memory_mb` | 交互题：interactor 源文件（默认 `interactor.cpp` / `interactor.cc` / `interact.cpp`）；CPU = 因子（1..10，默认 2）× 时限、至少 1 秒；内存默认 max(2 × 内存限制, 256) MB（16..4096） |
+| `grader` / `grader_files` | 函数交互题：`"grader.cpp"` 或 `{"cpp": …, "c": …}`（默认 `grader.cpp` / `grader.c`）；附带文件默认是 grader 同目录的头文件，`.h` / `.hpp` 放进选手编译目录，`.c` / `.cpp` 一起编进 grader |
+| `answer_pattern` / `answer_files` | 提交答案题：答案文件名模板（占位符 `{ident}` `{input_stem}` `{case}` `{index}`，默认输入名全是数字时 `{ident}{input_stem}.out`，否则 `{input_stem}.out`）；`answer_files` 逐点指定，优先 |
+
+- 不认识的键只提醒（`unknown_config_key`），不报错。
+- 提交答案题：最大的答案超过服务端 `max_file_size`（选手机单文件上限）时提醒 `answer_too_large`，摘要带 `max_answer_bytes`。
 - 未写分值：总分 100 按测试点平均，余数给最后几个点。
 - `precheck`：源码预检配置（第 7 节）；不合法时上传报 `400 validation_error`。
-- 子任务：全部 AC 才得该子任务分；子任务内的点不单独计分。
+- 子任务：得分 = floor(子任务分 × 子任务内各点的最小得分比例)；有点不是 AC / PA 即 0；子任务内的点不单独计分。
 
 ### 评测机
 
@@ -331,6 +352,7 @@ syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
 | `--token-file` | 令牌文件（必填） |
 | `--backend` | `isolate`（Linux 默认，需先装 [isolate](https://github.com/ioi/isolate)）/ `rlimit`（只用 `setrlimit`，不隔离网络与文件系统，仅开发自测；结果 `isolated: false`）/ `winjob`（Windows 默认，Job Object 限 CPU / 内存 / 进程数，选手程序低完整性级别运行；不隔离网络，结果 `isolated: false`） |
 | `--box-id` | isolate box 编号，同机多 worker 各不相同（默认 0） |
+| `--trusted-box-id` | isolate 评测侧 box 的起始编号（默认 `--box-id` + 500，并发位依次 +1）；0..999、不与选手 box 号段重叠，同机各 worker 的号段不能重叠 |
 | `--slots` | 同时评几个任务（默认 1）；只有 isolate 可大于 1（box 编号从 `--box-id` 起依次占用）。rlimit / winjob 的并发任务共用一个运行账号、能互相读写工作目录，启动即拒绝 |
 | `--cgroups` | isolate 用 cgroup 记内存 |
 | `--isolate` | isolate 可执行文件路径（默认 `isolate`） |
@@ -421,9 +443,14 @@ syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
 |---|---|
 | 编译 | `.cpp` / `.cc` / `.cxx`：`g++ -O2 -std=c++14 -lm`（可按题改）；`.c`：`gcc -O2 -std=c99 -lm`；编译在沙箱内 |
 | 运行 | 每个测试点前清空工作目录；TLE 按 CPU 时间判 |
-| 比对 | 默认逐行比较，忽略行末空白（空格、`\t`、`\r`）与文末空行；有 checker 时用 checker |
+| 比对 | 默认逐行比较，按 `compare_mode` 忽略行末空白与 / 或文末空行（默认都忽略，`\r\n` 一律当 `\n`）；不相等但按空白切词后相同 → PE；有 checker 时用 checker |
+| checker | 在评测侧工作目录编译（`g++ -O2 -std=gnu++17 -lm`）运行；stderr 首行 `ok` AC、`wrong answer` / `unexpected eof` WA、`wrong output format` PE、`FAIL` SE、`points X` / `partially correct (k)` 按比例；无前缀按退出码 0 / 1 / 2 / 其余 = AC / WA / PE / SE |
+| 部分分 | 每点 floor(比例 × 分值)；比例在 0 与 1 之间记 `PA`，结果里带 `ratio` 与 `max_score` |
 | 文件 IO 无输出文件 | WA |
-| 状态 | `AC` / `WA` / `TLE` / `MLE` / `RE` / `OLE` / `CE`；整题取最严重（`SE` > `CE` > `RE` > `MLE` > `TLE` > `OLE` > `WA` > `AC`） |
+| 状态 | `AC` / `PA` / `PE` / `WA` / `TLE` / `MLE` / `RE` / `OLE` / `CE` / `SE`；整题取最严重（`SE` > `CE` > `RE` > `MLE` > `TLE` > `OLE` > `WA` > `PE` > `PA` > `AC`）；词表见 §12.16 |
+| 函数交互 | grader 在评测侧编成目标文件（`-DEVAL`，失败 SE）；选手代码只和头文件一起编（失败 CE），再与 grader 链接（失败 CE） |
+| 提交答案 | 不编译不运行；缺答案文件的点判 WA 并写明文件名；测试点带 `file` |
+| 交互 | 选手与 interactor 双向管道，判定表见 §12.15；测试点带 `interactor_time_ms` |
 
 写出的 `result.json`（原子写入）：
 
@@ -436,16 +463,21 @@ syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
 
 - 有源码预检预警时多一个 `precheck_warnings`：`[{"code", "line", "message", "excerpt"}]`（第 7 节）；没有预警或旧评测机时不带。
 - 有风险事件时多一个 `risk_events`（第 8 节）；没有或旧评测机时不带。
+- 非传统题多一个 `problem_type`。
+- 扫描外部评测器的结果时，`PC` / `Partially Correct` / `Partial Accepted` 规整为 `PA`，`Presentation Error` 规整为 `PE`。
 - 扫描器只读 `score` / `max_score` / `status`，其余进 `raw_json`。
 - 评测机自身故障（沙箱起不来、checker 编不过，记 `SE`）：不写成绩，任务退回队列；第 3 次仍失败记失败，进度里显示原因。
 - 代码选择：只看仍在机器上、内容已存下的文件，按题目代码路径归题；多份候选时取文件名与题目同名者；仍无法区分 → 记失败。
 - 未交代码：不写结果，矩阵显示"未交"。
+- 提交答案题：按答案文件名在归到这道题的文件里找（同名取路径最浅，深度相同记失败）；一个都没有 = 未交。
+- 失败分两类：选代码 / 题目配置失败 `outcome = SF`（重新评测即可），评测机连续出错 `outcome = SE`。
+- 取消：`POST /api/v1/admin/contests/{id}/judge/builtin/cancel`，体 `{problem?, player_id?, task_id?}`（都不填 = 全场），排队中 / 在评的任务改为 `cancelled`（`outcome = CA`），不写成绩；正在评的评测机交结果 `404`、被丢掉；响应 `{cancelled}`。被取消的任务不算评过，智能模式照样会为同一版本再排。
 - 场次进行中：`POST /api/v1/admin/contests/{id}/judge/builtin` 返回 `409 contest_in_progress`；带 `"force": true` 后执行。
 - 重测 = 再次排任务：同一对还在排队的任务被替换，跑完的留作历史；新结果覆盖 `result.json`（若已写进去的是更新版本的结果则只进历史）；手工录入的成绩不被覆盖。
 - 同一 (数据包, 评测配置, 代码) 评过（`SE` 除外）：直接复用结果，不占评测机；`rerun: true` 时真跑。
 - 自带评测写的 `result.json` 多带 `task_id`、`source_version_id`（复用的还有 `reused_from`）。
 
-排任务：`POST /api/v1/admin/contests/{id}/judge/builtin`，体 `{problem?, player_id?, force, version_id?, rerun}`，都不填 = 全场所有自带评测题 × 所有选手（评最新版）；`version_id` = 重测那个历史版本（结果只进历史，不受场次进行中限制）；响应 `{queued, problems}`。进度：`GET` 同路径，返回 `total` / `queued` / `running` / `done` / `failed` / `delayed`（去抖中）/ `failures[]`；完成 / 失败只数每 (选手, 题目) 最新那条。
+排任务：`POST /api/v1/admin/contests/{id}/judge/builtin`，体 `{problem?, player_id?, force, version_id?, rerun}`，都不填 = 全场所有自带评测题 × 所有选手（评最新版）；`version_id` = 重测那个历史版本（结果只进历史，不受场次进行中限制）；响应 `{queued, problems}`。进度：`GET` 同路径，返回 `total` / `queued` / `running` / `done` / `failed` / `cancelled` / `delayed`（去抖中）/ `compiling` / `judging`（在评里按评测机上报的阶段，旧评测机不报）/ `submit_failed` / `system_error` / `unservable`（题型 → 排队中但没有在线评测机能评的条数）/ `failures[{player_no, problem, error, code}]`；完成 / 失败 / 取消只数每 (选手, 题目) 最新那条。任务列表每行带 `phase`。
 
 ### 版本、自动评测与 timeline（§12.9）
 
@@ -464,11 +496,12 @@ syncoj-judge --server http://10.0.0.5:8000 --token-file token --backend isolate
 
 | 接口 | 说明 |
 |---|---|
-| `POST /api/v1/judge/poll` | 体 `{version, backend, isolated, hostname, platform, slots, poll_seconds, want, boot_id, features}`（自报状态；`want` 1 = 顺带领一个任务；`features` 是能力列表，`slots` = 认下发的并发数）。返回 `{task, command, enabled, slots, service}`：`task` 形状同 `/lease` 的响应，没领到为 `null`（无任务、已暂停、评测服务关着、`want` 0 或有命令）；`command` 为 `run` / `stop` / `restart` / `uninstall`；`slots` 是管理端设定的并发数（没设、评测机没报 `slots` 能力、或后端不是 isolate 而设定 > 1 时为 `null`），与评测机当前的不同时评测机评完手上的、以它重启；`service` 是「评测服务」开关。评测机遇到旧服务端（多了 `features` 回 `422`）时去掉 `features` 重发 |
+| `POST /api/v1/judge/poll` | 体 `{version, backend, isolated, hostname, platform, slots, poll_seconds, want, boot_id, features}`（自报状态；`want` 1 = 顺带领一个任务；`features` 是能力列表，`slots` = 认下发的并发数，`type:grader` / `type:answer_only` / `type:interactive` = 能评的题型，没报的题型不派，旧评测机只评传统题）。返回 `{task, command, enabled, slots, service}`：`task` 形状同 `/lease` 的响应，没领到为 `null`（无任务、已暂停、评测服务关着、`want` 0 或有命令）；`command` 为 `run` / `stop` / `restart` / `uninstall`；`slots` 是管理端设定的并发数（没设、评测机没报 `slots` 能力、或后端不是 isolate 而设定 > 1 时为 `null`），与评测机当前的不同时评测机评完手上的、以它重启；`service` 是「评测服务」开关。评测机遇到旧服务端（多了 `features` 回 `422`）时去掉 `features` 重发 |
 | `POST /api/v1/judge/goodbye` | `{kind}`（`systemd` / `schtask` / `local` / `manual`，只进审计）。只在管理端下过卸载时认：删掉这台评测机（令牌失效、名下在评的任务退回队列）并返回 `200`；否则 `409 judge_worker_not_uninstalling` |
-| `POST /api/v1/judge/lease` | 旧评测机用：领任务（租约 15 分钟，过期回队列）；无任务、已暂停或评测服务关着 `204`。返回 `id`、`contest_slug`、`player_no`、`problem`（`ident` / `time_limit_ms` / `memory_limit_mb` / `io_mode` / `input_file` / `output_file` / `compile_flags`；文件名为 `null` = 用 `<ident>.in` / `<ident>.out`）、`source`（`path` / `sha256`）、`testdata`（`sha256` / `name`）、`attempt` |
-| `GET /api/v1/judge/tasks/{id}/blobs/{sha256}` | 取本任务的代码或数据包；其他内容 `404` |
-| `POST /api/v1/judge/tasks/{id}/result` | `{score, max_score, status, detail}`（`score` / `max_score` 0–1000000，`status` 1–16 字符），写 `result.json`；`detail` 里认 `judge` / `isolated` / `language` / `compile_message` / `cases` / `subtasks` / `precheck_warnings` / `risk_events`，其余丢弃 |
+| `POST /api/v1/judge/lease` | 旧评测机用：领任务（租约 15 分钟，过期回队列）；无任务、已暂停或评测服务关着 `204`。返回 `id`、`contest_slug`、`player_no`、`problem`（`ident` / `time_limit_ms` / `memory_limit_mb` / `io_mode` / `input_file` / `output_file` / `compile_flags`；文件名为 `null` = 用 `<ident>.in` / `<ident>.out`）、`source`（`path` / `sha256`）、`testdata`（`sha256` / `name`）、`attempt`；新字段 `problem.problem_type` / `problem.compare_mode`，提交答案题的 `sources[{case, name, path, sha256}]`（`sha256` 为空 = 这个点没交）。`/lease` 只派传统题 |
+| `GET /api/v1/judge/tasks/{id}/blobs/{sha256}` | 取本任务的代码（提交答案题：清单里的答案文件）或数据包；其他内容 `404` |
+| `POST /api/v1/judge/tasks/{id}/phase` | `{phase}`（`compiling` / `judging`），报告在评任务的阶段；不是自己领的或已结束 `404`。旧服务端没有这个接口，评测机忽略失败 |
+| `POST /api/v1/judge/tasks/{id}/result` | `{score, max_score, status, detail}`（`score` / `max_score` 0–1000000，`status` 1–16 字符），写 `result.json`；`detail` 里认 `judge` / `isolated` / `language` / `compile_message` / `cases` / `subtasks` / `precheck_warnings` / `risk_events` / `problem_type`，其余丢弃 |
 | `POST /api/v1/judge/tasks/{id}/fail` | `{message}`（≤2000），退回队列 |
 
 评测机与服务端出自同一个包，需一起升级：旧评测机不认 `input_file` / `output_file`，仍按 `<ident>.in` / `<ident>.out` 读写，设了自定义文件名的题会被评错。

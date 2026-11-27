@@ -18,7 +18,7 @@ from ..context import AppContext
 from ..errors import ApiError
 from ..models import JudgeWorker, utcnow
 from ..schemas import (
-    JudgeFailIn, JudgeGoodbyeIn, JudgeLeaseOut, JudgePollIn, JudgePollOut, JudgeResultIn, SimpleAck,
+    JudgeFailIn, JudgeGoodbyeIn, JudgeLeaseOut, JudgePhaseIn, JudgePollIn, JudgePollOut, JudgeResultIn, SimpleAck,
 )
 from ..security import hash_token
 from ..services import builtin_judge, judge_workers
@@ -29,6 +29,7 @@ router = APIRouter(prefix="/api/v1/judge", tags=["judge"])
 #: 交回的结果里，除了三项成绩之外原样落进 result.json 的键
 DETAIL_KEYS = (
     "judge", "isolated", "language", "compile_message", "cases", "subtasks", "precheck_warnings", "risk_events",
+    "problem_type",
 )
 
 
@@ -83,7 +84,9 @@ def poll(
         service = judge_workers.service_enabled(session)
     task = None
     if payload.want and enabled and service and command == "run":
-        leased = builtin_judge.lease_next(ctx, worker_id)
+        # 只派这台评测机报了能力的题型（features 里的 ``type:*``）；没报的只评传统题（§12.13）
+        types = builtin_judge.worker_types(payload.features)
+        leased = builtin_judge.lease_next(ctx, worker_id, types=types)
         if leased is not None:
             task = JudgeLeaseOut(**leased.to_payload())
     return JudgePollOut(task=task, command=command, enabled=enabled, slots=slots, service=service)
@@ -119,7 +122,7 @@ def task_blob(
     ctx: AppContext = Depends(get_ctx),
     worker_id: int = Depends(require_judge_worker),
 ):
-    """取任务要用的内容：只认这个任务的代码与它那道题的数据包。"""
+    """取任务要用的内容：只认这个任务的代码（提交答案题是清单里的答案文件）与它那道题的数据包。"""
     with ctx.db.session() as session:
         task = builtin_judge.leased_task(session, task_id, worker_id)
         if task is None:
@@ -133,6 +136,8 @@ def task_blob(
             )
         ).scalar_one_or_none()
         allowed = {task.source_sha256, testdata}
+        allowed.update(item.get("sha256") for item in builtin_judge.task_sources(task) if isinstance(item, dict))
+        allowed.discard(None)
     if sha256 not in allowed or not ctx.blobs.has(sha256):
         raise ApiError(404, "not_found", "这份内容不属于这个任务")
     return FileResponse(str(ctx.blobs.path_for(sha256)), media_type="application/octet-stream")
@@ -155,6 +160,19 @@ def submit_result(
             document[key] = payload.detail[key]
     if not builtin_judge.complete(ctx, task_id, worker_id, document):
         raise ApiError(404, "not_found", "任务不存在、不是你领的，或者已经被重测替换")
+    return SimpleAck(ok=True, detail="已记录")
+
+
+@router.post("/tasks/{task_id}/phase", response_model=SimpleAck)
+def report_phase(
+    task_id: int,
+    payload: JudgePhaseIn,
+    ctx: AppContext = Depends(get_ctx),
+    worker_id: int = Depends(require_judge_worker),
+) -> SimpleAck:
+    """评测机报告在评任务的阶段：``compiling``（编译中）/ ``judging``（评测中）。旧评测机不报。"""
+    if not builtin_judge.set_phase(ctx, task_id, worker_id, payload.phase):
+        raise ApiError(404, "not_found", "任务不存在、不是你领的，或者已经结束")
     return SimpleAck(ok=True, detail="已记录")
 
 

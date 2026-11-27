@@ -4987,6 +4987,8 @@ def _problem_out(row: Problem, settings: Settings) -> ProblemOut:
         output_file=row.output_file or None,
         compile_flags=row.compile_flags,
         testdata=_testdata_out(row),
+        problem_type=row.problem_type or "traditional",
+        compare_mode=row.compare_mode or "both",
     )
 
 
@@ -5005,6 +5007,18 @@ def _testdata_out(row: Problem) -> Optional[ProblemTestdataOut]:
         subtasks=int(info.get("subtasks") or 0),
         has_checker=bool(info.get("has_checker")),
         total_score=int(info.get("total_score") or 0),
+        declared_type=info.get("declared_type") or None,
+        detected_type=info.get("detected_type") or None,
+        checker_protocol=info.get("checker_protocol") or None,
+        checker_points=info.get("checker_points") or None,
+        has_interactor=bool(info.get("has_interactor")),
+        grader_files=[str(n) for n in info.get("grader_files") or []][:50],
+        answer_count=len(info.get("answer_names") or {}),
+        answer_exts=[str(n) for n in info.get("answer_exts") or []][:20],
+        warnings=[
+            {"code": str(w.get("code") or "")[:32], "message": str(w.get("message") or "")[:300]}
+            for w in info.get("warnings") or [] if isinstance(w, dict)
+        ][:50],
     )
 
 
@@ -5331,6 +5345,10 @@ def _result_details(raw: Optional[str]) -> Dict[str, Any]:
                 "time_ms": _int_or_none(item.get("time_ms")),
                 "memory_kb": _int_or_none(item.get("memory_kb")),
                 "message": str(item.get("message") or "")[:2000],
+                "ratio": _ratio_or_none(item.get("ratio")),
+                "max_score": _int_or_none(item.get("max_score")),
+                "file": str(item["file"])[:255] if item.get("file") else None,
+                "interactor_time_ms": _int_or_none(item.get("interactor_time_ms")),
             }
         )
     subtasks = []
@@ -5389,7 +5407,14 @@ def _result_details(raw: Optional[str]) -> Dict[str, Any]:
         "risk_events": risk_events[:200],
         "truncated": bool(document.get("truncated")),
         "task_id": _int_or_none(document.get("task_id")),
+        "problem_type": str(document["problem_type"])[:16] if document.get("problem_type") else None,
     }
+
+
+def _ratio_or_none(value: Any) -> Optional[float]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return max(0.0, min(1.0, float(value)))
 
 
 def _run_detail(run: JudgeRun, player_no: str) -> JudgeRunDetailOut:

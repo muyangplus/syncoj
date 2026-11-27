@@ -64,6 +64,6 @@ def open_testdata(problem: ExportProblem, open_blob: OpenBlob) -> Iterator[Tuple
     handle = open_blob(problem.testdata_sha256)
     try:
         with zipfile.ZipFile(handle) as zf:
-            yield zf, parse_testdata(zf)
+            yield zf, parse_testdata(zf, problem.problem_type)
     finally:
         handle.close()

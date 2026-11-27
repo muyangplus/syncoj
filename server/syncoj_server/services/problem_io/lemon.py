@@ -8,17 +8,21 @@
 
 导入：
 
-* ``taskType`` 只收 0（传统题）；1/2/3/4 分别报提交答案 / 交互 / 通信错误。
+* ``taskType``：0 传统；1 提交答案（答案文件名 = 各测试点输出文件的文件名）；2 交互（LemonLime 的
+  交互是函数交互：``grader`` 是带 main 的源码、``interactor`` 是给选手 include 的头文件，名字取
+  ``interactorName``）→ ``grader`` 题型；3 / 4 通信题报错（§12.13）。
 * ``standardInputCheck`` 与 ``standardOutputCheck`` 都为真 → stdio；都为假 → 文件 IO，
-  文件名取 ``inputFileName`` / ``outputFileName``；两者不同 → 文件 IO + ``mixed_io``。
+  文件名取 ``inputFileName`` / ``outputFileName``；两者不同 → ``auto``（标准 IO 与文件都能评）。
 * 每个 testCase 是一个计分单元：只有 1 对文件 → 普通测试点；多对 → 捆绑子任务。分值取 ``fullScore``。
   ``<k>_lemon_SUbtaskDEPENDENCE_fLAg`` 先剔除再按下标配对（``dependency_dropped``）。
 * 各组 ``timeLimit``（ms）/ ``memoryLimit``（MB）取最大值，不同时给 ``limits_collapsed``。
-* ``comparisonMode``：1 默认比较；0 / 2 默认比较并提示放宽；3 生成实数 checker
-  （eps = 10^-realPrecision，绝对或相对误差满足其一）；4 报错；5 在 ``specialJudge`` 同目录找源码。
+* ``comparisonMode``：1 默认比较（两种空白都忽略）；0 严格比较（``strict``）；2 默认比较并提示放宽；
+  3 生成实数 checker（eps = 10^-realPrecision，绝对或相对误差满足其一）；4 Lemon 协议的 spj
+  （``checker_protocol: lemon``，分数文件）；5 在 ``specialJudge`` 同目录找源码（testlib）。
 * 路径里的 ``\\`` 换成 ``/``；``..``、绝对路径、盘符 → ``unsafe_path``。
 
-导出：``contest/contest.cdf`` + ``contest/data/<ident>/``，每个普通测试点一个 testCase，
+导出：``contest/contest.cdf`` + ``contest/data/<ident>/``，题型反向映射（交互题 LemonLime 没有对应，
+跳过并提示），每个普通测试点一个 testCase，
 每个子任务一个 testCase（装下它的全部文件对），每组都带整题的时限与内存。checker 只能给源码，
 需在 LemonLime 机器上编译（``checker_needs_build``）。
 """
@@ -68,11 +72,12 @@ _CHECKER_FALLBACKS = ("checker.cpp", "chk.cpp", "spj.cpp")
 #: specialJudge 指向这些扩展名时是编译产物，找不到源码报 checker_missing_source
 _BINARY_EXTS = ("exe", "out", "bin")
 _TASK_TYPE_ERRORS = {
-    1: "answers_only_unsupported",
-    2: "interactive_unsupported",
     3: "communication_unsupported",
     4: "communication_unsupported",
 }
+#: taskType → 题型
+_TASK_TYPES = {0: "traditional", 1: "answer_only", 2: "grader"}
+_EXPORT_TASK_TYPES = {"traditional": 0, "answer_only": 1, "grader": 2}
 
 
 def _dirname(path: str) -> str:
@@ -224,7 +229,7 @@ def _compare(view: ArchiveView, data_dir: str, bundle: ProblemBundle, task: Dict
     if mode == 1:
         return
     if mode == 0:
-        bundle.warn(notice("strict_compare_relaxed"))
+        bundle.compare_mode = "strict"
     elif mode == 2:
         bundle.warn(notice("diff_compare_relaxed"))
     elif mode == 3:
@@ -236,11 +241,31 @@ def _compare(view: ArchiveView, data_dir: str, bundle: ProblemBundle, task: Dict
         bundle.checker = FileRef(data=real_checker(eps))
         bundle.warn(notice("real_checker_generated", eps="%g" % eps))
     elif mode == 4:
-        bundle.fail(notice("lemon_spj_unsupported"))
+        _checker(view, data_dir, bundle, task)
+        bundle.checker_protocol = "lemon"
     elif mode == 5:
         _checker(view, data_dir, bundle, task)
     else:
         bundle.fail(notice("checker_unknown", name="comparisonMode %d" % mode))
+
+
+def _grader(view: ArchiveView, data_dir: str, bundle: ProblemBundle, task: Dict[str, Any]) -> None:
+    """LemonLime 的交互题（函数交互）：``grader`` 源码 + ``interactor`` 头文件（复制成 ``interactorName``）。"""
+    raw = _str(task.get("grader"))
+    grader = _norm(raw) if raw else ""
+    if not grader or not view.exists(data_dir + grader):
+        bundle.fail(notice("checker_missing_source", path="data/" + (grader or "grader")))
+        return
+    bundle.grader = FileRef(member=view.full(data_dir + grader))
+    bundle.grader_name = "grader.c" if grader.lower().endswith(".c") else "grader.cpp"
+    raw_header = _str(task.get("interactor"))
+    header = _norm(raw_header) if raw_header else ""
+    if header:
+        if not view.exists(data_dir + header):
+            bundle.fail(notice("missing_file", path="data/" + header))
+            return
+        name = _basename(_str(task.get("interactorName")) or header)
+        bundle.grader_files[name] = FileRef(member=view.full(data_dir + header))
 
 
 def _io(bundle: ProblemBundle, task: Dict[str, Any]) -> None:
@@ -249,13 +274,8 @@ def _io(bundle: ProblemBundle, task: Dict[str, Any]) -> None:
     if stdin and stdout:
         bundle.io_mode = "stdio"
         return
-    bundle.io_mode = "file"
-    if stdin != stdout:
-        # 混合 IO 只能二选一：按文件 IO 导入，原题读标准输入 / 写标准输出的程序在这里读不到、写不进
-        if stdin:
-            bundle.warn(notice("mixed_io", source="标准输入 + 文件输出", affected="读标准输入"))
-        else:
-            bundle.warn(notice("mixed_io", source="文件输入 + 标准输出", affected="写标准输出"))
+    # 混合 IO（一边标准、一边文件）用 auto：输入同时是 stdin 与输入文件，输出优先取输出文件
+    bundle.io_mode = "file" if stdin == stdout else "auto"
     bundle.input_file = _str(task.get("inputFileName")) or None
     bundle.output_file = _str(task.get("outputFileName")) or None
 
@@ -368,14 +388,23 @@ def _task(view: ArchiveView, data_dir: str, index: int, task: Any) -> ProblemBun
         title=title,
     )
     task_type = _int(task.get("taskType"))
-    if task_type not in (None, 0):
+    if task_type not in _TASK_TYPES and task_type is not None:
         code = _TASK_TYPE_ERRORS.get(task_type)  # type: ignore[arg-type]
         bundle.fail(notice(code) if code else notice("problem_type_unsupported", type=task.get("taskType")))
         return bundle
+    bundle.problem_type = _TASK_TYPES[task_type or 0]
     _io(bundle, task)
     try:
         _compare(view, data_dir, bundle, task)
         _cases(view, data_dir, bundle, task)
+        if bundle.problem_type == "grader":
+            _grader(view, data_dir, bundle, task)
+        elif bundle.problem_type == "answer_only":
+            bundle.answer_files = {
+                case.name: _basename(case.answer.member or "")
+                for case in bundle.cases if case.answer is not None and case.answer.member
+            }
+            bundle.io_mode = "stdio"
     except _UnsafePath as exc:
         bundle.fail(notice("unsafe_path", path=exc.path))
     if bundle.time_limit_ms is None:
@@ -418,8 +447,13 @@ def _export_task(problem: ExportProblem, zf_in: Any, testdata: Any, zf: Any, roo
     for case in testdata.cases:
         rel_in = "%s/%s.in" % (folder, flat[case.name])
         rel_out = "%s/%s.out" % (folder, flat[case.name])
+        if problem.problem_type == "answer_only":
+            rel_out = "%s/%s" % (folder, testdata.answer_name(case.name, problem.ident))
         _copy(zf_in, case.input, zf, root + "data/" + rel_in, dry_run)
-        _copy(zf_in, case.answer, zf, root + "data/" + rel_out, dry_run)
+        if case.answer:
+            _copy(zf_in, case.answer, zf, root + "data/" + rel_out, dry_run)
+        else:
+            zf.writestr(root + "data/" + rel_out, b"")
         files[case.name] = (rel_in, rel_out)
 
     def group(score: int, names: List[str]) -> Dict[str, Any]:
@@ -442,9 +476,14 @@ def _export_task(problem: ExportProblem, zf_in: Any, testdata: Any, zf: Any, roo
             emitted.add(id(sub))
             groups.append(group(sub.score, list(sub.cases)))
 
-    comparison, special = 1, ""
+    comparison, special = (0 if problem.compare_mode == "strict" else 1), ""
+    if problem.compare_mode in ("trailing_spaces", "trailing_newlines") and testdata.checker is None:
+        notices.append(notice("compare_mode_approx", mode=problem.compare_mode))
     if testdata.checker is not None:
-        comparison, special = 5, "%s/checker" % folder
+        comparison = 4 if testdata.checker_protocol == "lemon" else 5
+        special = "%s/checker" % folder
+        if testdata.checker_protocol == "exitcode":
+            notices.append(notice("checker_protocol_approx", protocol="exitcode"))
         source = zf_in.read(testdata.checker)
         _copy(zf_in, testdata.checker, zf, root + "data/%s/checker.cpp" % folder, dry_run)
         for member in testdata.checker_support:
@@ -456,9 +495,25 @@ def _export_task(problem: ExportProblem, zf_in: Any, testdata: Any, zf: Any, roo
     if problem.compile_flags:
         notices.append(notice("flags_dropped", flags=problem.compile_flags))
 
+    extra: Dict[str, Any] = {}
+    if problem.problem_type == "grader" and testdata.grader:
+        member = testdata.grader.get("cpp") or next(iter(testdata.grader.values()))
+        base = member.rsplit("/", 1)[-1]
+        _copy(zf_in, member, zf, root + "data/%s/%s" % (folder, base), dry_run)
+        extra["grader"] = "%s/%s" % (folder, base)
+        headers = [m for m in testdata.grader_files if m.lower().endswith((".h", ".hpp"))]
+        if headers:
+            head = headers[0].rsplit("/", 1)[-1]
+            _copy(zf_in, headers[0], zf, root + "data/%s/%s" % (folder, head), dry_run)
+            extra["interactor"] = "%s/%s" % (folder, head)
+            extra["interactorName"] = head
+        if len(testdata.grader_files) > 1:
+            notices.append(notice("extra_files_dropped", files=", ".join(
+                m.rsplit("/", 1)[-1] for m in testdata.grader_files[1:])))
+
     sub_folder = _sub_folder_check(problem, notices)
     stdio = problem.io_mode != "file"
-    return {
+    document = {
         "answerFileExtension": "out",
         "comparisonMode": comparison,
         "compilerConfiguration": {},
@@ -472,9 +527,15 @@ def _export_task(problem: ExportProblem, zf_in: Any, testdata: Any, zf: Any, roo
         "standardInputCheck": stdio,
         "standardOutputCheck": stdio,
         "subFolderCheck": sub_folder,
-        "taskType": 0,
+        "taskType": _EXPORT_TASK_TYPES.get(problem.problem_type, 0),
         "testCases": groups,
     }
+    if problem.io_mode == "auto":
+        # LemonLime 只能二选一：按文件 IO 写出（auto 下 freopen 的程序照样能评）
+        document["standardInputCheck"] = document["standardOutputCheck"] = False
+        notices.append(notice("io_auto_as_file"))
+    document.update(extra)
+    return document
 
 
 def _sub_folder_check(problem: ExportProblem, notices: List[Notice]) -> bool:
@@ -504,6 +565,9 @@ def export(problems: List[ExportProblem], open_blob: OpenBlob, zf: Any) -> Dict[
     tasks: List[Dict[str, Any]] = []
     for problem in problems:
         notices[problem.id] = []
+        if problem.problem_type == "interactive":
+            notices[problem.id].append(notice("type_not_exportable", type="交互题", format=LABEL))
+            continue
         try:
             with open_testdata(problem, open_blob) as (zf_in, testdata):
                 tasks.append(_export_task(problem, zf_in, testdata, zf, root, notices[problem.id]))

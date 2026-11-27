@@ -861,6 +861,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/contests/{contest_id}/judge/builtin/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Cancel Builtin Judge
+         * @description 取消排队中 / 在评的任务（CA）：不写成绩；正在评的评测机交回的结果会被丢掉。
+         */
+        post: operations["cancel_builtin_judge_api_v1_admin_contests__contest_id__judge_builtin_cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/contests/{contest_id}/judge/rescan": {
         parameters: {
             query?: never;
@@ -2041,7 +2061,10 @@ export interface paths {
         get?: never;
         /**
          * Set Problem Judge
-         * @description 题目的评测方式：外部评测器 / 自带评测，以及时限、内存、IO 方式与文件名、编译参数。
+         * @description 题目的评测方式：外部评测器 / 自带评测，以及题型、时限、内存、IO 方式与文件名、编译参数、比较方式。
+         *
+         *     改题型时已有数据包按新题型重新校验，不合格 422 ``testdata_invalid_for_type``；交互题只能用
+         *     标准输入输出（422 ``io_mode_conflict``）；提交答案题不存时限、内存与编译参数。
          */
         put: operations["set_problem_judge_api_v1_admin_problems__problem_id__judge_put"];
         post?: never;
@@ -2083,6 +2106,9 @@ export interface paths {
         /**
          * Upload Testdata
          * @description 上传数据包（zip）。**上传时就校验结构**：缺答案、路径不安全、配置写错当场报出来。
+         *
+         *     按题目的题型校验（给了 ``problem_type`` 就按它、并在成功后改题目的题型）；config.json 写的
+         *     ``type`` 与之不一致时 422 ``testdata_type_mismatch``（``details``：problem_type / declared）。
          */
         post: operations["upload_testdata_api_v1_admin_problems__problem_id__testdata_post"];
         /** Delete Testdata */
@@ -2847,7 +2873,7 @@ export interface paths {
         };
         /**
          * Task Blob
-         * @description 取任务要用的内容：只认这个任务的代码与它那道题的数据包。
+         * @description 取任务要用的内容：只认这个任务的代码（提交答案题是清单里的答案文件）与它那道题的数据包。
          */
         get: operations["task_blob_api_v1_judge_tasks__task_id__blobs__sha256__get"];
         put?: never;
@@ -2872,6 +2898,26 @@ export interface paths {
          * @description 评测机自己出错（沙箱起不来、checker 编译不过……）：退回队列，三次都失败就记失败。
          */
         post: operations["report_failure_api_v1_judge_tasks__task_id__fail_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/judge/tasks/{task_id}/phase": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Report Phase
+         * @description 评测机报告在评任务的阶段：``compiling``（编译中）/ ``judging``（评测中）。旧评测机不报。
+         */
+        post: operations["report_phase_api_v1_judge_tasks__task_id__phase_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3683,8 +3729,34 @@ export interface components {
             /** Machine Id */
             machine_id: string;
         };
+        /**
+         * BuiltinJudgeCancelIn
+         * @description 取消排队中 / 在评的任务（CA）。都不填 = 全场。
+         */
+        BuiltinJudgeCancelIn: {
+            /** Player Id */
+            player_id?: number | null;
+            /** Problem */
+            problem?: string | null;
+            /** Task Id */
+            task_id?: number | null;
+        };
+        /** BuiltinJudgeCancelOut */
+        BuiltinJudgeCancelOut: {
+            /**
+             * Cancelled
+             * @default 0
+             */
+            cancelled: number;
+        };
         /** BuiltinJudgeFailureOut */
         BuiltinJudgeFailureOut: {
+            /**
+             * Code
+             * @default SF
+             * @enum {string}
+             */
+            code: "SF" | "SE";
             /** Error */
             error: string;
             /** Player No */
@@ -3723,6 +3795,16 @@ export interface components {
          */
         BuiltinJudgeProgressOut: {
             /**
+             * Cancelled
+             * @default 0
+             */
+            cancelled: number;
+            /**
+             * Compiling
+             * @default 0
+             */
+            compiling: number;
+            /**
              * Delayed
              * @default 0
              */
@@ -3740,6 +3822,11 @@ export interface components {
             /** Failures */
             failures?: components["schemas"]["BuiltinJudgeFailureOut"][];
             /**
+             * Judging
+             * @default 0
+             */
+            judging: number;
+            /**
              * Queued
              * @default 0
              */
@@ -3750,10 +3837,24 @@ export interface components {
              */
             running: number;
             /**
+             * Submit Failed
+             * @default 0
+             */
+            submit_failed: number;
+            /**
+             * System Error
+             * @default 0
+             */
+            system_error: number;
+            /**
              * Total
              * @default 0
              */
             total: number;
+            /** Unservable */
+            unservable?: {
+                [key: string]: number;
+            };
         };
         /** BuiltinJudgeQueuedOut */
         BuiltinJudgeQueuedOut: {
@@ -4316,6 +4417,20 @@ export interface components {
             version: string;
         };
         /**
+         * JudgeAnswerRefOut
+         * @description 提交答案题的一个答案文件（``path`` / ``sha256`` 为空 = 这个点没交）。
+         */
+        JudgeAnswerRefOut: {
+            /** Case */
+            case: string;
+            /** Name */
+            name: string;
+            /** Path */
+            path?: string | null;
+            /** Sha256 */
+            sha256?: string | null;
+        };
+        /**
          * JudgeAutoIn
          * @description 场次的自动入队设置（§12.9、§12.12）。智能模式的阈值不传 = 不改。
          */
@@ -4369,6 +4484,12 @@ export interface components {
         };
         /** JudgeCaseOut */
         JudgeCaseOut: {
+            /** File */
+            file?: string | null;
+            /** Interactor Time Ms */
+            interactor_time_ms?: number | null;
+            /** Max Score */
+            max_score?: number | null;
             /** Memory Kb */
             memory_kb?: number | null;
             /**
@@ -4378,6 +4499,8 @@ export interface components {
             message: string;
             /** Name */
             name: string;
+            /** Ratio */
+            ratio?: number | null;
             /**
              * Score
              * @default 0
@@ -4470,6 +4593,11 @@ export interface components {
              * @default 0
              */
             cases: number;
+            /**
+             * Compare Mode
+             * @default both
+             */
+            compare_mode: string;
             /** Compile Flags */
             compile_flags?: string | null;
             /** Errors */
@@ -4506,6 +4634,11 @@ export interface components {
             memory_limit_mb?: number | null;
             /** Output File */
             output_file?: string | null;
+            /**
+             * Problem Type
+             * @default traditional
+             */
+            problem_type: string;
             /** Source Name */
             source_name: string;
             /**
@@ -4575,7 +4708,20 @@ export interface components {
             player_no: string;
             problem: components["schemas"]["JudgeProblemConfigOut"];
             source: components["schemas"]["JudgeBlobRefOut"];
+            /** Sources */
+            sources?: components["schemas"]["JudgeAnswerRefOut"][];
             testdata: components["schemas"]["JudgeBlobRefOut"];
+        };
+        /**
+         * JudgePhaseIn
+         * @description 评测机报告在评任务的阶段（编译中 / 评测中）。
+         */
+        JudgePhaseIn: {
+            /**
+             * Phase
+             * @enum {string}
+             */
+            phase: "compiling" | "judging";
         };
         /**
          * JudgePollIn
@@ -4668,6 +4814,11 @@ export interface components {
         };
         /** JudgeProblemConfigOut */
         JudgeProblemConfigOut: {
+            /**
+             * Compare Mode
+             * @default both
+             */
+            compare_mode: string;
             /** Compile Flags */
             compile_flags?: string | null;
             /** Ident */
@@ -4680,6 +4831,11 @@ export interface components {
             memory_limit_mb: number;
             /** Output File */
             output_file?: string | null;
+            /**
+             * Problem Type
+             * @default traditional
+             */
+            problem_type: string;
             /** Time Limit Ms */
             time_limit_ms: number;
         };
@@ -4796,6 +4952,8 @@ export interface components {
             precheck_warnings?: components["schemas"]["JudgePrecheckFindingOut"][];
             /** Problem */
             problem: string;
+            /** Problem Type */
+            problem_type?: string | null;
             /**
              * Risk Count
              * @default 0
@@ -5005,6 +5163,8 @@ export interface components {
             not_before?: string | null;
             /** Outcome */
             outcome?: string | null;
+            /** Phase */
+            phase?: string | null;
             /** Player Id */
             player_id: number;
             /** Player No */
@@ -5018,6 +5178,8 @@ export interface components {
             priority: number;
             /** Problem */
             problem: string;
+            /** Problem Type */
+            problem_type?: string | null;
             /** Reason */
             reason?: string | null;
             /** Requested By */
@@ -5095,6 +5257,8 @@ export interface components {
             not_before?: string | null;
             /** Outcome */
             outcome?: string | null;
+            /** Phase */
+            phase?: string | null;
             /** Player Id */
             player_id: number;
             /** Player No */
@@ -5203,6 +5367,8 @@ export interface components {
             slots_control: boolean;
             /** Token */
             token: string;
+            /** Types */
+            types?: string[];
             /**
              * Uninstall Control
              * @default false
@@ -5275,6 +5441,8 @@ export interface components {
              * @default false
              */
             slots_control: boolean;
+            /** Types */
+            types?: string[];
             /**
              * Uninstall Control
              * @default false
@@ -6146,6 +6314,8 @@ export interface components {
          * @description 题目的自带评测配置（§12）。``compile_flags`` 只接受白名单里的几类参数（服务端校验）。
          */
         ProblemJudgeIn: {
+            /** Compare Mode */
+            compare_mode?: ("strict" | "trailing_spaces" | "trailing_newlines" | "both") | null;
             /** Compile Flags */
             compile_flags?: string | null;
             /** Input File */
@@ -6155,7 +6325,7 @@ export interface components {
              * @default stdio
              * @enum {string}
              */
-            io_mode: "stdio" | "file";
+            io_mode: "stdio" | "file" | "auto";
             /**
              * Judge Mode
              * @default external
@@ -6166,6 +6336,8 @@ export interface components {
             memory_limit_mb?: number | null;
             /** Output File */
             output_file?: string | null;
+            /** Problem Type */
+            problem_type?: ("traditional" | "grader" | "answer_only" | "interactive") | null;
             /** Time Limit Ms */
             time_limit_ms?: number | null;
         };
@@ -6194,6 +6366,12 @@ export interface components {
         };
         /** ProblemOut */
         ProblemOut: {
+            /**
+             * Compare Mode
+             * @default both
+             * @enum {string}
+             */
+            compare_mode: "strict" | "trailing_spaces" | "trailing_newlines" | "both";
             /** Compile Flags */
             compile_flags?: string | null;
             /** Contest Id */
@@ -6227,6 +6405,12 @@ export interface components {
             order_index: number;
             /** Output File */
             output_file?: string | null;
+            /**
+             * Problem Type
+             * @default traditional
+             * @enum {string}
+             */
+            problem_type: "traditional" | "grader" | "answer_only" | "interactive";
             testdata?: components["schemas"]["ProblemTestdataOut"] | null;
             /** Time Limit Ms */
             time_limit_ms?: number | null;
@@ -6238,13 +6422,35 @@ export interface components {
          * @description 题目的数据包（§12）：上传时校验出的摘要。
          */
         ProblemTestdataOut: {
+            /**
+             * Answer Count
+             * @default 0
+             */
+            answer_count: number;
+            /** Answer Exts */
+            answer_exts?: string[];
             /** Cases */
             cases: number;
+            /** Checker Points */
+            checker_points?: string | null;
+            /** Checker Protocol */
+            checker_protocol?: string | null;
+            /** Declared Type */
+            declared_type?: string | null;
+            /** Detected Type */
+            detected_type?: string | null;
+            /** Grader Files */
+            grader_files?: string[];
             /**
              * Has Checker
              * @default false
              */
             has_checker: boolean;
+            /**
+             * Has Interactor
+             * @default false
+             */
+            has_interactor: boolean;
             /** Name */
             name: string;
             /** Sha256 */
@@ -6261,6 +6467,8 @@ export interface components {
              * @default 0
              */
             total_score: number;
+            /** Warnings */
+            warnings?: components["schemas"]["TestdataWarningOut"][];
         };
         /**
          * ProblemUpsert
@@ -6856,6 +7064,16 @@ export interface components {
              * @default 0
              */
             tasks: number;
+        };
+        /** TestdataWarningOut */
+        TestdataWarningOut: {
+            /** Code */
+            code: string;
+            /**
+             * Message
+             * @default
+             */
+            message: string;
         };
         /** TickRequest */
         TickRequest: {
@@ -8430,6 +8648,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BuiltinJudgeQueuedOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    cancel_builtin_judge_api_v1_admin_contests__contest_id__judge_builtin_cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contest_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BuiltinJudgeCancelIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BuiltinJudgeCancelOut"];
                 };
             };
             /** @description Validation Error */
@@ -10395,7 +10648,10 @@ export interface operations {
     };
     upload_testdata_api_v1_admin_problems__problem_id__testdata_post: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description 同时把题目改成这个题型（「改为 X 并上传」） */
+                problem_type?: string | null;
+            };
             header?: never;
             path: {
                 problem_id: number;
@@ -11634,6 +11890,41 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["JudgeFailIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimpleAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    report_phase_api_v1_judge_tasks__task_id__phase_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                task_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JudgePhaseIn"];
             };
         };
         responses: {

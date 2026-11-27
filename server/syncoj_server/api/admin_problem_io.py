@@ -226,6 +226,8 @@ def _item_out(bundle: ProblemBundle, existing: Dict[str, Problem], summary: Opti
         subtasks=int(summary.get("subtasks") or 0),
         total_score=int(summary.get("total_score") or 0),
         has_checker=bool(summary.get("has_checker")),
+        problem_type=bundle.problem_type,
+        compare_mode=bundle.compare_mode or "both",
         warnings=_notices(bundle.warnings),
         errors=_notices(bundle.errors),
     )
@@ -315,7 +317,7 @@ def _title_is_just_a_name(bundle: ProblemBundle, ident: str) -> bool:
 
 def _effective_io(bundle: ProblemBundle, ident: str) -> Tuple[Optional[str], Optional[str]]:
     """改了 ident 之后，IO 文件名仍指向包里原来的实际文件名。"""
-    if bundle.io_mode != "file":
+    if bundle.io_mode not in ("file", "auto"):
         return None, None
     actual_in = bundle.input_file or "%s.in" % bundle.ident
     actual_out = bundle.output_file or "%s.out" % bundle.ident
@@ -452,6 +454,8 @@ def _apply(contest_id: int, payload: JudgeImportApplyIn, ctx: AppContext) -> Jud
                 row.io_mode = bundle.io_mode
                 row.input_file, row.output_file = _effective_io(bundle, ident)
                 row.compile_flags = bundle.compile_flags
+                row.problem_type = None if bundle.problem_type == "traditional" else bundle.problem_type
+                row.compare_mode = None if (bundle.compare_mode or "both") == "both" else bundle.compare_mode
                 old = row.testdata_sha256
                 if bundle.key in built:
                     sha256, size, summary = built[bundle.key]
@@ -508,6 +512,8 @@ def _snapshot(row: Problem, settings: Settings) -> ExportProblem:
         input_file=row.input_file or None,
         output_file=row.output_file or None,
         compile_flags=row.compile_flags,
+        problem_type=row.problem_type or "traditional",
+        compare_mode=row.compare_mode or "both",
         testdata_sha256=row.testdata_sha256,
         testdata_name=row.testdata_name,
         testdata_size=int(row.testdata_size) if row.testdata_size is not None else None,

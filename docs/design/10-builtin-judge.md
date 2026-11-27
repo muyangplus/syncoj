@@ -6,7 +6,7 @@
 ### 12.1 目标与边界
 
 * **要**：教师对一个场次（或一道题、一个选手）发起评测，按 NOI 惯例编译、运行、比对，成绩进成绩矩阵；能重测；能看每个测试点。
-* **不要**：在线 OJ 那一套（题库、提交队列、实时排行榜）；交互题与通信题；Windows 上的网络隔离（`winjob` 限资源 + 低完整性级别，不隔离网络）。
+* **不要**：在线 OJ 那一套（题库、提交队列、实时排行榜）；通信题（manager + 多进程；交互题、函数交互、提交答案见 §12.13）；Windows 上的网络隔离（`winjob` 限资源 + 低完整性级别，不隔离网络）。
 * **硬约束**：选手代码**不可信**；服务端进程持有数据库、发布私钥（`.key/`）、统一注册密钥，**不在服务端进程内、不以服务端账号**运行选手程序。
 
 ### 12.2 关键决定：产物写进现有的 `judge_result/`
@@ -53,12 +53,12 @@ syncoj-server（服务端账号）         syncoj-judge worker（专用账号，
 ### 12.5 评测语义（NOI 惯例）
 
 * **语言**：C++ `g++ -O2 -std=c++14 -lm`（`.cpp/.cc/.cxx`，编译参数可按题改）；C `gcc -O2 -std=c99 -lm`。编译也在沙箱里跑（防模板递归、`#include </dev/random>` 这类编译器炸弹），限 CPU 10 秒、墙钟 30 秒、输出 64 MB。
-* **IO**：按题配置文件 IO（默认读 `<题目>.in` 写 `<题目>.out`，文件名可按题改）或标准 IO（默认）；文件 IO 下没有输出文件判 WA 并写明原因（多半忘了 `freopen`）。默认时限 1000 ms、内存 256 MB。
+* **IO**：按题配置文件 IO（默认读 `<题目>.in` 写 `<题目>.out`，文件名可按题改）、标准 IO（默认）或 `auto`（两者都能评，§12.16）；文件 IO 下没有输出文件判 WA 并写明原因（多半忘了 `freopen`）。默认时限 1000 ms、内存 256 MB。
 * **数据包**：每题一个 zip（与下发资产同一套上传与 blob 存储），**上传时校验结构**。测试点 `<名字>.in` + `<名字>.ans`（或 `.out`），可在任意子目录，名字唯一、按自然序；可选 `config.json` 写每点分值与子任务（子任务全 AC 才得分，捆绑）；未写分值时 100 分按点均分。LemonLime 的数据目录直接打 zip 即可；整场题目配置的导入导出见 §12.8。
-* **比对**：默认逐行比较，忽略行末空白与文末空行；数据包含 `checker.cpp`（连同 `testlib.h`）时用它做 special judge，testlib 风格 `checker <in> <out> <ans>`，退出码 0 为通过，也在沙箱里编译运行。
+* **比对**：默认逐行比较，按题的比较方式忽略行末空白与 / 或文末空行（默认两者都忽略，§12.16）；数据包含 `checker.cpp` 时用它做 special judge（testlib 风格 `checker <in> <out> <ans>`，按 stderr 前缀判定，支持部分分与 Lemon / exitcode 协议，§12.14），在评测侧工作目录里编译运行（§12.15）。
 * **源码预检**：编译前对选手源码做文本检查（先按 C 翻译阶段规范化再匹配）；`#pragma`、内联汇编、系统调用、禁用头文件、题目以外的文件等直接拦截记 CE（不编译），疑似混淆只预警、写进结果的 `precheck_warnings`。规则与按题开关见 `docs/reference/judge-result.md` 第 7 节。
-* 每次运行前清空工作目录，从评测机内存重新放入编译产物（选手程序与 checker 各自只在自己运行时在场），程序不能跨点留东西，也改不了 checker。
-* **结果状态**：AC / WA / TLE / MLE / RE（带信号）/ OLE / CE（编译信息截断保存）/ SE（评测系统自己的错，**不算选手的分**，界面提示重测）。整题取最严重者（SE > CE > RE > MLE > TLE > OLE > WA > AC）。
+* 每次运行前清空工作目录，从评测机内存重新放入编译产物（选手 box 里只有选手程序；checker 在评测侧工作目录，只在自己运行时在场），程序不能跨点留东西，也改不了 checker。
+* **结果状态**：AC / PA（部分正确）/ PE（格式错误）/ WA / TLE / MLE / RE（带信号）/ OLE / CE（编译信息截断保存）/ SE（评测系统自己的错，**不算选手的分**，界面提示重测）。整题取最严重者（SE > CE > RE > MLE > TLE > OLE > WA > PE > PA > AC）；词表与任务过程状态见 §12.16。
 
 ### 12.6 界面与触发
 
@@ -85,6 +85,7 @@ syncoj-server（服务端账号）         syncoj-judge worker（专用账号，
 * **数据包不变**：外来题目规整成 §12.5 的数据包（`<名字>.in/.ans` + `config.json` + `checker.cpp`），走与上传数据包相同的校验与 blob 存储；评测机与计分不改。
 * **模型只加两列**：`input_file`、`output_file`（文件 IO 文件名，NULL = `<题目>.in/.out`）。逐点限制、子任务依赖、非捆绑子任务、小数分、栈限制折算成现有语义并逐题给警告。
 * **原生格式无损**：`syncoj-problems.json` + 原样的 `testdata.zip`，导出再导入各列与 `testdata_sha256` 不变。
+* **题型**（§12.13）：LemonLime 提交答案 / 交互（= 函数交互）、Hydro `interactive` / `submit_answer` / `user_extra_files`、HOJ `interactive` 映射成对应题型，QDUOJ 的两参数 spj 走 exitcode 协议，严格比较映射成 `compare_mode: strict`；通信题仍报错。导出反向映射，目标格式没有的题型跳过并提示。原生格式有新列时写 `version: 2`。
 * **checker**：随仓库带 testlib.h，checker 用了而包里没有时补上；实数比较与 HUSTOJ spj 由服务端生成不依赖 testlib 的 checker。
 * **YAML** 用自带的受限子集解析器，不引入 PyYAML；XML 流式解析并拒绝 DOCTYPE / ENTITY。
 * **只信服务端解析**：应用导入时重新解析暂存包，只采用客户端回传的标识与动作。
@@ -146,3 +147,72 @@ syncoj-server（服务端账号）         syncoj-judge worker（专用账号，
 * **考后结果进矩阵**：后台成绩扫描平时跳过 `closed` 场次；评测机交回结果时把场次记进 `ctx.judge_dirty_contests`，下一轮扫描照扫它一次（已归档仍不扫）。
 * **节奏**：后台每 `smart_tick_seconds`（服务端配置，默认 30 秒）评估一轮，每场一个短事务；归档场次不评；评测服务关着照常入队、只是不发。
 * **界面**：「任务」卡片的自动评测三态（关闭 / 每次改动 / 智能），选智能时展开阈值（稳定 / 空闲 / 结束前 / 冷却 / 队列倍数）；评测记录的触发方式显示与筛选带上各信号。
+
+### 12.13 题型
+
+`problem.problem_type`（迁移 026，NULL = 传统题）是题型的唯一来源：`traditional`（传统）/ `grader`（函数交互）/ `answer_only`（提交答案）/ `interactive`（交互，testlib 双向管道）。通信题（manager + 多进程）不做。
+
+* **以列为准**：题型决定 Agent 收哪些文件，所以不随数据包静默改。数据包 `config.json` 可写 `type`，与列不一致时上传 422 `testdata_type_mismatch`（`details`：`problem_type` / `declared`），界面给「改为 X 并上传」（同一请求带 `?problem_type=X`，校验通过才改列）。包里没写 `type` 时按文件名猜（有 `interactor.cpp` → 交互，有 `grader.cpp` → 函数交互），只作提示（`detected_type`）。改题型时已有数据包按新题型重新校验，不合格 422 `testdata_invalid_for_type`；交互题只能标准 IO（422 `io_mode_conflict`）；提交答案题不存时限、内存、编译参数。
+* **能力协商**：评测机在 `/poll` 的 `features` 里报 `type:grader` / `type:answer_only` / `type:interactive`；领任务只派它报了的题型（题目已删的任务照样领出来就地了结），不能评的任务留在队列、不消耗次数。没报（旧评测机、`/lease`）= 只评传统题。只有 isolate 报 `type:interactive`：rlimit 的评测侧目录与选手同一账号，交互时选手能读到答案；winjob 没有双进程管道。进度里 `unservable` 按题型数「排队中、但没有在线评测机能评」的任务；评测机卡片显示它能评的题型。
+* **函数交互（grader）**：数据包带 `grader.cpp`（或 `grader.c`、`{"cpp": …, "c": …}`）与附带文件 `grader_files`（默认 grader 同目录的头文件）。grader 在评测侧工作目录单独编成目标文件（`-c -O2 <题目语言标准> -DEVAL`，失败记 SE）；选手代码在选手 box 里只和**头文件**一起编（看不到 grader 源码，`#include "grader.cpp"` 编不过；失败记 CE）；最后链接 `grader.o user.o`（grader 在前；自己写了 `main` 等链接失败记 CE，原样给出链接器信息）。grader 不支持选手的语言 → CE。选手源码照常预检，grader 是出题人代码不预检；选手目录里与 grader 同名的文件不当选手代码。grader 与选手同进程，选手的全局构造可以抢先读输入 —— 出题时让 grader 先读完输入、关键数据放 `static`。
+* **提交答案（answer_only）**：不编译、不运行选手的东西。每个测试点的答案文件名：`answer_files`（逐点）> `answer_pattern`（占位符 `{ident}` `{input_stem}` `{case}` `{index}`）> 默认（输入名全是数字时 `{ident}{input_stem}.out`，否则 `{input_stem}.out`）；文件名必须带扩展名。没配代码路径模式时默认 `{ident}/<答案名公共前缀>*<扩展名>`（每种扩展名一条；用公共前缀免得把 `a.out` 收进来；还没数据包时 `{ident}/{ident}*.out`）。场次里有提交答案题时，下发给 Agent 的 `extensions` 追加答案扩展名（协议字段不变，仍按题目模式过滤回收）。领任务时按文件名在归到这道题的文件里找（同名取路径最浅，深度相同如实报错）；一个都没有 = 没交（不写成绩），缺的点判 WA 并写明文件名。清单记 `judge_task.sources_json`，`source_sha256` 是规范化清单的 sha256（结果复用照旧），评测机按清单逐个取（只放行清单里的 sha）。有 checker 时用它判（`.ans` 可缺），否则默认比较器。不能重测单个文件的历史版本（SF）。
+* **交互（interactive）**：数据包带 `interactor.cpp`（testlib `registerInteraction`），`.ans` 可缺（按空文件）。见 §12.15。
+
+### 12.14 部分分与 checker 协议
+
+* **判定只看 stderr 首行前缀**（`judging/verdict.py`，按 testlib 的输出约定独立实现）：`ok` → AC；`wrong answer` / `unexpected eof` → WA；`wrong output format` → PE；`FAIL` → SE；`points X` → 按 `checker_points` 换成比例；`partially correct (k)` → k/100（k > 100 记 SE）；`quitpi` 记 SE。没有可认前缀时退出码兜底：0 AC、1 WA、2 PE、其余 SE。调用只传三个参数（`chk in out ans`），不传 report 文件。
+* **`checker_points`**：`ratio`（默认，X 是 0..1）/ `percent`（0..100）/ `auto`（≤ 1 当比例，否则百分数）。越界记 SE，不悄悄截断；导入器按来源格式设置口径。
+* **`checker_protocol`**：`testlib`（默认）/ `lemon`（`spj in out ans <满分> score.txt msg.txt`，满分取 `cases[].full_score`，缺省用本点分值，再缺省 100；分数文件缺失、读不懂、为负或超过满分记 SE）/ `exitcode`（0 AC、1 WA、其余 SE，stderr 只当说明）。
+* **计分**：每点得分 `floor(比例 × 分值)`；子任务得分 `floor(子任务分 × 子任务内最小比例)`，有点不是 AC / PA 就是 0。比例在 0 与 1 之间的点状态为 **PA**（Partial Accepted），结果里带 `ratio` 与 `max_score`。
+* **testlib.h 评测时注入**：`"testlib": "builtin"`（默认）把随服务端带的 `judging/vendor/testlib.h` 放进编译目录（覆盖包里的那份，版本不同给 `testlib_overridden` 提醒）；`"bundled"` 用包里的。出题人程序统一 `g++ -O2 -std=gnu++17 -lm`。
+* 未知 config 键只给提醒（`unknown_config_key`），不报错。已有 SPJ 题重测后分数可能变（以前 `quitp` / `_pc` 判 WA 或 SE）：有 checker 的题 `judge_key` 带判定口径版本，不复用旧结果。
+
+### 12.15 评测侧工作目录与双进程交互
+
+* **评测侧工作目录（trusted box）**：checker、interactor、grader 在它里面编译与运行，选手 box 里只有 `prog`。出题人程序的编译产物读进评测机内存，每次运行前清空、放入，运行完再清空。isolate：另一个 box（`--trusted-box-id`，默认 `--box-id + 500`，并发位依次 +1；启动时校验在 0..999 且与选手 box 号段不重叠，同机各 worker 的号段不能重叠）；rlimit：再建一个 0700 目录，**同一运行账号**（只给开发自测，交互题运行期间选手程序理论上能读到它）；winjob：另一个目录，标 Medium + 禁止读上 / 写上，出题人程序以评测机令牌运行，低完整性的选手程序打不开。
+* **双向管道**（`judging/interact.py`）：选手 stdout → interactor stdin，interactor stdout → 选手 stdin；父进程两边都起来后关掉自己手上的四个管道端。interactor 以 `interactor in.txt tout.txt ans.txt` 运行，stderr 写进评测侧文件。rlimit 的中间层在 exec 前恢复 SIGPIPE 默认处理（Python 启动时忽略了它）。isolate 不加 `--stdin/--stdout`（直接继承管道）、加 `--stderr`，isolate 自己的输出写日志文件而不是管道；墙钟 + 10 秒仍没结束由宿主侧杀掉记 SE。winjob 不支持（不报能力）。
+* **限制**：选手 CPU = 时限、墙钟 = 2 × 时限 + 1 秒、单进程；interactor CPU = `interactor_time_factor`（默认 2，1..10）× 时限（至少 1 秒）、墙钟 = 选手墙钟 + 2 秒、内存 `interactor_memory_mb`（默认 max(2 × 内存限制, 256) MB）。选手结束后给 interactor 2 秒收尾，到时杀掉。时间、内存只报选手的，interactor 用时另记 `interactor_time_ms`。
+* **判定表**（`interact.decide`，自上而下取第一条；U = 选手，I = interactor，V = I 的 testlib 判定；"I 先结束"要比 U 早 0.2 秒以上，选手被杀后 interactor 读到 EOF 不算先判）：
+
+  | # | 条件 | 结果 |
+  |---|---|---|
+  | 1 | 任一方沙箱出错 | SE |
+  | 2 | U 正常结束，I 超限 / 被 SIGPIPE 以外的信号杀 / 收尾超时 | SE |
+  | 3 | I 先结束且 V 为 WA / PE / PA，U 是 TLE / RE / SIGPIPE | 按 V |
+  | 4 | U TLE | TLE（CPU 没用满写「空闲超时，检查 fflush」） |
+  | 5 | U MLE / OLE | 同 |
+  | 6 | U 被 SIGPIPE 以外的信号杀 | RE |
+  | 7 | U 收到 SIGPIPE | V = ok 判 RE「交互结束后仍在输出」；V 为 WA / PE / PA 按 V；否则 SE |
+  | 8 | U 正常结束，I 被 SIGPIPE 杀 | WA「程序提前结束」 |
+  | 9 | V 是 FAIL 或读不出 | SE |
+  | 10 | V 为 ok / PA 且数据包有 checker | 在评测侧再跑 `chk in tout ans`，比例取两者较小 |
+  | 11 | 其余 | 按 V（U 退出码非 0 而 V = ok 判 RE） |
+
+* isolate 下两个 box 同时开 `--cg`、box 继承管道 fd 只用假 isolate 验证过命令行，部署后要在装有 isolate 的机器上跑一遍交互题。交互题评测时 CPU 负载翻倍，worker 并发建议不超过核数的一半。
+
+### 12.16 评测状态
+
+| 代号 | 名称 | 说明文案（界面原样使用） |
+|---|---|---|
+| PD | Pending | 您的解答正在排队等待评测中，请等待结果... |
+| SF | Submitted Failed | 您的此次提交失败，请点击按钮重新提交... |
+| CP | Compiling | 正在对您的源代码进行编译中，请等待结果... |
+| JG | Judging | 正在使用测试数据运行您的程序中，请等待结果... |
+| CE | Compile Error | 无法编译您的源代码，点击链接查看编译器的输出。 |
+| PE | Presentation Error | 您提交的代码已经很接近正确答案，请检查代码格式输出是否有多余空格，换行等空白符。 |
+| PA | Partial Accepted | 加油！您提交的代码通过了部分测试点，请考虑其他可能性。 |
+| AC | Accepted | 恭喜! 您的解题方法是正确的。 |
+| WA | Wrong Answer | 您的程序输出结果与判题程序的答案不符。 |
+| RE | Runtime Error | 您的程序异常终止，可能的原因是：段错误，被零除或用非0的代码退出程序。 |
+| TLE | Time Limit Exceeded | 您的程序运行时间已超出题目限制。 |
+| MLE | Memory Limit Exceeded | 您的程序实际使用的内存已超出题目限制。 |
+| OLE | Output Limit Exceeded | 您的程序输出超出限制。 |
+| SE | System Error | 糟糕，判题机系统出了问题。请报告给管理员。 |
+| CA | Cancelled | 您的此次提交被取消！ |
+
+* 说明文案是用户给定的词表，界面原样使用（优先于 ADR-0004 的「不写解释句」）；集中在 `web/src/utils/judgeStatus.ts`，标签显示代号、悬停显示「名称：说明」。
+* 测试点与整题：整题取最严重 `SE > CE > RE > MLE > TLE > OLE > WA > PE > PA > AC`。PE：默认比较器按比较方式不相等、但按空白切词后相同；testlib `wrong output format` / 无前缀退出码 2。Lemon / exitcode 协议没有 PE。
+* 任务过程：`queued` → PD；`running` 按评测机上报的阶段（`POST /judge/tasks/{id}/phase`，`judge_task.phase`，旧评测机不报）→ CP / JG；失败分 SF（选代码、题目配置失败，`outcome = SF`，旁边给「重新评测」）与 SE（评测机连续出错，`outcome = SE`）；教师取消 → `cancelled`（`outcome = CA`，不写成绩，正在评的评测机交结果被丢掉）。被取消的任务不算「评过」，智能模式照样会为同一版本再排。
+* **比较方式**（`problem.compare_mode`，NULL = `both`）：所有方式先把 `\r\n` 当 `\n`；`strict` 逐字节、`trailing_spaces` 忽略行末空格与制表、`trailing_newlines` 忽略文末空行、`both` 两者都忽略。只作用于默认比较器（有 checker、交互题时不适用）。
+* **IO 方式 `auto`**：输入同时写成输入文件与 stdin，stdout 写到 `stdout.txt`；运行后优先取输出文件（存在且是普通文件），否则取 `stdout.txt`。交互题不允许 `file` / `auto`。
+* 外部评测器结果的状态别名：`PC` / `Partially Correct` / `Partial Accepted` 规整为 PA，`Presentation Error` 规整为 PE；整题取最严重时 PA 比 PE、WA 轻。

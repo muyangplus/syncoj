@@ -41,7 +41,7 @@
 | 3. 测试数据来源 | Web 上传 zip，走与下发资产同一套 blob 存储，上传时校验 |
 | 4. 谁触发 | 教师点「评测」/「重测」；场次进行中需显式确认（`force`） |
 | 5. 语言 | C++ 与 C |
-| 6. 判分范围 | 逐点 + 子任务捆绑 + testlib 风格 SPJ；不做交互题 |
+| 6. 判分范围 | 逐点 + 子任务捆绑 + testlib 风格 SPJ（含部分分、Lemon / exitcode 协议）；题型：传统、函数交互（grader）、提交答案、交互（testlib 双向管道，§12.13）；不做通信题 |
 
 随之落地：成绩仍经 `ResultScanner` 收进 `judge_run`（§4.4 不变），测试点细节放在 `result.json` 的 `cases` 并原样进 `raw_json`；评测所用代码记在 `judge_task.source_path` / `source_sha256`。
 
